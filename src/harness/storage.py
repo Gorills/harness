@@ -70,6 +70,16 @@ def connect_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def inspect_database(path: Path) -> DatabaseStatus:
+    """Inspect an initialized Harness database without creating or migrating it."""
+    connection = connect_database(path)
+    try:
+        journal_mode = _journal_mode_from_row(connection.execute("PRAGMA journal_mode").fetchone())
+        return _status(connection, journal_mode=journal_mode)
+    finally:
+        connection.close()
+
+
 def fts5_available(connection: sqlite3.Connection) -> bool:
     """Return whether the runtime SQLite connection can create an FTS5 table."""
     try:
