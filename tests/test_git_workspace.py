@@ -187,10 +187,9 @@ def test_inspect_git_workspace_bounds_rev_parse_runtime(
     repository.mkdir()
 
     def timed_out_git(*args: object, **kwargs: object) -> NoReturn:
-        command = args[0]
         timeout = kwargs.get("timeout")
         assert timeout == 1.5
-        raise subprocess.TimeoutExpired(command, timeout)
+        raise subprocess.TimeoutExpired(["git"], timeout)
 
     monkeypatch.setattr(subprocess, "run", timed_out_git)
 
@@ -206,10 +205,9 @@ def test_inspect_working_tree_status_bounds_git_runtime(
     repository.mkdir()
 
     def timed_out_git(*args: object, **kwargs: object) -> NoReturn:
-        command = args[0]
         timeout = kwargs.get("timeout")
         assert timeout == 1.5
-        raise subprocess.TimeoutExpired(command, timeout)
+        raise subprocess.TimeoutExpired(["git"], timeout)
 
     monkeypatch.setattr(subprocess, "run", timed_out_git)
 
