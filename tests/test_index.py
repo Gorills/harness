@@ -3,11 +3,14 @@ import os
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import harness.index as index_module
 from harness.index import (
     IndexedFileKind,
+    IndexingError,
     WorkspaceIndexMismatchError,
     list_indexed_files,
     scan_workspace,
@@ -122,6 +125,50 @@ def test_scan_hashes_symlink_target_without_following_outside_workspace(tmp_path
         expected = hashlib.sha256(b"symlink\0" + os.fsencode(str(outside))).hexdigest()
         assert record.content_sha256 == expected
         assert record.content_sha256 != hashlib.sha256(outside.read_bytes()).hexdigest()
+    finally:
+        connection.close()
+
+
+def test_scan_does_not_read_external_target_after_regular_file_is_replaced_by_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    tracked = root / "tracked.txt"
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("do-not-read-this-content\n", encoding="utf-8")
+    original_open = Path.open
+    swapped = False
+    hash_updates: list[bytes] = []
+
+    class TrackingHash:
+        def update(self, data: bytes) -> None:
+            hash_updates.append(data)
+
+        def hexdigest(self) -> str:
+            return "0" * 64
+
+    def tracking_sha256(data: bytes = b"") -> TrackingHash:
+        digest = TrackingHash()
+        if data:
+            digest.update(data)
+        return digest
+
+    def racing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        nonlocal swapped
+        if self == tracked and not swapped:
+            swapped = True
+            self.unlink()
+            self.symlink_to(outside)
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    monkeypatch.setattr(index_module.hashlib, "sha256", tracking_sha256)
+    try:
+        with pytest.raises(IndexingError, match="changed while scanning"):
+            scan_workspace(connection, workspace_id)
+        assert swapped is True
+        assert hash_updates == []
     finally:
         connection.close()
 
