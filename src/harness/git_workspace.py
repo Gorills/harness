@@ -39,6 +39,17 @@ class GitWorkspaceLayout:
 
 
 @dataclass(frozen=True, slots=True)
+class GitWorkspaceRuntimeIdentity:
+    """Ephemeral filesystem identity used to detect one-read Workspace replacement races."""
+
+    layout: GitWorkspaceLayout
+    git_dir: Path
+    workspace_root_identity: tuple[int, int]
+    git_dir_identity: tuple[int, int]
+    git_common_dir_identity: tuple[int, int]
+
+
+@dataclass(frozen=True, slots=True)
 class GitWorkingTreeStatus:
     """Compact live Git state needed by read-only Workspace status surfaces."""
 
@@ -59,6 +70,22 @@ def inspect_git_workspace(path: Path) -> GitWorkspaceLayout:
     return GitWorkspaceLayout(
         workspace_root=workspace_root,
         git_common_dir=_normalize_existing_path(common_dir),
+    )
+
+
+def inspect_git_workspace_runtime_identity(path: Path) -> GitWorkspaceRuntimeIdentity:
+    """Return canonical Git paths plus ephemeral inode identity for one live status read."""
+    layout = inspect_git_workspace(path)
+    git_dir = Path(_rev_parse(layout.workspace_root, "--git-dir"))
+    if not git_dir.is_absolute():
+        git_dir = layout.workspace_root / git_dir
+    normalized_git_dir = _normalize_existing_path(git_dir)
+    return GitWorkspaceRuntimeIdentity(
+        layout=layout,
+        git_dir=normalized_git_dir,
+        workspace_root_identity=_filesystem_identity(layout.workspace_root),
+        git_dir_identity=_filesystem_identity(normalized_git_dir),
+        git_common_dir_identity=_filesystem_identity(layout.git_common_dir),
     )
 
 
@@ -141,6 +168,14 @@ def _normalize_existing_path(path: Path) -> Path:
     except (OSError, RuntimeError) as exc:
         raise GitWorkspaceError(f"Git reported a path that cannot be resolved: {path}") from exc
     return Path(os.path.normcase(str(resolved)))
+
+
+def _filesystem_identity(path: Path) -> tuple[int, int]:
+    try:
+        path_stat = path.stat()
+    except OSError as exc:
+        raise GitWorkspaceError(f"Git identity path cannot be inspected: {path}") from exc
+    return path_stat.st_dev, path_stat.st_ino
 
 
 def _git_environment() -> dict[str, str]:
