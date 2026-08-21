@@ -67,8 +67,8 @@ def test_status_validates_canonical_runtime_directory_before_ipc(
 
     assert entrypoints._run_status(workspace_root, None) == 1
     assert capsys.readouterr().out.strip() == (
-        "Harness status: FAIL (Harness runtime directory must be a real directory owned by "
-        "the current user with no group/other access)"
+        "Harness status: FAIL (Harness runtime directory must be owned by the current user, "
+        "be a real directory, and have no group/other access)"
     )
 
 
