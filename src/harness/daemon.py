@@ -296,10 +296,15 @@ def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> in
 
 def _prepare_socket_parent(parent: Path) -> None:
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    parent_stat = parent.stat()
-    if parent_stat.st_uid != os.geteuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
+    parent_stat = parent.lstat()
+    if (
+        not stat.S_ISDIR(parent_stat.st_mode)
+        or parent_stat.st_uid != os.geteuid()
+        or stat.S_IMODE(parent_stat.st_mode) & 0o077
+    ):
         raise InsecureSocketDirectoryError(
-            f"IPC directory must be owned by the current user with no group/other access: {parent}"
+            f"IPC directory must be a real directory owned by the current user "
+            f"with no group/other access: {parent}"
         )
 
 
