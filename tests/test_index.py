@@ -249,6 +249,38 @@ def test_scan_fails_closed_if_harnessignore_disappears_after_inspection(
         connection.close()
 
 
+def test_scan_fails_closed_if_harnessignore_changes_during_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    harnessignore = root / ".harnessignore"
+    harnessignore.write_text("", encoding="utf-8")
+    original_run = subprocess.run
+    changed = False
+
+    def racing_run(*args: Any, **kwargs: Any) -> Any:
+        nonlocal changed
+        command = args[0] if args else kwargs.get("args")
+        if (
+            not changed
+            and isinstance(command, list)
+            and command[:2] == ["git", "ls-files"]
+        ):
+            changed = True
+            harnessignore.write_text("tracked.txt\n", encoding="utf-8")
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", racing_run)
+    try:
+        with pytest.raises(IndexingError, match=r"changed while scanning: \.harnessignore"):
+            scan_workspace(connection, workspace_id)
+        assert changed is True
+        assert list_indexed_files(connection, workspace_id) == ()
+    finally:
+        connection.close()
+
+
 def test_scan_ignores_inherited_git_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
