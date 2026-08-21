@@ -8,6 +8,11 @@ from types import FrameType
 from harness.daemon import DaemonError, serve_daemon
 from harness.doctor import DoctorReport, run_doctor_checks
 from harness.ipc import IpcError, WorkspaceStatusResult, request_workspace_status
+from harness.runtime_paths import (
+    RuntimePathError,
+    default_runtime_paths,
+    ensure_private_state_directory,
+)
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -94,7 +99,13 @@ def _status_failure(detail: str) -> int:
     return 1
 
 
-def _run_status(workspace_location: Path, socket_path: Path) -> int:
+def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
+    if socket_path is None:
+        try:
+            socket_path = default_runtime_paths().socket
+        except RuntimePathError as exc:
+            return _status_failure(str(exc))
+
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -143,6 +154,27 @@ def _run_daemon(database_path: Path, socket_path: Path) -> int:
     return 0
 
 
+def _run_daemon_with_defaults(
+    database_path: Path | None,
+    socket_path: Path | None,
+) -> int:
+    uses_default_database = database_path is None
+    try:
+        if database_path is None or socket_path is None:
+            defaults = default_runtime_paths()
+            if database_path is None:
+                database_path = defaults.database
+            if socket_path is None:
+                socket_path = defaults.socket
+        if uses_default_database:
+            ensure_private_state_directory(database_path.parent)
+    except RuntimePathError as exc:
+        print(f"Harness daemon: FAIL ({exc})")
+        return 1
+
+    return _run_daemon(database_path, socket_path)
+
+
 def harness_main() -> int:
     """Run the Harness CLI."""
     parser = _parser("harness", "Harness CLI. Product runtime is under implementation.")
@@ -163,7 +195,7 @@ def harness_main() -> int:
         help="show read-only status for one registered Workspace",
         description=(
             "Resolve a filesystem location to a registered Workspace and read compact status "
-            "from an explicitly selected Harness daemon socket."
+            "from the per-user Harness daemon."
         ),
     )
     status_parser.add_argument(
@@ -177,9 +209,8 @@ def harness_main() -> int:
     status_parser.add_argument(
         "--socket",
         type=Path,
-        required=True,
         metavar="PATH",
-        help="Unix-domain socket of the running Harness daemon",
+        help="override the canonical per-user Unix-domain socket path",
     )
 
     args = parser.parse_args()
@@ -200,15 +231,26 @@ def harnessd_main() -> int:
         "serve",
         help="serve the implemented read-only local IPC status paths",
         description=(
-            "Serve the bounded read-only local IPC status paths using an explicit database and socket."
+            "Serve the bounded read-only local IPC status paths using canonical per-user "
+            "database and socket defaults unless explicitly overridden."
         ),
     )
-    serve_parser.add_argument("--database", type=Path, required=True, metavar="PATH")
-    serve_parser.add_argument("--socket", type=Path, required=True, metavar="PATH")
+    serve_parser.add_argument(
+        "--database",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Harness database path",
+    )
+    serve_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Unix-domain socket path",
+    )
 
     args = parser.parse_args()
     if args.command == "serve":
-        return _run_daemon(args.database, args.socket)
+        return _run_daemon_with_defaults(args.database, args.socket)
 
     parser.print_help()
     return 0
