@@ -172,6 +172,55 @@ def test_scan_does_not_read_external_target_after_regular_file_is_replaced_by_sy
         connection.close()
 
 
+def test_scan_does_not_read_external_harnessignore_after_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    harnessignore = root / ".harnessignore"
+    harnessignore.write_text("tracked.txt\n", encoding="utf-8")
+    outside = tmp_path / "outside-ignore.txt"
+    outside.write_text("external-secret-pattern\n", encoding="utf-8")
+    original_open = Path.open
+    swapped = False
+    reads: list[bool] = []
+
+    class ReadTrackingStream:
+        def __init__(self, stream: Any) -> None:
+            self._stream = stream
+
+        def __enter__(self) -> "ReadTrackingStream":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+            self._stream.close()
+
+        def fileno(self) -> int:
+            return self._stream.fileno()
+
+        def read(self, *args: Any, **kwargs: Any) -> bytes:
+            reads.append(True)
+            return self._stream.read(*args, **kwargs)
+
+    def racing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        nonlocal swapped
+        if self == harnessignore and not swapped:
+            swapped = True
+            self.unlink()
+            self.symlink_to(outside)
+            return ReadTrackingStream(original_open(self, *args, **kwargs))
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    try:
+        with pytest.raises(IndexingError, match="changed while scanning"):
+            scan_workspace(connection, workspace_id)
+        assert swapped is True
+        assert reads == []
+    finally:
+        connection.close()
+
+
 def test_scan_ignores_inherited_git_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
