@@ -33,14 +33,14 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
         tables = {
             row[0]
             for row in connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"projects", "workspaces"} <= tables
+        assert {"projects", "workspaces", "indexed_files"} <= tables
     finally:
         connection.close()
 
@@ -57,7 +57,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
     finally:
         connection.close()
 
@@ -94,7 +94,7 @@ def test_initialize_database_serializes_concurrent_migrations(
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
     finally:
         connection.close()
 
@@ -131,7 +131,7 @@ def test_initialize_database_migrates_existing_version_zero_database(tmp_path: P
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
     finally:
         connection.close()
 
@@ -152,13 +152,13 @@ def test_initialize_database_migrates_existing_version_one_database(tmp_path: Pa
 
     status = initialize_database(database)
 
-    assert status.schema_version == 2
+    assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
         assert connection.execute("SELECT value FROM legacy_fixture").fetchone() == ("preserved",)
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'projects'"
@@ -166,6 +166,68 @@ def test_initialize_database_migrates_existing_version_one_database(tmp_path: Pa
         assert connection.execute(
             "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'workspaces'"
         ).fetchone() == ("workspaces",)
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'indexed_files'"
+        ).fetchone() == ("indexed_files",)
+    finally:
+        connection.close()
+
+
+def test_initialize_database_migrates_existing_version_two_database(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK (version > 0))"
+        )
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2)")
+        connection.execute(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                visibility_mode TEXT NOT NULL DEFAULT 'normal'
+                    CHECK (visibility_mode IN ('normal', 'hidden'))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE workspaces (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                workspace_root TEXT NOT NULL UNIQUE,
+                git_common_dir TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX workspaces_project_id_idx ON workspaces(project_id)")
+        connection.execute(
+            "CREATE INDEX workspaces_git_common_dir_idx ON workspaces(git_common_dir)"
+        )
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = initialize_database(database)
+
+    assert status.schema_version == SCHEMA_VERSION
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT id FROM projects").fetchall() == [("project",)]
+        assert connection.execute("SELECT id FROM workspaces").fetchall() == [("workspace",)]
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,)]
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'indexed_files'"
+        ).fetchone() == ("indexed_files",)
     finally:
         connection.close()
 
@@ -177,7 +239,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     connection = sqlite3.connect(database)
     try:
         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
-        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2), (3)")
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4)")
         connection.commit()
         before = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
@@ -190,7 +252,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     try:
         assert connection.execute("PRAGMA journal_mode").fetchone() == before
         versions = connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert versions == [(1,), (2,), (3,)]
+        assert versions == [(1,), (2,), (3,), (4,)]
     finally:
         connection.close()
 

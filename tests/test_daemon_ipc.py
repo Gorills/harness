@@ -26,7 +26,7 @@ from harness.ipc import (
     _status_from_response,
     request_status,
 )
-from harness.storage import connect_database, initialize_database
+from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX IPC slice")
 
@@ -87,7 +87,7 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
     stop_event, executor, future = _start_server(database, socket_path)
     try:
         assert request_status(socket_path) == StatusResult(
-            schema_version=2,
+            schema_version=SCHEMA_VERSION,
             project_count=2,
             workspace_count=1,
         )
@@ -99,7 +99,11 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
             "version": PROTOCOL_VERSION,
             "request_id": "exact",
             "ok": True,
-            "result": {"schema_version": 2, "project_count": 2, "workspace_count": 1},
+            "result": {
+                "schema_version": SCHEMA_VERSION,
+                "project_count": 2,
+                "workspace_count": 1,
+            },
         }
     finally:
         _stop_server(stop_event, executor, future)
@@ -129,7 +133,7 @@ def test_invalid_protocol_requests_fail_closed_and_daemon_recovers(
             "ok": False,
             "error": {"code": "invalid_request", "message": "IPC request is invalid"},
         }
-        assert request_status(socket_path) == StatusResult(2, 0, 0)
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
@@ -150,7 +154,7 @@ def test_status_request_rejects_extra_fields_without_mutating_database(tmp_path:
             "ok": False,
             "error": {"code": "invalid_request", "message": "IPC request is invalid"},
         }
-        assert request_status(socket_path) == StatusResult(2, 0, 0)
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
@@ -167,7 +171,7 @@ def test_oversized_request_is_bounded_and_next_client_still_succeeds(tmp_path: P
             "code": "message_too_large",
             "message": "IPC request exceeds byte limit",
         }
-        assert request_status(socket_path) == StatusResult(2, 0, 0)
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
@@ -215,7 +219,7 @@ def test_daemon_initializes_database_before_serving_status(tmp_path: Path) -> No
     stop_event, executor, future = _start_server(database, socket_path)
     try:
         assert database.is_file()
-        assert request_status(socket_path) == StatusResult(2, 0, 0)
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
@@ -227,7 +231,7 @@ def test_disconnected_client_does_not_stop_daemon(tmp_path: Path) -> None:
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.connect(str(socket_path))
-        assert request_status(socket_path) == StatusResult(2, 0, 0)
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
@@ -239,7 +243,11 @@ def test_client_rejects_boolean_protocol_version() -> None:
                 "version": True,
                 "request_id": "request",
                 "ok": True,
-                "result": {"schema_version": 2, "project_count": 0, "workspace_count": 0},
+                "result": {
+                    "schema_version": SCHEMA_VERSION,
+                    "project_count": 0,
+                    "workspace_count": 0,
+                },
             },
             expected_request_id="request",
         )
