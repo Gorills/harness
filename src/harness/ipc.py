@@ -77,7 +77,7 @@ def request_status(
             client.connect(str(socket_path))
             client.sendall(payload)
             response = _decode_json(_receive_frame(client))
-    except (TimeoutError, socket.timeout) as exc:
+    except TimeoutError as exc:
         raise IpcTransportError("local IPC request timed out") from exc
     except OSError as exc:
         raise IpcTransportError(f"local IPC transport failed: {exc}") from exc
