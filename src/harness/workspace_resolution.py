@@ -72,12 +72,16 @@ class WorkspaceResolver:
             matches = [
                 (workspace, root) for workspace, root in self._workspaces if root == normalized_path
             ]
-        else:
+        elif hint.match_mode is WorkspaceHintMatchMode.LOCATION:
             matches = [
                 (workspace, root)
                 for workspace, root in self._workspaces
                 if self._contains(root, normalized_path)
             ]
+        else:
+            raise WorkspaceResolutionError(
+                f"unsupported workspace hint match mode for {hint.source!r}: {hint.match_mode!r}"
+            )
 
         if not matches:
             raise WorkspaceNotFoundError(
