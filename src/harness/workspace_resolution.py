@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 
@@ -18,6 +19,13 @@ class AmbiguousWorkspaceError(WorkspaceResolutionError):
     """Raised when one hint matches multiple equally specific Workspaces."""
 
 
+class WorkspaceHintMatchMode(StrEnum):
+    """How a filesystem hint is allowed to match a registered Workspace."""
+
+    ROOT = "root"
+    LOCATION = "location"
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceCandidate:
     """Registered Workspace identity and filesystem root used for resolution."""
@@ -28,10 +36,11 @@ class WorkspaceCandidate:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceHint:
-    """Ordered, host-normalized filesystem evidence for the active Workspace."""
+    """Ordered filesystem evidence for the active Workspace."""
 
     path: Path
     source: str
+    match_mode: WorkspaceHintMatchMode = WorkspaceHintMatchMode.ROOT
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,11 +68,19 @@ class WorkspaceResolver:
 
         hint = hints[0]
         normalized_path = self._normalize(hint.path)
-        matches = [
-            (workspace, root)
-            for workspace, root in self._workspaces
-            if self._contains(root, normalized_path)
-        ]
+        if hint.match_mode is WorkspaceHintMatchMode.ROOT:
+            matches = [
+                (workspace, root)
+                for workspace, root in self._workspaces
+                if root == normalized_path
+            ]
+        else:
+            matches = [
+                (workspace, root)
+                for workspace, root in self._workspaces
+                if self._contains(root, normalized_path)
+            ]
+
         if not matches:
             raise WorkspaceNotFoundError(
                 f"highest-priority workspace hint {hint.source!r} at {normalized_path} "
