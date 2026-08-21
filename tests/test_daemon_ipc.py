@@ -17,7 +17,14 @@ from harness.daemon import (
     SocketPathInUseError,
     serve_daemon,
 )
-from harness.ipc import MAX_MESSAGE_BYTES, PROTOCOL_VERSION, StatusResult, request_status
+from harness.ipc import (
+    MAX_MESSAGE_BYTES,
+    PROTOCOL_VERSION,
+    IpcProtocolError,
+    StatusResult,
+    _status_from_response,
+    request_status,
+)
 from harness.storage import connect_database, initialize_database
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX IPC slice")
@@ -224,3 +231,16 @@ def test_disconnected_client_does_not_stop_daemon(tmp_path: Path) -> None:
         assert request_status(socket_path) == StatusResult(2, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
+
+
+def test_client_rejects_boolean_protocol_version() -> None:
+    with pytest.raises(IpcProtocolError, match="unsupported IPC protocol version"):
+        _status_from_response(
+            {
+                "version": True,
+                "request_id": "request",
+                "ok": True,
+                "result": {"schema_version": 2, "project_count": 0, "workspace_count": 0},
+            },
+            expected_request_id="request",
+        )

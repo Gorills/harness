@@ -187,7 +187,8 @@ def _encode_json(value: dict[str, Any]) -> bytes:
 
 
 def _status_from_response(response: dict[str, Any], *, expected_request_id: str) -> StatusResult:
-    if response.get("version") != PROTOCOL_VERSION:
+    version = response.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version != PROTOCOL_VERSION:
         raise IpcProtocolError("daemon response uses an unsupported IPC protocol version")
     if response.get("request_id") != expected_request_id:
         raise IpcProtocolError("daemon response request_id does not match the request")
