@@ -35,6 +35,7 @@ from harness.workspace_resolution import (
 
 _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
+_ERROR_MESSAGE_MAX_LENGTH = 1024
 
 
 class DaemonError(RuntimeError):
@@ -251,6 +252,8 @@ def _try_send_error(
     message: str,
     request_id: str | None = None,
 ) -> None:
+    if len(message) > _ERROR_MESSAGE_MAX_LENGTH:
+        message = f"{message[: _ERROR_MESSAGE_MAX_LENGTH - 3]}..."
     try:
         send_error_response(
             client,
@@ -258,7 +261,7 @@ def _try_send_error(
             code=code,
             message=message,
         )
-    except OSError:
+    except (IpcMessageTooLargeError, OSError):
         pass
 
 
