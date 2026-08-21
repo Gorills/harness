@@ -47,7 +47,7 @@ This file is evidence for adapter design, not a promise that undocumented host i
 
 ## Hidden-mode capability baseline
 
-Hidden mode is stricter than ordinary project instructions. Prompt/rule loading is necessary but not sufficient: the supported profile must deny agent-originated durable SCM mutations, protect its enforcement from agent tampering, and suppress host-injected durable attribution where applicable. Admission is based on Harness-owned adapter/profile metadata rather than self-reported `clientInfo`; unknown capability fails closed.
+Hidden mode is stricter than ordinary project instructions. Prompt/rule loading is necessary but not sufficient: the supported profile must deny agent-originated durable SCM mutations, protect its enforcement from agent tampering, suppress host-injected durable attribution where applicable, and prove safe mode-transition behavior for already-admitted sessions/profiles. Admission is based on Harness-owned adapter/profile metadata rather than self-reported `clientInfo`; unknown capability fails closed.
 
 | Host/profile | Project/local rule or settings surface | SCM-write enforcement evidence | Attribution evidence | Hidden status before acceptance |
 | --- | --- | --- | --- | --- |
@@ -79,6 +79,8 @@ For every supported host/profile and supported OS family where behavior differs,
 - [ ] Hidden agent attempts to stage/commit/amend/create refs or tags/push/create or edit PRs/issues/reviews/comments are denied by the host profile, not merely discouraged by prompt text.
 - [ ] Hidden enforcement configuration is tamper-resistant for the tested profile: the agent cannot edit/disable it or escalate into a bypass/full-access mode.
 - [ ] Unsupported/spoofed host profiles are rejected for Hidden admission and cannot gain support by changing self-reported client metadata.
+- [ ] With a Normal-capability agent/profile already admitted, switching to Hidden either revokes/revalidates that live capability before the mode becomes effective or fails closed with an actionable restart/reopen requirement; an older Normal-capability agent cannot commit/push after `project_status` reports Hidden.
+- [ ] Hidden → Normal restoration does not remove Harness-owned enforcement underneath an admitted Hidden session before the transition boundary completes.
 - [ ] Hidden mode emits no host/model/Harness attribution into durable Git/SCM artifacts; if the host injects unavoidable attribution, the profile fails Hidden acceptance.
 - [ ] Switching Hidden → Normal restores only Harness-owned settings/policy and preserves unknown user configuration.
 - [ ] When `harnessd` is unavailable, Normal remains native; Hidden still permits ordinary edits/shell/read-only Git while agent publication stays denied and human Git outside the agent path remains usable.
