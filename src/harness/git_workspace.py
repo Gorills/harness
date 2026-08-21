@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+_GIT_COMMAND_TIMEOUT_SECONDS = 1.5
 _GIT_CONTEXT_ENVIRONMENT = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -99,7 +100,10 @@ def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
             check=False,
             capture_output=True,
             env=_git_environment(),
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitWorkspaceError(f"Git status inspection timed out at {invocation_dir}") from exc
     except FileNotFoundError as exc:
         raise GitExecutableUnavailableError("Git executable is not available") from exc
     except OSError as exc:
@@ -202,7 +206,10 @@ def _rev_parse(invocation_dir: Path, argument: str) -> str:
             check=False,
             capture_output=True,
             env=_git_environment(),
+            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise GitWorkspaceError(f"Git workspace inspection timed out at {invocation_dir}") from exc
     except FileNotFoundError as exc:
         raise GitExecutableUnavailableError("Git executable is not available") from exc
     except OSError as exc:
