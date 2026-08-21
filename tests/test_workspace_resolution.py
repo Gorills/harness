@@ -62,9 +62,7 @@ def test_location_inside_registered_workspace_matches_ancestor(tmp_path: Path) -
     location.mkdir(parents=True)
     resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
 
-    resolution = resolver.resolve(
-        [WorkspaceHint(location, "cwd", WorkspaceHintMatchMode.LOCATION)]
-    )
+    resolution = resolver.resolve([WorkspaceHint(location, "cwd", WorkspaceHintMatchMode.LOCATION)])
 
     assert resolution.workspace_id == "registered"
     assert resolution.workspace_root == registered.resolve()
@@ -105,9 +103,7 @@ def test_nested_workspace_is_more_specific_for_descendant_hint(tmp_path: Path) -
         ]
     )
 
-    resolution = resolver.resolve(
-        [WorkspaceHint(cwd, "cwd", WorkspaceHintMatchMode.LOCATION)]
-    )
+    resolution = resolver.resolve([WorkspaceHint(cwd, "cwd", WorkspaceHintMatchMode.LOCATION)])
 
     assert resolution.workspace_id == "nested"
     assert resolution.workspace_root == nested.resolve()
