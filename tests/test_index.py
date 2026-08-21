@@ -222,6 +222,33 @@ def test_scan_does_not_read_external_harnessignore_after_replacement(
         connection.close()
 
 
+def test_scan_fails_closed_if_harnessignore_disappears_after_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    harnessignore = root / ".harnessignore"
+    harnessignore.write_text("tracked.txt\n", encoding="utf-8")
+    original_open = Path.open
+    removed = False
+
+    def racing_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        nonlocal removed
+        if self == harnessignore and not removed:
+            removed = True
+            self.unlink()
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", racing_open)
+    try:
+        with pytest.raises(IndexingError, match=r"changed while scanning: \.harnessignore"):
+            scan_workspace(connection, workspace_id)
+        assert removed is True
+        assert list_indexed_files(connection, workspace_id) == ()
+    finally:
+        connection.close()
+
+
 def test_scan_ignores_inherited_git_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
