@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, Project/Workspace registry primitives, read-only runtime doctor checks, bounded daemon/local-IPC status paths, and deterministic file-index reconciliation primitives exist; MCP, search, Tasks, host integration, and dashboard behavior are not implemented yet.
+> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, Project/Workspace registry primitives, read-only runtime doctor checks, a read-only Workspace status CLI, bounded daemon/local-IPC status paths, and deterministic file-index reconciliation primitives exist; MCP, search, Tasks, host integration, and dashboard behavior are not implemented yet.
 
 ## Product principles
 
@@ -42,6 +42,8 @@ The first deterministic index slice inventories regular files and symlinks for o
 
 The installed `harness` CLI includes `harness doctor`. With no database argument it checks the current SQLite runtime and FTS5 availability using only an in-memory database, so it creates no durable Harness state. `harness doctor --database PATH` additionally inspects an explicitly selected, already initialized Harness database for supported schema state, WAL mode, foreign-key enforcement, and FTS5 availability. Database inspection does not create or migrate the selected path; a missing or invalid database is reported as a bounded failure. Harness does not choose a canonical database path yet, so this diagnostic requires an explicit `PATH`. The broader doctor contract (daemon, permissions, registrations, host adapters, projects, index state, skills, dashboard, and stale integrations) is not implemented yet.
 
+The installed CLI also exposes `harness status [PATH] --socket PATH`. `PATH` defaults to the current directory and is treated as a filesystem location inside an already registered Workspace. The command resolves that location through the daemon's fail-closed Workspace resolver and prints only compact mechanical state: Project/Workspace identity, canonical root, visibility mode, Git branch/HEAD, dirty-path summary, indexed-file count, and schema version. It is read-only: it does not register a Project/Workspace, run a scan, or mutate the database. `--socket` remains explicit because Harness does not choose a canonical per-user daemon socket yet.
+
 The installed `harnessd` console script exposes `harnessd serve --database PATH --socket PATH`. On supported POSIX systems the daemon initializes/migrates the explicit database, binds a Unix-domain socket, and serves two versioned read-only internal requests: global `status` and Workspace-scoped `workspace_status`. The socket directory must be owned by the current OS user with no group/other access; Harness creates a missing final directory with mode `0700`, sets the socket to `0600`, refuses to replace an existing socket-path entry, and removes only the socket inode it created on clean shutdown.
 
 The global status result remains deliberately small: schema version plus Project and Workspace counts. `workspace_status` accepts at most four ordered absolute filesystem hints, resolves them against the durable Workspace registry with the existing fail-closed priority rules, verifies the registered Git identity, and returns only compact mechanical state: Project/Workspace identity, effective visibility mode, canonical Workspace root, live Git branch/HEAD, dirty-path count, and current indexed-file count. It does not expose source text, search results, Tasks, Knowledge, or MCP objects.
@@ -55,7 +57,7 @@ uv sync --locked --all-groups
 uv run --frozen python scripts/quality.py
 ```
 
-The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, and runs the installed `harness doctor` command.
+The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, verifies that installed `harness --help` exposes the implemented CLI commands, and runs the installed `harness doctor` command.
 
 ## License
 

@@ -7,8 +7,9 @@ from types import FrameType
 
 from harness.daemon import DaemonError, serve_daemon
 from harness.doctor import DoctorReport, run_doctor_checks
-from harness.ipc import IpcError
+from harness.ipc import IpcError, WorkspaceStatusResult, request_workspace_status
 from harness.storage import DatabaseError
+from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _DOCTOR_RUNTIME_SCOPE = (
     "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
@@ -18,6 +19,7 @@ _DOCTOR_DATABASE_SCOPE = (
     "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
     "implemented yet."
 )
+_STATUS_FAILURE_DETAIL_MAX_LENGTH = 1024
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -72,6 +74,52 @@ def _run_doctor(database_path: Path | None = None) -> int:
     return result
 
 
+def _print_workspace_status(status: WorkspaceStatusResult) -> None:
+    print(f"Project: {status.project_id}")
+    print(f"Workspace: {status.workspace_id}")
+    print(f"Workspace root: {status.workspace_root}")
+    print(f"Visibility: {status.visibility_mode}")
+    print(f"Git HEAD: {status.head if status.head is not None else '(unborn)'}")
+    print(f"Git branch: {status.branch if status.branch is not None else '(detached)'}")
+    print(f"Dirty paths: {status.dirty_path_count}")
+    print(f"Indexed files: {status.indexed_file_count}")
+    print(f"Schema: {status.schema_version}")
+
+
+def _status_failure(detail: str) -> int:
+    detail = detail.replace("\r", "\\r").replace("\n", "\\n")
+    if len(detail) > _STATUS_FAILURE_DETAIL_MAX_LENGTH:
+        detail = f"{detail[: _STATUS_FAILURE_DETAIL_MAX_LENGTH - 3]}..."
+    print(f"Harness status: FAIL ({detail})")
+    return 1
+
+
+def _run_status(workspace_location: Path, socket_path: Path) -> int:
+    try:
+        location = workspace_location.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return _status_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
+    if not location.is_dir():
+        return _status_failure(f"workspace path is not a directory: {location}")
+
+    try:
+        status = request_workspace_status(
+            socket_path,
+            [
+                WorkspaceHint(
+                    path=location,
+                    source="cli-location",
+                    match_mode=WorkspaceHintMatchMode.LOCATION,
+                )
+            ],
+        )
+    except IpcError as exc:
+        return _status_failure(str(exc))
+
+    _print_workspace_status(status)
+    return 0
+
+
 def _run_daemon(database_path: Path, socket_path: Path) -> int:
     stop_event = Event()
 
@@ -110,10 +158,35 @@ def harness_main() -> int:
         metavar="PATH",
         help="inspect an existing initialized Harness database without creating or migrating it",
     )
+    status_parser = subparsers.add_parser(
+        "status",
+        help="show read-only status for one registered Workspace",
+        description=(
+            "Resolve a filesystem location to a registered Workspace and read compact status "
+            "from an explicitly selected Harness daemon socket."
+        ),
+    )
+    status_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        metavar="PATH",
+        help="location inside the registered Workspace (default: current directory)",
+    )
+    status_parser.add_argument(
+        "--socket",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Unix-domain socket of the running Harness daemon",
+    )
 
     args = parser.parse_args()
     if args.command == "doctor":
         return _run_doctor(args.database)
+    if args.command == "status":
+        return _run_status(args.path, args.socket)
 
     parser.print_help()
     return 0

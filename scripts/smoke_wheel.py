@@ -85,6 +85,13 @@ def main() -> int:
                 )
 
         harness = scripts_dir / f"harness{suffix}"
+        help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("doctor", "status"):
+            if expected not in help_result.stdout:
+                raise RuntimeError(
+                    f"installed harness --help did not contain {expected!r}: {help_result.stdout!r}"
+                )
+
         doctor = _run((str(harness), "doctor"), cwd=workspace, env=isolated_env)
         for expected in ("SQLite runtime: OK", "FTS5: OK"):
             if expected not in doctor.stdout:
