@@ -11,7 +11,7 @@ class WorkspaceResolutionError(RuntimeError):
 
 
 class WorkspaceNotFoundError(WorkspaceResolutionError):
-    """Raised when no registered Workspace matches the available hints."""
+    """Raised when no registered Workspace matches the highest-priority hint."""
 
 
 class AmbiguousWorkspaceError(WorkspaceResolutionError):
@@ -45,7 +45,7 @@ class WorkspaceResolution:
 
 
 class WorkspaceResolver:
-    """Resolve ordered filesystem hints against registered Workspaces."""
+    """Resolve the highest-priority filesystem hint against registered Workspaces."""
 
     def __init__(self, workspaces: Sequence[WorkspaceCandidate]) -> None:
         self._workspaces = tuple(
@@ -53,47 +53,39 @@ class WorkspaceResolver:
         )
 
     def resolve(self, hints: Sequence[WorkspaceHint]) -> WorkspaceResolution:
-        """Return the first unambiguous Workspace selected by ordered hints."""
+        """Resolve the strongest available hint without falling back on mismatch."""
         if not hints:
             raise WorkspaceNotFoundError("no workspace hints were provided")
 
-        normalized_hints: list[tuple[WorkspaceHint, Path]] = []
-        for hint in hints:
-            normalized_path = self._normalize(hint.path)
-            normalized_hints.append((hint, normalized_path))
-            matches = [
-                (workspace, root)
-                for workspace, root in self._workspaces
-                if self._contains(root, normalized_path)
-            ]
-            if not matches:
-                continue
-
-            deepest = max(len(root.parts) for _, root in matches)
-            winners = [
-                (workspace, root) for workspace, root in matches if len(root.parts) == deepest
-            ]
-            if len(winners) != 1:
-                workspace_ids = ", ".join(
-                    sorted(workspace.workspace_id for workspace, _ in winners)
-                )
-                raise AmbiguousWorkspaceError(
-                    f"workspace hint {hint.source!r} at {normalized_path} matches multiple "
-                    f"registered workspaces: {workspace_ids}"
-                )
-
-            workspace, root = winners[0]
-            return WorkspaceResolution(
-                workspace_id=workspace.workspace_id,
-                workspace_root=root,
-                hint_source=hint.source,
-                matched_path=normalized_path,
+        hint = hints[0]
+        normalized_path = self._normalize(hint.path)
+        matches = [
+            (workspace, root)
+            for workspace, root in self._workspaces
+            if self._contains(root, normalized_path)
+        ]
+        if not matches:
+            raise WorkspaceNotFoundError(
+                f"highest-priority workspace hint {hint.source!r} at {normalized_path} "
+                "does not match a registered workspace"
             )
 
-        hint_details = ", ".join(
-            f"{hint.source}={normalized_path}" for hint, normalized_path in normalized_hints
+        deepest = max(len(root.parts) for _, root in matches)
+        winners = [(workspace, root) for workspace, root in matches if len(root.parts) == deepest]
+        if len(winners) != 1:
+            workspace_ids = ", ".join(sorted(workspace.workspace_id for workspace, _ in winners))
+            raise AmbiguousWorkspaceError(
+                f"workspace hint {hint.source!r} at {normalized_path} matches multiple "
+                f"registered workspaces: {workspace_ids}"
+            )
+
+        workspace, root = winners[0]
+        return WorkspaceResolution(
+            workspace_id=workspace.workspace_id,
+            workspace_root=root,
+            hint_source=hint.source,
+            matched_path=normalized_path,
         )
-        raise WorkspaceNotFoundError(f"no registered workspace matches hints: {hint_details}")
 
     @staticmethod
     def _normalize(path: Path) -> Path:
