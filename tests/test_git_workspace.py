@@ -7,6 +7,7 @@ import pytest
 
 from harness.git_workspace import (
     GitExecutableUnavailableError,
+    GitWorkspaceError,
     NotGitWorkspaceError,
     inspect_git_working_tree_status,
     inspect_git_workspace,
@@ -176,3 +177,41 @@ def test_inspect_git_workspace_reports_missing_git_executable(
 
     with pytest.raises(GitExecutableUnavailableError, match="Git executable is not available"):
         inspect_git_workspace(directory)
+
+
+def test_inspect_git_workspace_bounds_rev_parse_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def timed_out_git(*args: object, **kwargs: object) -> NoReturn:
+        command = args[0]
+        timeout = kwargs.get("timeout")
+        assert timeout == 1.5
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(subprocess, "run", timed_out_git)
+
+    with pytest.raises(GitWorkspaceError, match="Git workspace inspection timed out"):
+        inspect_git_workspace(repository)
+
+
+def test_inspect_working_tree_status_bounds_git_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def timed_out_git(*args: object, **kwargs: object) -> NoReturn:
+        command = args[0]
+        timeout = kwargs.get("timeout")
+        assert timeout == 1.5
+        raise subprocess.TimeoutExpired(command, timeout)
+
+    monkeypatch.setattr(subprocess, "run", timed_out_git)
+
+    with pytest.raises(GitWorkspaceError, match="Git status inspection timed out"):
+        inspect_git_working_tree_status(repository)
