@@ -11,7 +11,7 @@ from threading import Event
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
-    inspect_git_workspace,
+    inspect_git_workspace_runtime_identity,
 )
 from harness.ipc import (
     IpcMessageTooLargeError,
@@ -82,15 +82,17 @@ def read_workspace_status(
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
 
-    layout = inspect_git_workspace(workspace.workspace_root)
+    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
     if (
-        layout.workspace_root != workspace.workspace_root
-        or layout.git_common_dir != workspace.git_common_dir
+        runtime_identity.layout.workspace_root != workspace.workspace_root
+        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
     ):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
     git_status = inspect_git_working_tree_status(workspace.workspace_root)
+    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+        raise WorkspaceResolutionError("workspace Git identity changed during status read")
 
     connection.execute("BEGIN")
     try:
