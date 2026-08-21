@@ -115,8 +115,7 @@ def test_scan_hashes_symlink_target_without_following_outside_workspace(tmp_path
 
         scan_workspace(connection, workspace_id)
         records = {
-            record.relative_path: record
-            for record in list_indexed_files(connection, workspace_id)
+            record.relative_path: record for record in list_indexed_files(connection, workspace_id)
         }
         record = records["outside-link"]
         assert record.kind is IndexedFileKind.SYMLINK
