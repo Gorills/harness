@@ -17,6 +17,10 @@ class ProjectNotFoundError(RegistryError):
     """Raised when a Workspace is registered against an unknown Project."""
 
 
+class WorkspaceNotFoundError(RegistryError):
+    """Raised when a requested Workspace is not registered."""
+
+
 class WorkspaceRegistrationConflictError(RegistryError):
     """Raised when an existing Workspace root has incompatible registry identity."""
 
@@ -69,6 +73,21 @@ def get_project(connection: sqlite3.Connection, project_id: str) -> ProjectRecor
     if row is None:
         raise ProjectNotFoundError(f"project is not registered: {project_id}")
     return _project_from_row(row)
+
+
+def get_workspace(connection: sqlite3.Connection, workspace_id: str) -> WorkspaceRecord:
+    """Load one Workspace by durable identity."""
+    row = connection.execute(
+        """
+        SELECT id, project_id, workspace_root, git_common_dir
+        FROM workspaces
+        WHERE id = ?
+        """,
+        (workspace_id,),
+    ).fetchone()
+    if row is None:
+        raise WorkspaceNotFoundError(f"workspace is not registered: {workspace_id}")
+    return _workspace_from_row(row)
 
 
 def register_workspace(
