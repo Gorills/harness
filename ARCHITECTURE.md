@@ -122,6 +122,8 @@ Minimum states remain:
 
 v1 enforces at most one distinct `working` Task per Workspace transactionally. Parallel tasks use separate Workspaces/worktrees.
 
+Each Task carries a monotonically increasing `revision` used only as an optimistic-concurrency token. Every successful Task mutation increments it. A caller never uses timestamps, bridge identity, or Workspace-current state as a substitute for this revision.
+
 The name intentionally overlaps with the MCP Tasks extension, but the semantics do not. In v1, `task_start` and `task_checkpoint` are ordinary bounded MCP tool calls that mutate/query Harness-owned durable Task state in `harnessd`; they do not return or manage MCP task handles. A future use of the MCP Tasks extension would be justified only for a genuinely long-running single MCP operation and must remain orthogonal to Harness Task identity.
 
 ### AgentSession / AgentActivity
@@ -187,14 +189,17 @@ project_status
 
 But the implementation is explicitly workspace-domain based and write-safe:
 
-- `task_start` creates/resumes a Task, returns its stable Harness `task_id`, and establishes it as the Workspace's current working Task through a transactional domain transition.
+- `task_start` creates/resumes a Task, returns its stable Harness `task_id` plus current `revision`, and establishes it as the Workspace's current working Task through a transactional domain transition.
 - Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
-- Read-only calls may derive relevance/display defaults from Workspace + current Task.
-- `task_checkpoint` is a mutating operation and therefore MUST include the intended Harness `task_id`; the daemon verifies that the Task belongs to the resolved Workspace and that the requested transition is valid.
-- A stale call for Task A must never be retargeted to whichever Task is current when the request executes. Workspace-current inference is not a write target.
+- Read-only calls may derive relevance/display defaults from Workspace + current Task and expose the current Task revision where a subsequent mutation may depend on it.
+- `task_checkpoint` is a mutating operation and therefore MUST include both the intended Harness `task_id` and `expected_revision`.
+- The daemon verifies Task/Workspace ownership and transition validity, then applies the mutation only when the stored revision equals `expected_revision`; success increments and returns the new revision.
+- Revision mismatch is a bounded conflict response with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
+- A stale call for Task A must never be retargeted to whichever Task is current when the request executes, and a stale writer for Task A must never overwrite a newer checkpoint for Task A.
+- Dashboard Task mutations (`Accept`, feedback, cancel) use the same revision precondition at the application boundary; interfaces do not get a concurrency bypass.
 - A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose Task continuity.
 
-This preserves the intended cheap workflow without relying on obsolete MCP session state. It adds one stable identifier to Task writes, but no extra ritual tool call.
+This preserves the intended cheap workflow without relying on obsolete MCP session state. It adds stable identity plus a concurrency token to Task writes, but no extra ritual tool call.
 
 ## 8. Model-facing MCP surface
 
@@ -208,9 +213,10 @@ Keep exactly five primary tools until data proves another operation is necessary
 
 Write targeting rule:
 
-- `task_start` returns the Harness `task_id`;
-- `task_checkpoint` requires that `task_id` explicitly;
-- model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer their target from mutable current-Task state.
+- `task_start` returns the Harness `task_id` and current `revision`;
+- `task_checkpoint` requires `task_id` and `expected_revision`; success returns the incremented revision;
+- revision mismatch is a non-mutating conflict that requires refresh/reconciliation;
+- model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer identity or concurrency state from mutable Workspace-current state.
 
 Each tool contract owns:
 

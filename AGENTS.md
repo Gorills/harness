@@ -29,7 +29,7 @@ The audited architecture and accepted ADRs control implementation when the origi
 - `harnessd` owns durable business state. Host adapters and the MCP bridge are thin integration layers.
 - Core business logic must not depend on Claude, Codex, Cursor, or Antigravity-specific APIs.
 - MCP is stateless at the protocol level for the 2026-07-28 path. Never use an MCP session identifier as a domain invariant.
-- Task identity and continuity are Harness domain state. Read relevance may be workspace-scoped, but every mutating Task call must explicitly target a Harness `task_id`; never infer a write target from mutable Workspace-current state.
+- Task identity and continuity are Harness domain state. Read relevance may be workspace-scoped, but every mutating Task call must explicitly carry `task_id` plus `expected_revision`; never infer a write target from Workspace-current state or accept stale same-Task writes.
 - Harness `Task` is not the MCP `io.modelcontextprotocol/tasks` extension. Do not use protocol task handles as Harness Task IDs or lifecycle state.
 - `AgentSession` records observed bridge/client activity; it is not a protocol session and is not authoritative for task identity.
 - Filesystem is source of truth for code; Git is source of truth for Git state/history. Structural Index is derived data.
