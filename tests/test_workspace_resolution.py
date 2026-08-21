@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -8,6 +9,7 @@ from harness.workspace_resolution import (
     WorkspaceHint,
     WorkspaceHintMatchMode,
     WorkspaceNotFoundError,
+    WorkspaceResolutionError,
     WorkspaceResolver,
 )
 
@@ -66,6 +68,17 @@ def test_location_inside_registered_workspace_matches_ancestor(tmp_path: Path) -
 
     assert resolution.workspace_id == "registered"
     assert resolution.workspace_root == registered.resolve()
+
+
+def test_unknown_match_mode_fails_closed(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    nested = registered / "nested-project"
+    nested.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+    malformed_mode = cast(WorkspaceHintMatchMode, "root")
+
+    with pytest.raises(WorkspaceResolutionError, match="unsupported workspace hint match mode"):
+        resolver.resolve([WorkspaceHint(nested, "serialized-root", malformed_mode)])
 
 
 def test_first_matching_hint_wins_over_weaker_hint(tmp_path: Path) -> None:
