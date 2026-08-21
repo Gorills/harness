@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** implementation bootstrap. Packaging/tooling and shipping entrypoints exist; product runtime behavior is not implemented yet.
+> **Repository status:** implementation foundation. Packaging/tooling and the SQLite persistence bootstrap exist; daemon/IPC and product domain behavior are not implemented yet.
 
 ## Product principles
 
@@ -34,7 +34,9 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 ## Development state
 
-The repository now has a Python 3.13 package and a locked development toolchain. The installed `harness` and `harnessd` console scripts intentionally expose only bootstrap help/version behavior; daemon, MCP, persistence, indexing, search, Task, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
+The repository now has a Python 3.13 package, a locked development toolchain, and a minimal SQLite persistence bootstrap. Database initialization creates ordered schema migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, and probes FTS5 as a runtime capability. No Project/Workspace/Task tables or other product domain schema are created yet.
+
+The installed `harness` and `harnessd` console scripts still expose only bootstrap help/version behavior; daemon/IPC, MCP, indexing, search, Task behavior, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
 
 Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
 
