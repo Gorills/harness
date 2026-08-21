@@ -1,10 +1,12 @@
 import sys
+from pathlib import Path
 
 import pytest
 
 import harness.entrypoints as entrypoints
 from harness.doctor import DoctorReport
 from harness.entrypoints import harness_main, harnessd_main
+from harness.storage import DatabaseStatus
 
 
 def test_harness_main_lists_doctor(
@@ -33,7 +35,8 @@ def test_harness_doctor_reports_runtime(
     assert capsys.readouterr().out.splitlines() == [
         "SQLite runtime: OK (version 3.50.4)",
         "FTS5: OK",
-        "Doctor scope: SQLite runtime only; other checks are not implemented yet.",
+        "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
+        "Harness database.",
     ]
 
 
@@ -71,8 +74,78 @@ def test_harness_doctor_reports_sqlite_errors_without_traceback(
     assert capsys.readouterr().out.splitlines() == [
         "SQLite runtime: FAIL (probe failed)",
         "FTS5: UNKNOWN",
-        "Doctor scope: SQLite runtime only; other checks are not implemented yet.",
+        "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
+        "Harness database.",
     ]
+
+
+def test_harness_doctor_inspects_selected_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "harness.db"
+
+    def successful_checks(path: Path) -> DoctorReport:
+        assert path == database_path
+        return DoctorReport(
+            sqlite_version="3.50.4",
+            fts5_available=True,
+            database_status=DatabaseStatus(
+                schema_version=1,
+                sqlite_version="3.50.4",
+                journal_mode="wal",
+                foreign_keys=True,
+                fts5_available=True,
+            ),
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "doctor", "--database", str(database_path)],
+    )
+    monkeypatch.setattr(entrypoints, "run_doctor_checks", successful_checks)
+
+    assert harness_main() == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "SQLite runtime: OK (version 3.50.4)",
+        "FTS5: OK",
+        f"Database: OK ({database_path})",
+        "Database schema: 1",
+        "Database journal mode: wal",
+        "Database foreign keys: OK",
+        "Database FTS5: OK",
+        "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
+        "implemented yet.",
+    ]
+
+
+def test_harness_doctor_reports_database_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_path = tmp_path / "missing.db"
+
+    def failed_checks(path: Path) -> DoctorReport:
+        assert path == database_path
+        return DoctorReport(
+            sqlite_version="3.50.4",
+            fts5_available=True,
+            database_error="unable to open database file",
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "doctor", "--database", str(database_path)],
+    )
+    monkeypatch.setattr(entrypoints, "run_doctor_checks", failed_checks)
+
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert f"Database: FAIL ({database_path}: unable to open database file)" in output
 
 
 def test_harnessd_main_reports_bootstrap_state(
