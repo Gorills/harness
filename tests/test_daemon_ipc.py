@@ -170,7 +170,9 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
 def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state(
     tmp_path: Path,
 ) -> None:
-    root, database, project_id, workspace_id, git_identity = _registered_workspace_database(tmp_path)
+    root, database, project_id, workspace_id, git_identity = _registered_workspace_database(
+        tmp_path
+    )
     head, branch = git_identity.split(":", maxsplit=1)
     (root / "untracked.txt").write_text("dirty\n", encoding="utf-8")
     socket_path = tmp_path / "ipc" / "harness.sock"
