@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-import harness.index as index_module
 from harness.index import (
     IndexedFileKind,
     IndexingError,
@@ -163,7 +162,7 @@ def test_scan_does_not_read_external_target_after_regular_file_is_replaced_by_sy
         return original_open(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", racing_open)
-    monkeypatch.setattr(index_module.hashlib, "sha256", tracking_sha256)
+    monkeypatch.setattr(hashlib, "sha256", tracking_sha256)
     try:
         with pytest.raises(IndexingError, match="changed while scanning"):
             scan_workspace(connection, workspace_id)
