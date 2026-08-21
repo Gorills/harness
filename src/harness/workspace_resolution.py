@@ -70,9 +70,7 @@ class WorkspaceResolver:
         normalized_path = self._normalize(hint.path)
         if hint.match_mode is WorkspaceHintMatchMode.ROOT:
             matches = [
-                (workspace, root)
-                for workspace, root in self._workspaces
-                if root == normalized_path
+                (workspace, root) for workspace, root in self._workspaces if root == normalized_path
             ]
         else:
             matches = [
