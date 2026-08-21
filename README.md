@@ -13,6 +13,7 @@ Harness is a local-first control plane for coding agents. It preserves project i
 - Semantic knowledge is captured only after real task investigation and always has provenance.
 - A small, stable model-facing surface: status, search, context, task start/resume, checkpoint.
 - One modular-monolith core; host-specific behavior stays in adapters.
+- Two explicit publication modes: Normal for ordinary native-host SCM behavior, Hidden for local-only agent integration with human-owned Git/SCM publication.
 
 ## Start here
 
@@ -26,6 +27,10 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 - [ADR-0001: MCP 2026-07-28 and a sessionless core](docs/decisions/0001-mcp-2026-07-28-sessionless-core.md)
 - [ADR-0002: Host integration and workspace resolution boundaries](docs/decisions/0002-host-integration-and-workspace-resolution.md)
+- [ADR-0003: Normal and Hidden project visibility modes](docs/decisions/0003-normal-and-hidden-visibility-modes.md)
+- [ADR-0004: Hidden mode transitions require capability revocation](docs/decisions/0004-hidden-mode-transition-barrier.md)
+- [ADR-0005: Hidden transition proof must survive daemon recovery](docs/decisions/0005-hidden-transition-recovery-safety.md)
+- [ADR-0006: Hidden mode transitions use crash-safe commit ordering](docs/decisions/0006-hidden-transition-crash-atomicity.md)
 
 ## Development state
 

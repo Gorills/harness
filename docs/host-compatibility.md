@@ -45,6 +45,21 @@ This file is evidence for adapter design, not a promise that undocumented host i
 - Antigravity CLI migration docs list global CLI skills under `~/.gemini/antigravity-cli/skills` while keeping workspace skills at `.agents/skills`.
 - Skills are discovered by name/description first and full `SKILL.md` is loaded on activation.
 
+## Hidden-mode capability baseline
+
+Hidden mode is stricter than ordinary project instructions. Prompt/rule loading is necessary but not sufficient: the supported profile must deny agent-originated durable SCM mutations, protect its enforcement from agent tampering, suppress host-injected durable attribution where applicable, and prove safe mode-transition behavior for already-admitted sessions/profiles. Admission is based on Harness-owned adapter/profile metadata rather than self-reported `clientInfo`; unknown capability fails closed.
+
+| Host/profile | Project/local rule or settings surface | SCM-write enforcement evidence | Attribution evidence | Hidden status before acceptance |
+| --- | --- | --- | --- | --- |
+| Claude Code local CLI/IDE | `CLAUDE.local.md`, `.claude/rules/`, `.claude/settings.local.json` | Official permissions + OS-level sandbox support deny rules / filesystem write restrictions; bypass/unsandboxed escape must be disabled for the tested profile | Official `attribution.commit` / `attribution.pr` can be empty; built-in Git instructions can be disabled | Candidate; real-host acceptance required |
+| Codex local CLI/IDE | Project `AGENTS.md` discovery; `AGENTS.override.md` exists but replaces same-directory base instructions | Current source has managed permission profiles capable of workspace writes with a denied `.git` subpath (explicitly tested in the Windows sandbox); end-to-end injection, cross-platform behavior, remote-SCM denial, and anti-bypass still require acceptance | No host-injected attribution contract established here | Candidate primitive; acceptance-gated, never prompt-only |
+| Cursor IDE/CLI | `.cursor/rules/`; user/admin attribution setting is documented | Safe project-local hard SCM denial is not established by docs reviewed here | Cursor changelog documents per-user/admin attribution control | Acceptance-gated; do not assume enforcement |
+| Cursor Cloud/background | Cloud profile is separate from local project execution | Local project settings cannot be assumed to control server-side branch/commit/PR behavior | Official docs reviewed do not establish a complete cloud suppression contract; Cursor staff support has separately reported cloud `Co-authored-by: Cursor` attribution as independent of the local setting | Unsupported until current vendor behavior and acceptance prove suppression |
+| Antigravity IDE | `.agents/rules/`; project-scoped settings/permissions are documented | Official Deny > Ask > Allow permission engine and project settings are candidate controls | No automatic durable attribution behavior established by docs reviewed here | Candidate; real-host acceptance required |
+| Antigravity CLI | `.agents/rules/` plus CLI permission settings | CLI permissions are documented, but scope/escape behavior must be accepted separately from IDE | No automatic durable attribution behavior established here | Candidate; separate acceptance required |
+
+Git-local artifact hiding is common across profiles: Hidden projections resolve `git rev-parse --git-path info/exclude` (logically `$GIT_COMMON_DIR/info/exclude`), never mutate `.gitignore`, and must fail on tracked/user-owned target collisions. Because the common exclude file is shared by linked worktrees, v1 uses one effective visibility mode for Workspaces sharing the same Git common directory.
+
 ## Required real-host acceptance matrix
 
 For every supported host/profile and supported OS family where behavior differs, verify:
@@ -60,17 +75,35 @@ For every supported host/profile and supported OS family where behavior differs,
 - [ ] Irrelevant generated skills are absent.
 - [ ] No duplicate Harness skill appears because of compatibility directory scanning.
 - [ ] Removing Harness deletes only Harness-owned integration artifacts.
-- [ ] When `harnessd` is unavailable, native editing/shell/Git workflow remains usable.
+- [ ] Hidden projection leaves `.gitignore` byte-for-byte unchanged and all Harness-owned project artifacts untracked/ignored.
+- [ ] Hidden agent attempts to stage/commit/amend/create refs or tags/push/create or edit PRs/issues/reviews/comments are denied by the host profile, not merely discouraged by prompt text.
+- [ ] Hidden enforcement configuration is tamper-resistant for the tested profile: the agent cannot edit/disable it or escalate into a bypass/full-access mode.
+- [ ] Unsupported/spoofed host profiles are rejected for Hidden admission and cannot gain support by changing self-reported client metadata.
+- [ ] With a Normal-capability agent/profile already admitted, switching to Hidden either revokes/revalidates that live capability before the mode becomes effective or fails closed with an actionable restart/reopen requirement; an older Normal-capability agent cannot commit/push after `project_status` reports Hidden.
+- [ ] Hidden → Normal restoration does not remove Harness-owned enforcement underneath an admitted Hidden session before the transition boundary completes.
+- [ ] Hidden mode emits no host/model/Harness attribution into durable Git/SCM artifacts; if the host injects unavoidable attribution, the profile fails Hidden acceptance.
+- [ ] Switching Hidden → Normal restores only Harness-owned settings/policy and preserves unknown user configuration.
+- [ ] When `harnessd` is unavailable, Normal remains native; Hidden still permits ordinary edits/shell/read-only Git while agent publication stays denied and human Git outside the agent path remains usable.
 
 ## Source URLs
 
 - Claude MCP: https://code.claude.com/docs/en/mcp
 - Claude skills: https://code.claude.com/docs/en/skills
 - Claude project memory: https://code.claude.com/docs/en/memory
+- Claude settings/attribution: https://code.claude.com/docs/en/settings
+- Claude permissions: https://code.claude.com/docs/en/permissions
+- Claude sandboxing: https://code.claude.com/docs/en/sandboxing
 - Codex MCP: https://developers.openai.com/codex/mcp/
 - Codex skills: https://developers.openai.com/codex/skills/
+- Codex AGENTS discovery source: https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs
+- Codex managed-permission sandbox source: https://github.com/openai/codex/blob/main/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
 - Cursor MCP: https://cursor.com/docs/mcp
 - Cursor skills: https://cursor.com/docs/skills
+- Cursor rules: https://cursor.com/docs/rules
+- Cursor attribution changelog: https://cursor.com/changelog/3-0
+- Cursor Cloud attribution staff support (secondary/current behavior evidence): https://forum.cursor.com/t/autonomous-commit-attribution/157699
 - Antigravity MCP: https://antigravity.google/docs/mcp
 - Antigravity skills: https://antigravity.google/docs/skills/
+- Antigravity rules: https://antigravity.google/docs/ide/rules/
+- Antigravity permissions: https://antigravity.google/docs/permissions/
 - Antigravity CLI migration: https://antigravity.google/docs/cli/gcli-migration/
