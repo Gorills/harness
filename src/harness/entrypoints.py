@@ -12,6 +12,7 @@ from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
     ensure_private_state_directory,
+    require_private_runtime_directory,
 )
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -102,7 +103,9 @@ def _status_failure(detail: str) -> int:
 def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
     if socket_path is None:
         try:
-            socket_path = default_runtime_paths().socket
+            defaults = default_runtime_paths()
+            require_private_runtime_directory(defaults.socket.parent)
+            socket_path = defaults.socket
         except RuntimePathError as exc:
             return _status_failure(str(exc))
 
