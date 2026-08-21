@@ -223,6 +223,8 @@ Write targeting rule:
 - revision mismatch or missing required revision is non-mutating and requires refresh/reconciliation;
 - model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer identity or concurrency state from mutable Workspace-current state.
 
+`project_status` includes the effective `visibility_mode` (`normal` or `hidden`) as a compact domain field so the model can obey the current publication policy. Host capability diagnostics and enforcement internals stay out of the model-visible payload and belong in `doctor`/dashboard surfaces.
+
 Each tool contract owns:
 
 - explicit allowed fields;
@@ -346,7 +348,31 @@ Projection design must include:
 
 Skill hot reload is an optimization, not a correctness requirement.
 
-## 15. Host adapters
+## 15. Normal and Hidden visibility modes
+
+Harness exposes a durable Project-level `visibility_mode` with exactly two v1 values. New Projects default to `normal`; changing the mode is an explicit operator/human action and is not exposed as a model-facing MCP mutation.
+
+- `normal`: ordinary native-host SCM behavior is allowed subject to user/host permissions; Harness does not suppress host attribution by default.
+- `hidden`: the agent remains an editing/research assistant, but durable SCM publication is human-owned. Agent-originated staging/index writes, commit/amend, ref/branch/tag mutations, push, PR/issue/review/comment/release actions, and equivalent remote SCM mutations are denied for the supported host profile.
+
+Hidden mode also strengthens project-artifact hygiene:
+
+- canonical Harness state/skills/rules remain outside repositories;
+- host-required project projections are untracked and ignored through the path resolved by `git rev-parse --git-path info/exclude` (logically `$GIT_COMMON_DIR/info/exclude`);
+- `.gitignore` and tracked instruction/config files are never modified merely to activate Hidden mode;
+- tracked-path or unknown-user-file collisions fail before materialization;
+- `assume-unchanged` and `skip-worktree` are not used as ignore mechanisms;
+- cleanup removes only Harness-owned files and exclude entries.
+
+`info/exclude` is not a security boundary: standard Git can force-add ignored files. Hidden correctness therefore depends on host-specific enforcement that denies agent-originated SCM mutations, with prompt rules and optional Git hooks only as defense-in-depth.
+
+Because `$GIT_COMMON_DIR/info/exclude` is shared across linked worktrees, all Harness Workspaces resolving to the same Git common directory use the same effective visibility mode in v1. Contradictory per-worktree modes are rejected.
+
+Hidden is capability-gated and fail-closed. A host/profile is supported only when its adapter has real-host proof for local Hidden instructions, SCM-write enforcement, policy integrity (the agent cannot disable its own enforcement), attribution suppression where applicable, safe projection paths, and deterministic cleanup. Every agent/bridge admission to a Hidden Project re-validates the resolved adapter profile; an unsupported or unverifiable profile gets a bounded error rather than a silent downgrade to Normal. Host-profile identity for this decision comes from Harness-owned adapter/registration metadata, never from self-reported `clientInfo`. Unknown or prompt-only behavior is not reported as enforced Hidden mode. Provider-side telemetry/analytics and unrelated agents/tools operating outside the Harness integration are outside this repository/SCM visibility contract.
+
+See ADR-0003.
+
+## 16. Host adapters
 
 `HostAdapter` is the only public host extension boundary in v1.
 
@@ -356,7 +382,8 @@ Responsibilities:
 - safe global MCP registration/unregistration;
 - workspace-root hint construction;
 - minimal bootstrap instructions if needed;
-- native skill projection/cleanup;
+- native skill/rule/local-settings projection and cleanup;
+- Hidden-mode capability reporting, enforcement setup, and restoration of Harness-owned policy;
 - doctor checks;
 - optional hooks that never become correctness dependencies.
 
@@ -371,7 +398,7 @@ Current target profiles:
 
 Do not branch core business logic on host identity.
 
-## 16. Dashboard
+## 17. Dashboard
 
 FastAPI/Starlette/Uvicorn + Jinja2/HTML/CSS/vanilla JS + SSE remains a sound v1 choice.
 
@@ -383,7 +410,7 @@ Dashboard rules:
 - state transitions (`Accept`, feedback, cancel) call the same domain services used by other interfaces;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport.
 
-## 17. Security and privacy boundaries
+## 18. Security and privacy boundaries
 
 - Local-only by default.
 - Daemon IPC restricted to current OS user.
@@ -395,7 +422,7 @@ Dashboard rules:
 - Integration mutation must be ownership-aware and reversible.
 - Logs use metadata/identifiers, not raw source/context payloads by default.
 
-## 18. Failure and recovery
+## 19. Failure and recovery
 
 A crash must not invent progress.
 
@@ -405,8 +432,9 @@ A crash must not invent progress.
 - Watcher/index state reconciles from filesystem on restart.
 - IPC reconnect is side-effect free until an explicit domain operation occurs.
 - Index corruption/rebuild must not destroy durable Tasks or Knowledge.
+- In `normal`, Harness failure leaves the native host/Git workflow unchanged. In `hidden`, source editing, shell work, and read-only Git inspection must remain usable, while agent SCM publication stays denied by host policy; human Git/SCM actions outside the agent execution path remain unaffected.
 
-## 19. Testing architecture
+## 20. Testing architecture
 
 ### Core automated proof
 
@@ -435,11 +463,11 @@ Keep a separate matrix because core tests cannot prove proprietary host behavior
 - instructions influence normal usage where the host documents/supports them;
 - relevant native skill visible and irrelevant skills absent;
 - host switch resumes the same Harness Task;
-- Harness failure leaves native agent workflow usable.
+- Harness failure preserves the mode contract: Normal stays native/unrestricted by Harness; Hidden keeps agent publication denied while ordinary edits/read-only Git and human Git outside the agent path remain usable.
 
 No passing unit/integration suite may be described as proof of these host-specific behaviors.
 
-## 20. Dependency direction for implementation
+## 21. Dependency direction for implementation
 
 Target modular-monolith package direction:
 
@@ -464,7 +492,7 @@ Rules:
 
 Avoid a generic dependency-injection/plugin framework. Plain constructors/protocols are enough until complexity proves otherwise.
 
-## 21. Planned repository shape
+## 22. Planned repository shape
 
 The first implementation bootstrap should create something close to:
 
@@ -494,7 +522,7 @@ tests/
 
 This is guidance, not permission to create empty layers pre-emptively. Add modules when a bounded feature needs them.
 
-## 22. Architecture change control
+## 23. Architecture change control
 
 The original specification is preserved verbatim. Corrections enter through audit findings and ADRs so the reason for divergence stays reviewable.
 

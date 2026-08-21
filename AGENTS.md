@@ -36,7 +36,9 @@ The audited architecture and accepted ADRs control implementation when the origi
 - Model-visible responses are bounded contracts. New fields require exposure-budget and negative-disclosure tests.
 - Raw source is never bulk-embedded or sent to external services by default.
 - Hooks are optional observability/enhancement only and must not be required for correctness.
-- Host adapters may discover/configure hosts, resolve workspace hints, project native skills, clean up owned artifacts, and run host-specific doctor checks. They may not contain search/task/index/knowledge business logic.
+- `visibility_mode=hidden` is fail-closed: agents may edit/research but must not perform durable SCM mutations, and Harness-owned project artifacts must remain untracked/ignored without changing `.gitignore` or tracked instruction files. Hidden is human-selected; model-facing tools may read the effective mode but may not change it. Hidden host admission uses Harness-owned adapter/profile identity, never self-reported `clientInfo`; unsupported profiles fail closed. Do not claim Hidden enforcement from prompt text or `.git/info/exclude` alone.
+- Workspaces sharing one Git common directory share one effective visibility mode in v1; do not introduce per-worktree Hidden/Normal divergence without a separately verified isolation mechanism.
+- Host adapters may discover/configure hosts, resolve workspace hints, project native skills/rules/local settings, enforce supported Hidden-mode policy, clean up owned artifacts, and run host-specific doctor checks. They may not contain search/task/index/knowledge business logic.
 - Use the official MCP SDK in production. Raw JSON-RPC is allowed only for independent wire-level tests.
 
 ## Host integrations
@@ -57,6 +59,8 @@ Host configuration formats and discovery paths change. Before modifying an adapt
 - Generated files must carry ownership metadata where the host format permits it.
 - Avoid duplicate visibility across hosts that scan compatibility directories, especially Cursor.
 - Skill relevance, project visibility, and cleanup need acceptance tests.
+- Hidden projections resolve the local exclude file with `git rev-parse --git-path info/exclude`, then use exact Harness-owned root-anchored entries; never use `assume-unchanged` or `skip-worktree` to hide tracked files.
+- Before projecting Hidden artifacts, fail on tracked targets or unknown user-owned collisions.
 
 ## Tests
 
