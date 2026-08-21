@@ -298,6 +298,36 @@ def test_harness_status_reports_ipc_error_without_traceback(
     assert capsys.readouterr().out.strip() == "Harness status: FAIL (local IPC request timed out)"
 
 
+def test_harness_status_bounds_multiline_ipc_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    socket_path = tmp_path / "harness.sock"
+
+    def failed_request(*_args: object, **_kwargs: object) -> WorkspaceStatusResult:
+        raise IpcTransportError("first\nsecond\r" + "x" * 2000)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "status", str(workspace_root), "--socket", str(socket_path)],
+    )
+    monkeypatch.setattr(entrypoints, "request_workspace_status", failed_request)
+
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert output.count("\n") == 1
+    line = output.rstrip("\n")
+    assert "\n" not in line
+    assert "\r" not in line
+    assert line.startswith("Harness status: FAIL (first\\nsecond\\r")
+    assert line.endswith("...)")
+    assert len(line) == len("Harness status: FAIL ()") + 1024
+
+
 def test_harnessd_main_lists_bounded_serve_command(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
