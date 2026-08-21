@@ -36,7 +36,7 @@ Otherwise:
 
 Relative or empty `XDG_STATE_HOME` values are ignored rather than treated as repository-relative paths.
 
-Before `harnessd` uses this default database location, the final Harness state directory is created/validated as owned by the effective OS user with no group/other permissions. Explicit `--database PATH` overrides keep their existing caller-selected filesystem semantics.
+Before `harnessd` uses this default database location, the final Harness state directory is created/validated as a real directory (not a symlink), owned by the effective OS user, with no group/other permissions. Explicit `--database PATH` overrides keep their existing caller-selected filesystem semantics.
 
 ### Runtime socket
 
@@ -52,7 +52,7 @@ Otherwise Harness uses the process temporary directory with the effective numeri
 <TEMP>/harness-<uid>/harness.sock
 ```
 
-The daemon's existing socket-parent ownership/mode checks remain authoritative before bind. Relative or empty `XDG_RUNTIME_DIR` values are ignored.
+The final Harness socket directory must be a real directory (not a symlink), owned by the effective OS user, with no group/other permissions. The daemon creates/validates that directory before bind. A client using the canonical socket validates the same directory before connecting, so a pre-created symlink or another user's directory in a shared temporary namespace is not trusted as the per-user daemon endpoint. Relative or empty `XDG_RUNTIME_DIR` values are ignored.
 
 ### CLI behavior
 
@@ -72,6 +72,7 @@ Path selection itself performs no daemon autostart, registration, scan, MCP setu
 - Manual daemon startup no longer requires copying database/socket arguments into every command.
 - Durable database state does not live in a transient runtime directory.
 - Socket fallback remains per-user and short enough for common Unix-domain socket path limits.
+- Canonical clients fail closed on spoofable final runtime-directory entries rather than connecting through a symlink or another user's directory.
 - Explicit overrides preserve isolated test/recovery workflows.
 
 ### Costs and limits
@@ -88,7 +89,9 @@ Automated tests must prove:
 - absolute XDG state/runtime bases produce the exact documented paths;
 - relative XDG values are ignored and deterministic fallbacks are used;
 - the canonical state directory is created private to the effective user and insecure existing state directories fail closed;
-- `harness status` uses the canonical socket when no override is supplied;
+- state/runtime final directories that are symlinks are rejected even when their targets are private current-user directories;
+- `harness status` uses the canonical socket when no override is supplied and validates its canonical runtime directory before IPC;
 - `harnessd serve` uses the canonical database/socket defaults and prepares the default state directory;
+- the daemon rejects a symlinked socket parent before bind;
 - explicit CLI path overrides still bypass default selection as intended;
 - installed-wheel help exposes the optional override contract.
