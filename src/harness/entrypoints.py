@@ -98,9 +98,7 @@ def _run_status(workspace_location: Path, socket_path: Path) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        return _status_failure(
-            f"workspace path cannot be resolved: {workspace_location}: {exc}"
-        )
+        return _status_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
     if not location.is_dir():
         return _status_failure(f"workspace path is not a directory: {location}")
 
