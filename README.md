@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** architecture baseline. Product implementation has not started yet.
+> **Repository status:** implementation bootstrap. Packaging/tooling and shipping entrypoints exist; product runtime behavior is not implemented yet.
 
 ## Product principles
 
@@ -34,7 +34,16 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 ## Development state
 
-This baseline intentionally contains no production package scaffold yet. The next bounded implementation task should establish the Python package, reproducible dependency lock, formatting/lint/type/test configuration, and CI together so the repository never claims reproducibility before it is actually verifiable.
+The repository now has a Python 3.13 package and a locked development toolchain. The installed `harness` and `harnessd` console scripts intentionally expose only bootstrap help/version behavior; daemon, MCP, persistence, indexing, search, Task, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
+
+Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
+
+```text
+uv sync --locked --all-groups
+uv run --frozen python scripts/quality.py
+```
+
+The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment and executes both shipping console scripts.
 
 ## License
 

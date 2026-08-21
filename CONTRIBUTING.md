@@ -14,6 +14,17 @@ Harness is intentionally developed in small, reviewable slices because it sits b
 
 Do not combine unrelated cleanup with feature or bug work.
 
+## Local quality checks
+
+Harness development uses `uv 0.12.5` with Python 3.13 and the committed `uv.lock`:
+
+```text
+uv sync --locked --all-groups
+uv run --frozen python scripts/quality.py
+```
+
+The quality gate checks lock freshness, Ruff formatting/lint, strict mypy, pytest, and an isolated wheel-install smoke test for the `harness` and `harnessd` console scripts.
+
 ## Branches and pull requests
 
 - Never develop directly on `main` once the initial repository bootstrap exists.

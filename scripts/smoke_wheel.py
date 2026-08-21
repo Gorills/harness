@@ -1,0 +1,91 @@
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_VERSION = "0.1.0.dev0"
+
+
+def _run(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    print(f"+ {shlex.join(command)}", flush=True)
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        env=env,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    print(result.stdout, end="")
+    result.check_returncode()
+    return result
+
+
+def _venv_scripts_dir(venv: Path) -> Path:
+    return venv / ("Scripts" if os.name == "nt" else "bin")
+
+
+def main() -> int:
+    """Build a wheel, install it in isolation, and execute both console scripts."""
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required for the wheel smoke test")
+
+    with tempfile.TemporaryDirectory(prefix="harness-wheel-smoke-") as temp_dir:
+        workspace = Path(temp_dir)
+        dist = workspace / "dist"
+        venv = workspace / "venv"
+
+        _run(
+            (
+                uv,
+                "build",
+                "--wheel",
+                "--no-sources",
+                "--no-build-isolation",
+                "--out-dir",
+                str(dist),
+            ),
+            cwd=PROJECT_ROOT,
+        )
+
+        wheels = list(dist.glob("harness-*.whl"))
+        if len(wheels) != 1:
+            raise RuntimeError(f"expected exactly one Harness wheel, found {len(wheels)}")
+        wheel = wheels[0]
+
+        _run((uv, "venv", "--python", "3.13", "--no-project", str(venv)), cwd=workspace)
+        scripts_dir = _venv_scripts_dir(venv)
+        python = scripts_dir / ("python.exe" if os.name == "nt" else "python")
+        _run(
+            (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
+            cwd=workspace,
+        )
+
+        isolated_env = os.environ.copy()
+        isolated_env.pop("PYTHONPATH", None)
+        suffix = ".exe" if os.name == "nt" else ""
+        for name in ("harness", "harnessd"):
+            executable = scripts_dir / f"{name}{suffix}"
+            result = _run((str(executable), "--version"), cwd=workspace, env=isolated_env)
+            expected = f"{name} {EXPECTED_VERSION}\n"
+            if result.stdout != expected:
+                raise RuntimeError(
+                    f"unexpected {name} --version output: {result.stdout!r}; expected {expected!r}"
+                )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
