@@ -295,9 +295,7 @@ def test_harness_status_reports_ipc_error_without_traceback(
     monkeypatch.setattr(entrypoints, "request_workspace_status", failed_request)
 
     assert harness_main() == 1
-    assert capsys.readouterr().out.strip() == (
-        "Harness status: FAIL (local IPC request timed out)"
-    )
+    assert capsys.readouterr().out.strip() == "Harness status: FAIL (local IPC request timed out)"
 
 
 def test_harnessd_main_lists_bounded_serve_command(
