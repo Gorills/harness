@@ -262,11 +262,7 @@ def test_scan_fails_closed_if_harnessignore_changes_during_snapshot(
     def racing_run(*args: Any, **kwargs: Any) -> Any:
         nonlocal changed
         command = args[0] if args else kwargs.get("args")
-        if (
-            not changed
-            and isinstance(command, list)
-            and command[:2] == ["git", "ls-files"]
-        ):
+        if not changed and isinstance(command, list) and command[:2] == ["git", "ls-files"]:
             changed = True
             harnessignore.write_text("tracked.txt\n", encoding="utf-8")
         return original_run(*args, **kwargs)
