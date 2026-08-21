@@ -176,6 +176,8 @@ def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
         harnessignore_stat = harnessignore.lstat()
     except FileNotFoundError:
         harnessignore_stat = None
+    except OSError as exc:
+        raise IndexingError("Workspace .harnessignore could not be inspected") from exc
     if harnessignore_stat is not None and stat.S_ISREG(harnessignore_stat.st_mode):
         exclude_arguments.append(f"--exclude-from={harnessignore}")
 
