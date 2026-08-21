@@ -130,7 +130,7 @@ def test_scan_ignores_inherited_git_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root, connection, workspace_id = _registered(tmp_path / "target")
+    _root, connection, workspace_id = _registered(tmp_path / "target")
     decoy = _repo(tmp_path / "decoy")
     monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
