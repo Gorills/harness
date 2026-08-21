@@ -81,8 +81,8 @@ def ensure_private_state_directory(
         or stat.S_IMODE(directory_stat.st_mode) & 0o077
     ):
         raise InsecureStateDirectoryError(
-            "Harness state directory must be a real directory owned by the current user "
-            "with no group/other access"
+            "Harness state directory must be owned by the current user, be a real directory, "
+            "and have no group/other access"
         )
 
 
@@ -107,8 +107,8 @@ def require_private_runtime_directory(
         or stat.S_IMODE(directory_stat.st_mode) & 0o077
     ):
         raise InsecureRuntimeDirectoryError(
-            "Harness runtime directory must be a real directory owned by the current user "
-            "with no group/other access"
+            "Harness runtime directory must be owned by the current user, be a real directory, "
+            "and have no group/other access"
         )
 
 
