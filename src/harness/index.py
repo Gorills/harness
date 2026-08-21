@@ -171,15 +171,9 @@ def _build_snapshot(workspace: WorkspaceRecord) -> dict[str, IndexedFileRecord]:
 
 def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
-    harnessignore = workspace_root / ".harnessignore"
-    try:
-        harnessignore_stat = harnessignore.lstat()
-    except FileNotFoundError:
-        harnessignore_stat = None
-    except OSError as exc:
-        raise IndexingError("Workspace .harnessignore could not be inspected") from exc
-    if harnessignore_stat is not None and stat.S_ISREG(harnessignore_stat.st_mode):
-        exclude_arguments.append(f"--exclude-from={harnessignore}")
+    harnessignore_rules = _read_harnessignore_rules(workspace_root)
+    if harnessignore_rules is not None:
+        exclude_arguments.append("--exclude-from=-")
 
     candidates = _git_ls_files(
         workspace_root,
@@ -187,6 +181,7 @@ def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
         "--others",
         "--exclude-standard",
         *exclude_arguments,
+        exclude_stdin=harnessignore_rules,
     )
     excluded_tracked = set(
         _git_ls_files(
@@ -194,18 +189,51 @@ def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
             "--cached",
             "--ignored",
             *exclude_arguments,
+            exclude_stdin=harnessignore_rules,
         )
     )
     return tuple(sorted(set(candidates) - excluded_tracked))
 
 
-def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
+def _read_harnessignore_rules(workspace_root: Path) -> bytes | None:
+    harnessignore = workspace_root / ".harnessignore"
+    try:
+        before = harnessignore.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise IndexingError("Workspace .harnessignore could not be inspected") from exc
+    if not stat.S_ISREG(before.st_mode):
+        return None
+
+    try:
+        with harnessignore.open("rb") as stream:
+            opened_before = os.fstat(stream.fileno())
+            _require_stable_entry(".harnessignore", before, opened_before)
+            rules = stream.read()
+            opened_after = os.fstat(stream.fileno())
+        _require_stable_entry(".harnessignore", opened_before, opened_after)
+        current = harnessignore.lstat()
+        _require_stable_entry(".harnessignore", opened_after, current)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise IndexingError("Workspace .harnessignore could not be read safely") from exc
+    return rules
+
+
+def _git_ls_files(
+    workspace_root: Path,
+    *arguments: str,
+    exclude_stdin: bytes | None = None,
+) -> tuple[str, ...]:
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", *arguments],
             cwd=workspace_root,
             check=False,
             capture_output=True,
+            input=exclude_stdin,
             env=_git_environment(),
         )
     except FileNotFoundError as exc:
