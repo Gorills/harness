@@ -66,6 +66,7 @@ def test_workspace_status_rejects_repository_replacement_during_live_git_read(
             check: bool,
             capture_output: bool,
             env: dict[str, str],
+            timeout: float,
         ) -> subprocess.CompletedProcess[bytes]:
             nonlocal swapped
             if not swapped and args[:2] == ["git", "status"]:
@@ -78,6 +79,7 @@ def test_workspace_status_rejects_repository_replacement_during_live_git_read(
                 check=check,
                 capture_output=capture_output,
                 env=env,
+                timeout=timeout,
             )
 
         monkeypatch.setattr(subprocess, "run", swapping_run)
