@@ -276,7 +276,11 @@ def _workspace_hints_from_params(value: object) -> tuple[WorkspaceHint, ...]:
         path = raw_hint["path"]
         source = raw_hint["source"]
         raw_mode = raw_hint["match_mode"]
-        if not isinstance(path, str) or not isinstance(source, str) or not isinstance(raw_mode, str):
+        if (
+            not isinstance(path, str)
+            or not isinstance(source, str)
+            or not isinstance(raw_mode, str)
+        ):
             raise IpcProtocolError("workspace hint fields have invalid types")
         try:
             match_mode = WorkspaceHintMatchMode(raw_mode)
@@ -417,7 +421,9 @@ def _workspace_status_from_response(
     head = result["head"]
     if head is not None:
         head = _bounded_response_string(head, "head", 64)
-        if len(head) not in {40, 64} or any(character not in "0123456789abcdef" for character in head):
+        if len(head) not in {40, 64} or any(
+            character not in "0123456789abcdef" for character in head
+        ):
             raise IpcProtocolError("daemon workspace status has invalid HEAD identity")
     branch = result["branch"]
     if branch is not None:
