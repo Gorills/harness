@@ -269,7 +269,11 @@ def _inspect_entry(
             raise WorkspaceIndexMismatchError(
                 f"Workspace file resolves outside root: {relative_path}"
             )
-        digest, opened_before, opened_after = _hash_regular_file(path)
+        digest, opened_before, opened_after = _hash_regular_file(
+            path,
+            relative_path=relative_path,
+            expected_before=before,
+        )
         _require_stable_entry(relative_path, opened_before, opened_after)
         current = path.lstat()
         _require_stable_entry(relative_path, opened_after, current)
@@ -286,14 +290,20 @@ def _inspect_entry(
         raise IndexingError(f"Workspace entry could not be inspected: {relative_path}") from exc
 
 
-def _hash_regular_file(path: Path) -> tuple[str, os.stat_result, os.stat_result]:
+def _hash_regular_file(
+    path: Path,
+    *,
+    relative_path: str,
+    expected_before: os.stat_result,
+) -> tuple[str, os.stat_result, os.stat_result]:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        before = os.fstat(stream.fileno())
+        opened_before = os.fstat(stream.fileno())
+        _require_stable_entry(relative_path, expected_before, opened_before)
         while chunk := stream.read(_HASH_CHUNK_BYTES):
             digest.update(chunk)
-        after = os.fstat(stream.fileno())
-    return digest.hexdigest(), before, after
+        opened_after = os.fstat(stream.fileno())
+    return digest.hexdigest(), opened_before, opened_after
 
 
 def _require_stable_entry(
