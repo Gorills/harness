@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from harness.git_workspace import _git_environment, inspect_git_workspace
 from harness.registry import WorkspaceRecord, get_workspace
@@ -172,16 +173,29 @@ def _build_snapshot(workspace: WorkspaceRecord) -> dict[str, IndexedFileRecord]:
 def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
     harnessignore_rules = _read_harnessignore_rules(workspace_root)
-    if harnessignore_rules is not None:
-        exclude_arguments.append("--exclude-from=-")
+    if harnessignore_rules is None:
+        return _candidate_paths_from_git(workspace_root, exclude_arguments)
 
+    try:
+        with TemporaryDirectory(prefix="harness-ignore-") as temporary_directory:
+            exclude_file = Path(temporary_directory) / "rules"
+            exclude_file.write_bytes(harnessignore_rules)
+            exclude_arguments.append(f"--exclude-from={exclude_file}")
+            return _candidate_paths_from_git(workspace_root, exclude_arguments)
+    except OSError as exc:
+        raise IndexingError("Workspace .harnessignore snapshot could not be prepared") from exc
+
+
+def _candidate_paths_from_git(
+    workspace_root: Path,
+    exclude_arguments: list[str],
+) -> tuple[str, ...]:
     candidates = _git_ls_files(
         workspace_root,
         "--cached",
         "--others",
         "--exclude-standard",
         *exclude_arguments,
-        exclude_stdin=harnessignore_rules,
     )
     excluded_tracked = set(
         _git_ls_files(
@@ -189,7 +203,6 @@ def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
             "--cached",
             "--ignored",
             *exclude_arguments,
-            exclude_stdin=harnessignore_rules,
         )
     )
     return tuple(sorted(set(candidates) - excluded_tracked))
@@ -222,18 +235,13 @@ def _read_harnessignore_rules(workspace_root: Path) -> bytes | None:
     return rules
 
 
-def _git_ls_files(
-    workspace_root: Path,
-    *arguments: str,
-    exclude_stdin: bytes | None = None,
-) -> tuple[str, ...]:
+def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", *arguments],
             cwd=workspace_root,
             check=False,
             capture_output=True,
-            input=exclude_stdin,
             env=_git_environment(),
         )
     except FileNotFoundError as exc:
