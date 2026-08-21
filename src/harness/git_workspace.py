@@ -38,6 +38,15 @@ class GitWorkspaceLayout:
     git_common_dir: Path
 
 
+@dataclass(frozen=True, slots=True)
+class GitWorkingTreeStatus:
+    """Compact live Git state needed by read-only Workspace status surfaces."""
+
+    head: str | None
+    branch: str | None
+    dirty_file_count: int
+
+
 def inspect_git_workspace(path: Path) -> GitWorkspaceLayout:
     """Return canonical worktree and shared Git-directory paths for ``path``."""
     invocation_dir = _existing_directory(path)
@@ -50,6 +59,67 @@ def inspect_git_workspace(path: Path) -> GitWorkspaceLayout:
     return GitWorkspaceLayout(
         workspace_root=workspace_root,
         git_common_dir=_normalize_existing_path(common_dir),
+    )
+
+
+def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
+    """Return branch/HEAD and a bounded dirty-path count from stable Git porcelain output."""
+    invocation_dir = _existing_directory(path)
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
+            cwd=invocation_dir,
+            check=False,
+            capture_output=True,
+            env=_git_environment(),
+        )
+    except FileNotFoundError as exc:
+        raise GitExecutableUnavailableError("Git executable is not available") from exc
+    except OSError as exc:
+        raise GitWorkspaceError(f"Git could not inspect status at {invocation_dir}") from exc
+
+    if result.returncode != 0:
+        detail = os.fsdecode(result.stderr).strip()
+        message = f"Git could not inspect working tree status: {invocation_dir}"
+        if detail:
+            message = f"{message}: {detail}"
+        raise NotGitWorkspaceError(message)
+
+    head: str | None = None
+    branch: str | None = None
+    head_seen = False
+    branch_seen = False
+    dirty_file_count = 0
+    for raw_line in result.stdout.splitlines():
+        if raw_line.startswith(b"# branch.oid "):
+            if head_seen:
+                raise GitWorkspaceError("Git status returned duplicate branch.oid metadata")
+            value = os.fsdecode(raw_line[len(b"# branch.oid ") :])
+            if not value:
+                raise GitWorkspaceError("Git status returned an empty branch.oid value")
+            head = None if value == "(initial)" else value
+            head_seen = True
+            continue
+        if raw_line.startswith(b"# branch.head "):
+            if branch_seen:
+                raise GitWorkspaceError("Git status returned duplicate branch.head metadata")
+            value = os.fsdecode(raw_line[len(b"# branch.head ") :])
+            if not value:
+                raise GitWorkspaceError("Git status returned an empty branch.head value")
+            branch = None if value == "(detached)" else value
+            branch_seen = True
+            continue
+        if raw_line.startswith(b"# "):
+            continue
+        if raw_line:
+            dirty_file_count += 1
+
+    if not head_seen or not branch_seen:
+        raise GitWorkspaceError("Git status omitted required branch metadata")
+    return GitWorkingTreeStatus(
+        head=head,
+        branch=branch,
+        dirty_file_count=dirty_file_count,
     )
 
 
