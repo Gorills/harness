@@ -6,8 +6,8 @@ import pytest
 from harness.storage import (
     InvalidSchemaStateError,
     connect_database,
-    inspect_database,
     initialize_database,
+    inspect_database,
 )
 
 
