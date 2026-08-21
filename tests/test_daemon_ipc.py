@@ -264,7 +264,7 @@ def test_receive_frame_timeout_is_total_not_per_chunk() -> None:
         future = executor.submit(trickle_request)
         started = time.monotonic()
         try:
-            with pytest.raises(TimeoutError, match="timed out|deadline"):
+            with pytest.raises(TimeoutError, match=r"timed out|deadline"):
                 _receive_frame(reader)
             elapsed = time.monotonic() - started
             assert elapsed < 0.2
