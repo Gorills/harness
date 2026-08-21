@@ -303,8 +303,8 @@ def _prepare_socket_parent(parent: Path) -> None:
         or stat.S_IMODE(parent_stat.st_mode) & 0o077
     ):
         raise InsecureSocketDirectoryError(
-            f"IPC directory must be a real directory owned by the current user "
-            f"with no group/other access: {parent}"
+            f"IPC directory must be owned by the current user, be a real directory, "
+            f"and have no group/other access: {parent}"
         )
 
 
