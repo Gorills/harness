@@ -125,9 +125,9 @@ def harnessd_main() -> int:
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser(
         "serve",
-        help="serve the implemented local IPC status path",
+        help="serve the implemented read-only local IPC status paths",
         description=(
-            "Serve the bounded local IPC status path using an explicit database and socket."
+            "Serve the bounded read-only local IPC status paths using an explicit database and socket."
         ),
     )
     serve_parser.add_argument("--database", type=Path, required=True, metavar="PATH")

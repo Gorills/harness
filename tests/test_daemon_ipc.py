@@ -4,6 +4,7 @@ import json
 import os
 import socket
 import stat
+import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -17,18 +18,73 @@ from harness.daemon import (
     SocketPathInUseError,
     serve_daemon,
 )
+from harness.index import scan_workspace
 from harness.ipc import (
     MAX_MESSAGE_BYTES,
     PROTOCOL_VERSION,
     IpcProtocolError,
+    IpcRemoteError,
     StatusResult,
+    WorkspaceStatusResult,
     _receive_frame,
     _status_from_response,
     request_status,
+    request_workspace_status,
 )
+from harness.registry import create_project, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX IPC slice")
+
+
+def _git(cwd: Path, *arguments: str) -> None:
+    subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
+
+
+def _git_output(cwd: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+    return os.fsdecode(result.stdout).strip()
+
+
+def _registered_workspace_database(
+    tmp_path: Path,
+) -> tuple[Path, Path, str, str, str]:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init")
+    (root / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(root, "add", "tracked.txt")
+    _git(
+        root,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-m",
+        "init",
+    )
+    head = _git_output(root, "rev-parse", "HEAD")
+    branch = _git_output(root, "branch", "--show-current")
+
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+        return root, database, project.project_id, workspace.workspace_id, f"{head}:{branch}"
+    finally:
+        connection.close()
 
 
 def _start_server(
@@ -109,6 +165,160 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
         _stop_server(stop_event, executor, future)
 
     assert not socket_path.exists()
+
+
+def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state(
+    tmp_path: Path,
+) -> None:
+    root, database, project_id, workspace_id, git_identity = _registered_workspace_database(
+        tmp_path
+    )
+    head, branch = git_identity.split(":", maxsplit=1)
+    (root / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        status = request_workspace_status(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+        )
+        assert status == WorkspaceStatusResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            visibility_mode="normal",
+            workspace_root=root.resolve(),
+            head=head,
+            branch=branch,
+            dirty_path_count=1,
+            indexed_file_count=1,
+        )
+
+        raw_payload = {
+            "version": PROTOCOL_VERSION,
+            "request_id": "workspace-exact",
+            "method": "workspace_status",
+            "params": {
+                "hints": [
+                    {
+                        "path": str(root.resolve()),
+                        "source": "explicit-root",
+                        "match_mode": "root",
+                    }
+                ]
+            },
+        }
+        response = _raw_request(
+            socket_path,
+            (json.dumps(raw_payload, separators=(",", ":")) + "\n").encode("utf-8"),
+        )
+        assert response == {
+            "version": PROTOCOL_VERSION,
+            "request_id": "workspace-exact",
+            "ok": True,
+            "result": {
+                "schema_version": SCHEMA_VERSION,
+                "workspace_id": workspace_id,
+                "project_id": project_id,
+                "visibility_mode": "normal",
+                "workspace_root": str(root.resolve()),
+                "head": head,
+                "branch": branch,
+                "dirty_path_count": 1,
+                "indexed_file_count": 1,
+            },
+        }
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_workspace_status_location_hint_resolves_most_specific_registered_workspace(
+    tmp_path: Path,
+) -> None:
+    root, database, _project_id, workspace_id, _git_identity = _registered_workspace_database(
+        tmp_path
+    )
+    nested = root / "src" / "package"
+    nested.mkdir(parents=True)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        status = request_workspace_status(
+            socket_path,
+            [WorkspaceHint(nested, "cwd", WorkspaceHintMatchMode.LOCATION)],
+        )
+        assert status.workspace_id == workspace_id
+        assert status.workspace_root == root.resolve()
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_workspace_status_stronger_unmatched_hint_fails_without_fallback(tmp_path: Path) -> None:
+    root, database, _project_id, _workspace_id, _git_identity = _registered_workspace_database(
+        tmp_path
+    )
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with pytest.raises(IpcRemoteError) as exc_info:
+            request_workspace_status(
+                socket_path,
+                [
+                    WorkspaceHint(tmp_path / "unknown", "explicit-root"),
+                    WorkspaceHint(root, "cwd", WorkspaceHintMatchMode.LOCATION),
+                ],
+            )
+        assert exc_info.value.code == "workspace_resolution_error"
+        assert "explicit-root" in exc_info.value.message
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 1, 1)
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"hints": []},
+        {"hints": [{"path": "relative", "source": "cwd", "match_mode": "location"}]},
+        {
+            "hints": [
+                {
+                    "path": "/repo",
+                    "source": "cwd",
+                    "match_mode": "location",
+                    "extra": True,
+                }
+            ]
+        },
+    ],
+)
+def test_workspace_status_rejects_malformed_params_and_daemon_recovers(
+    tmp_path: Path,
+    params: dict[str, object],
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        payload = {
+            "version": PROTOCOL_VERSION,
+            "request_id": "bad-workspace",
+            "method": "workspace_status",
+            "params": params,
+        }
+        response = _raw_request(
+            socket_path,
+            (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"),
+        )
+        assert response == {
+            "version": PROTOCOL_VERSION,
+            "request_id": None,
+            "ok": False,
+            "error": {"code": "invalid_request", "message": "IPC request is invalid"},
+        }
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
+    finally:
+        _stop_server(stop_event, executor, future)
 
 
 @pytest.mark.parametrize(
