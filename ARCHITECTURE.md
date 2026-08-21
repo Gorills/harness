@@ -120,7 +120,7 @@ Minimum states remain:
 - `completed`
 - `cancelled`
 
-At most one distinct `working` Task should exist per Workspace. Parallel tasks use separate Workspaces/worktrees.
+v1 enforces at most one distinct `working` Task per Workspace transactionally. Parallel tasks use separate Workspaces/worktrees.
 
 The name intentionally overlaps with the MCP Tasks extension, but the semantics do not. In v1, `task_start` and `task_checkpoint` are ordinary bounded MCP tool calls that mutate/query Harness-owned durable Task state in `harnessd`; they do not return or manage MCP task handles. A future use of the MCP Tasks extension would be justified only for a genuinely long-running single MCP operation and must remain orthogonal to Harness Task identity.
 
@@ -185,15 +185,16 @@ project_status
 → task_checkpoint
 ```
 
-But the implementation is explicitly workspace-domain based:
+But the implementation is explicitly workspace-domain based and write-safe:
 
-- `task_start` creates/resumes a Task and establishes it as the Workspace's current working Task through a transactional domain transition.
-- Subsequent read calls derive relevance from Workspace + current Task.
-- `task_checkpoint` targets the Workspace current Task when unambiguous.
-- If ambiguity is possible because of recovery/admin state, require explicit `task_id` or fail safely; do not guess.
-- A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose task binding.
+- `task_start` creates/resumes a Task, returns its stable Harness `task_id`, and establishes it as the Workspace's current working Task through a transactional domain transition.
+- Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
+- Read-only calls may derive relevance/display defaults from Workspace + current Task.
+- `task_checkpoint` is a mutating operation and therefore MUST include the intended Harness `task_id`; the daemon verifies that the Task belongs to the resolved Workspace and that the requested transition is valid.
+- A stale call for Task A must never be retargeted to whichever Task is current when the request executes. Workspace-current inference is not a write target.
+- A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose Task continuity.
 
-This preserves the intended cheap workflow without relying on an obsolete MCP session concept.
+This preserves the intended cheap workflow without relying on obsolete MCP session state. It adds one stable identifier to Task writes, but no extra ritual tool call.
 
 ## 8. Model-facing MCP surface
 
@@ -204,6 +205,12 @@ Keep exactly five primary tools until data proves another operation is necessary
 - `project_context`
 - `task_start`
 - `task_checkpoint`
+
+Write targeting rule:
+
+- `task_start` returns the Harness `task_id`;
+- `task_checkpoint` requires that `task_id` explicitly;
+- model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer their target from mutable current-Task state.
 
 Each tool contract owns:
 

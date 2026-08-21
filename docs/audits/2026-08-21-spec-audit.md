@@ -69,14 +69,15 @@ Correct interpretation:
 
 ### `task_start` binds MCP session to Task — AMEND (critical)
 
-Replace transport-hidden binding with a domain transition:
+Replace transport-hidden binding with explicit domain identity:
 
-- `task_start` creates/resumes and makes a Task current for a Workspace.
-- Subsequent calls derive current Task from Workspace state when unambiguous.
-- Bridge activity may be associated with the Task for history, but a bridge restart cannot erase binding.
-- Ambiguous recovery/admin states fail safely or require explicit task identity.
+- `task_start` creates/resumes a Task, returns its stable Harness `task_id`, and makes it current for a Workspace.
+- Read-only calls may derive relevance from the Workspace current Task.
+- `task_checkpoint` and any future mutating Task operation must carry the intended Harness `task_id`; mutable Workspace-current state is not a safe write target.
+- Starting a different Task while one is already `working` in the Workspace must fail rather than silently switch the write target.
+- Bridge activity may be associated with the Task for history, but a bridge restart cannot erase Task continuity.
 
-This preserves the intended low-ritual workflow and is compatible with stateless MCP.
+Reason: without explicit write identity, a stale/parallel client can checkpoint Task A after the Workspace has moved to Task B and accidentally mutate B. This preserves the intended low-ritual workflow while satisfying MCP statelessness: one identifier is carried on writes, with no additional tool call.
 
 ### MCP roots as a project-resolution dependency — REJECT for correctness
 
