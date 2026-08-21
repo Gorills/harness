@@ -89,7 +89,9 @@ def _run_status(workspace_location: Path, socket_path: Path) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        print(f"Harness status: FAIL (workspace path cannot be resolved: {workspace_location}: {exc})")
+        print(
+            f"Harness status: FAIL (workspace path cannot be resolved: {workspace_location}: {exc})"
+        )
         return 1
     if not location.is_dir():
         print(f"Harness status: FAIL (workspace path is not a directory: {location})")
