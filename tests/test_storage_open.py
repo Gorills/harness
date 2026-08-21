@@ -52,8 +52,11 @@ def test_inspect_database_does_not_migrate_uninitialized_database(tmp_path: Path
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("PRAGMA journal_mode").fetchone() == before_journal_mode
-        assert connection.execute(
-            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'"
-        ).fetchone() is None
+        assert (
+            connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'schema_migrations'"
+            ).fetchone()
+            is None
+        )
     finally:
         connection.close()
