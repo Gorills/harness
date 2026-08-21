@@ -36,7 +36,7 @@ def _venv_scripts_dir(venv: Path) -> Path:
 
 
 def main() -> int:
-    """Build a wheel, install it in isolation, and execute both console scripts."""
+    """Build a wheel, install it in isolation, and execute shipping console behavior."""
     uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required for the wheel smoke test")
@@ -82,6 +82,14 @@ def main() -> int:
             if result.stdout != expected:
                 raise RuntimeError(
                     f"unexpected {name} --version output: {result.stdout!r}; expected {expected!r}"
+                )
+
+        harness = scripts_dir / f"harness{suffix}"
+        doctor = _run((str(harness), "doctor"), cwd=workspace, env=isolated_env)
+        for expected in ("SQLite runtime: OK", "FTS5: OK"):
+            if expected not in doctor.stdout:
+                raise RuntimeError(
+                    f"installed harness doctor output did not contain {expected!r}: {doctor.stdout!r}"
                 )
 
     return 0

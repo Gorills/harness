@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** implementation foundation. Packaging/tooling and the SQLite persistence bootstrap exist; daemon/IPC and product domain behavior are not implemented yet.
+> **Repository status:** implementation foundation. Packaging/tooling, the SQLite persistence bootstrap, and the first read-only runtime doctor check exist; daemon/IPC and product domain behavior are not implemented yet.
 
 ## Product principles
 
@@ -36,7 +36,9 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 The repository now has a Python 3.13 package, a locked development toolchain, and a minimal SQLite persistence bootstrap. Database initialization creates ordered schema migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, and probes FTS5 as a runtime capability. No Project/Workspace/Task tables or other product domain schema are created yet.
 
-The installed `harness` and `harnessd` console scripts still expose only bootstrap help/version behavior; daemon/IPC, MCP, indexing, search, Task behavior, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
+The installed `harness` CLI now includes an initial read-only `harness doctor` check for the current SQLite runtime and FTS5 availability. It uses an in-memory database and creates no durable Harness state. The broader doctor contract (daemon, persisted schema, permissions, registrations, host adapters, projects, index state, skills, dashboard, and stale integrations) is not implemented yet.
+
+The installed `harnessd` console script still exposes only bootstrap help/version behavior; daemon/IPC, MCP, indexing, search, Task behavior, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
 
 Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
 
@@ -45,7 +47,7 @@ uv sync --locked --all-groups
 uv run --frozen python scripts/quality.py
 ```
 
-The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment and executes both shipping console scripts.
+The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, and runs the installed `harness doctor` command.
 
 ## License
 
