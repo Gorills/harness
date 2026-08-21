@@ -161,18 +161,23 @@ def _require_registered_layout(workspace: WorkspaceRecord) -> None:
 
 
 def _build_snapshot(workspace: WorkspaceRecord) -> dict[str, IndexedFileRecord]:
-    relative_paths = _candidate_paths(workspace.workspace_root)
+    harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
+    relative_paths = _candidate_paths(workspace.workspace_root, harnessignore_rules)
     snapshot: dict[str, IndexedFileRecord] = {}
     for relative_path in relative_paths:
         record = _inspect_entry(workspace, relative_path)
         if record is not None:
             snapshot[relative_path] = record
+    if _read_harnessignore_rules(workspace.workspace_root) != harnessignore_rules:
+        raise IndexingError("Workspace changed while scanning: .harnessignore")
     return snapshot
 
 
-def _candidate_paths(workspace_root: Path) -> tuple[str, ...]:
+def _candidate_paths(
+    workspace_root: Path,
+    harnessignore_rules: bytes | None,
+) -> tuple[str, ...]:
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
-    harnessignore_rules = _read_harnessignore_rules(workspace_root)
     if harnessignore_rules is None:
         return _candidate_paths_from_git(workspace_root, exclude_arguments)
 
