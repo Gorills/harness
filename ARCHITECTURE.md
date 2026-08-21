@@ -189,17 +189,20 @@ project_status
 
 But the implementation is explicitly workspace-domain based and write-safe:
 
-- `task_start` creates/resumes a Task, returns its stable Harness `task_id` plus current `revision`, and establishes it as the Workspace's current working Task through a transactional domain transition.
+- `task_start` without `task_id` creates a new Task only when the Workspace has no distinct `working` Task. Creation has no prior Task revision; the one-working-Task invariant and creation are enforced in one transaction, and the response returns the new `task_id` plus initial `revision`.
+- `task_start` with `task_id` resumes an existing Task. If that Task is already the Workspace's `working` Task, resume is idempotent/read-like and returns its current revision without mutating Task state.
+- If resume would mutate an existing Task (for example `waiting → working`), `task_start` MUST also include `expected_revision`; the transition uses the same compare-and-set rule as every other existing-Task mutation and returns the incremented revision.
+- `completed` and `cancelled` Tasks are not reopened by `task_start` in v1; a future reopen operation must define its own explicit transition contract.
 - Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
 - Read-only calls may derive relevance/display defaults from Workspace + current Task and expose the current Task revision where a subsequent mutation may depend on it.
 - `task_checkpoint` is a mutating operation and therefore MUST include both the intended Harness `task_id` and `expected_revision`.
-- The daemon verifies Task/Workspace ownership and transition validity, then applies the mutation only when the stored revision equals `expected_revision`; success increments and returns the new revision.
-- Revision mismatch is a bounded conflict response with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
+- The daemon verifies Task/Workspace ownership and transition validity, then applies an existing-Task mutation only when the stored revision equals `expected_revision`; success increments and returns the new revision.
+- Revision mismatch or a required-but-missing `expected_revision` is a bounded conflict/error with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
 - A stale call for Task A must never be retargeted to whichever Task is current when the request executes, and a stale writer for Task A must never overwrite a newer checkpoint for Task A.
 - Dashboard Task mutations (`Accept`, feedback, cancel) use the same revision precondition at the application boundary; interfaces do not get a concurrency bypass.
 - A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose Task continuity.
 
-This preserves the intended cheap workflow without relying on obsolete MCP session state. It adds stable identity plus a concurrency token to Task writes, but no extra ritual tool call.
+This preserves the intended cheap workflow without relying on obsolete MCP session state. Existing-Task writes carry stable identity plus a concurrency token; idempotent resume of an already-working Task still needs no extra ritual call.
 
 ## 8. Model-facing MCP surface
 
@@ -213,9 +216,11 @@ Keep exactly five primary tools until data proves another operation is necessary
 
 Write targeting rule:
 
-- `task_start` returns the Harness `task_id` and current `revision`;
-- `task_checkpoint` requires `task_id` and `expected_revision`; success returns the incremented revision;
-- revision mismatch is a non-mutating conflict that requires refresh/reconciliation;
+- creating through `task_start` returns a new Harness `task_id` and initial `revision`;
+- resuming an already-`working` Task by `task_id` is idempotent and returns its current revision;
+- a `task_start` resume that changes existing Task state requires `task_id` + `expected_revision`;
+- `task_checkpoint` requires `task_id` + `expected_revision`; successful existing-Task mutation returns the incremented revision;
+- revision mismatch or missing required revision is non-mutating and requires refresh/reconciliation;
 - model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer identity or concurrency state from mutable Workspace-current state.
 
 Each tool contract owns:

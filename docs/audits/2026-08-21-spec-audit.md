@@ -71,13 +71,14 @@ Correct interpretation:
 
 Replace transport-hidden binding with explicit domain identity:
 
-- `task_start` creates/resumes a Task, returns its stable Harness `task_id`, and makes it current for a Workspace.
+- Creating through `task_start` transactionally creates a new Task only when the Workspace has no distinct `working` Task and returns its Harness `task_id` plus initial revision.
+- `task_start(task_id=...)` is idempotent when that Task is already `working`; if resume would mutate existing Task state (for example `waiting → working`), it also requires `expected_revision`.
 - Read-only calls may derive relevance from the Workspace current Task.
-- `task_checkpoint` and any future mutating Task operation must carry the intended Harness `task_id`; mutable Workspace-current state is not a safe write target.
+- `task_checkpoint` and every other mutation of an existing Task must carry `task_id` + `expected_revision`; mutable Workspace-current state is neither a safe write target nor a concurrency token.
 - Starting a different Task while one is already `working` in the Workspace must fail rather than silently switch the write target.
 - Bridge activity may be associated with the Task for history, but a bridge restart cannot erase Task continuity.
 
-Reason: without explicit write identity, a stale/parallel client can checkpoint Task A after the Workspace has moved to Task B and accidentally mutate B. This preserves the intended low-ritual workflow while satisfying MCP statelessness: one identifier is carried on writes, with no additional tool call.
+Reason: explicit identity prevents a stale/parallel client from checkpointing Task A into Task B; revision CAS also prevents two writers of Task A, or resume versus Dashboard feedback, from silently overwriting each other. New Task creation has no prior revision and is serialized by the one-working-Task invariant. This preserves the intended low-ritual workflow without a transport session dependency.
 
 ### MCP roots as a project-resolution dependency — REJECT for correctness
 
