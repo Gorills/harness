@@ -3,7 +3,7 @@ import os
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, cast
 
 import pytest
 
@@ -186,7 +186,7 @@ def test_scan_does_not_read_external_harnessignore_after_replacement(
     reads: list[bool] = []
 
     class ReadTrackingStream:
-        def __init__(self, stream: Any) -> None:
+        def __init__(self, stream: BinaryIO) -> None:
             self._stream = stream
 
         def __enter__(self) -> "ReadTrackingStream":
@@ -208,7 +208,8 @@ def test_scan_does_not_read_external_harnessignore_after_replacement(
             swapped = True
             self.unlink()
             self.symlink_to(outside)
-            return ReadTrackingStream(original_open(self, *args, **kwargs))
+            stream = cast(BinaryIO, original_open(self, *args, **kwargs))
+            return ReadTrackingStream(stream)
         return original_open(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", racing_open)
