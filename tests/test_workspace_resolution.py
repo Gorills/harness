@@ -24,27 +24,25 @@ def test_resolves_exact_registered_workspace(tmp_path: Path) -> None:
     assert resolution.matched_path == root.resolve()
 
 
-def test_uses_hints_in_priority_order(tmp_path: Path) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    first.mkdir()
-    second.mkdir()
+def test_stronger_unmatched_hint_fails_instead_of_falling_through(tmp_path: Path) -> None:
+    registered = tmp_path / "registered"
+    fallback = tmp_path / "fallback"
+    registered.mkdir()
+    fallback.mkdir()
     resolver = WorkspaceResolver(
         [
-            WorkspaceCandidate("first", first),
-            WorkspaceCandidate("second", second),
+            WorkspaceCandidate("registered", registered),
+            WorkspaceCandidate("fallback", fallback),
         ]
     )
 
-    resolution = resolver.resolve(
-        [
-            WorkspaceHint(tmp_path / "unknown", "strong-but-unmatched"),
-            WorkspaceHint(second, "documented-launch-root"),
-        ]
-    )
-
-    assert resolution.workspace_id == "second"
-    assert resolution.hint_source == "documented-launch-root"
+    with pytest.raises(WorkspaceNotFoundError, match="strong-explicit-root"):
+        resolver.resolve(
+            [
+                WorkspaceHint(tmp_path / "unknown", "strong-explicit-root"),
+                WorkspaceHint(fallback, "cwd"),
+            ]
+        )
 
 
 def test_first_matching_hint_wins_over_weaker_hint(tmp_path: Path) -> None:
@@ -121,22 +119,18 @@ def test_ambiguous_equal_roots_fail_instead_of_falling_through(tmp_path: Path) -
         )
 
 
-def test_reports_all_unmatched_hint_sources(tmp_path: Path) -> None:
+def test_unmatched_hint_error_reports_source_and_path(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", root)])
+    unknown = tmp_path / "unknown"
 
     with pytest.raises(WorkspaceNotFoundError) as exc_info:
-        resolver.resolve(
-            [
-                WorkspaceHint(tmp_path / "unknown-a", "explicit-root"),
-                WorkspaceHint(tmp_path / "unknown-b", "cwd"),
-            ]
-        )
+        resolver.resolve([WorkspaceHint(unknown, "explicit-root")])
 
     message = str(exc_info.value)
-    assert "explicit-root=" in message
-    assert "cwd=" in message
+    assert "explicit-root" in message
+    assert str(unknown.resolve()) in message
 
 
 def test_rejects_resolution_without_hints(tmp_path: Path) -> None:
