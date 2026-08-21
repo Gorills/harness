@@ -115,7 +115,7 @@ def read_workspace_status(
         workspace_root=workspace.workspace_root,
         head=git_status.head,
         branch=git_status.branch,
-        dirty_file_count=git_status.dirty_file_count,
+        dirty_path_count=git_status.dirty_path_count,
         indexed_file_count=indexed_file_count,
     )
 
