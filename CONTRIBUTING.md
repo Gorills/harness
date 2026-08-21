@@ -1,0 +1,55 @@
+# Contributing to Harness
+
+Harness is intentionally developed in small, reviewable slices because it sits between several fast-changing agent hosts and a durable local state model.
+
+## Change workflow
+
+1. Choose one bounded task with a concrete acceptance condition.
+2. Read the relevant specification, audit, architecture, ADRs, implementation, and tests.
+3. Make the smallest complete change.
+4. Add or update tests that can fail for the behavior being changed.
+5. Run relevant local checks.
+6. Review the complete diff for regressions, accidental disclosure, host coupling, and undocumented contract changes.
+7. Open a focused PR that states what is verified and what is not.
+
+Do not combine unrelated cleanup with feature or bug work.
+
+## Branches and pull requests
+
+- Never develop directly on `main` once the initial repository bootstrap exists.
+- Prefer short-lived branches named by intent, for example `feat/task-store` or `fix/mcp-budget`.
+- Keep commits reviewable; avoid generated noise.
+- A PR changing MCP-visible fields, database schema, host integration behavior, or architecture must identify the contract affected.
+- Do not merge with known failing relevant checks.
+
+## Architecture changes
+
+Create or amend an ADR when a change:
+
+- changes a core process or ownership boundary;
+- adds a durable extension interface;
+- changes task/session/workspace semantics;
+- changes persistence or migration strategy;
+- changes MCP contract semantics;
+- introduces a mandatory external service or new deployment component;
+- changes how host-specific behavior is isolated.
+
+Implementation detail that preserves an existing decision usually does not need an ADR.
+
+## Compatibility policy
+
+Host adapters target documented public behavior, not guessed internal behavior. If an official host document does not establish a needed behavior, mark it as requiring real-host acceptance instead of encoding the assumption as fact.
+
+MCP protocol compatibility must be handled through the official SDK. Harness must not implement its own production protocol stack.
+
+## Security and privacy
+
+- Local-only is the default trust boundary.
+- Never log raw source, full model context, secrets, or credential-bearing host configuration by default.
+- Never treat host-provided client metadata as an authentication primitive.
+- External embedding or LLM providers require explicit opt-in and a documented data boundary.
+- Integration cleanup removes only Harness-owned artifacts.
+
+## Definition of verified
+
+A statement is **verified** only when the relevant check actually ran against the current change. Documentation review, static reasoning, unit tests, wire tests, and real-host acceptance are distinct levels of evidence and must not be conflated.
