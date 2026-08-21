@@ -190,7 +190,7 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
             workspace_root=root.resolve(),
             head=head,
             branch=branch,
-            dirty_file_count=1,
+            dirty_path_count=1,
             indexed_file_count=1,
         )
 
@@ -224,7 +224,7 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
                 "workspace_root": str(root.resolve()),
                 "head": head,
                 "branch": branch,
-                "dirty_file_count": 1,
+                "dirty_path_count": 1,
                 "indexed_file_count": 1,
             },
         }
