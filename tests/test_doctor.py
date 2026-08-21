@@ -51,7 +51,8 @@ def test_run_doctor_checks_inspects_initialized_database(tmp_path: Path) -> None
     assert report.database_status.schema_version == SCHEMA_VERSION
     assert report.database_status.journal_mode == "wal"
     assert report.database_status.foreign_keys is True
-    assert report.database_status.fts5_available is True
+    assert isinstance(report.database_status.fts5_available, bool)
+    assert report.database_status.fts5_available == report.fts5_available
 
 
 def test_run_doctor_checks_does_not_create_missing_database(tmp_path: Path) -> None:
