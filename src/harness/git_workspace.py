@@ -57,7 +57,9 @@ def _existing_directory(path: Path) -> Path:
     try:
         resolved = path.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        raise NotGitWorkspaceError(f"workspace path does not exist or cannot be resolved: {path}") from exc
+        raise NotGitWorkspaceError(
+            f"workspace path does not exist or cannot be resolved: {path}"
+        ) from exc
     if not resolved.is_dir():
         raise NotGitWorkspaceError(f"workspace path is not a directory: {resolved}")
     return resolved
