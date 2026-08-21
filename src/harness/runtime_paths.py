@@ -92,7 +92,9 @@ def _home_directory() -> Path:
     try:
         return Path.home()
     except RuntimeError as exc:
-        raise RuntimePathError("Harness could not determine the current user's home directory") from exc
+        raise RuntimePathError(
+            "Harness could not determine the current user's home directory"
+        ) from exc
 
 
 def _temporary_directory() -> Path:
@@ -111,4 +113,6 @@ def _effective_uid(value: int | None) -> int:
 
 def _require_posix_runtime() -> None:
     if os.name == "nt" or not hasattr(os, "geteuid"):
-        raise RuntimePathError("canonical Harness daemon paths are not implemented on this platform")
+        raise RuntimePathError(
+            "canonical Harness daemon paths are not implemented on this platform"
+        )
