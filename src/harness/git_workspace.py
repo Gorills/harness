@@ -5,6 +5,18 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+_GIT_CONTEXT_ENVIRONMENT = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_PREFIX",
+)
+
 
 class GitWorkspaceError(RuntimeError):
     """Base class for Git Workspace inspection failures."""
@@ -59,6 +71,22 @@ def _normalize_existing_path(path: Path) -> Path:
     return Path(os.path.normcase(str(resolved)))
 
 
+def _git_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for variable in _GIT_CONTEXT_ENVIRONMENT:
+        environment.pop(variable, None)
+    return environment
+
+
+def _decode_git_value(value: bytes) -> str:
+    output = os.fsdecode(value)
+    if output.endswith("\n"):
+        output = output[:-1]
+    if output.endswith("\r"):
+        output = output[:-1]
+    return output
+
+
 def _rev_parse(invocation_dir: Path, argument: str) -> str:
     try:
         result = subprocess.run(
@@ -66,9 +94,7 @@ def _rev_parse(invocation_dir: Path, argument: str) -> str:
             cwd=invocation_dir,
             check=False,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            env=_git_environment(),
         )
     except FileNotFoundError as exc:
         raise GitExecutableUnavailableError("Git executable is not available") from exc
@@ -76,13 +102,13 @@ def _rev_parse(invocation_dir: Path, argument: str) -> str:
         raise GitWorkspaceError(f"Git could not inspect workspace at {invocation_dir}") from exc
 
     if result.returncode != 0:
-        detail = result.stderr.strip()
+        detail = os.fsdecode(result.stderr).strip()
         message = f"path is not inside an inspectable Git worktree: {invocation_dir}"
         if detail:
             message = f"{message}: {detail}"
         raise NotGitWorkspaceError(message)
 
-    output = result.stdout.rstrip("\r\n")
+    output = _decode_git_value(result.stdout)
     if not output:
         raise GitWorkspaceError(f"Git returned no value for {argument} at {invocation_dir}")
     return output
