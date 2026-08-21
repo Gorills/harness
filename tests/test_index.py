@@ -127,7 +127,10 @@ def test_scan_hashes_symlink_target_without_following_outside_workspace(tmp_path
         connection.close()
 
 
-def test_scan_ignores_inherited_git_context(tmp_path: Path, monkeypatch) -> None:
+def test_scan_ignores_inherited_git_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root, connection, workspace_id = _registered(tmp_path / "target")
     decoy = _repo(tmp_path / "decoy")
     monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
