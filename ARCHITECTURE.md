@@ -93,6 +93,7 @@ Consequences for Harness:
 - Any client metadata is advisory/self-reported and unsuitable for authorization or behavior-critical branching.
 - Workspace and task resolution must work on every request without hidden protocol-session state.
 - MCP roots are not a core dependency; they are deprecated in the modern protocol line.
+- Harness `Task` is an application-domain work item and is **not** the MCP `io.modelcontextprotocol/tasks` extension. The MCP extension represents a long-running individual protocol request; it must not become Harness task identity, persistence, or lifecycle.
 
 See ADR-0001.
 
@@ -120,6 +121,8 @@ Minimum states remain:
 - `cancelled`
 
 At most one distinct `working` Task should exist per Workspace. Parallel tasks use separate Workspaces/worktrees.
+
+The name intentionally overlaps with the MCP Tasks extension, but the semantics do not. In v1, `task_start` and `task_checkpoint` are ordinary bounded MCP tool calls that mutate/query Harness-owned durable Task state in `harnessd`; they do not return or manage MCP task handles. A future use of the MCP Tasks extension would be justified only for a genuinely long-running single MCP operation and must remain orthogonal to Harness Task identity.
 
 ### AgentSession / AgentActivity
 

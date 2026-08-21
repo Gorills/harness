@@ -30,6 +30,7 @@ The audited architecture and accepted ADRs control implementation when the origi
 - Core business logic must not depend on Claude, Codex, Cursor, or Antigravity-specific APIs.
 - MCP is stateless at the protocol level for the 2026-07-28 path. Never use an MCP session identifier as a domain invariant.
 - Task identity and continuity are Harness domain state. Normal task resolution is workspace-scoped, not connection-scoped.
+- Harness `Task` is not the MCP `io.modelcontextprotocol/tasks` extension. Do not use protocol task handles as Harness Task IDs or lifecycle state.
 - `AgentSession` records observed bridge/client activity; it is not a protocol session and is not authoritative for task identity.
 - Filesystem is source of truth for code; Git is source of truth for Git state/history. Structural Index is derived data.
 - Model-visible responses are bounded contracts. New fields require exposure-budget and negative-disclosure tests.

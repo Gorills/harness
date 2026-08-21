@@ -12,6 +12,8 @@ The current MCP 2026-07-28 specification removed the initialize/initialized hand
 
 A Harness domain invariant tied to an MCP session would therefore depend on legacy protocol behavior and could fail across modern hosts, reconnects, or SDK evolution.
 
+The same protocol revision also defines the `io.modelcontextprotocol/tasks` extension for long-running individual MCP requests. Its `Task` vocabulary is not equivalent to the Harness domain `Task`, which represents durable project work across calls, hosts, and human feedback. The shared name creates a correctness risk if the two lifecycles are accidentally coupled.
+
 ## Decision
 
 1. Production uses the official MCP Python SDK v2; Harness does not implement its own protocol stack.
@@ -22,6 +24,7 @@ A Harness domain invariant tied to an MCP session would therefore depend on lega
 6. Subsequent operations resolve the current Task from Workspace state when unambiguous; ambiguity fails safely or requires explicit identity.
 7. Client metadata is diagnostic only and must not drive security or correctness-critical behavior.
 8. Deprecated MCP roots and server-initiated request mechanisms are not correctness dependencies.
+9. Harness `Task` must not be implemented as, identified by, or mapped one-to-one onto the MCP `io.modelcontextprotocol/tasks` extension. The five v1 Harness tools use ordinary bounded request/response semantics.
 
 ## Consequences
 
@@ -31,6 +34,7 @@ A Harness domain invariant tied to an MCP session would therefore depend on lega
 - Host restart/reconnect does not lose Task continuity.
 - Domain state is testable without proprietary host lifecycle semantics.
 - Legacy clients remain supportable through the official SDK rather than core branching.
+- Harness task continuity cannot be accidentally replaced by a protocol-level long-running-request primitive with different semantics.
 
 ### Costs
 
@@ -40,7 +44,7 @@ A Harness domain invariant tied to an MCP session would therefore depend on lega
 
 ## Verification
 
-Core automated tests must demonstrate Task continuity across multiple independent MCP subprocess instances. Real-host tests must demonstrate the same Task can be resumed after host/bridge restart.
+Core automated tests must demonstrate Task continuity across multiple independent MCP subprocess instances. MCP contract/wire tests must also assert that v1 does not advertise or use the MCP Tasks extension to implement Harness Task lifecycle. Real-host tests must demonstrate the same Harness Task can be resumed after host/bridge restart.
 
 ## References
 
