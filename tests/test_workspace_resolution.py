@@ -1,0 +1,178 @@
+from pathlib import Path
+from typing import cast
+
+import pytest
+
+from harness.workspace_resolution import (
+    AmbiguousWorkspaceError,
+    WorkspaceCandidate,
+    WorkspaceHint,
+    WorkspaceHintMatchMode,
+    WorkspaceNotFoundError,
+    WorkspaceResolutionError,
+    WorkspaceResolver,
+)
+
+
+def test_resolves_exact_registered_workspace(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", root)])
+
+    resolution = resolver.resolve([WorkspaceHint(root, "explicit-root")])
+
+    assert resolution.workspace_id == "workspace-1"
+    assert resolution.workspace_root == root.resolve()
+    assert resolution.hint_source == "explicit-root"
+    assert resolution.matched_path == root.resolve()
+
+
+def test_stronger_unmatched_hint_fails_instead_of_falling_through(tmp_path: Path) -> None:
+    registered = tmp_path / "registered"
+    fallback = tmp_path / "fallback"
+    registered.mkdir()
+    fallback.mkdir()
+    resolver = WorkspaceResolver(
+        [
+            WorkspaceCandidate("registered", registered),
+            WorkspaceCandidate("fallback", fallback),
+        ]
+    )
+
+    with pytest.raises(WorkspaceNotFoundError, match="strong-explicit-root"):
+        resolver.resolve(
+            [
+                WorkspaceHint(tmp_path / "unknown", "strong-explicit-root"),
+                WorkspaceHint(fallback, "cwd", WorkspaceHintMatchMode.LOCATION),
+            ]
+        )
+
+
+def test_unregistered_root_inside_registered_workspace_fails_closed(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    unregistered = registered / "nested-project"
+    unregistered.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+
+    with pytest.raises(WorkspaceNotFoundError, match="explicit-root"):
+        resolver.resolve([WorkspaceHint(unregistered, "explicit-root")])
+
+
+def test_location_inside_registered_workspace_matches_ancestor(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    location = registered / "src" / "package"
+    location.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+
+    resolution = resolver.resolve([WorkspaceHint(location, "cwd", WorkspaceHintMatchMode.LOCATION)])
+
+    assert resolution.workspace_id == "registered"
+    assert resolution.workspace_root == registered.resolve()
+
+
+def test_unknown_match_mode_fails_closed(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    nested = registered / "nested-project"
+    nested.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+    malformed_mode = cast(WorkspaceHintMatchMode, "root")
+
+    with pytest.raises(WorkspaceResolutionError, match="unsupported workspace hint match mode"):
+        resolver.resolve([WorkspaceHint(nested, "serialized-root", malformed_mode)])
+
+
+def test_first_matching_hint_wins_over_weaker_hint(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    resolver = WorkspaceResolver(
+        [
+            WorkspaceCandidate("first", first),
+            WorkspaceCandidate("second", second),
+        ]
+    )
+
+    resolution = resolver.resolve(
+        [
+            WorkspaceHint(first, "explicit-root"),
+            WorkspaceHint(second, "cwd", WorkspaceHintMatchMode.LOCATION),
+        ]
+    )
+
+    assert resolution.workspace_id == "first"
+    assert resolution.hint_source == "explicit-root"
+
+
+def test_nested_workspace_is_more_specific_for_descendant_hint(tmp_path: Path) -> None:
+    outer = tmp_path / "repo"
+    nested = outer / "nested"
+    cwd = nested / "src"
+    cwd.mkdir(parents=True)
+    resolver = WorkspaceResolver(
+        [
+            WorkspaceCandidate("outer", outer),
+            WorkspaceCandidate("nested", nested),
+        ]
+    )
+
+    resolution = resolver.resolve([WorkspaceHint(cwd, "cwd", WorkspaceHintMatchMode.LOCATION)])
+
+    assert resolution.workspace_id == "nested"
+    assert resolution.workspace_root == nested.resolve()
+
+
+def test_normalizes_parent_segments_before_matching(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    child = root / "src"
+    child.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", root)])
+
+    resolution = resolver.resolve(
+        [WorkspaceHint(child / ".." / "src", "cwd", WorkspaceHintMatchMode.LOCATION)]
+    )
+
+    assert resolution.matched_path == child.resolve()
+
+
+def test_ambiguous_equal_roots_fail_instead_of_falling_through(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    fallback = tmp_path / "fallback"
+    root.mkdir()
+    fallback.mkdir()
+    resolver = WorkspaceResolver(
+        [
+            WorkspaceCandidate("workspace-a", root),
+            WorkspaceCandidate("workspace-b", root),
+            WorkspaceCandidate("fallback", fallback),
+        ]
+    )
+
+    with pytest.raises(AmbiguousWorkspaceError, match="workspace-a, workspace-b"):
+        resolver.resolve(
+            [
+                WorkspaceHint(root, "explicit-root"),
+                WorkspaceHint(fallback, "cwd", WorkspaceHintMatchMode.LOCATION),
+            ]
+        )
+
+
+def test_unmatched_hint_error_reports_source_and_path(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", root)])
+    unknown = tmp_path / "unknown"
+
+    with pytest.raises(WorkspaceNotFoundError) as exc_info:
+        resolver.resolve([WorkspaceHint(unknown, "explicit-root")])
+
+    message = str(exc_info.value)
+    assert "explicit-root" in message
+    assert str(unknown.resolve()) in message
+
+
+def test_rejects_resolution_without_hints(tmp_path: Path) -> None:
+    resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", tmp_path)])
+
+    with pytest.raises(WorkspaceNotFoundError, match="no workspace hints"):
+        resolver.resolve([])
