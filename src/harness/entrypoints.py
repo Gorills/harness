@@ -1,8 +1,14 @@
 from argparse import ArgumentParser
 from importlib.metadata import version as distribution_version
 from pathlib import Path
+from signal import SIGINT, SIGTERM, getsignal, signal
+from threading import Event
+from types import FrameType
 
+from harness.daemon import DaemonError, serve_daemon
 from harness.doctor import DoctorReport, run_doctor_checks
+from harness.ipc import IpcError
+from harness.storage import DatabaseError
 
 _DOCTOR_RUNTIME_SCOPE = (
     "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
@@ -66,6 +72,29 @@ def _run_doctor(database_path: Path | None = None) -> int:
     return result
 
 
+def _run_daemon(database_path: Path, socket_path: Path) -> int:
+    stop_event = Event()
+
+    def request_stop(_signum: int, _frame: FrameType | None) -> None:
+        stop_event.set()
+
+    previous_handlers = {
+        SIGINT: getsignal(SIGINT),
+        SIGTERM: getsignal(SIGTERM),
+    }
+    signal(SIGINT, request_stop)
+    signal(SIGTERM, request_stop)
+    try:
+        serve_daemon(database_path, socket_path, stop_event=stop_event)
+    except (DaemonError, DatabaseError, IpcError, OSError) as exc:
+        print(f"Harness daemon: FAIL ({exc})")
+        return 1
+    finally:
+        signal(SIGINT, previous_handlers[SIGINT])
+        signal(SIGTERM, previous_handlers[SIGTERM])
+    return 0
+
+
 def harness_main() -> int:
     """Run the Harness CLI."""
     parser = _parser("harness", "Harness CLI. Product runtime is under implementation.")
@@ -91,8 +120,22 @@ def harness_main() -> int:
 
 
 def harnessd_main() -> int:
-    """Run the bootstrap Harness daemon entrypoint."""
-    parser = _parser("harnessd", "Harness daemon runtime is not implemented yet.")
-    parser.parse_args()
+    """Run the bounded Harness daemon entrypoint."""
+    parser = _parser("harnessd", "Harness daemon. Broader product runtime is under implementation.")
+    subparsers = parser.add_subparsers(dest="command")
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="serve the implemented local IPC status path",
+        description=(
+            "Serve the bounded local IPC status path using an explicit database and socket."
+        ),
+    )
+    serve_parser.add_argument("--database", type=Path, required=True, metavar="PATH")
+    serve_parser.add_argument("--socket", type=Path, required=True, metavar="PATH")
+
+    args = parser.parse_args()
+    if args.command == "serve":
+        return _run_daemon(args.database, args.socket)
+
     parser.print_help()
     return 0

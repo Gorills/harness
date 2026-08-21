@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, the first Project/Workspace registry primitives, and read-only runtime doctor checks exist; daemon/IPC and broader product domain behavior are not implemented yet.
+> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, Project/Workspace registry primitives, read-only runtime doctor checks, and the first bounded daemon/local-IPC status path exist; MCP, indexing, search, Tasks, host integration, and dashboard behavior are not implemented yet.
 
 ## Product principles
 
@@ -40,7 +40,9 @@ Schema v2 contains only the first durable product registry slice: `projects` and
 
 The installed `harness` CLI includes `harness doctor`. With no database argument it checks the current SQLite runtime and FTS5 availability using only an in-memory database, so it creates no durable Harness state. `harness doctor --database PATH` additionally inspects an explicitly selected, already initialized Harness database for supported schema state, WAL mode, foreign-key enforcement, and FTS5 availability. Database inspection does not create or migrate the selected path; a missing or invalid database is reported as a bounded failure. Harness does not choose a canonical database path yet, so this diagnostic requires an explicit `PATH`. The broader doctor contract (daemon, permissions, registrations, host adapters, projects, index state, skills, dashboard, and stale integrations) is not implemented yet.
 
-The installed `harnessd` console script still exposes only bootstrap help/version behavior; daemon/IPC, MCP, indexing, search, Task behavior, Hidden enforcement, host adapters, and dashboard behavior are not implemented yet.
+The installed `harnessd` console script now has one bounded runtime command: `harnessd serve --database PATH --socket PATH`. On supported POSIX systems the daemon initializes/migrates the explicit database, binds a Unix-domain socket, and serves a versioned internal `status` request. The socket directory must be owned by the current OS user with no group/other access; Harness creates a missing final directory with mode `0700`, sets the socket to `0600`, refuses to replace an existing socket-path entry, and removes only the socket inode it created on clean shutdown. The status result is deliberately small: schema version plus Project and Workspace counts.
+
+The current internal IPC protocol is independent of MCP wire objects, uses protocol version `1`, allows exactly one request/response per connection, enforces a 16 KiB message limit, uses bounded client/server timeouts, and rejects unknown fields/methods fail-closed. This slice does not choose canonical daemon/database/socket locations, implement autostart/service management, expose MCP, or claim a verified Windows named-pipe/equivalent transport; Windows daemon IPC therefore remains unsupported until that separate platform task is proven.
 
 Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
 

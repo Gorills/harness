@@ -148,11 +148,43 @@ def test_harness_doctor_reports_database_error_without_traceback(
     assert f"Database: FAIL ({database_path}: unable to open database file)" in output
 
 
-def test_harnessd_main_reports_bootstrap_state(
+def test_harnessd_main_lists_bounded_serve_command(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["harnessd"])
 
     assert harnessd_main() == 0
-    assert "Harness daemon runtime is not implemented yet." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Broader product runtime is under implementation." in output
+    assert "serve" in output
+
+
+def test_harnessd_serve_dispatches_explicit_database_and_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    seen: list[tuple[Path, Path]] = []
+
+    def run_daemon(database: Path, ipc_socket: Path) -> int:
+        seen.append((database, ipc_socket))
+        return 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harnessd",
+            "serve",
+            "--database",
+            str(database_path),
+            "--socket",
+            str(socket_path),
+        ],
+    )
+    monkeypatch.setattr(entrypoints, "_run_daemon", run_daemon)
+
+    assert harnessd_main() == 0
+    assert seen == [(database_path, socket_path)]
