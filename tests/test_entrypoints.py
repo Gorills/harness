@@ -221,6 +221,8 @@ def test_harness_status_uses_canonical_socket_without_override(
         database=tmp_path / "state" / "harness.db",
         socket=tmp_path / "run" / "harness.sock",
     )
+    defaults.socket.parent.mkdir(mode=0o700)
+    defaults.socket.parent.chmod(0o700)
     seen_sockets: list[Path] = []
 
     def request_status(
