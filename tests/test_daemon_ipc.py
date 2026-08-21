@@ -22,6 +22,7 @@ from harness.ipc import (
     PROTOCOL_VERSION,
     IpcProtocolError,
     StatusResult,
+    _receive_frame,
     _status_from_response,
     request_status,
 )
@@ -242,3 +243,31 @@ def test_client_rejects_boolean_protocol_version() -> None:
             },
             expected_request_id="request",
         )
+
+
+def test_receive_frame_timeout_is_total_not_per_chunk() -> None:
+    reader, writer = socket.socketpair()
+    reader.settimeout(0.1)
+
+    def trickle_request() -> None:
+        try:
+            for chunk in (b"{", b'"', b"x", b"\n"):
+                time.sleep(0.06)
+                try:
+                    writer.sendall(chunk)
+                except OSError:
+                    return
+        finally:
+            writer.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(trickle_request)
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="timed out|deadline"):
+                _receive_frame(reader)
+            elapsed = time.monotonic() - started
+            assert elapsed < 0.2
+        finally:
+            reader.close()
+            future.result()

@@ -5,6 +5,7 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 
@@ -149,21 +150,37 @@ def send_error_response(
 
 def _receive_frame(peer: socket.socket) -> bytes:
     data = bytearray()
-    while True:
-        chunk = peer.recv(min(4096, MAX_MESSAGE_BYTES + 1 - len(data)))
-        if not chunk:
-            raise IpcProtocolError("IPC peer closed before terminating the message")
-        newline_index = chunk.find(b"\n")
-        if newline_index >= 0:
-            data.extend(chunk[:newline_index])
+    original_timeout = peer.gettimeout()
+    deadline = (
+        monotonic() + original_timeout
+        if original_timeout is not None and original_timeout > 0
+        else None
+    )
+    try:
+        while True:
+            if deadline is not None:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("IPC receive deadline exceeded")
+                peer.settimeout(remaining)
+
+            chunk = peer.recv(min(4096, MAX_MESSAGE_BYTES + 1 - len(data)))
+            if not chunk:
+                raise IpcProtocolError("IPC peer closed before terminating the message")
+            newline_index = chunk.find(b"\n")
+            if newline_index >= 0:
+                data.extend(chunk[:newline_index])
+                if len(data) > MAX_MESSAGE_BYTES:
+                    raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
+                if chunk[newline_index + 1 :]:
+                    raise IpcProtocolError("multiple IPC messages per connection are not supported")
+                return bytes(data)
+            data.extend(chunk)
             if len(data) > MAX_MESSAGE_BYTES:
                 raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
-            if chunk[newline_index + 1 :]:
-                raise IpcProtocolError("multiple IPC messages per connection are not supported")
-            return bytes(data)
-        data.extend(chunk)
-        if len(data) > MAX_MESSAGE_BYTES:
-            raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
+    finally:
+        if deadline is not None:
+            peer.settimeout(original_timeout)
 
 
 def _decode_json(payload: bytes) -> dict[str, Any]:
