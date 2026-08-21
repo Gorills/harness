@@ -56,7 +56,7 @@ class GitWorkingTreeStatus:
 
     head: str | None
     branch: str | None
-    dirty_file_count: int
+    dirty_path_count: int
 
 
 def inspect_git_workspace(path: Path) -> GitWorkspaceLayout:
@@ -120,7 +120,7 @@ def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
     branch: str | None = None
     head_seen = False
     branch_seen = False
-    dirty_file_count = 0
+    dirty_path_count = 0
     for raw_line in result.stdout.splitlines():
         if raw_line.startswith(b"# branch.oid "):
             if head_seen:
@@ -143,14 +143,14 @@ def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
         if raw_line.startswith(b"# "):
             continue
         if raw_line:
-            dirty_file_count += 1
+            dirty_path_count += 1
 
     if not head_seen or not branch_seen:
         raise GitWorkspaceError("Git status omitted required branch metadata")
     return GitWorkingTreeStatus(
         head=head,
         branch=branch,
-        dirty_file_count=dirty_file_count,
+        dirty_path_count=dirty_path_count,
     )
 
 
