@@ -115,7 +115,21 @@ def test_inspect_working_tree_status_reports_head_branch_and_dirty_count(tmp_pat
 
     assert status.head == expected_head
     assert status.branch == expected_branch
-    assert status.dirty_file_count == 2
+    assert status.dirty_path_count == 2
+
+
+def test_inspect_working_tree_status_counts_untracked_directory_as_one_dirty_path(
+    tmp_path: Path,
+) -> None:
+    repository = _initialize_repository(tmp_path)
+    untracked = repository / "untracked"
+    untracked.mkdir()
+    (untracked / "one.txt").write_text("one\n", encoding="utf-8")
+    (untracked / "two.txt").write_text("two\n", encoding="utf-8")
+
+    status = inspect_git_working_tree_status(repository)
+
+    assert status.dirty_path_count == 1
 
 
 def test_inspect_working_tree_status_supports_unborn_branch(tmp_path: Path) -> None:
@@ -127,7 +141,7 @@ def test_inspect_working_tree_status_supports_unborn_branch(tmp_path: Path) -> N
 
     assert status.head is None
     assert status.branch
-    assert status.dirty_file_count == 0
+    assert status.dirty_path_count == 0
 
 
 def test_working_tree_status_ignores_inherited_git_repository_context(
@@ -145,7 +159,7 @@ def test_working_tree_status_ignores_inherited_git_repository_context(
     status = inspect_git_working_tree_status(target)
 
     assert status.head == target_head
-    assert status.dirty_file_count == 1
+    assert status.dirty_path_count == 1
 
 
 def test_inspect_git_workspace_rejects_non_git_directory(tmp_path: Path) -> None:
