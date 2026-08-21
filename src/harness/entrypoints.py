@@ -19,6 +19,7 @@ _DOCTOR_DATABASE_SCOPE = (
     "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
     "implemented yet."
 )
+_STATUS_FAILURE_DETAIL_MAX_LENGTH = 1024
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -85,17 +86,23 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Schema: {status.schema_version}")
 
 
+def _status_failure(detail: str) -> int:
+    detail = detail.replace("\r", "\\r").replace("\n", "\\n")
+    if len(detail) > _STATUS_FAILURE_DETAIL_MAX_LENGTH:
+        detail = f"{detail[: _STATUS_FAILURE_DETAIL_MAX_LENGTH - 3]}..."
+    print(f"Harness status: FAIL ({detail})")
+    return 1
+
+
 def _run_status(workspace_location: Path, socket_path: Path) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        print(
-            f"Harness status: FAIL (workspace path cannot be resolved: {workspace_location}: {exc})"
+        return _status_failure(
+            f"workspace path cannot be resolved: {workspace_location}: {exc}"
         )
-        return 1
     if not location.is_dir():
-        print(f"Harness status: FAIL (workspace path is not a directory: {location})")
-        return 1
+        return _status_failure(f"workspace path is not a directory: {location}")
 
     try:
         status = request_workspace_status(
@@ -109,8 +116,7 @@ def _run_status(workspace_location: Path, socket_path: Path) -> int:
             ],
         )
     except IpcError as exc:
-        print(f"Harness status: FAIL ({exc})")
-        return 1
+        return _status_failure(str(exc))
 
     _print_workspace_status(status)
     return 0
