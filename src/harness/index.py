@@ -228,8 +228,8 @@ def _read_harnessignore_rules(workspace_root: Path) -> bytes | None:
         _require_stable_entry(".harnessignore", opened_before, opened_after)
         current = harnessignore.lstat()
         _require_stable_entry(".harnessignore", opened_after, current)
-    except FileNotFoundError:
-        return None
+    except FileNotFoundError as exc:
+        raise IndexingError("Workspace changed while scanning: .harnessignore") from exc
     except OSError as exc:
         raise IndexingError("Workspace .harnessignore could not be read safely") from exc
     return rules
