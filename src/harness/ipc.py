@@ -427,7 +427,7 @@ def _workspace_status_from_response(
             raise IpcProtocolError("daemon workspace status has invalid HEAD identity")
     branch = result["branch"]
     if branch is not None:
-        branch = _bounded_response_string(branch, "branch", 1024)
+        branch = _bounded_response_string(branch, "branch", MAX_MESSAGE_BYTES)
 
     return WorkspaceStatusResult(
         schema_version=schema_version,
