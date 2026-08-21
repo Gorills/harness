@@ -13,25 +13,22 @@ from harness.git_workspace import (
 )
 
 
-def _git(cwd: Path, *arguments: str) -> str:
-    result = subprocess.run(
+def _git(cwd: Path, *arguments: str) -> None:
+    subprocess.run(
         ["git", *arguments],
         cwd=cwd,
         check=True,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
     )
-    return result.stdout.strip()
 
 
 def _normalized(path: Path) -> Path:
     return Path(os.path.normcase(str(path.resolve(strict=True))))
 
 
-def _initialize_repository(tmp_path: Path) -> Path:
-    repository = tmp_path / "repository with spaces"
-    repository.mkdir()
+def _initialize_repository(base: Path, name: str = "repository with spaces") -> Path:
+    repository = base / name
+    repository.mkdir(parents=True)
     _git(repository, "init")
     (repository / "tracked.txt").write_text("initial\n", encoding="utf-8")
     _git(repository, "add", "tracked.txt")
@@ -41,6 +38,8 @@ def _initialize_repository(tmp_path: Path) -> Path:
         "user.name=Harness Test",
         "-c",
         "user.email=harness@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
         "commit",
         "-m",
         "initial",
@@ -74,6 +73,24 @@ def test_linked_worktree_has_distinct_root_and_shared_common_dir(tmp_path: Path)
     assert linked_layout.workspace_root == _normalized(linked)
     assert linked_layout.workspace_root != primary_layout.workspace_root
     assert linked_layout.git_common_dir == primary_layout.git_common_dir
+
+
+def test_inspection_ignores_inherited_git_repository_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = _initialize_repository(tmp_path / "target-parent", "target")
+    decoy = _initialize_repository(tmp_path / "decoy-parent", "decoy")
+    nested = target / "nested"
+    nested.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(decoy / ".git"))
+
+    layout = inspect_git_workspace(nested)
+
+    assert layout.workspace_root == _normalized(target)
+    assert layout.git_common_dir == _normalized(target / ".git")
 
 
 def test_inspect_git_workspace_rejects_non_git_directory(tmp_path: Path) -> None:
