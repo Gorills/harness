@@ -16,6 +16,10 @@ class InsecureStateDirectoryError(RuntimePathError):
     """Raised when the canonical Harness state directory is not private to the current user."""
 
 
+class InsecureRuntimeDirectoryError(RuntimePathError):
+    """Raised when the canonical Harness runtime directory is not private to the current user."""
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePaths:
     """Canonical per-user paths used by the installed Harness POSIX runtime."""
@@ -62,12 +66,12 @@ def ensure_private_state_directory(
     *,
     effective_uid: int | None = None,
 ) -> None:
-    """Create/validate the canonical state directory as current-user-only."""
+    """Create/validate the canonical state directory as a real current-user-only directory."""
     _require_posix_runtime()
     uid = _effective_uid(effective_uid)
     try:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        directory_stat = directory.stat()
+        directory_stat = directory.lstat()
     except OSError as exc:
         raise RuntimePathError("Harness state directory could not be prepared") from exc
 
@@ -77,7 +81,34 @@ def ensure_private_state_directory(
         or stat.S_IMODE(directory_stat.st_mode) & 0o077
     ):
         raise InsecureStateDirectoryError(
-            "Harness state directory must be owned by the current user with no group/other access"
+            "Harness state directory must be a real directory owned by the current user "
+            "with no group/other access"
+        )
+
+
+def require_private_runtime_directory(
+    directory: Path,
+    *,
+    effective_uid: int | None = None,
+) -> None:
+    """Validate a canonical socket directory before a client trusts its Unix socket."""
+    _require_posix_runtime()
+    uid = _effective_uid(effective_uid)
+    try:
+        directory_stat = directory.lstat()
+    except FileNotFoundError as exc:
+        raise RuntimePathError("Harness runtime directory does not exist") from exc
+    except OSError as exc:
+        raise RuntimePathError("Harness runtime directory could not be inspected") from exc
+
+    if (
+        not stat.S_ISDIR(directory_stat.st_mode)
+        or directory_stat.st_uid != uid
+        or stat.S_IMODE(directory_stat.st_mode) & 0o077
+    ):
+        raise InsecureRuntimeDirectoryError(
+            "Harness runtime directory must be a real directory owned by the current user "
+            "with no group/other access"
         )
 
 
