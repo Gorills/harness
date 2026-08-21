@@ -48,9 +48,7 @@ def _start_server(
     return stop_event, executor, future
 
 
-def _stop_server(
-    stop_event: Event, executor: ThreadPoolExecutor, future: Future[None]
-) -> None:
+def _stop_server(stop_event: Event, executor: ThreadPoolExecutor, future: Future[None]) -> None:
     stop_event.set()
     executor.shutdown(wait=True)
     future.result()
@@ -113,7 +111,7 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
     [
         b'{"version":2,"request_id":"bad","method":"status"}\n',
         b'{"version":1,"request_id":"bad","method":"project_status"}\n',
-        b'not-json\n',
+        b"not-json\n",
     ],
 )
 def test_invalid_protocol_requests_fail_closed_and_daemon_recovers(
