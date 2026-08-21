@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -213,6 +213,31 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
     if target_version == 1:
         connection.execute(
             f"CREATE TABLE {_MIGRATIONS_TABLE} (version INTEGER PRIMARY KEY CHECK (version > 0))"
+        )
+        return
+    if target_version == 2:
+        connection.execute(
+            """
+            CREATE TABLE projects (
+                id TEXT PRIMARY KEY,
+                visibility_mode TEXT NOT NULL DEFAULT 'normal'
+                    CHECK (visibility_mode IN ('normal', 'hidden'))
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE workspaces (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                workspace_root TEXT NOT NULL UNIQUE,
+                git_common_dir TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute("CREATE INDEX workspaces_project_id_idx ON workspaces(project_id)")
+        connection.execute(
+            "CREATE INDEX workspaces_git_common_dir_idx ON workspaces(git_common_dir)"
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

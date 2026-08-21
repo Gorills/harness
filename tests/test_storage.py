@@ -30,7 +30,17 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1,), (2,)]
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_schema WHERE type = 'table'"
+            ).fetchall()
+        }
+        assert {"projects", "workspaces"} <= tables
     finally:
         connection.close()
 
@@ -44,7 +54,10 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
     assert second == first
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1,), (2,)]
     finally:
         connection.close()
 
@@ -78,7 +91,10 @@ def test_initialize_database_serializes_concurrent_migrations(
     assert statuses[1].schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1,), (2,)]
     finally:
         connection.close()
 
@@ -112,7 +128,44 @@ def test_initialize_database_migrates_existing_version_zero_database(tmp_path: P
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT value FROM legacy_fixture").fetchone() == ("preserved",)
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(1,)]
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1,), (2,)]
+    finally:
+        connection.close()
+
+
+def test_initialize_database_migrates_existing_version_one_database(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY CHECK (version > 0))"
+        )
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (1)")
+        connection.execute("CREATE TABLE legacy_fixture (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO legacy_fixture(value) VALUES ('preserved')")
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = initialize_database(database)
+
+    assert status.schema_version == 2
+    connection = sqlite3.connect(database)
+    try:
+        versions = connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        assert versions == [(1,), (2,)]
+        assert connection.execute("SELECT value FROM legacy_fixture").fetchone() == ("preserved",)
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'projects'"
+        ).fetchone() == ("projects",)
+        assert connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'workspaces'"
+        ).fetchone() == ("workspaces",)
     finally:
         connection.close()
 
@@ -124,7 +177,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     connection = sqlite3.connect(database)
     try:
         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
-        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2)")
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2), (3)")
         connection.commit()
         before = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
@@ -137,7 +190,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     try:
         assert connection.execute("PRAGMA journal_mode").fetchone() == before
         versions = connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert versions == [(1,), (2,)]
+        assert versions == [(1,), (2,), (3,)]
     finally:
         connection.close()
 

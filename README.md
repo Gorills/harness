@@ -2,7 +2,7 @@
 
 Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
 
-> **Repository status:** implementation foundation. Packaging/tooling, the SQLite persistence bootstrap, and the first read-only runtime doctor check exist; daemon/IPC and product domain behavior are not implemented yet.
+> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, the first Project/Workspace registry primitives, and read-only runtime doctor checks exist; daemon/IPC and broader product domain behavior are not implemented yet.
 
 ## Product principles
 
@@ -34,7 +34,9 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 ## Development state
 
-The repository now has a Python 3.13 package, a locked development toolchain, and a minimal SQLite persistence bootstrap. Database initialization creates ordered schema migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, and probes FTS5 as a runtime capability. No Project/Workspace/Task tables or other product domain schema are created yet.
+The repository now has a Python 3.13 package, a locked development toolchain, and SQLite schema version 2. Database initialization creates ordered migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, probes FTS5 as a runtime capability, and migrates the initial bootstrap schema forward without discarding unrelated existing data.
+
+Schema v2 contains only the first durable product registry slice: `projects` and `workspaces`. New Projects are created with the required `normal` visibility default. Workspace registration is internal-only and requires an explicit Project identity plus an inspectable Git worktree; Harness stores the canonical worktree root and Git common directory reported by Git, treats repeat registration as idempotent, fails closed on incompatible root/Project identity, and rejects contradictory visibility policy for Workspaces sharing one Git common directory. It does not infer logical Project identity across independent clones, expose visibility-mode transitions, or add `harness scan` yet. Task/index/search/knowledge/agent-session schemas are still absent.
 
 The installed `harness` CLI includes `harness doctor`. With no database argument it checks the current SQLite runtime and FTS5 availability using only an in-memory database, so it creates no durable Harness state. `harness doctor --database PATH` additionally inspects an explicitly selected, already initialized Harness database for supported schema state, WAL mode, foreign-key enforcement, and FTS5 availability. Database inspection does not create or migrate the selected path; a missing or invalid database is reported as a bounded failure. Harness does not choose a canonical database path yet, so this diagnostic requires an explicit `PATH`. The broader doctor contract (daemon, permissions, registrations, host adapters, projects, index state, skills, dashboard, and stale integrations) is not implemented yet.
 
