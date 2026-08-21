@@ -79,7 +79,7 @@ def serve_daemon(
         while stop_event is None or not stop_event.is_set():
             try:
                 client, _ = server.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             with client:
                 client.settimeout(_CLIENT_TIMEOUT_SECONDS)
@@ -100,7 +100,7 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
     except IpcMessageTooLargeError:
         _try_send_error(client, code="message_too_large", message="IPC request exceeds byte limit")
         return
-    except (IpcProtocolError, TimeoutError, socket.timeout):
+    except (IpcProtocolError, TimeoutError):
         _try_send_error(client, code="invalid_request", message="IPC request is invalid")
         return
 
