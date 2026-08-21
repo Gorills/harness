@@ -244,7 +244,15 @@ def _serve_workspace_status(
             message="daemon could not read Workspace status",
         )
         return
-    send_workspace_status_response(client, request_id, status)
+    try:
+        send_workspace_status_response(client, request_id, status)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace status exceeds IPC byte limit",
+        )
 
 
 def _try_send_error(
