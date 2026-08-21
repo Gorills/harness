@@ -5,7 +5,6 @@ from typing import NoReturn
 
 import pytest
 
-import harness.git_workspace as git_workspace
 from harness.git_workspace import (
     GitExecutableUnavailableError,
     NotGitWorkspaceError,
@@ -118,7 +117,7 @@ def test_inspect_git_workspace_reports_missing_git_executable(
     def unavailable_git(*args: object, **kwargs: object) -> NoReturn:
         raise FileNotFoundError("git")
 
-    monkeypatch.setattr(git_workspace.subprocess, "run", unavailable_git)
+    monkeypatch.setattr(subprocess, "run", unavailable_git)
 
     with pytest.raises(GitExecutableUnavailableError, match="Git executable is not available"):
         inspect_git_workspace(directory)
