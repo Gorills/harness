@@ -7,6 +7,7 @@ import harness.entrypoints as entrypoints
 from harness.doctor import DoctorReport
 from harness.entrypoints import harness_main, harnessd_main
 from harness.ipc import IpcTransportError, WorkspaceStatusResult
+from harness.runtime_paths import RuntimePaths
 from harness.storage import DatabaseStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -210,6 +211,45 @@ def test_harness_status_resolves_location_and_prints_bounded_status(
     ]
 
 
+def test_harness_status_uses_canonical_socket_without_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    defaults = RuntimePaths(
+        database=tmp_path / "state" / "harness.db",
+        socket=tmp_path / "run" / "harness.sock",
+    )
+    defaults.socket.parent.mkdir(mode=0o700)
+    defaults.socket.parent.chmod(0o700)
+    seen_sockets: list[Path] = []
+
+    def request_status(
+        ipc_socket: Path,
+        _hints: list[WorkspaceHint],
+    ) -> WorkspaceStatusResult:
+        seen_sockets.append(ipc_socket)
+        return WorkspaceStatusResult(
+            schema_version=3,
+            workspace_id="workspace-1",
+            project_id="project-1",
+            visibility_mode="normal",
+            workspace_root=workspace_root.resolve(),
+            head=None,
+            branch="main",
+            dirty_path_count=0,
+            indexed_file_count=0,
+        )
+
+    monkeypatch.setattr(sys, "argv", ["harness", "status", str(workspace_root)])
+    monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
+    monkeypatch.setattr(entrypoints, "request_workspace_status", request_status)
+
+    assert harness_main() == 0
+    assert seen_sockets == [defaults.socket]
+
+
 def test_harness_status_defaults_to_current_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -368,3 +408,31 @@ def test_harnessd_serve_dispatches_explicit_database_and_socket(
 
     assert harnessd_main() == 0
     assert seen == [(database_path, socket_path)]
+
+
+def test_harnessd_serve_uses_canonical_paths_and_prepares_default_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    defaults = RuntimePaths(
+        database=tmp_path / "state" / "harness" / "harness.db",
+        socket=tmp_path / "run" / "harness.sock",
+    )
+    prepared: list[Path] = []
+    seen: list[tuple[Path, Path]] = []
+
+    def prepare_state(directory: Path) -> None:
+        prepared.append(directory)
+
+    def run_daemon(database: Path, ipc_socket: Path) -> int:
+        seen.append((database, ipc_socket))
+        return 0
+
+    monkeypatch.setattr(sys, "argv", ["harnessd", "serve"])
+    monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
+    monkeypatch.setattr(entrypoints, "ensure_private_state_directory", prepare_state)
+    monkeypatch.setattr(entrypoints, "_run_daemon", run_daemon)
+
+    assert harnessd_main() == 0
+    assert prepared == [defaults.database.parent]
+    assert seen == [(defaults.database, defaults.socket)]
