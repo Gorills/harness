@@ -6,6 +6,7 @@ from harness.workspace_resolution import (
     AmbiguousWorkspaceError,
     WorkspaceCandidate,
     WorkspaceHint,
+    WorkspaceHintMatchMode,
     WorkspaceNotFoundError,
     WorkspaceResolver,
 )
@@ -40,9 +41,33 @@ def test_stronger_unmatched_hint_fails_instead_of_falling_through(tmp_path: Path
         resolver.resolve(
             [
                 WorkspaceHint(tmp_path / "unknown", "strong-explicit-root"),
-                WorkspaceHint(fallback, "cwd"),
+                WorkspaceHint(fallback, "cwd", WorkspaceHintMatchMode.LOCATION),
             ]
         )
+
+
+def test_unregistered_root_inside_registered_workspace_fails_closed(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    unregistered = registered / "nested-project"
+    unregistered.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+
+    with pytest.raises(WorkspaceNotFoundError, match="explicit-root"):
+        resolver.resolve([WorkspaceHint(unregistered, "explicit-root")])
+
+
+def test_location_inside_registered_workspace_matches_ancestor(tmp_path: Path) -> None:
+    registered = tmp_path / "repo"
+    location = registered / "src" / "package"
+    location.mkdir(parents=True)
+    resolver = WorkspaceResolver([WorkspaceCandidate("registered", registered)])
+
+    resolution = resolver.resolve(
+        [WorkspaceHint(location, "cwd", WorkspaceHintMatchMode.LOCATION)]
+    )
+
+    assert resolution.workspace_id == "registered"
+    assert resolution.workspace_root == registered.resolve()
 
 
 def test_first_matching_hint_wins_over_weaker_hint(tmp_path: Path) -> None:
@@ -60,7 +85,7 @@ def test_first_matching_hint_wins_over_weaker_hint(tmp_path: Path) -> None:
     resolution = resolver.resolve(
         [
             WorkspaceHint(first, "explicit-root"),
-            WorkspaceHint(second, "cwd"),
+            WorkspaceHint(second, "cwd", WorkspaceHintMatchMode.LOCATION),
         ]
     )
 
@@ -80,7 +105,9 @@ def test_nested_workspace_is_more_specific_for_descendant_hint(tmp_path: Path) -
         ]
     )
 
-    resolution = resolver.resolve([WorkspaceHint(cwd, "cwd")])
+    resolution = resolver.resolve(
+        [WorkspaceHint(cwd, "cwd", WorkspaceHintMatchMode.LOCATION)]
+    )
 
     assert resolution.workspace_id == "nested"
     assert resolution.workspace_root == nested.resolve()
@@ -92,7 +119,9 @@ def test_normalizes_parent_segments_before_matching(tmp_path: Path) -> None:
     child.mkdir(parents=True)
     resolver = WorkspaceResolver([WorkspaceCandidate("workspace-1", root)])
 
-    resolution = resolver.resolve([WorkspaceHint(child / ".." / "src", "cwd")])
+    resolution = resolver.resolve(
+        [WorkspaceHint(child / ".." / "src", "cwd", WorkspaceHintMatchMode.LOCATION)]
+    )
 
     assert resolution.matched_path == child.resolve()
 
@@ -114,7 +143,7 @@ def test_ambiguous_equal_roots_fail_instead_of_falling_through(tmp_path: Path) -
         resolver.resolve(
             [
                 WorkspaceHint(root, "explicit-root"),
-                WorkspaceHint(fallback, "cwd"),
+                WorkspaceHint(fallback, "cwd", WorkspaceHintMatchMode.LOCATION),
             ]
         )
 
