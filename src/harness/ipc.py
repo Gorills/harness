@@ -519,11 +519,7 @@ def _validate_search_query(value: object) -> None:
 
 
 def _validate_search_limit(value: object) -> None:
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or not 1 <= value <= MAX_SEARCH_LIMIT
-    ):
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SEARCH_LIMIT:
         raise IpcProtocolError(
             f"workspace search limit must be an integer between 1 and {MAX_SEARCH_LIMIT}"
         )
@@ -764,7 +760,11 @@ def _workspace_search_from_response(
         raise IpcProtocolError("daemon workspace search result does not match the IPC schema")
 
     schema_version = result["schema_version"]
-    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version < 0:
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 0
+    ):
         raise IpcProtocolError("daemon workspace search schema version has invalid type")
     workspace_id = _bounded_search_response_string(result["workspace_id"], "workspace_id", 128)
     project_id = _bounded_search_response_string(result["project_id"], "project_id", 128)
@@ -798,9 +798,7 @@ def _workspace_search_from_response(
         if path.is_absolute() or ".." in path.parts or "\x00" in relative_path:
             raise IpcProtocolError("daemon workspace search hit has unsafe relative_path")
         try:
-            kind = IndexedFileKind(
-                _bounded_search_response_string(raw_hit["kind"], "kind", 16)
-            )
+            kind = IndexedFileKind(_bounded_search_response_string(raw_hit["kind"], "kind", 16))
         except ValueError as exc:
             raise IpcProtocolError("daemon workspace search hit has unsupported kind") from exc
         size_bytes = raw_hit["size_bytes"]
