@@ -19,6 +19,7 @@ _HINT_SOURCE_MAX_LENGTH = 64
 _HINT_PATH_MAX_LENGTH = 4096
 _MAX_WORKSPACE_HINTS = 4
 _DEFAULT_TIMEOUT_SECONDS = 2.0
+_SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
 
 
 class IpcError(RuntimeError):
@@ -75,12 +76,30 @@ class WorkspaceStatusResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceScanResult:
+    """Bounded registration/reconciliation result returned by ``harness scan``."""
+
+    schema_version: int
+    workspace_id: str
+    project_id: str
+    visibility_mode: str
+    workspace_root: Path
+    project_created: bool
+    workspace_created: bool
+    file_count: int
+    added: int
+    updated: int
+    removed: int
+
+
+@dataclass(frozen=True, slots=True)
 class IpcRequest:
     """Validated internal request independent of MCP wire objects."""
 
     request_id: str
     method: str
     workspace_hints: tuple[WorkspaceHint, ...] = ()
+    scan_path: Path | None = None
 
 
 def request_status(
@@ -119,6 +138,29 @@ def request_workspace_status(
     return _workspace_status_from_response(response, expected_request_id=request_id)
 
 
+def request_workspace_scan(
+    socket_path: Path,
+    path: Path,
+    *,
+    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+) -> WorkspaceScanResult:
+    """Register/reuse one Git Workspace and request deterministic index reconciliation."""
+    scan_path = str(path)
+    _validate_scan_path(scan_path)
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "scan_workspace",
+            "params": {"path": scan_path},
+        },
+        timeout=timeout,
+    )
+    return _workspace_scan_from_response(response, expected_request_id=request_id)
+
+
 def receive_request(peer: socket.socket) -> IpcRequest:
     """Receive and validate exactly one bounded request frame."""
     payload = _decode_json(_receive_frame(peer))
@@ -150,6 +192,15 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             request_id=request_id,
             method=method,
             workspace_hints=_workspace_hints_from_params(payload["params"]),
+        )
+
+    if method == "scan_workspace":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("workspace scan request fields do not match the IPC schema")
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            scan_path=_scan_path_from_params(payload["params"]),
         )
 
     raise IpcProtocolError("unsupported IPC method")
@@ -195,6 +246,36 @@ def send_workspace_status_response(
                     "branch": status.branch,
                     "dirty_path_count": status.dirty_path_count,
                     "indexed_file_count": status.indexed_file_count,
+                },
+            }
+        )
+    )
+
+
+def send_workspace_scan_response(
+    peer: socket.socket,
+    request_id: str,
+    result: WorkspaceScanResult,
+) -> None:
+    """Send the exact success contract for one deterministic Workspace scan."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "project_id": result.project_id,
+                    "visibility_mode": result.visibility_mode,
+                    "workspace_root": str(result.workspace_root),
+                    "project_created": result.project_created,
+                    "workspace_created": result.workspace_created,
+                    "file_count": result.file_count,
+                    "added": result.added,
+                    "updated": result.updated,
+                    "removed": result.removed,
                 },
             }
         )
@@ -289,6 +370,23 @@ def _workspace_hints_from_params(value: object) -> tuple[WorkspaceHint, ...]:
         _validate_hint_fields(path, source, match_mode)
         hints.append(WorkspaceHint(path=Path(path), source=source, match_mode=match_mode))
     return tuple(hints)
+
+
+def _scan_path_from_params(value: object) -> Path:
+    if not isinstance(value, dict) or set(value) != {"path"}:
+        raise IpcProtocolError("workspace scan params do not match the IPC schema")
+    path = value["path"]
+    if not isinstance(path, str):
+        raise IpcProtocolError("workspace scan path has invalid type")
+    _validate_scan_path(path)
+    return Path(path)
+
+
+def _validate_scan_path(path: str) -> None:
+    if not path or len(path) > _HINT_PATH_MAX_LENGTH or "\x00" in path:
+        raise IpcProtocolError("workspace scan path must be a non-empty bounded path")
+    if not Path(path).is_absolute():
+        raise IpcProtocolError("workspace scan path must be absolute")
 
 
 def _validate_hint_fields(
@@ -442,6 +540,73 @@ def _workspace_status_from_response(
     )
 
 
+def _workspace_scan_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> WorkspaceScanResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "workspace_id",
+        "project_id",
+        "visibility_mode",
+        "workspace_root",
+        "project_created",
+        "workspace_created",
+        "file_count",
+        "added",
+        "updated",
+        "removed",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon workspace scan result does not match the IPC schema")
+
+    counts = (
+        result["schema_version"],
+        result["file_count"],
+        result["added"],
+        result["updated"],
+        result["removed"],
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        raise IpcProtocolError("daemon workspace scan counts have invalid field types")
+    project_created = result["project_created"]
+    workspace_created = result["workspace_created"]
+    if not isinstance(project_created, bool) or not isinstance(workspace_created, bool):
+        raise IpcProtocolError("daemon workspace scan registration flags have invalid field types")
+
+    workspace_id = _bounded_scan_response_string(result["workspace_id"], "workspace_id", 128)
+    project_id = _bounded_scan_response_string(result["project_id"], "project_id", 128)
+    visibility_mode = _bounded_scan_response_string(
+        result["visibility_mode"], "visibility_mode", 16
+    )
+    if visibility_mode not in {"normal", "hidden"}:
+        raise IpcProtocolError("daemon workspace scan has unsupported visibility mode")
+    workspace_root_value = _bounded_scan_response_string(
+        result["workspace_root"],
+        "workspace_root",
+        _HINT_PATH_MAX_LENGTH,
+    )
+    workspace_root = Path(workspace_root_value)
+    if not workspace_root.is_absolute():
+        raise IpcProtocolError("daemon workspace scan root must be absolute")
+
+    return WorkspaceScanResult(
+        schema_version=counts[0],
+        workspace_id=workspace_id,
+        project_id=project_id,
+        visibility_mode=visibility_mode,
+        workspace_root=workspace_root,
+        project_created=project_created,
+        workspace_created=workspace_created,
+        file_count=counts[1],
+        added=counts[2],
+        updated=counts[3],
+        removed=counts[4],
+    )
+
+
 def _success_result(response: dict[str, Any], *, expected_request_id: str) -> dict[str, Any]:
     version = response.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version != PROTOCOL_VERSION:
@@ -472,6 +637,12 @@ def _success_result(response: dict[str, Any], *, expected_request_id: str) -> di
 def _bounded_response_string(value: object, field: str, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise IpcProtocolError(f"daemon workspace status has invalid {field}")
+    return value
+
+
+def _bounded_scan_response_string(value: object, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise IpcProtocolError(f"daemon workspace scan has invalid {field}")
     return value
 
 

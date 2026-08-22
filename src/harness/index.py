@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import monotonic
 
 from harness.git_workspace import _git_environment, inspect_git_workspace
 from harness.registry import WorkspaceRecord, get_workspace
@@ -34,6 +35,10 @@ class IndexingError(RuntimeError):
 
 class WorkspaceIndexMismatchError(IndexingError):
     """Raised when the registered Workspace no longer matches its Git worktree identity."""
+
+
+class ScanDeadlineExceededError(IndexingError):
+    """Raised when a bounded daemon-backed scan exceeds its execution deadline."""
 
 
 class IndexedFileKind(StrEnum):
@@ -65,15 +70,23 @@ class ScanResult:
     removed: int
 
 
-def scan_workspace(connection: sqlite3.Connection, workspace_id: str) -> ScanResult:
+def scan_workspace(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    deadline: float | None = None,
+) -> ScanResult:
     """Reconcile the rebuildable file inventory for one registered Workspace."""
+    _require_scan_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
     _require_registered_layout(workspace)
-    snapshot = _build_snapshot(workspace)
+    snapshot = _build_snapshot(workspace, deadline=deadline)
+    _require_scan_deadline(deadline)
     _require_registered_layout(workspace)
 
     connection.execute("BEGIN IMMEDIATE")
     try:
+        _require_scan_deadline(deadline)
         current_workspace = get_workspace(connection, workspace_id)
         if current_workspace != workspace:
             raise WorkspaceIndexMismatchError("workspace registry identity changed during scan")
@@ -84,6 +97,7 @@ def scan_workspace(connection: sqlite3.Connection, workspace_id: str) -> ScanRes
         added = 0
         updated = 0
         for relative_path, record in snapshot.items():
+            _require_scan_deadline(deadline)
             prior = existing.get(relative_path)
             if prior == record:
                 continue
@@ -112,6 +126,7 @@ def scan_workspace(connection: sqlite3.Connection, workspace_id: str) -> ScanRes
 
         stale_paths = sorted(set(existing) - set(snapshot))
         for relative_path in stale_paths:
+            _require_scan_deadline(deadline)
             connection.execute(
                 "DELETE FROM indexed_files WHERE workspace_id = ? AND relative_path = ?",
                 (workspace_id, relative_path),
@@ -160,14 +175,25 @@ def _require_registered_layout(workspace: WorkspaceRecord) -> None:
         )
 
 
-def _build_snapshot(workspace: WorkspaceRecord) -> dict[str, IndexedFileRecord]:
+def _build_snapshot(
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float | None,
+) -> dict[str, IndexedFileRecord]:
+    _require_scan_deadline(deadline)
     harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
-    relative_paths = _candidate_paths(workspace.workspace_root, harnessignore_rules)
+    relative_paths = _candidate_paths(
+        workspace.workspace_root,
+        harnessignore_rules,
+        deadline=deadline,
+    )
     snapshot: dict[str, IndexedFileRecord] = {}
     for relative_path in relative_paths:
-        record = _inspect_entry(workspace, relative_path)
+        _require_scan_deadline(deadline)
+        record = _inspect_entry(workspace, relative_path, deadline=deadline)
         if record is not None:
             snapshot[relative_path] = record
+    _require_scan_deadline(deadline)
     if _read_harnessignore_rules(workspace.workspace_root) != harnessignore_rules:
         raise IndexingError("Workspace changed while scanning: .harnessignore")
     return snapshot
@@ -176,17 +202,28 @@ def _build_snapshot(workspace: WorkspaceRecord) -> dict[str, IndexedFileRecord]:
 def _candidate_paths(
     workspace_root: Path,
     harnessignore_rules: bytes | None,
+    *,
+    deadline: float | None,
 ) -> tuple[str, ...]:
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
     if harnessignore_rules is None:
-        return _candidate_paths_from_git(workspace_root, exclude_arguments)
+        return _candidate_paths_from_git(
+            workspace_root,
+            exclude_arguments,
+            deadline=deadline,
+        )
 
     try:
         with TemporaryDirectory(prefix="harness-ignore-") as temporary_directory:
+            _require_scan_deadline(deadline)
             exclude_file = Path(temporary_directory) / "rules"
             exclude_file.write_bytes(harnessignore_rules)
             exclude_arguments.append(f"--exclude-from={exclude_file}")
-            return _candidate_paths_from_git(workspace_root, exclude_arguments)
+            return _candidate_paths_from_git(
+                workspace_root,
+                exclude_arguments,
+                deadline=deadline,
+            )
     except OSError as exc:
         raise IndexingError("Workspace .harnessignore snapshot could not be prepared") from exc
 
@@ -194,6 +231,8 @@ def _candidate_paths(
 def _candidate_paths_from_git(
     workspace_root: Path,
     exclude_arguments: list[str],
+    *,
+    deadline: float | None,
 ) -> tuple[str, ...]:
     candidates = _git_ls_files(
         workspace_root,
@@ -201,6 +240,7 @@ def _candidate_paths_from_git(
         "--others",
         "--exclude-standard",
         *exclude_arguments,
+        deadline=deadline,
     )
     excluded_tracked = set(
         _git_ls_files(
@@ -208,6 +248,7 @@ def _candidate_paths_from_git(
             "--cached",
             "--ignored",
             *exclude_arguments,
+            deadline=deadline,
         )
     )
     return tuple(sorted(set(candidates) - excluded_tracked))
@@ -240,7 +281,11 @@ def _read_harnessignore_rules(workspace_root: Path) -> bytes | None:
     return rules
 
 
-def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
+def _git_ls_files(
+    workspace_root: Path,
+    *arguments: str,
+    deadline: float | None,
+) -> tuple[str, ...]:
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", *arguments],
@@ -248,7 +293,10 @@ def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
             check=False,
             capture_output=True,
             env=_git_environment(),
+            timeout=_remaining_scan_seconds(deadline),
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ScanDeadlineExceededError("Workspace scan deadline exceeded") from exc
     except FileNotFoundError as exc:
         raise IndexingError("Git executable is not available for Workspace scan") from exc
     except OSError as exc:
@@ -262,6 +310,7 @@ def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
 
     paths: list[str] = []
     for raw_path in result.stdout.split(b"\0"):
+        _require_scan_deadline(deadline)
         if not raw_path:
             continue
         relative_path = os.fsdecode(raw_path)
@@ -281,7 +330,10 @@ def _git_ls_files(workspace_root: Path, *arguments: str) -> tuple[str, ...]:
 def _inspect_entry(
     workspace: WorkspaceRecord,
     relative_path: str,
+    *,
+    deadline: float | None,
 ) -> IndexedFileRecord | None:
+    _require_scan_deadline(deadline)
     path = workspace.workspace_root / relative_path
     try:
         parent = path.parent.resolve(strict=True)
@@ -314,6 +366,7 @@ def _inspect_entry(
             path,
             relative_path=relative_path,
             expected_before=before,
+            deadline=deadline,
         )
         _require_stable_entry(relative_path, opened_before, opened_after)
         current = path.lstat()
@@ -336,12 +389,17 @@ def _hash_regular_file(
     *,
     relative_path: str,
     expected_before: os.stat_result,
+    deadline: float | None,
 ) -> tuple[str, os.stat_result, os.stat_result]:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         opened_before = os.fstat(stream.fileno())
         _require_stable_entry(relative_path, expected_before, opened_before)
-        while chunk := stream.read(_HASH_CHUNK_BYTES):
+        while True:
+            _require_scan_deadline(deadline)
+            chunk = stream.read(_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
             digest.update(chunk)
         opened_after = os.fstat(stream.fileno())
     return digest.hexdigest(), opened_before, opened_after
@@ -356,6 +414,20 @@ def _require_stable_entry(
     identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
     if identity_before != identity_after:
         raise IndexingError(f"Workspace changed while scanning: {relative_path}")
+
+
+def _remaining_scan_seconds(deadline: float | None) -> float | None:
+    if deadline is None:
+        return None
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise ScanDeadlineExceededError("Workspace scan deadline exceeded")
+    return remaining
+
+
+def _require_scan_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise ScanDeadlineExceededError("Workspace scan deadline exceeded")
 
 
 def _record_from_row(row: tuple[object, ...]) -> IndexedFileRecord:
