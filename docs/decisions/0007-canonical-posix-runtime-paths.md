@@ -78,7 +78,7 @@ Path selection itself performs no daemon autostart, registration, scan, MCP setu
 ### Costs and limits
 
 - This decision is POSIX-only until the Windows local-user IPC transport is implemented.
-- A stale Unix socket can still block startup under the daemon's existing fail-closed `SocketPathInUseError`; stale-socket recovery/autostart belongs to the later singleton/service task.
+- Daemon singleton ownership and crash-stale socket recovery are defined separately by ADR-0008; this path decision still performs no autostart or OS service management.
 - This does not create a public Project/Workspace registration workflow or scan command.
 - The XDG-compatible fallback on macOS is a Harness convention rather than a claim that macOS natively defines XDG variables.
 
