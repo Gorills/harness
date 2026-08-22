@@ -52,7 +52,7 @@ def test_canonical_autostart_reuses_reachable_daemon(
         raise AssertionError("reachable canonical daemon must not be respawned")
 
     monkeypatch.setattr(autostart, "request_status", request_status)
-    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", unexpected_spawn)
 
     ensure_canonical_daemon(paths)
 
@@ -74,7 +74,7 @@ def test_canonical_autostart_treats_probe_timeout_as_busy_daemon(
         raise AssertionError("a busy daemon probe timeout must not trigger a duplicate start")
 
     monkeypatch.setattr(autostart, "request_status", request_status)
-    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", unexpected_spawn)
 
     ensure_canonical_daemon(paths)
 
@@ -99,7 +99,7 @@ def test_canonical_autostart_starts_package_module_when_runtime_directory_is_mis
         paths.socket.parent.chmod(0o700)
         return object()
 
-    monkeypatch.setattr(autostart.subprocess, "Popen", spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
     monkeypatch.setattr(autostart, "request_status", lambda *_args, **_kwargs: _ready_status())
 
     ensure_canonical_daemon(paths)
@@ -132,7 +132,7 @@ def test_canonical_autostart_recovers_confirmed_absence_with_one_spawn(
         return object()
 
     monkeypatch.setattr(autostart, "request_status", request_status)
-    monkeypatch.setattr(autostart.subprocess, "Popen", spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
 
     ensure_canonical_daemon(paths)
 
@@ -163,7 +163,7 @@ def test_canonical_autostart_accepts_busy_endpoint_during_readiness_race(
         return object()
 
     monkeypatch.setattr(autostart, "request_status", request_status)
-    monkeypatch.setattr(autostart.subprocess, "Popen", spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
 
     ensure_canonical_daemon(paths)
 
@@ -186,7 +186,7 @@ def test_canonical_autostart_does_not_spawn_for_unclassified_transport_failure(
         raise AssertionError("unclassified transport failures must fail closed")
 
     monkeypatch.setattr(autostart, "request_status", request_status)
-    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", unexpected_spawn)
 
     with pytest.raises(IpcTransportError, match="permission denied"):
         ensure_canonical_daemon(paths)
@@ -203,7 +203,7 @@ def test_canonical_autostart_rejects_existing_insecure_runtime_directory_without
     def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("insecure runtime directory must fail closed")
 
-    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", unexpected_spawn)
 
     with pytest.raises(InsecureRuntimeDirectoryError):
         ensure_canonical_daemon(paths)
@@ -218,7 +218,7 @@ def test_canonical_autostart_reports_spawn_failure(
     def failed_spawn(*_args: object, **_kwargs: object) -> None:
         raise OSError("process creation denied")
 
-    monkeypatch.setattr(autostart.subprocess, "Popen", failed_spawn)
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", failed_spawn)
 
     with pytest.raises(DaemonAutostartError, match="could not be started"):
         ensure_canonical_daemon(paths)
