@@ -5,7 +5,6 @@ from pathlib import Path
 from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
-from typing import TypeVar
 
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import (
@@ -40,7 +39,6 @@ _DOCTOR_DATABASE_SCOPE = (
     "implemented yet."
 )
 _FAILURE_DETAIL_MAX_LENGTH = 1024
-_ResultT = TypeVar("_ResultT")
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -138,7 +136,7 @@ def _scan_failure(detail: str) -> int:
     return _bounded_failure("Harness scan", detail)
 
 
-def _request_with_canonical_autostart(
+def _request_with_canonical_autostart[_ResultT](
     request: Callable[[], _ResultT],
     *,
     socket_path: Path,
