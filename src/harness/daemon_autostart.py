@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +12,7 @@ from harness.runtime_paths import RuntimePathError, RuntimePaths, require_privat
 _DAEMON_PROBE_TIMEOUT_SECONDS = 0.2
 _DAEMON_START_TIMEOUT_SECONDS = 3.0
 _DAEMON_START_POLL_SECONDS = 0.05
+_DAEMON_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 
 
 class DaemonAutostartError(IpcTransportError):
@@ -31,7 +33,11 @@ def ensure_canonical_daemon(paths: RuntimePaths) -> None:
 
     try:
         request_status(paths.socket, timeout=_DAEMON_PROBE_TIMEOUT_SECONDS)
-    except IpcTransportError:
+    except IpcTransportError as exc:
+        if _transport_error_is_timeout(exc):
+            return
+        if not _transport_error_proves_daemon_absent(exc):
+            raise
         _start_canonical_daemon()
         _wait_for_canonical_daemon(paths)
 
@@ -44,6 +50,15 @@ def _runtime_directory_is_missing(directory: Path) -> bool:
     except OSError as exc:
         raise RuntimePathError("Harness runtime directory could not be inspected") from exc
     return False
+
+
+def _transport_error_proves_daemon_absent(error: IpcTransportError) -> bool:
+    cause = error.__cause__
+    return isinstance(cause, OSError) and cause.errno in _DAEMON_ABSENT_ERRNOS
+
+
+def _transport_error_is_timeout(error: IpcTransportError) -> bool:
+    return isinstance(error.__cause__, TimeoutError)
 
 
 def _start_canonical_daemon() -> None:
@@ -66,7 +81,9 @@ def _wait_for_canonical_daemon(paths: RuntimePaths) -> None:
     while True:
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise DaemonAutostartError("Harness daemon did not become ready") from last_transport_error
+            raise DaemonAutostartError(
+                "Harness daemon did not become ready"
+            ) from last_transport_error
 
         if _runtime_directory_is_missing(paths.socket.parent):
             sleep(min(_DAEMON_START_POLL_SECONDS, remaining))
@@ -79,6 +96,10 @@ def _wait_for_canonical_daemon(paths: RuntimePaths) -> None:
                 timeout=min(_DAEMON_PROBE_TIMEOUT_SECONDS, remaining),
             )
         except IpcTransportError as exc:
+            if _transport_error_is_timeout(exc):
+                return
+            if not _transport_error_proves_daemon_absent(exc):
+                raise
             last_transport_error = exc
             sleep(min(_DAEMON_START_POLL_SECONDS, remaining))
             continue
