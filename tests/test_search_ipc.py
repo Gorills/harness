@@ -272,9 +272,7 @@ def test_workspace_search_corrupt_index_returns_error_and_daemon_recovers(tmp_pa
 
 def test_workspace_search_response_overflow_returns_bounded_error(tmp_path: Path) -> None:
     directory = "d" * 120
-    files = {
-        f"{directory}/file-{index:02d}-{'x' * 150}.txt": "x\n" for index in range(50)
-    }
+    files = {f"{directory}/file-{index:02d}-{'x' * 150}.txt": "x\n" for index in range(50)}
     root, database, _project_id, _workspace_id = _registered_workspace_database(
         tmp_path,
         files=files,
