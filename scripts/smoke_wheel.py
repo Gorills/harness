@@ -84,6 +84,18 @@ def main() -> int:
                     f"unexpected {name} --version output: {result.stdout!r}; expected {expected!r}"
                 )
 
+        daemon_module = _run(
+            (str(python), "-P", "-m", "harness.daemon_process", "--version"),
+            cwd=workspace,
+            env=isolated_env,
+        )
+        expected_daemon_module = f"harnessd {EXPECTED_VERSION}\n"
+        if daemon_module.stdout != expected_daemon_module:
+            raise RuntimeError(
+                "unexpected installed daemon module --version output: "
+                f"{daemon_module.stdout!r}; expected {expected_daemon_module!r}"
+            )
+
         harness = scripts_dir / f"harness{suffix}"
         harnessd = scripts_dir / f"harnessd{suffix}"
         help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)

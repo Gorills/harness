@@ -86,6 +86,31 @@ def ensure_private_state_directory(
         )
 
 
+def ensure_private_runtime_directory(
+    directory: Path,
+    *,
+    effective_uid: int | None = None,
+) -> None:
+    """Create/validate the canonical socket directory before client autostart or IPC."""
+    _require_posix_runtime()
+    uid = _effective_uid(effective_uid)
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory_stat = directory.lstat()
+    except OSError as exc:
+        raise RuntimePathError("Harness runtime directory could not be prepared") from exc
+
+    if (
+        not stat.S_ISDIR(directory_stat.st_mode)
+        or directory_stat.st_uid != uid
+        or stat.S_IMODE(directory_stat.st_mode) & 0o077
+    ):
+        raise InsecureRuntimeDirectoryError(
+            "Harness runtime directory must be owned by the current user, be a real directory, "
+            "and have no group/other access"
+        )
+
+
 def require_private_runtime_directory(
     directory: Path,
     *,

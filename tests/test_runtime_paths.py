@@ -8,6 +8,7 @@ from harness.runtime_paths import (
     InsecureStateDirectoryError,
     RuntimePaths,
     default_runtime_paths,
+    ensure_private_runtime_directory,
     ensure_private_state_directory,
 )
 
@@ -54,6 +55,18 @@ def test_ensure_private_state_directory_creates_current_user_only_directory(
     directory = tmp_path / "state" / "harness"
 
     ensure_private_state_directory(directory)
+
+    assert directory.is_dir()
+    assert stat.S_IMODE(directory.stat().st_mode) & 0o077 == 0
+    assert directory.stat().st_uid == os.geteuid()
+
+
+def test_ensure_private_runtime_directory_creates_current_user_only_directory(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "run" / "harness"
+
+    ensure_private_runtime_directory(directory)
 
     assert directory.is_dir()
     assert stat.S_IMODE(directory.stat().st_mode) & 0o077 == 0
