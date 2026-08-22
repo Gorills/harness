@@ -72,6 +72,7 @@ def test_start_canonical_daemon_uses_same_python_detached_and_waits_for_status(
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.DEVNULL,
                 "stderr": subprocess.DEVNULL,
+                "cwd": "/",
                 "close_fds": True,
                 "start_new_session": True,
             },
