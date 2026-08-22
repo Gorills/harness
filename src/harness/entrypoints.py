@@ -6,6 +6,7 @@ from threading import Event
 from types import FrameType
 
 from harness.daemon import DaemonError, serve_daemon
+from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import DoctorReport, run_doctor_checks
 from harness.ipc import (
     IpcError,
@@ -18,7 +19,6 @@ from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
     ensure_private_state_directory,
-    require_private_runtime_directory,
 )
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -129,13 +129,17 @@ def _scan_failure(detail: str) -> int:
     return _bounded_failure("Harness scan", detail)
 
 
+def _canonical_socket() -> Path:
+    defaults = default_runtime_paths()
+    ensure_canonical_daemon(defaults)
+    return defaults.socket
+
+
 def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
     if socket_path is None:
         try:
-            defaults = default_runtime_paths()
-            require_private_runtime_directory(defaults.socket.parent)
-            socket_path = defaults.socket
-        except RuntimePathError as exc:
+            socket_path = _canonical_socket()
+        except (RuntimePathError, IpcError) as exc:
             return _status_failure(str(exc))
 
     try:
@@ -166,10 +170,8 @@ def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
 def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
     if socket_path is None:
         try:
-            defaults = default_runtime_paths()
-            require_private_runtime_directory(defaults.socket.parent)
-            socket_path = defaults.socket
-        except RuntimePathError as exc:
+            socket_path = _canonical_socket()
+        except (RuntimePathError, IpcError) as exc:
             return _scan_failure(str(exc))
 
     try:
