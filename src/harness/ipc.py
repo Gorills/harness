@@ -578,7 +578,9 @@ def _workspace_scan_from_response(
 
     workspace_id = _bounded_scan_response_string(result["workspace_id"], "workspace_id", 128)
     project_id = _bounded_scan_response_string(result["project_id"], "project_id", 128)
-    visibility_mode = _bounded_scan_response_string(result["visibility_mode"], "visibility_mode", 16)
+    visibility_mode = _bounded_scan_response_string(
+        result["visibility_mode"], "visibility_mode", 16
+    )
     if visibility_mode not in {"normal", "hidden"}:
         raise IpcProtocolError("daemon workspace scan has unsupported visibility mode")
     workspace_root_value = _bounded_scan_response_string(
