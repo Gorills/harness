@@ -19,13 +19,15 @@ from harness.ipc import (
     IpcProtocolError,
     StatusResult,
     UnsupportedIpcTransportError,
-    WorkspaceScanResult as IpcWorkspaceScanResult,
     WorkspaceStatusResult,
     receive_request,
     send_error_response,
     send_status_response,
     send_workspace_scan_response,
     send_workspace_status_response,
+)
+from harness.ipc import (
+    WorkspaceScanResult as IpcWorkspaceScanResult,
 )
 from harness.registry import RegistryError, get_project, get_workspace, list_workspaces
 from harness.scan import scan_path
