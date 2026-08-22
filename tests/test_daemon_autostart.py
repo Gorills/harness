@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import subprocess
 import sys
@@ -27,6 +28,12 @@ def _ready_status() -> StatusResult:
     return StatusResult(SCHEMA_VERSION, 0, 0)
 
 
+def _transport_failure(cause: OSError) -> IpcTransportError:
+    error = IpcTransportError(f"local IPC transport failed: {cause}")
+    error.__cause__ = cause
+    return error
+
+
 def test_canonical_autostart_reuses_reachable_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -50,6 +57,26 @@ def test_canonical_autostart_reuses_reachable_daemon(
     ensure_canonical_daemon(paths)
 
     assert probes == [paths.socket]
+
+
+def test_canonical_autostart_treats_probe_timeout_as_busy_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    paths.socket.parent.mkdir(mode=0o700)
+    paths.socket.parent.chmod(0o700)
+
+    def request_status(*_args: object, **_kwargs: object) -> StatusResult:
+        raise _transport_failure(TimeoutError("IPC receive deadline exceeded"))
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("a busy daemon probe timeout must not trigger a duplicate start")
+
+    monkeypatch.setattr(autostart, "request_status", request_status)
+    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+
+    ensure_canonical_daemon(paths)
 
 
 def test_canonical_autostart_starts_package_module_when_runtime_directory_is_missing(
@@ -80,7 +107,7 @@ def test_canonical_autostart_starts_package_module_when_runtime_directory_is_mis
     assert commands == [[sys.executable, "-m", "harness.daemon_process"]]
 
 
-def test_canonical_autostart_recovers_transport_unavailable_with_one_spawn(
+def test_canonical_autostart_recovers_confirmed_absence_with_one_spawn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -94,7 +121,9 @@ def test_canonical_autostart_recovers_transport_unavailable_with_one_spawn(
         nonlocal probe_count
         probe_count += 1
         if probe_count == 1:
-            raise IpcTransportError("local IPC transport failed: connection refused")
+            raise _transport_failure(
+                ConnectionRefusedError(errno.ECONNREFUSED, "connection refused")
+            )
         return _ready_status()
 
     def spawn(*_args: object, **_kwargs: object) -> object:
@@ -109,6 +138,58 @@ def test_canonical_autostart_recovers_transport_unavailable_with_one_spawn(
 
     assert probe_count == 2
     assert spawn_count == 1
+
+
+def test_canonical_autostart_accepts_busy_endpoint_during_readiness_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    paths.socket.parent.mkdir(mode=0o700)
+    paths.socket.parent.chmod(0o700)
+    probe_count = 0
+    spawn_count = 0
+
+    def request_status(*_args: object, **_kwargs: object) -> StatusResult:
+        nonlocal probe_count
+        probe_count += 1
+        if probe_count == 1:
+            raise _transport_failure(FileNotFoundError(errno.ENOENT, "socket missing"))
+        raise _transport_failure(TimeoutError("IPC receive deadline exceeded"))
+
+    def spawn(*_args: object, **_kwargs: object) -> object:
+        nonlocal spawn_count
+        spawn_count += 1
+        return object()
+
+    monkeypatch.setattr(autostart, "request_status", request_status)
+    monkeypatch.setattr(autostart.subprocess, "Popen", spawn)
+
+    ensure_canonical_daemon(paths)
+
+    assert probe_count == 2
+    assert spawn_count == 1
+
+
+def test_canonical_autostart_does_not_spawn_for_unclassified_transport_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    paths.socket.parent.mkdir(mode=0o700)
+    paths.socket.parent.chmod(0o700)
+
+    def request_status(*_args: object, **_kwargs: object) -> StatusResult:
+        raise _transport_failure(PermissionError(errno.EACCES, "permission denied"))
+
+    def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unclassified transport failures must fail closed")
+
+    monkeypatch.setattr(autostart, "request_status", request_status)
+    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_spawn)
+
+    with pytest.raises(IpcTransportError, match="permission denied"):
+        ensure_canonical_daemon(paths)
 
 
 def test_canonical_autostart_rejects_existing_insecure_runtime_directory_without_spawn(
