@@ -13,7 +13,12 @@ import pytest
 import harness.daemon as daemon_module
 import harness.entrypoints as entrypoints
 from harness.daemon import serve_daemon
-from harness.index import IndexingError, ScanDeadlineExceededError, list_indexed_files, scan_workspace
+from harness.index import (
+    IndexingError,
+    ScanDeadlineExceededError,
+    list_indexed_files,
+    scan_workspace,
+)
 from harness.ipc import (
     IpcRemoteError,
     WorkspaceScanResult,
@@ -126,7 +131,9 @@ def test_scan_registration_reuses_unique_project_for_linked_worktree(tmp_path: P
     connection = connect_database(database)
     try:
         primary_project, primary = register_workspace_with_inferred_project(connection, path=root)
-        linked_project, secondary = register_workspace_with_inferred_project(connection, path=linked)
+        linked_project, secondary = register_workspace_with_inferred_project(
+            connection, path=linked
+        )
 
         assert linked_project == primary_project
         assert secondary.project_id == primary.project_id
