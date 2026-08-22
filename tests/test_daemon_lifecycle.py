@@ -15,7 +15,7 @@ from harness.daemon import (
     InsecureDaemonLockError,
     serve_daemon,
 )
-from harness.ipc import StatusResult, request_status
+from harness.ipc import IpcError, StatusResult, request_status
 from harness.storage import SCHEMA_VERSION
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX daemon lifecycle slice")
@@ -28,13 +28,18 @@ def _start_server(
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(serve_daemon, database, socket_path, stop_event=stop_event)
     deadline = time.monotonic() + 3
-    while not socket_path.exists():
+    while True:
         if future.done():
             future.result()
+        try:
+            if request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0):
+                break
+        except IpcError:
+            pass
         if time.monotonic() >= deadline:
             stop_event.set()
             executor.shutdown(wait=True)
-            raise AssertionError("daemon socket did not appear")
+            raise AssertionError("daemon did not become ready")
         time.sleep(0.01)
     return stop_event, executor, future
 
