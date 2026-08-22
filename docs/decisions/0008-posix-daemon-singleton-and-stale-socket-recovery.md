@@ -61,7 +61,7 @@ Explicit `--database PATH` and `--socket PATH` overrides continue to exist for t
 
 ### Autostart
 
-This ADR establishes the lifecycle primitive required by autostart but does not start background processes from `harness`, install a launchd/systemd service, or implement reconnect policy. Those remain separate bounded tasks.
+This ADR establishes the lifecycle primitive required by autostart. Canonical POSIX client lazy-autostart is defined later by ADR-0009; this decision itself still does not install a launchd/systemd service or define a general reconnect/service-management policy.
 
 Windows remains outside this decision until the Windows local-user IPC transport is implemented and proven.
 
@@ -83,7 +83,7 @@ Windows remains outside this decision until the Windows local-user IPC transport
 - Sibling `.lock` files remain beside the selected socket and database after shutdown; this is expected and does not imply the daemon is running.
 - A connectable legacy/foreign process occupying the selected socket prevents startup rather than being replaced.
 - Explicit database paths keep caller-selected filesystem semantics; the stronger private-directory guarantee applies to the canonical state directory.
-- This task does not make `harness status` or `harness scan` autostart the daemon.
+- Lazy canonical client autostart is a separate decision in ADR-0009; this ADR does not define OS service registration or management.
 
 ## Verification
 
