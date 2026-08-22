@@ -10,6 +10,13 @@ from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 
+from harness.index import IndexedFileKind
+from harness.search import (
+    DEFAULT_SEARCH_LIMIT,
+    MAX_SEARCH_LIMIT,
+    MAX_SEARCH_QUERY_BYTES,
+    SearchMatchKind,
+)
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 PROTOCOL_VERSION = 1
@@ -93,6 +100,27 @@ class WorkspaceScanResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceSearchHit:
+    """One bounded mechanical search hit returned over local IPC."""
+
+    relative_path: str
+    kind: IndexedFileKind
+    size_bytes: int
+    match_kind: SearchMatchKind
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSearchResult:
+    """Bounded Workspace-scoped indexed-path search result returned by the daemon."""
+
+    schema_version: int
+    workspace_id: str
+    project_id: str
+    workspace_root: Path
+    results: tuple[WorkspaceSearchHit, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class IpcRequest:
     """Validated internal request independent of MCP wire objects."""
 
@@ -100,6 +128,8 @@ class IpcRequest:
     method: str
     workspace_hints: tuple[WorkspaceHint, ...] = ()
     scan_path: Path | None = None
+    search_query: str | None = None
+    search_limit: int | None = None
 
 
 def request_status(
@@ -161,6 +191,35 @@ def request_workspace_scan(
     return _workspace_scan_from_response(response, expected_request_id=request_id)
 
 
+def request_workspace_search(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    query: str,
+    *,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> WorkspaceSearchResult:
+    """Request bounded deterministic indexed-path search for one registered Workspace."""
+    _validate_search_query(query)
+    _validate_search_limit(limit)
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "workspace_search",
+            "params": {
+                "hints": _workspace_hints_to_wire(hints),
+                "query": query,
+                "limit": limit,
+            },
+        },
+        timeout=timeout,
+    )
+    return _workspace_search_from_response(response, expected_request_id=request_id)
+
+
 def receive_request(peer: socket.socket) -> IpcRequest:
     """Receive and validate exactly one bounded request frame."""
     payload = _decode_json(_receive_frame(peer))
@@ -201,6 +260,18 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             request_id=request_id,
             method=method,
             scan_path=_scan_path_from_params(payload["params"]),
+        )
+
+    if method == "workspace_search":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("workspace search request fields do not match the IPC schema")
+        hints, query, limit = _workspace_search_from_params(payload["params"])
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            workspace_hints=hints,
+            search_query=query,
+            search_limit=limit,
         )
 
     raise IpcProtocolError("unsupported IPC method")
@@ -276,6 +347,38 @@ def send_workspace_scan_response(
                     "added": result.added,
                     "updated": result.updated,
                     "removed": result.removed,
+                },
+            }
+        )
+    )
+
+
+def send_workspace_search_response(
+    peer: socket.socket,
+    request_id: str,
+    result: WorkspaceSearchResult,
+) -> None:
+    """Send the exact success contract for one bounded Workspace search."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "project_id": result.project_id,
+                    "workspace_root": str(result.workspace_root),
+                    "results": [
+                        {
+                            "relative_path": hit.relative_path,
+                            "kind": hit.kind.value,
+                            "size_bytes": hit.size_bytes,
+                            "match_kind": hit.match_kind.value,
+                        }
+                        for hit in result.results
+                    ],
                 },
             }
         )
@@ -372,6 +475,19 @@ def _workspace_hints_from_params(value: object) -> tuple[WorkspaceHint, ...]:
     return tuple(hints)
 
 
+def _workspace_search_from_params(
+    value: object,
+) -> tuple[tuple[WorkspaceHint, ...], str, int]:
+    if not isinstance(value, dict) or set(value) != {"hints", "query", "limit"}:
+        raise IpcProtocolError("workspace search params do not match the IPC schema")
+    hints = _workspace_hints_from_params({"hints": value["hints"]})
+    query = value["query"]
+    limit = value["limit"]
+    _validate_search_query(query)
+    _validate_search_limit(limit)
+    return hints, cast(str, query), cast(int, limit)
+
+
 def _scan_path_from_params(value: object) -> Path:
     if not isinstance(value, dict) or set(value) != {"path"}:
         raise IpcProtocolError("workspace scan params do not match the IPC schema")
@@ -387,6 +503,30 @@ def _validate_scan_path(path: str) -> None:
         raise IpcProtocolError("workspace scan path must be a non-empty bounded path")
     if not Path(path).is_absolute():
         raise IpcProtocolError("workspace scan path must be absolute")
+
+
+def _validate_search_query(value: object) -> None:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise IpcProtocolError("workspace search query must be a non-empty bounded string")
+    try:
+        size = len(value.strip().encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise IpcProtocolError("workspace search query must be valid UTF-8 text") from exc
+    if size > MAX_SEARCH_QUERY_BYTES:
+        raise IpcProtocolError(
+            f"workspace search query exceeds {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes"
+        )
+
+
+def _validate_search_limit(value: object) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_SEARCH_LIMIT
+    ):
+        raise IpcProtocolError(
+            f"workspace search limit must be an integer between 1 and {MAX_SEARCH_LIMIT}"
+        )
 
 
 def _validate_hint_fields(
@@ -607,6 +747,91 @@ def _workspace_scan_from_response(
     )
 
 
+def _workspace_search_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> WorkspaceSearchResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "workspace_id",
+        "project_id",
+        "workspace_root",
+        "results",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon workspace search result does not match the IPC schema")
+
+    schema_version = result["schema_version"]
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version < 0:
+        raise IpcProtocolError("daemon workspace search schema version has invalid type")
+    workspace_id = _bounded_search_response_string(result["workspace_id"], "workspace_id", 128)
+    project_id = _bounded_search_response_string(result["project_id"], "project_id", 128)
+    workspace_root_value = _bounded_search_response_string(
+        result["workspace_root"],
+        "workspace_root",
+        _HINT_PATH_MAX_LENGTH,
+    )
+    workspace_root = Path(workspace_root_value)
+    if not workspace_root.is_absolute():
+        raise IpcProtocolError("daemon workspace search root must be absolute")
+
+    raw_results = result["results"]
+    if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
+        raise IpcProtocolError("daemon workspace search results exceed the item limit")
+    hits: list[WorkspaceSearchHit] = []
+    for raw_hit in raw_results:
+        if not isinstance(raw_hit, dict) or set(raw_hit) != {
+            "relative_path",
+            "kind",
+            "size_bytes",
+            "match_kind",
+        }:
+            raise IpcProtocolError("daemon workspace search hit does not match the IPC schema")
+        relative_path = _bounded_search_response_string(
+            raw_hit["relative_path"],
+            "relative_path",
+            MAX_MESSAGE_BYTES,
+        )
+        path = Path(relative_path)
+        if path.is_absolute() or ".." in path.parts or "\x00" in relative_path:
+            raise IpcProtocolError("daemon workspace search hit has unsafe relative_path")
+        try:
+            kind = IndexedFileKind(
+                _bounded_search_response_string(raw_hit["kind"], "kind", 16)
+            )
+        except ValueError as exc:
+            raise IpcProtocolError("daemon workspace search hit has unsupported kind") from exc
+        size_bytes = raw_hit["size_bytes"]
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
+            raise IpcProtocolError("daemon workspace search hit has invalid size_bytes")
+        try:
+            match_kind = SearchMatchKind(
+                _bounded_search_response_string(raw_hit["match_kind"], "match_kind", 32)
+            )
+        except ValueError as exc:
+            raise IpcProtocolError(
+                "daemon workspace search hit has unsupported match_kind"
+            ) from exc
+        hits.append(
+            WorkspaceSearchHit(
+                relative_path=relative_path,
+                kind=kind,
+                size_bytes=size_bytes,
+                match_kind=match_kind,
+            )
+        )
+
+    return WorkspaceSearchResult(
+        schema_version=schema_version,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        workspace_root=workspace_root,
+        results=tuple(hits),
+    )
+
+
 def _success_result(response: dict[str, Any], *, expected_request_id: str) -> dict[str, Any]:
     version = response.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version != PROTOCOL_VERSION:
@@ -643,6 +868,12 @@ def _bounded_response_string(value: object, field: str, maximum: int) -> str:
 def _bounded_scan_response_string(value: object, field: str, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise IpcProtocolError(f"daemon workspace scan has invalid {field}")
+    return value
+
+
+def _bounded_search_response_string(value: object, field: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > maximum:
+        raise IpcProtocolError(f"daemon workspace search has invalid {field}")
     return value
 
 
