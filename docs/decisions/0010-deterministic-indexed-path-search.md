@@ -31,23 +31,36 @@ The contract:
 7. returns only relative path, entry kind, size, and the mechanical match reason;
 8. never returns raw source, content hashes, registry internals, Task state, Knowledge, or unrelated Workspace data.
 
-This slice is intentionally a domain primitive only. It does not add a public CLI command, daemon IPC method, or MCP `project_search` surface yet. Those exposure layers must be added only after the retrieval contract is independently reviewed and verified.
+The domain primitive is exposed through the daemon only after its contract is independently verified. Internal protocol v1 gains an additive `workspace_search` method carrying ordered Workspace hints, the bounded query, and the bounded result limit. The daemon resolves the Workspace using the existing fail-closed resolver, verifies the registered Git identity around the read, executes the domain search against one consistent index snapshot, and returns only Project/Workspace identity plus the mechanical hits.
+
+The installed CLI exposes that daemon path as:
+
+```text
+harness search QUERY [PATH] [--limit N] [--socket PATH]
+```
+
+`PATH` defaults to the current directory and is a location inside an already registered Workspace. With no explicit socket override, the command uses the same canonical POSIX lazy-autostart behavior as `status` and `scan`. Search is read-only: it does not register, rescan, read source content, or mutate durable state. Result paths are escaped before terminal rendering so control characters in repository filenames cannot inject extra output lines.
+
+This still does not add MCP `project_search`. The eventual model-facing contract has a richer bounded result schema (`ref`, title/location/summary/freshness and code-specific metadata) and belongs to the separately audited MCP bridge slice after Task and Knowledge domain state exists.
 
 ## Consequences
 
 ### Positive
 
-- Search becomes independently testable without coupling the first retrieval contract to MCP or a new wire shape.
+- Search is independently testable without coupling the first retrieval contract to MCP.
 - Legacy repositories gain deterministic identifier/path narrowing from data Harness already indexes.
 - The result is naturally bounded and has a small negative-disclosure surface.
+- CLI users can exercise real daemon-owned retrieval on an installed Harness without direct database access.
 - No schema migration, content ingestion, parser dependency, embedding provider, or cloud service is introduced.
 
 ### Costs and limits
 
 - This is not the full v1 search implementation and does not claim lexical source/content search.
+- Search reflects the current persisted Structural Index snapshot; without the future watcher, callers use `harness scan` to reconcile filesystem changes before relying on fresh results.
 - FTS5, symbols/imports/exports, docs, Git metadata, structural proximity, Tasks, Knowledge, Working Sets, and rank fusion remain later bounded search channels.
 - Identifier token splitting is deliberately conservative and ASCII-oriented in this slice; exact and substring path matching still work for other Unicode path text.
 - The implementation currently scans the selected Workspace's indexed rows in process. A later FTS/schema slice may replace this internal mechanism without changing the bounded domain result contract.
+- Internal IPC remains capped at 16 KiB. A requested result set that cannot fit returns a bounded `response_too_large` error instead of silently emitting a partial wire payload.
 
 ## Verification
 
@@ -58,4 +71,8 @@ Automated tests must prove:
 - deterministic substring fallback and ordering;
 - hard query and result-count bounds;
 - Workspace scoping through the existing registry/index contract;
+- exact IPC request/response shape and malformed-request recovery;
+- serialized IPC response-size enforcement;
+- CLI Workspace-hint, limit, canonical-autostart, and explicit-socket behavior;
+- terminal path escaping for control characters;
 - result negative disclosure: no source content or internal content hash fields.
