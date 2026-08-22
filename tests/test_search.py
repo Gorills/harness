@@ -48,12 +48,8 @@ def _registered(tmp_path: Path) -> tuple[sqlite3.Connection, str]:
     root = _repo(
         tmp_path / "repo",
         {
-            "src/rotateRefreshToken.py": (
-                "TOP_SECRET_BODY = 'never expose through path search'\n"
-            ),
-            "tests/rotate_refresh_token_test.py": (
-                "def test_rotate_refresh_token(): pass\n"
-            ),
+            "src/rotateRefreshToken.py": ("TOP_SECRET_BODY = 'never expose through path search'\n"),
+            "tests/rotate_refresh_token_test.py": ("def test_rotate_refresh_token(): pass\n"),
             "docs/auth-guide.md": "authentication guide\n",
             "src/tokenBucket.py": "class TokenBucket: pass\n",
         },
@@ -99,9 +95,7 @@ def test_search_normalizes_camel_snake_and_natural_identifier_tokens(
             "src/rotateRefreshToken.py",
             "tests/rotate_refresh_token_test.py",
         ]
-        assert all(
-            result.match_kind is SearchMatchKind.IDENTIFIER_TOKENS for result in results
-        )
+        assert all(result.match_kind is SearchMatchKind.IDENTIFIER_TOKENS for result in results)
     finally:
         connection.close()
 
@@ -111,9 +105,7 @@ def test_search_uses_deterministic_substring_fallback(tmp_path: Path) -> None:
     try:
         results = search_indexed_paths(connection, workspace_id, "RefreshT")
 
-        assert [result.relative_path for result in results] == [
-            "src/rotateRefreshToken.py"
-        ]
+        assert [result.relative_path for result in results] == ["src/rotateRefreshToken.py"]
         assert results[0].match_kind is SearchMatchKind.PATH_SUBSTRING
     finally:
         connection.close()
@@ -140,9 +132,7 @@ def test_search_is_strictly_workspace_scoped(tmp_path: Path) -> None:
             foreign_workspace.workspace_id,
             "foreign token",
         )
-        assert [result.relative_path for result in foreign_results] == [
-            "src/foreignTokenOnly.py"
-        ]
+        assert [result.relative_path for result in foreign_results] == ["src/foreignTokenOnly.py"]
     finally:
         connection.close()
 
