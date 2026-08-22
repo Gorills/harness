@@ -124,9 +124,7 @@ def _print_workspace_search(result: WorkspaceSearchResult) -> None:
     print(f"Matches: {len(result.results)}")
     for hit in result.results:
         relative_path = json.dumps(hit.relative_path, ensure_ascii=False)
-        print(
-            f"{relative_path}\t{hit.kind.value}\t{hit.size_bytes}\t{hit.match_kind.value}"
-        )
+        print(f"{relative_path}\t{hit.kind.value}\t{hit.size_bytes}\t{hit.match_kind.value}")
     print(f"Schema: {result.schema_version}")
 
 
