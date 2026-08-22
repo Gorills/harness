@@ -54,6 +54,16 @@ class WorkspaceRecord:
     git_common_dir: Path
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceScanRegistration:
+    """Registration decision used by the public deterministic scan workflow."""
+
+    project: ProjectRecord
+    workspace: WorkspaceRecord
+    project_created: bool
+    workspace_created: bool
+
+
 def create_project(connection: sqlite3.Connection) -> ProjectRecord:
     """Create a Project with the required v1 default Normal visibility policy."""
     project = ProjectRecord(project_id=uuid4().hex, visibility_mode=VisibilityMode.NORMAL)
@@ -114,26 +124,82 @@ def register_workspace(
             connection.execute("COMMIT")
             return existing
 
-        workspace = WorkspaceRecord(
-            workspace_id=uuid4().hex,
-            project_id=project_id,
-            workspace_root=layout.workspace_root,
-            git_common_dir=layout.git_common_dir,
-        )
-        connection.execute(
-            """
-            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
-            VALUES (?, ?, ?, ?)
-            """,
-            (
-                workspace.workspace_id,
-                workspace.project_id,
-                str(workspace.workspace_root),
-                str(workspace.git_common_dir),
-            ),
-        )
+        workspace = _insert_workspace(connection, project_id=project_id, layout=layout)
         connection.execute("COMMIT")
         return workspace
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def register_workspace_for_scan(
+    connection: sqlite3.Connection,
+    *,
+    path: Path,
+) -> WorkspaceScanRegistration:
+    """Resolve or create the Project/Workspace identity needed by ``harness scan``.
+
+    A previously registered root is reused. A new linked worktree is attached to the one
+    existing Project sharing its Git common directory. Independent clones are not inferred to
+    be the same logical Project and therefore create a new Project. Ambiguous historical
+    common-directory membership fails closed.
+    """
+    layout = inspect_git_workspace(path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        existing = _workspace_by_root(connection, layout.workspace_root)
+        if existing is not None:
+            _require_matching_workspace(
+                existing,
+                project_id=existing.project_id,
+                layout=layout,
+            )
+            project = get_project(connection, existing.project_id)
+            _require_common_dir_visibility(
+                connection,
+                git_common_dir=layout.git_common_dir,
+                visibility_mode=project.visibility_mode,
+            )
+            connection.execute("COMMIT")
+            return WorkspaceScanRegistration(
+                project=project,
+                workspace=existing,
+                project_created=False,
+                workspace_created=False,
+            )
+
+        project_ids = _project_ids_by_common_dir(connection, layout.git_common_dir)
+        if len(project_ids) > 1:
+            raise WorkspaceRegistrationConflictError(
+                "Git common directory is already associated with multiple Projects; "
+                "automatic scan registration is ambiguous"
+            )
+
+        if project_ids:
+            project = get_project(connection, project_ids[0])
+            project_created = False
+        else:
+            project = create_project(connection)
+            project_created = True
+
+        _require_common_dir_visibility(
+            connection,
+            git_common_dir=layout.git_common_dir,
+            visibility_mode=project.visibility_mode,
+        )
+        workspace = _insert_workspace(
+            connection,
+            project_id=project.project_id,
+            layout=layout,
+        )
+        connection.execute("COMMIT")
+        return WorkspaceScanRegistration(
+            project=project,
+            workspace=workspace,
+            project_created=project_created,
+            workspace_created=True,
+        )
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -178,6 +244,55 @@ def _workspace_by_root(
     if row is None:
         return None
     return _workspace_from_row(row)
+
+
+def _project_ids_by_common_dir(
+    connection: sqlite3.Connection,
+    git_common_dir: Path,
+) -> tuple[str, ...]:
+    rows = connection.execute(
+        """
+        SELECT DISTINCT project_id
+        FROM workspaces
+        WHERE git_common_dir = ?
+        ORDER BY project_id
+        """,
+        (str(git_common_dir),),
+    ).fetchall()
+    project_ids: list[str] = []
+    for row in rows:
+        project_id = row[0]
+        if not isinstance(project_id, str) or not project_id:
+            raise RegistryError("workspace registry row has invalid persisted types")
+        project_ids.append(project_id)
+    return tuple(project_ids)
+
+
+def _insert_workspace(
+    connection: sqlite3.Connection,
+    *,
+    project_id: str,
+    layout: GitWorkspaceLayout,
+) -> WorkspaceRecord:
+    workspace = WorkspaceRecord(
+        workspace_id=uuid4().hex,
+        project_id=project_id,
+        workspace_root=layout.workspace_root,
+        git_common_dir=layout.git_common_dir,
+    )
+    connection.execute(
+        """
+        INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            workspace.workspace_id,
+            workspace.project_id,
+            str(workspace.workspace_root),
+            str(workspace.git_common_dir),
+        ),
+    )
+    return workspace
 
 
 def _require_matching_workspace(
