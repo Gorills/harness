@@ -36,6 +36,10 @@ def _status(workspace_root: Path) -> WorkspaceStatusResult:
     )
 
 
+def _unexpected_autostart(_path: Path) -> None:
+    raise AssertionError("daemon autostart was not expected")
+
+
 def test_status_autostarts_canonical_daemon_once_and_retries_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -76,16 +80,11 @@ def test_status_does_not_autostart_explicit_socket(
     workspace_root.mkdir()
     socket_path = tmp_path / "manual.sock"
 
-    monkeypatch.setattr(
-        entrypoints,
-        "request_workspace_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(_transport_error(errno.ENOENT)),
-    )
-    monkeypatch.setattr(
-        entrypoints,
-        "start_canonical_daemon",
-        lambda _path: (_ for _ in ()).throw(AssertionError("explicit socket must not autostart")),
-    )
+    def unavailable_status(*_args: object, **_kwargs: object) -> WorkspaceStatusResult:
+        raise _transport_error(errno.ENOENT)
+
+    monkeypatch.setattr(entrypoints, "request_workspace_status", unavailable_status)
+    monkeypatch.setattr(entrypoints, "start_canonical_daemon", _unexpected_autostart)
 
     assert entrypoints._run_status(workspace_root, socket_path) == 1
     assert "Harness status: FAIL (local IPC transport failed)" in capsys.readouterr().out
@@ -103,17 +102,12 @@ def test_status_does_not_autostart_ambiguous_canonical_transport_failure(
         socket=tmp_path / "run" / "harness.sock",
     )
 
+    def denied_status(*_args: object, **_kwargs: object) -> WorkspaceStatusResult:
+        raise _transport_error(errno.EACCES)
+
     monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
-    monkeypatch.setattr(
-        entrypoints,
-        "request_workspace_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(_transport_error(errno.EACCES)),
-    )
-    monkeypatch.setattr(
-        entrypoints,
-        "start_canonical_daemon",
-        lambda _path: (_ for _ in ()).throw(AssertionError("ambiguous failure must not autostart")),
-    )
+    monkeypatch.setattr(entrypoints, "request_workspace_status", denied_status)
+    monkeypatch.setattr(entrypoints, "start_canonical_daemon", _unexpected_autostart)
 
     assert entrypoints._run_status(workspace_root, None) == 1
     assert "Harness status: FAIL (local IPC transport failed)" in capsys.readouterr().out
