@@ -63,16 +63,20 @@ def test_daemon_recovers_stale_owned_socket_after_lock_acquisition(tmp_path: Pat
     stop_event, executor, future = _start_server(database, socket_path)
     try:
         assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
-        lock_path = socket_path.with_name(f"{socket_path.name}.lock")
-        lock_stat = lock_path.lstat()
-        assert stat.S_ISREG(lock_stat.st_mode)
-        assert stat.S_IMODE(lock_stat.st_mode) == 0o600
-        assert lock_stat.st_uid == os.geteuid()
+        for lock_path in (
+            socket_path.with_name(f"{socket_path.name}.lock"),
+            database.with_name(f"{database.name}.lock"),
+        ):
+            lock_stat = lock_path.lstat()
+            assert stat.S_ISREG(lock_stat.st_mode)
+            assert stat.S_IMODE(lock_stat.st_mode) == 0o600
+            assert lock_stat.st_uid == os.geteuid()
     finally:
         _stop_server(stop_event, executor, future)
 
     assert not socket_path.exists()
     assert socket_path.with_name(f"{socket_path.name}.lock").is_file()
+    assert database.with_name(f"{database.name}.lock").is_file()
 
 
 def test_second_daemon_fails_before_database_mutation_and_first_keeps_serving(
@@ -88,6 +92,25 @@ def test_second_daemon_fails_before_database_mutation_and_first_keeps_serving(
 
         assert not second_database.exists()
         assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_second_daemon_cannot_share_database_through_a_different_socket(tmp_path: Path) -> None:
+    database = tmp_path / "state" / "harness.db"
+    first_socket = tmp_path / "ipc-first" / "harness.sock"
+    second_socket = tmp_path / "ipc-second" / "harness.sock"
+    stop_event, executor, future = _start_server(database, first_socket)
+    try:
+        alias_parent = tmp_path / "state-alias"
+        alias_parent.symlink_to(database.parent, target_is_directory=True)
+        alias_database = alias_parent / database.name
+
+        with pytest.raises(DaemonAlreadyRunningError, match="already owns the database"):
+            serve_daemon(alias_database, second_socket, stop_event=Event())
+
+        assert not second_socket.exists()
+        assert request_status(first_socket) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
 
