@@ -565,9 +565,7 @@ def _workspace_scan_from_response(
         result["updated"],
         result["removed"],
     )
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
-    ):
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
         raise IpcProtocolError("daemon workspace scan counts have invalid field types")
 
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
