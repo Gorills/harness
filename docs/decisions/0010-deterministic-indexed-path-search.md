@@ -61,6 +61,7 @@ This still does not add MCP `project_search`. The eventual model-facing contract
 - Identifier token splitting is deliberately conservative and ASCII-oriented in this slice; exact and substring path matching still work for other Unicode path text.
 - The implementation currently scans the selected Workspace's indexed rows in process. A later FTS/schema slice may replace this internal mechanism without changing the bounded domain result contract.
 - Internal IPC remains capped at 16 KiB. A requested result set that cannot fit returns a bounded `response_too_large` error instead of silently emitting a partial wire payload.
+- Invalid or corrupted persisted Structural Index rows return bounded `index_error` responses; the daemon remains available for subsequent requests rather than allowing the index-domain exception to escape its client handler.
 
 ## Verification
 
@@ -73,6 +74,7 @@ Automated tests must prove:
 - Workspace scoping through the existing registry/index contract;
 - exact IPC request/response shape and malformed-request recovery;
 - serialized IPC response-size enforcement;
+- corrupted-index error containment and daemon recovery;
 - CLI Workspace-hint, limit, canonical-autostart, and explicit-socket behavior;
 - terminal path escaping for control characters;
 - result negative disclosure: no source content or internal content hash fields.
