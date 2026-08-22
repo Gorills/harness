@@ -134,7 +134,9 @@ def ensure_workspace_registration(
             )
 
         project_created = not project_ids
-        project = get_project(connection, project_ids[0]) if project_ids else create_project(connection)
+        project = (
+            get_project(connection, project_ids[0]) if project_ids else create_project(connection)
+        )
         _require_common_dir_visibility(
             connection,
             git_common_dir=layout.git_common_dir,

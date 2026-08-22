@@ -198,6 +198,34 @@ def test_workspace_scan_ipc_round_trip_registers_and_indexes(tmp_path: Path) -> 
         assert result.added == 1
         assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 1, 1)
 
+        raw_response = _raw_request(
+            socket_path,
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": "scan-exact",
+                "method": "workspace_scan",
+                "params": {"path": str(repository.resolve())},
+            },
+        )
+        assert raw_response == {
+            "version": PROTOCOL_VERSION,
+            "request_id": "scan-exact",
+            "ok": True,
+            "result": {
+                "schema_version": SCHEMA_VERSION,
+                "project_id": result.project_id,
+                "workspace_id": result.workspace_id,
+                "visibility_mode": "normal",
+                "workspace_root": str(repository.resolve()),
+                "project_created": False,
+                "workspace_created": False,
+                "file_count": 1,
+                "added": 0,
+                "updated": 0,
+                "removed": 0,
+            },
+        }
+
         again = request_workspace_scan(socket_path, repository.resolve())
         assert again.project_id == result.project_id
         assert again.workspace_id == result.workspace_id
