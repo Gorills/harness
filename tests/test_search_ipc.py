@@ -245,6 +245,31 @@ def test_workspace_search_rejects_malformed_params_and_daemon_recovers(
         _stop_server(stop_event, executor, future)
 
 
+def test_workspace_search_corrupt_index_returns_error_and_daemon_recovers(tmp_path: Path) -> None:
+    root, database, _project_id, _workspace_id = _registered_workspace_database(tmp_path)
+    connection = connect_database(database)
+    try:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute("UPDATE indexed_files SET kind = 'corrupt'")
+    finally:
+        connection.close()
+
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with pytest.raises(IpcRemoteError) as exc_info:
+            request_workspace_search(
+                socket_path,
+                [WorkspaceHint(root.resolve(), "cwd", WorkspaceHintMatchMode.LOCATION)],
+                "token",
+            )
+        assert exc_info.value.code == "index_error"
+        assert "unsupported kind" in exc_info.value.message
+        assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 1, 1)
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
 def test_workspace_search_response_overflow_returns_bounded_error(tmp_path: Path) -> None:
     directory = "d" * 120
     files = {
