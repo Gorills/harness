@@ -87,7 +87,7 @@ def main() -> int:
         harness = scripts_dir / f"harness{suffix}"
         harnessd = scripts_dir / f"harnessd{suffix}"
         help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("doctor", "status"):
+        for expected in ("doctor", "status", "scan"):
             if expected not in help_result.stdout:
                 raise RuntimeError(
                     f"installed harness --help did not contain {expected!r}: {help_result.stdout!r}"
@@ -101,8 +101,16 @@ def main() -> int:
                     f"{status_help.stdout!r}"
                 )
 
+        scan_help = _run((str(harness), "scan", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("--socket", "deterministic", "Git Workspace"):
+            if expected not in scan_help.stdout:
+                raise RuntimeError(
+                    f"installed harness scan --help did not contain {expected!r}: "
+                    f"{scan_help.stdout!r}"
+                )
+
         serve_help = _run((str(harnessd), "serve", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--database", "--socket", "canonical per-user"):
+        for expected in ("--database", "--socket", "canonical per-user", "scan"):
             if expected not in serve_help.stdout:
                 raise RuntimeError(
                     f"installed harnessd serve --help did not contain {expected!r}: "
