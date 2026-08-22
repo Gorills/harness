@@ -60,7 +60,7 @@ def test_start_canonical_daemon_uses_same_python_detached_and_waits_for_status(
         probes.append((path, timeout))
         return StatusResult(SCHEMA_VERSION, 0, 0)
 
-    monkeypatch.setattr(daemon_autostart.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
     monkeypatch.setattr(daemon_autostart, "request_status", probe)
 
     start_canonical_daemon(socket_path)
@@ -90,7 +90,7 @@ def test_start_canonical_daemon_retries_only_endpoint_unavailable(
     socket_path = tmp_path / "run" / "harness.sock"
     calls = 0
 
-    monkeypatch.setattr(daemon_autostart.subprocess, "Popen", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(daemon_autostart, "sleep", lambda _seconds: None)
 
     def probe(_path: Path, *, timeout: float) -> StatusResult:
@@ -118,7 +118,7 @@ def test_start_canonical_daemon_fails_closed_on_ambiguous_readiness_transport(
         assert timeout > 0
         raise _transport_error(errno.EACCES)
 
-    monkeypatch.setattr(daemon_autostart.subprocess, "Popen", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(daemon_autostart, "request_status", ambiguous_probe)
 
     with pytest.raises(DaemonAutostartError, match="readiness transport failed"):
