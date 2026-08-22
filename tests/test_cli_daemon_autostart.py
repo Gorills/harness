@@ -22,7 +22,9 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX daemon autostart 
 
 def _transport_error(error_number: int) -> IpcTransportError:
     try:
-        raise IpcTransportError("local IPC transport failed") from OSError(error_number, "transport")
+        raise IpcTransportError("local IPC transport failed") from OSError(
+            error_number, "transport"
+        )
     except IpcTransportError as exc:
         return exc
 
