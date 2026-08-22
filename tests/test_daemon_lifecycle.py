@@ -92,6 +92,29 @@ def test_second_daemon_fails_before_database_mutation_and_first_keeps_serving(
         _stop_server(stop_event, executor, future)
 
 
+def test_daemon_preserves_connectable_socket_when_lock_is_not_held(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    socket_path.parent.mkdir(mode=0o700)
+    socket_path.parent.chmod(0o700)
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as existing_server:
+        existing_server.bind(str(socket_path))
+        existing_server.listen()
+        existing_stat = socket_path.lstat()
+
+        with pytest.raises(DaemonAlreadyRunningError, match="already serving the IPC endpoint"):
+            serve_daemon(database, socket_path, stop_event=Event())
+
+        current_stat = socket_path.lstat()
+        assert (current_stat.st_dev, current_stat.st_ino) == (
+            existing_stat.st_dev,
+            existing_stat.st_ino,
+        )
+
+    assert not database.exists()
+
+
 def test_daemon_refuses_symlinked_singleton_lock_without_touching_target(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     socket_path = tmp_path / "ipc" / "harness.sock"
