@@ -58,7 +58,7 @@ The final Harness socket directory must be a real directory (not a symlink), own
 
 `harness status [PATH]` uses the canonical socket automatically. `--socket PATH` remains an explicit override.
 
-`harnessd serve` uses both canonical defaults automatically. `--database PATH` and `--socket PATH` remain optional overrides and may be supplied independently.
+`harnessd serve` uses both canonical defaults automatically. `--database PATH` and `--socket PATH` remain optional overrides and may be supplied independently. Isolated concurrent daemon instances require distinct selected Harness databases; changing only the socket does not create a second writer for one store.
 
 `harness doctor` keeps its current contract: with no `--database`, it checks only the SQLite runtime/FTS5 and does not create or inspect durable state implicitly.
 
@@ -73,12 +73,12 @@ Path selection itself performs no daemon autostart, registration, scan, MCP setu
 - Durable database state does not live in a transient runtime directory.
 - Socket fallback remains per-user and short enough for common Unix-domain socket path limits.
 - Canonical clients fail closed on spoofable final runtime-directory entries rather than connecting through a symlink or another user's directory.
-- Explicit overrides preserve isolated test/recovery workflows.
+- Explicit overrides preserve isolated test/recovery workflows when isolated stores are selected.
 
 ### Costs and limits
 
 - This decision is POSIX-only until the Windows local-user IPC transport is implemented.
-- A stale Unix socket can still block startup under the daemon's existing fail-closed `SocketPathInUseError`; stale-socket recovery/autostart belongs to the later singleton/service task.
+- Daemon singleton ownership and crash-stale socket recovery are defined separately by ADR-0008; this path decision still performs no autostart or OS service management.
 - This does not create a public Project/Workspace registration workflow or scan command.
 - The XDG-compatible fallback on macOS is a Harness convention rather than a claim that macOS natively defines XDG variables.
 
