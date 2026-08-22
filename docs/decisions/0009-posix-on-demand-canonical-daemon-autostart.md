@@ -38,7 +38,7 @@ The client starts the daemon with the same Python interpreter that is running th
 
 The child inherits the user's environment so canonical XDG/home/runtime path selection remains identical to the caller. Python safe-path mode (`-P`) prevents the caller's current Workspace from being prepended to the child import path and therefore prevents a repository-local `harness` package from shadowing the installed daemon module merely because the user ran the command inside that repository.
 
-The process is detached from the invoking terminal session, receives `/dev/null`-style standard streams through `subprocess.DEVNULL`, and continues running after the short-lived CLI command exits. Readiness is proven through the existing bounded IPC `status` contract rather than through process existence or socket-file existence.
+The process is detached from the invoking terminal session, receives `/dev/null`-style standard streams through `subprocess.DEVNULL`, switches its working directory to the POSIX root (`/`) so the global daemon does not retain the launching Workspace or its mount as process cwd, and continues running after the short-lived CLI command exits. Readiness is proven through the existing bounded IPC `status` contract rather than through process existence or socket-file existence.
 
 Concurrent clients may both attempt to spawn a daemon. That race is intentional and safe: ADR-0008 endpoint and database locks ensure that only one process can own the canonical endpoint/store, while every client independently waits for the one healthy daemon to answer the status probe.
 
@@ -74,6 +74,7 @@ Those remain separate bounded tasks.
 - Concurrent first-use clients converge on one daemon through the already-proven singleton locks.
 - Ambiguous/live/foreign endpoint failures remain fail-closed instead of causing speculative background process launches.
 - The implementation does not depend on PATH lookup for a `harnessd` executable and avoids current-directory module shadowing.
+- The global daemon does not retain whichever project directory happened to launch it.
 - No service-manager dependency or platform-specific configuration artifact is introduced.
 
 ### Costs and limits
@@ -92,7 +93,7 @@ Automated tests must prove:
 - canonical status and scan autostart once on `ENOENT`/`ECONNREFUSED` and retry the original request once;
 - explicit `--socket` never autostarts;
 - permission-denied, timeout/reset, protocol, or daemon-returned failures do not trigger speculative startup;
-- the autostart child uses the same Python interpreter, safe-path mode, the daemon module entrypoint, detached session behavior, and closed standard streams;
+- the autostart child uses the same Python interpreter, safe-path mode, the daemon module entrypoint, detached session behavior, closed standard streams, and a working directory independent of the launching Workspace;
 - readiness is based on a bounded successful daemon status request rather than socket-file existence;
 - a real missing Unix-socket request preserves an underlying error classification that permits autostart;
 - canonical runtime-directory symlink/permission safety remains fail-closed;
