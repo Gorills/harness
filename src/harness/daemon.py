@@ -7,24 +7,34 @@ import stat
 from collections.abc import Sequence
 from pathlib import Path
 from threading import Event
+from time import monotonic
 
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
     inspect_git_workspace_runtime_identity,
 )
+from harness.index import IndexingError, ScanDeadlineExceededError, scan_workspace
 from harness.ipc import (
     IpcMessageTooLargeError,
     IpcProtocolError,
     StatusResult,
     UnsupportedIpcTransportError,
+    WorkspaceScanResult,
     WorkspaceStatusResult,
     receive_request,
     send_error_response,
     send_status_response,
+    send_workspace_scan_response,
     send_workspace_status_response,
 )
-from harness.registry import RegistryError, get_project, get_workspace, list_workspaces
+from harness.registry import (
+    RegistryError,
+    get_project,
+    get_workspace,
+    list_workspaces,
+    register_workspace_with_inferred_project,
+)
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.workspace_resolution import (
     WorkspaceCandidate,
@@ -36,6 +46,7 @@ from harness.workspace_resolution import (
 _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
+_WORKSPACE_SCAN_TIMEOUT_SECONDS = 30.0
 
 
 class DaemonError(RuntimeError):
@@ -120,13 +131,36 @@ def read_workspace_status(
     )
 
 
+def scan_workspace_path(
+    connection: sqlite3.Connection,
+    path: Path,
+) -> WorkspaceScanResult:
+    """Register one Git worktree if needed and reconcile its deterministic file index."""
+    project, workspace = register_workspace_with_inferred_project(connection, path=path)
+    scan = scan_workspace(
+        connection,
+        workspace.workspace_id,
+        deadline=monotonic() + _WORKSPACE_SCAN_TIMEOUT_SECONDS,
+    )
+    return WorkspaceScanResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        project_id=project.project_id,
+        workspace_root=workspace.workspace_root,
+        file_count=scan.file_count,
+        added=scan.added,
+        updated=scan.updated,
+        removed=scan.removed,
+    )
+
+
 def serve_daemon(
     database_path: Path,
     socket_path: Path,
     *,
     stop_event: Event | None = None,
 ) -> None:
-    """Serve the bounded read-only IPC status paths until asked to stop."""
+    """Serve the bounded local IPC status and Workspace-scan paths until asked to stop."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
     if socket_path.exists() or socket_path.is_symlink():
@@ -177,6 +211,17 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
         return
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
+        return
+    if request.method == "workspace_scan":
+        if request.workspace_path is None:
+            _try_send_error(
+                client,
+                request_id=request.request_id,
+                code="invalid_request",
+                message="IPC request is invalid",
+            )
+            return
+        _serve_workspace_scan(client, database, request.request_id, request.workspace_path)
         return
     _try_send_error(
         client,
@@ -252,6 +297,68 @@ def _serve_workspace_status(
             request_id=request_id,
             code="response_too_large",
             message="Workspace status exceeds IPC byte limit",
+        )
+
+
+def _serve_workspace_scan(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    path: Path,
+) -> None:
+    try:
+        result = scan_workspace_path(database, path)
+    except ScanDeadlineExceededError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_scan_timeout",
+            message=(
+                "Workspace scan exceeded its bounded deadline; registration is retained and "
+                "retry is safe"
+            ),
+        )
+        return
+    except IndexingError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_scan_error",
+            message=f"Workspace scan failed; registration is retained and retry is safe: {exc}",
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_registration_error",
+            message=str(exc),
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not register or scan Workspace",
+        )
+        return
+    try:
+        send_workspace_scan_response(client, request_id, result)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace scan result exceeds IPC byte limit",
         )
 
 
