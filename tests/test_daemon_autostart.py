@@ -14,7 +14,7 @@ from harness.daemon_autostart import (
     start_canonical_daemon,
     transport_error_allows_autostart,
 )
-from harness.ipc import IpcTransportError, StatusResult
+from harness.ipc import IpcTransportError, StatusResult, request_status
 from harness.storage import SCHEMA_VERSION
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX daemon autostart slice")
@@ -35,6 +35,13 @@ def test_transport_error_allows_autostart_only_for_unavailable_endpoint(error_nu
 @pytest.mark.parametrize("error_number", [errno.EACCES, errno.ETIMEDOUT, errno.ECONNRESET])
 def test_transport_error_rejects_ambiguous_or_accepted_endpoint_failures(error_number: int) -> None:
     assert transport_error_allows_autostart(_transport_error(error_number)) is False
+
+
+def test_missing_real_socket_is_classified_as_autostartable(tmp_path: Path) -> None:
+    with pytest.raises(IpcTransportError) as exc_info:
+        request_status(tmp_path / "missing" / "harness.sock")
+
+    assert transport_error_allows_autostart(exc_info.value) is True
 
 
 def test_start_canonical_daemon_uses_same_python_detached_and_waits_for_status(
@@ -60,7 +67,7 @@ def test_start_canonical_daemon_uses_same_python_detached_and_waits_for_status(
 
     assert spawned == [
         (
-            [sys.executable, "-m", "harness.daemon_process", "serve"],
+            [sys.executable, "-P", "-m", "harness.daemon_process", "serve"],
             {
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.DEVNULL,
@@ -105,12 +112,13 @@ def test_start_canonical_daemon_fails_closed_on_ambiguous_readiness_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     socket_path = tmp_path / "run" / "harness.sock"
+
+    def ambiguous_probe(_path: Path, *, timeout: float) -> StatusResult:
+        assert timeout > 0
+        raise _transport_error(errno.EACCES)
+
     monkeypatch.setattr(daemon_autostart.subprocess, "Popen", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(
-        daemon_autostart,
-        "request_status",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(_transport_error(errno.EACCES)),
-    )
+    monkeypatch.setattr(daemon_autostart, "request_status", ambiguous_probe)
 
     with pytest.raises(DaemonAutostartError, match="readiness transport failed"):
         start_canonical_daemon(socket_path)
