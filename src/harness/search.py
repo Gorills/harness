@@ -88,7 +88,11 @@ def _validate_query(query: str) -> str:
 
 
 def _validate_limit(limit: int) -> None:
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_SEARCH_LIMIT:
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= MAX_SEARCH_LIMIT
+    ):
         raise SearchError(f"search limit must be an integer between 1 and {MAX_SEARCH_LIMIT}")
 
 
