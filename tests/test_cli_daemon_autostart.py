@@ -8,7 +8,12 @@ from pathlib import Path
 import pytest
 
 import harness.entrypoints as entrypoints
-from harness.ipc import IpcTransportError, WorkspaceScanResult, WorkspaceStatusResult
+from harness.ipc import (
+    IpcRemoteError,
+    IpcTransportError,
+    WorkspaceScanResult,
+    WorkspaceStatusResult,
+)
 from harness.runtime_paths import RuntimePaths
 from harness.storage import SCHEMA_VERSION
 
@@ -111,6 +116,29 @@ def test_status_does_not_autostart_ambiguous_canonical_transport_failure(
 
     assert entrypoints._run_status(workspace_root, None) == 1
     assert "Harness status: FAIL (local IPC transport failed)" in capsys.readouterr().out
+
+
+def test_status_does_not_autostart_daemon_reported_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    defaults = RuntimePaths(
+        database=tmp_path / "state" / "harness.db",
+        socket=tmp_path / "run" / "harness.sock",
+    )
+
+    def remote_failure(*_args: object, **_kwargs: object) -> WorkspaceStatusResult:
+        raise IpcRemoteError("database_error", "daemon could not read status")
+
+    monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
+    monkeypatch.setattr(entrypoints, "request_workspace_status", remote_failure)
+    monkeypatch.setattr(entrypoints, "start_canonical_daemon", _unexpected_autostart)
+
+    assert entrypoints._run_status(workspace_root, None) == 1
+    assert "database_error: daemon could not read status" in capsys.readouterr().out
 
 
 def test_scan_autostarts_canonical_daemon_once_and_retries_request(
