@@ -27,7 +27,7 @@ def start_canonical_daemon(socket_path: Path) -> None:
     """Start the installed daemon detached and wait for its bounded status readiness probe."""
     try:
         subprocess.Popen(
-            [sys.executable, "-m", "harness.daemon_process", "serve"],
+            [sys.executable, "-P", "-m", "harness.daemon_process", "serve"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
