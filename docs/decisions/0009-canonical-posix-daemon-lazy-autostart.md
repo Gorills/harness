@@ -14,16 +14,16 @@ A full systemd/launchd service manager would add platform-specific installation 
 
 ## Decision
 
-On supported POSIX systems, client commands that use the canonical socket lazily ensure the canonical daemon is reachable before issuing their Workspace request.
+On supported POSIX systems, client commands that use the canonical socket lazily ensure the canonical daemon endpoint is available before issuing their Workspace request.
 
 The bounded behavior is:
 
 1. resolve the canonical runtime paths;
 2. if the final runtime directory already exists, validate that it is a real current-user-only directory before trusting any socket inside it;
 3. probe the canonical daemon with the bounded internal `status` request;
-4. if the transport is unavailable, launch a detached child from the same installed Python package with `python -m harness.daemon_process`;
-5. wait for at most three seconds for the private runtime directory and daemon status probe to become ready;
-6. continue with the original Workspace request only after readiness is proven.
+4. launch a detached child from the same installed Python package with `python -m harness.daemon_process` only when the trusted endpoint is confirmed absent by `ENOENT` or `ECONNREFUSED`;
+5. wait for at most three seconds while the runtime directory/endpoint remains confirmed absent;
+6. continue with the original Workspace request when the status probe succeeds or when a probe timeout shows that an endpoint is already occupied/busy enough that starting another daemon would be unsafe.
 
 If the canonical runtime directory does not yet exist, that absence is treated as a first-run state: the client launches the daemon and waits for the daemon to create and secure the directory. An existing insecure/symlinked/untrusted runtime directory still fails closed and is never repaired or replaced by the client.
 
@@ -35,9 +35,11 @@ The child redirects stdin/stdout/stderr to the null device, closes inherited fil
 
 ### Failure classification
 
-Only local IPC transport unavailability triggers autostart after a trusted runtime directory is present. Protocol or structured remote errors are not treated as evidence that another daemon should be launched.
+Autostart requires positive evidence that the canonical endpoint is absent. For the current POSIX Unix-socket transport, only `ENOENT` and `ECONNREFUSED` from the bounded IPC probe are treated as absence after the runtime directory has passed its trust check.
 
-Autostart readiness is bounded. A spawn failure or a daemon that does not become ready within the deadline is returned as a bounded CLI failure; the client does not loop indefinitely.
+A probe timeout is not evidence of absence. The daemon currently serves clients sequentially and a deterministic scan may occupy it for substantially longer than the short autostart probe; a timeout therefore means the endpoint may be live/busy and must not trigger a duplicate process. The original Workspace request then uses its command-specific IPC timeout. Other unclassified transport failures, protocol errors, and structured remote errors fail closed rather than starting another daemon.
+
+Autostart readiness is bounded. A spawn failure or an endpoint that remains positively absent through the deadline is returned as a bounded CLI failure; the client does not loop indefinitely.
 
 ## Consequences
 
@@ -45,14 +47,16 @@ Autostart readiness is bounded. A spawn failure or a daemon that does not become
 
 - A clean POSIX install no longer requires a separate manual `harnessd serve` step before canonical `status`/`scan` usage.
 - Existing runtime-directory security checks remain fail-closed.
+- A live daemon that is busy with a long serial request is never mistaken for an absent daemon merely because the short probe timed out.
 - Concurrent startup relies on the already-proven daemon singleton/database ownership contract instead of adding a second coordination mechanism.
 - No systemd/launchd installer, pidfile protocol, or service-manager abstraction is introduced.
 - Explicit custom socket workflows remain side-effect free with respect to the canonical daemon.
 
 ### Costs and limits
 
-- The first canonical client call may spend up to three seconds waiting for daemon readiness before failing.
+- The first canonical client call may spend up to three seconds waiting for a positively absent endpoint to appear before failing.
 - A healthy canonical client performs one small `status` probe before its requested Workspace operation.
+- A busy daemon may cause the requested command itself to hit its existing command-specific IPC timeout; autostart does not add a second daemon to work around daemon serialization.
 - The daemon currently has no public stop command or OS service registration; it remains a lazily detached user process.
 - Windows remains outside this decision until its local-user IPC/runtime path contract is implemented.
 
@@ -61,8 +65,11 @@ Autostart readiness is bounded. A spawn failure or a daemon that does not become
 Automated tests must prove:
 
 - a reachable canonical daemon is reused without spawning another process;
+- a short probe timeout is treated as a busy/live-enough endpoint and never triggers another process;
 - a missing canonical runtime directory triggers one detached package-module launch and then readiness validation;
-- an unavailable transport in an existing secure runtime directory triggers one launch and retry;
+- confirmed endpoint absence (`ENOENT`/`ECONNREFUSED`) in an existing secure runtime directory triggers one launch and retry;
+- a concurrent-start readiness probe that times out does not trigger or wait for another daemon;
+- unclassified transport failures fail closed without spawning;
 - an existing insecure runtime directory fails closed without spawning;
 - process creation failures are reported as bounded autostart errors;
 - canonical `status` and `scan` paths invoke the autostart boundary;
