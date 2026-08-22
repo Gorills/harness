@@ -7,7 +7,13 @@ from types import FrameType
 
 from harness.daemon import DaemonError, serve_daemon
 from harness.doctor import DoctorReport, run_doctor_checks
-from harness.ipc import IpcError, WorkspaceStatusResult, request_workspace_status
+from harness.ipc import (
+    IpcError,
+    WorkspaceScanResult,
+    WorkspaceStatusResult,
+    request_workspace_scan,
+    request_workspace_status,
+)
 from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
@@ -25,7 +31,7 @@ _DOCTOR_DATABASE_SCOPE = (
     "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
     "implemented yet."
 )
-_STATUS_FAILURE_DETAIL_MAX_LENGTH = 1024
+_CLI_FAILURE_DETAIL_MAX_LENGTH = 1024
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -92,29 +98,59 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Schema: {status.schema_version}")
 
 
-def _status_failure(detail: str) -> int:
+def _print_workspace_scan(result: WorkspaceScanResult) -> None:
+    print(f"Project: {result.project_id}")
+    print(f"Workspace: {result.workspace_id}")
+    print(f"Workspace root: {result.workspace_root}")
+    print(f"Visibility: {result.visibility_mode}")
+    print(f"Project created: {'yes' if result.project_created else 'no'}")
+    print(f"Workspace created: {'yes' if result.workspace_created else 'no'}")
+    print(f"Indexed files: {result.file_count}")
+    print(f"Added: {result.added}")
+    print(f"Updated: {result.updated}")
+    print(f"Removed: {result.removed}")
+    print(f"Schema: {result.schema_version}")
+
+
+def _cli_failure(command: str, detail: str) -> int:
     detail = detail.replace("\r", "\\r").replace("\n", "\\n")
-    if len(detail) > _STATUS_FAILURE_DETAIL_MAX_LENGTH:
-        detail = f"{detail[: _STATUS_FAILURE_DETAIL_MAX_LENGTH - 3]}..."
-    print(f"Harness status: FAIL ({detail})")
+    if len(detail) > _CLI_FAILURE_DETAIL_MAX_LENGTH:
+        detail = f"{detail[: _CLI_FAILURE_DETAIL_MAX_LENGTH - 3]}..."
+    print(f"Harness {command}: FAIL ({detail})")
     return 1
 
 
-def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
-    if socket_path is None:
-        try:
-            defaults = default_runtime_paths()
-            require_private_runtime_directory(defaults.socket.parent)
-            socket_path = defaults.socket
-        except RuntimePathError as exc:
-            return _status_failure(str(exc))
-
+def _resolve_workspace_location(command: str, workspace_location: Path) -> Path | None:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
-        return _status_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
+        _cli_failure(command, f"workspace path cannot be resolved: {workspace_location}: {exc}")
+        return None
     if not location.is_dir():
-        return _status_failure(f"workspace path is not a directory: {location}")
+        _cli_failure(command, f"workspace path is not a directory: {location}")
+        return None
+    return location
+
+
+def _resolve_socket(command: str, socket_path: Path | None) -> Path | None:
+    if socket_path is not None:
+        return socket_path
+    try:
+        defaults = default_runtime_paths()
+        require_private_runtime_directory(defaults.socket.parent)
+        return defaults.socket
+    except RuntimePathError as exc:
+        _cli_failure(command, str(exc))
+        return None
+
+
+def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
+    socket_path = _resolve_socket("status", socket_path)
+    if socket_path is None:
+        return 1
+    location = _resolve_workspace_location("status", workspace_location)
+    if location is None:
+        return 1
 
     try:
         status = request_workspace_status(
@@ -128,9 +164,26 @@ def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
             ],
         )
     except IpcError as exc:
-        return _status_failure(str(exc))
+        return _cli_failure("status", str(exc))
 
     _print_workspace_status(status)
+    return 0
+
+
+def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
+    socket_path = _resolve_socket("scan", socket_path)
+    if socket_path is None:
+        return 1
+    location = _resolve_workspace_location("scan", workspace_location)
+    if location is None:
+        return 1
+
+    try:
+        result = request_workspace_scan(socket_path, location)
+    except IpcError as exc:
+        return _cli_failure("scan", str(exc))
+
+    _print_workspace_scan(result)
     return 0
 
 
@@ -215,12 +268,36 @@ def harness_main() -> int:
         metavar="PATH",
         help="override the canonical per-user Unix-domain socket path",
     )
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="register and deterministically scan one Git Workspace",
+        description=(
+            "Register or reuse the Git Workspace containing PATH and reconcile its deterministic "
+            "file inventory through the per-user Harness daemon."
+        ),
+    )
+    scan_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        metavar="PATH",
+        help="location inside the Git Workspace (default: current directory)",
+    )
+    scan_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Unix-domain socket path",
+    )
 
     args = parser.parse_args()
     if args.command == "doctor":
         return _run_doctor(args.database)
     if args.command == "status":
         return _run_status(args.path, args.socket)
+    if args.command == "scan":
+        return _run_scan(args.path, args.socket)
 
     parser.print_help()
     return 0
@@ -232,9 +309,9 @@ def harnessd_main() -> int:
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser(
         "serve",
-        help="serve the implemented read-only local IPC status paths",
+        help="serve the implemented bounded local IPC paths",
         description=(
-            "Serve the bounded read-only local IPC status paths using canonical per-user "
+            "Serve the bounded local IPC status and scan paths using canonical per-user "
             "database and socket defaults unless explicitly overridden."
         ),
     )

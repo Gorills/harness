@@ -13,6 +13,7 @@ from harness.git_workspace import (
     inspect_git_working_tree_status,
     inspect_git_workspace_runtime_identity,
 )
+from harness.index import IndexingError
 from harness.ipc import (
     IpcMessageTooLargeError,
     IpcProtocolError,
@@ -22,9 +23,14 @@ from harness.ipc import (
     receive_request,
     send_error_response,
     send_status_response,
+    send_workspace_scan_response,
     send_workspace_status_response,
 )
+from harness.ipc import (
+    WorkspaceScanResult as IpcWorkspaceScanResult,
+)
 from harness.registry import RegistryError, get_project, get_workspace, list_workspaces
+from harness.scan import scan_path
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.workspace_resolution import (
     WorkspaceCandidate,
@@ -126,7 +132,7 @@ def serve_daemon(
     *,
     stop_event: Event | None = None,
 ) -> None:
-    """Serve the bounded read-only IPC status paths until asked to stop."""
+    """Serve the bounded local IPC status and scan paths until asked to stop."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
     if socket_path.exists() or socket_path.is_symlink():
@@ -177,6 +183,9 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
         return
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
+        return
+    if request.method == "workspace_scan" and request.workspace_path is not None:
+        _serve_workspace_scan(client, database, request.request_id, request.workspace_path)
         return
     _try_send_error(
         client,
@@ -252,6 +261,71 @@ def _serve_workspace_status(
             request_id=request_id,
             code="response_too_large",
             message="Workspace status exceeds IPC byte limit",
+        )
+
+
+def _serve_workspace_scan(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    workspace_path: Path,
+) -> None:
+    try:
+        result = scan_path(database, workspace_path)
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message=str(exc),
+        )
+        return
+    except IndexingError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="indexing_error",
+            message=str(exc),
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not scan Workspace",
+        )
+        return
+
+    response = IpcWorkspaceScanResult(
+        schema_version=SCHEMA_VERSION,
+        project_id=result.project_id,
+        workspace_id=result.workspace_id,
+        visibility_mode=result.visibility_mode,
+        workspace_root=result.workspace_root,
+        project_created=result.project_created,
+        workspace_created=result.workspace_created,
+        file_count=result.file_count,
+        added=result.added,
+        updated=result.updated,
+        removed=result.removed,
+    )
+    try:
+        send_workspace_scan_response(client, request_id, response)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace scan result exceeds IPC byte limit",
         )
 
 
