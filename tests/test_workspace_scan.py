@@ -7,6 +7,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from typing import Any
 
 import pytest
 
@@ -234,7 +235,7 @@ def test_scan_git_enumeration_uses_remaining_deadline(
     original_run = subprocess.run
     seen_timeout: list[float | None] = []
 
-    def timeout_git(*args: object, **kwargs: object) -> object:
+    def timeout_git(*args: Any, **kwargs: Any) -> Any:
         command = args[0] if args else kwargs.get("args")
         if isinstance(command, list) and command[:2] == ["git", "ls-files"]:
             timeout = kwargs.get("timeout")
