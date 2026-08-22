@@ -433,7 +433,9 @@ def _acquire_daemon_lock(socket_path: Path) -> int:
     except FileNotFoundError:
         existing = None
     except OSError as exc:
-        raise InsecureDaemonLockError(f"daemon lock path could not be inspected: {lock_path}") from exc
+        raise InsecureDaemonLockError(
+            f"daemon lock path could not be inspected: {lock_path}"
+        ) from exc
 
     if existing is not None and not stat.S_ISREG(existing.st_mode):
         raise InsecureDaemonLockError(f"daemon lock path must be a regular file: {lock_path}")
@@ -444,7 +446,9 @@ def _acquire_daemon_lock(socket_path: Path) -> int:
     try:
         lock_fd = os.open(lock_path, flags, 0o600)
     except OSError as exc:
-        raise InsecureDaemonLockError(f"daemon lock path could not be opened safely: {lock_path}") from exc
+        raise InsecureDaemonLockError(
+            f"daemon lock path could not be opened safely: {lock_path}"
+        ) from exc
 
     try:
         opened = os.fstat(lock_fd)
