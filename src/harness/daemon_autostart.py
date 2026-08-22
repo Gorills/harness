@@ -31,6 +31,7 @@ def start_canonical_daemon(socket_path: Path) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd="/",
             close_fds=True,
             start_new_session=True,
         )
