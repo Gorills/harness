@@ -426,6 +426,14 @@ def _serve_workspace_search(
             message="daemon could not read Workspace registry state",
         )
         return
+    except IndexingError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="index_error",
+            message=str(exc),
+        )
+        return
     except SearchError as exc:
         _try_send_error(
             client,
