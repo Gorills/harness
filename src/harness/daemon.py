@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import socket
 import sqlite3
@@ -47,6 +48,7 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
 _SCAN_DEADLINE_SECONDS = 30.0
+_EXISTING_SOCKET_PROBE_SECONDS = 0.2
 
 
 class DaemonError(RuntimeError):
@@ -57,8 +59,16 @@ class InsecureSocketDirectoryError(DaemonError):
     """Raised when the IPC directory is not private to the current OS user."""
 
 
+class InsecureDaemonLockError(DaemonError):
+    """Raised when the daemon singleton lock path is not safe to use."""
+
+
+class DaemonAlreadyRunningError(DaemonError):
+    """Raised when another daemon already owns or serves the selected IPC endpoint."""
+
+
 class SocketPathInUseError(DaemonError):
-    """Raised when daemon startup would replace an existing filesystem entry."""
+    """Raised when daemon startup would replace an unsafe existing filesystem entry."""
 
 
 def read_daemon_status(connection: sqlite3.Connection) -> StatusResult:
@@ -164,14 +174,16 @@ def serve_daemon(
     """Serve bounded local IPC status and deterministic scan paths until asked to stop."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
-    if socket_path.exists() or socket_path.is_symlink():
-        raise SocketPathInUseError(f"refusing to replace existing IPC path: {socket_path}")
+    lock_fd = _acquire_daemon_lock(socket_path)
 
-    initialize_database(database_path)
-    database = connect_database(database_path)
+    database: sqlite3.Connection | None = None
     server: socket.socket | None = None
     socket_identity: tuple[int, int] | None = None
     try:
+        _prepare_socket_path_for_bind(socket_path)
+        initialize_database(database_path)
+        database = connect_database(database_path)
+
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
         os.chmod(socket_path, 0o600)
@@ -193,8 +205,10 @@ def serve_daemon(
     finally:
         if server is not None:
             server.close()
-        database.close()
+        if database is not None:
+            database.close()
         _unlink_owned_socket(socket_path, socket_identity)
+        os.close(lock_fd)
 
 
 def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
@@ -404,6 +418,111 @@ def _prepare_socket_parent(parent: Path) -> None:
             f"IPC directory must be owned by the current user, be a real directory, "
             f"and have no group/other access: {parent}"
         )
+
+
+def _daemon_lock_path(socket_path: Path) -> Path:
+    return socket_path.with_name(f"{socket_path.name}.lock")
+
+
+def _acquire_daemon_lock(socket_path: Path) -> int:
+    import fcntl
+
+    lock_path = _daemon_lock_path(socket_path)
+    try:
+        existing = lock_path.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError as exc:
+        raise InsecureDaemonLockError(f"daemon lock path could not be inspected: {lock_path}") from exc
+
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise InsecureDaemonLockError(f"daemon lock path must be a regular file: {lock_path}")
+
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise InsecureDaemonLockError(f"daemon lock path could not be opened safely: {lock_path}") from exc
+
+    try:
+        opened = os.fstat(lock_fd)
+        current = lock_path.lstat()
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or opened.st_uid != os.geteuid()
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise InsecureDaemonLockError(
+                f"daemon lock must be a current-user regular file with one link: {lock_path}"
+            )
+        os.fchmod(lock_fd, 0o600)
+        if stat.S_IMODE(os.fstat(lock_fd).st_mode) != 0o600:
+            raise InsecureDaemonLockError(f"daemon lock mode could not be secured: {lock_path}")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise DaemonAlreadyRunningError(
+                f"another Harness daemon already owns the IPC endpoint: {socket_path}"
+            ) from exc
+        except OSError as exc:
+            raise DaemonError(f"daemon singleton lock could not be acquired: {lock_path}") from exc
+    except Exception:
+        os.close(lock_fd)
+        raise
+    return lock_fd
+
+
+def _prepare_socket_path_for_bind(socket_path: Path) -> None:
+    try:
+        current = socket_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SocketPathInUseError(f"refusing to replace existing IPC path: {socket_path}") from exc
+
+    if not stat.S_ISSOCK(current.st_mode) or current.st_uid != os.geteuid():
+        raise SocketPathInUseError(f"refusing to replace existing IPC path: {socket_path}")
+
+    identity = (current.st_dev, current.st_ino)
+    if _socket_endpoint_accepts_connections(socket_path):
+        raise DaemonAlreadyRunningError(
+            f"another process is already serving the IPC endpoint: {socket_path}"
+        )
+
+    try:
+        replacement = socket_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SocketPathInUseError(f"refusing to replace existing IPC path: {socket_path}") from exc
+
+    if (
+        not stat.S_ISSOCK(replacement.st_mode)
+        or replacement.st_uid != os.geteuid()
+        or (replacement.st_dev, replacement.st_ino) != identity
+    ):
+        raise SocketPathInUseError(f"refusing to replace changed IPC path: {socket_path}")
+    socket_path.unlink()
+
+
+def _socket_endpoint_accepts_connections(socket_path: Path) -> bool:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(_EXISTING_SOCKET_PROBE_SECONDS)
+        try:
+            probe.connect(str(socket_path))
+        except TimeoutError:
+            return True
+        except OSError as exc:
+            if exc.errno in {errno.ENOENT, errno.ECONNREFUSED}:
+                return False
+            raise SocketPathInUseError(
+                f"refusing to replace IPC socket that could not be classified: {socket_path}"
+            ) from exc
+    return True
 
 
 def _unlink_owned_socket(socket_path: Path, identity: tuple[int, int] | None) -> None:
