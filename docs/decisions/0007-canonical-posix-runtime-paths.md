@@ -58,7 +58,7 @@ The final Harness socket directory must be a real directory (not a symlink), own
 
 `harness status [PATH]` uses the canonical socket automatically. `--socket PATH` remains an explicit override.
 
-`harnessd serve` uses both canonical defaults automatically. `--database PATH` and `--socket PATH` remain optional overrides and may be supplied independently.
+`harnessd serve` uses both canonical defaults automatically. `--database PATH` and `--socket PATH` remain optional overrides and may be supplied independently. Isolated concurrent daemon instances require distinct selected Harness databases; changing only the socket does not create a second writer for one store.
 
 `harness doctor` keeps its current contract: with no `--database`, it checks only the SQLite runtime/FTS5 and does not create or inspect durable state implicitly.
 
@@ -73,7 +73,7 @@ Path selection itself performs no daemon autostart, registration, scan, MCP setu
 - Durable database state does not live in a transient runtime directory.
 - Socket fallback remains per-user and short enough for common Unix-domain socket path limits.
 - Canonical clients fail closed on spoofable final runtime-directory entries rather than connecting through a symlink or another user's directory.
-- Explicit overrides preserve isolated test/recovery workflows.
+- Explicit overrides preserve isolated test/recovery workflows when isolated stores are selected.
 
 ### Costs and limits
 
