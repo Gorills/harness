@@ -52,7 +52,7 @@ Otherwise Harness uses the process temporary directory with the effective numeri
 <TEMP>/harness-<uid>/harness.sock
 ```
 
-The final Harness socket directory must be a real directory (not a symlink), owned by the effective OS user, with no group/other permissions. The daemon creates/validates that directory before bind. A client using the canonical socket validates the same directory before connecting, so a pre-created symlink or another user's directory in a shared temporary namespace is not trusted as the per-user daemon endpoint. Relative or empty `XDG_RUNTIME_DIR` values are ignored.
+The final Harness socket directory must be a real directory (not a symlink), owned by the effective OS user, with no group/other permissions. The daemon creates/validates that directory before bind. A client using the canonical socket creates or validates the same private directory before IPC/autostart, so a pre-created symlink or another user's directory in a shared temporary namespace is not trusted as the per-user daemon endpoint. Relative or empty `XDG_RUNTIME_DIR` values are ignored.
 
 ### CLI behavior
 
@@ -62,7 +62,7 @@ The final Harness socket directory must be a real directory (not a symlink), own
 
 `harness doctor` keeps its current contract: with no `--database`, it checks only the SQLite runtime/FTS5 and does not create or inspect durable state implicitly.
 
-Path selection itself performs no daemon autostart, registration, scan, MCP setup, or host configuration.
+Path selection itself performs no daemon autostart, registration, scan, MCP setup, or host configuration. Canonical client autostart is a separate lifecycle policy defined by ADR-0009 after path selection has produced and secured the endpoint directory.
 
 ## Consequences
 
@@ -78,7 +78,7 @@ Path selection itself performs no daemon autostart, registration, scan, MCP setu
 ### Costs and limits
 
 - This decision is POSIX-only until the Windows local-user IPC transport is implemented.
-- Daemon singleton ownership and crash-stale socket recovery are defined separately by ADR-0008; this path decision still performs no autostart or OS service management.
+- Daemon singleton ownership and crash-stale socket recovery are defined separately by ADR-0008; bounded on-demand canonical client autostart is defined by ADR-0009. Neither path selection nor these decisions install/manage an OS service.
 - This does not create a public Project/Workspace registration workflow or scan command.
 - The XDG-compatible fallback on macOS is a Harness convention rather than a claim that macOS natively defines XDG variables.
 
@@ -89,6 +89,7 @@ Automated tests must prove:
 - absolute XDG state/runtime bases produce the exact documented paths;
 - relative XDG values are ignored and deterministic fallbacks are used;
 - the canonical state directory is created private to the effective user and insecure existing state directories fail closed;
+- the canonical runtime directory can be created private by canonical clients before first IPC/autostart;
 - state/runtime final directories that are symlinks are rejected even when their targets are private current-user directories;
 - `harness status` uses the canonical socket when no override is supplied and validates its canonical runtime directory before IPC;
 - `harnessd serve` uses the canonical database/socket defaults and prepares the default state directory;
