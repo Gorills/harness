@@ -136,12 +136,12 @@ def _scan_failure(detail: str) -> int:
     return _bounded_failure("Harness scan", detail)
 
 
-def _request_with_canonical_autostart[_ResultT](
-    request: Callable[[], _ResultT],
+def _request_with_canonical_autostart[ResultT](
+    request: Callable[[], ResultT],
     *,
     socket_path: Path,
     autostart: bool,
-) -> _ResultT:
+) -> ResultT:
     try:
         return request()
     except IpcTransportError as exc:
