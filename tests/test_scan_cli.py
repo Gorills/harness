@@ -68,9 +68,8 @@ def test_harness_scan_uses_canonical_socket_without_override(
         database=tmp_path / "state" / "harness.db",
         socket=tmp_path / "run" / "harness.sock",
     )
-    defaults.socket.parent.mkdir(mode=0o700)
-    defaults.socket.parent.chmod(0o700)
     seen_sockets: list[Path] = []
+    autostarted: list[RuntimePaths] = []
 
     def request_scan(ipc_socket: Path, _path: Path) -> WorkspaceScanResult:
         seen_sockets.append(ipc_socket)
@@ -90,10 +89,49 @@ def test_harness_scan_uses_canonical_socket_without_override(
 
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(workspace_root)])
     monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
+    monkeypatch.setattr(entrypoints, "ensure_canonical_daemon", autostarted.append)
     monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
 
     assert harness_main() == 0
+    assert autostarted == [defaults]
     assert seen_sockets == [defaults.socket]
+
+
+def test_harness_scan_explicit_socket_does_not_autostart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    socket_path = tmp_path / "manual.sock"
+
+    def unexpected_autostart(_paths: RuntimePaths) -> None:
+        raise AssertionError("explicit socket must not autostart the canonical daemon")
+
+    def request_scan(_socket: Path, _path: Path) -> WorkspaceScanResult:
+        return WorkspaceScanResult(
+            schema_version=3,
+            workspace_id="workspace-1",
+            project_id="project-1",
+            visibility_mode="normal",
+            workspace_root=workspace_root.resolve(),
+            project_created=False,
+            workspace_created=False,
+            file_count=0,
+            added=0,
+            updated=0,
+            removed=0,
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "scan", str(workspace_root), "--socket", str(socket_path)],
+    )
+    monkeypatch.setattr(entrypoints, "ensure_canonical_daemon", unexpected_autostart)
+    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+
+    assert harness_main() == 0
 
 
 def test_harness_scan_rejects_non_directory_before_ipc(
