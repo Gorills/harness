@@ -67,7 +67,9 @@ def _registered(tmp_path: Path) -> tuple[sqlite3.Connection, str]:
     return connection, workspace.workspace_id
 
 
-def test_search_ranks_exact_path_and_filename_before_broader_matches(tmp_path: Path) -> None:
+def test_search_ranks_exact_path_and_filename_before_broader_matches(
+    tmp_path: Path,
+) -> None:
     connection, workspace_id = _registered(tmp_path)
     try:
         exact_path = search_indexed_paths(
@@ -86,7 +88,9 @@ def test_search_ranks_exact_path_and_filename_before_broader_matches(tmp_path: P
         connection.close()
 
 
-def test_search_normalizes_camel_snake_and_natural_identifier_tokens(tmp_path: Path) -> None:
+def test_search_normalizes_camel_snake_and_natural_identifier_tokens(
+    tmp_path: Path,
+) -> None:
     connection, workspace_id = _registered(tmp_path)
     try:
         results = search_indexed_paths(connection, workspace_id, "rotate refresh token")
@@ -107,7 +111,9 @@ def test_search_uses_deterministic_substring_fallback(tmp_path: Path) -> None:
     try:
         results = search_indexed_paths(connection, workspace_id, "RefreshT")
 
-        assert [result.relative_path for result in results] == ["src/rotateRefreshToken.py"]
+        assert [result.relative_path for result in results] == [
+            "src/rotateRefreshToken.py"
+        ]
         assert results[0].match_kind is SearchMatchKind.PATH_SUBSTRING
     finally:
         connection.close()
@@ -180,7 +186,9 @@ def test_search_rejects_empty_nul_and_oversized_queries(tmp_path: Path) -> None:
         connection.close()
 
 
-def test_search_result_does_not_expose_source_or_internal_index_fields(tmp_path: Path) -> None:
+def test_search_result_does_not_expose_source_or_internal_index_fields(
+    tmp_path: Path,
+) -> None:
     connection, workspace_id = _registered(tmp_path)
     try:
         result = search_indexed_paths(connection, workspace_id, "rotateRefreshToken.py")[0]
