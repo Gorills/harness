@@ -1,14 +1,22 @@
 from argparse import ArgumentParser
+from collections.abc import Callable
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
+from typing import TypeVar
 
 from harness.daemon import DaemonError, serve_daemon
+from harness.daemon_autostart import (
+    DaemonAutostartError,
+    start_canonical_daemon,
+    transport_error_allows_autostart,
+)
 from harness.doctor import DoctorReport, run_doctor_checks
 from harness.ipc import (
     IpcError,
+    IpcTransportError,
     WorkspaceScanResult,
     WorkspaceStatusResult,
     request_workspace_scan,
@@ -17,8 +25,8 @@ from harness.ipc import (
 from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
+    ensure_private_runtime_directory,
     ensure_private_state_directory,
-    require_private_runtime_directory,
 )
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -32,6 +40,7 @@ _DOCTOR_DATABASE_SCOPE = (
     "implemented yet."
 )
 _FAILURE_DETAIL_MAX_LENGTH = 1024
+_ResultT = TypeVar("_ResultT")
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -129,15 +138,22 @@ def _scan_failure(detail: str) -> int:
     return _bounded_failure("Harness scan", detail)
 
 
-def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
-    if socket_path is None:
-        try:
-            defaults = default_runtime_paths()
-            require_private_runtime_directory(defaults.socket.parent)
-            socket_path = defaults.socket
-        except RuntimePathError as exc:
-            return _status_failure(str(exc))
+def _request_with_canonical_autostart(
+    request: Callable[[], _ResultT],
+    *,
+    socket_path: Path,
+    autostart: bool,
+) -> _ResultT:
+    try:
+        return request()
+    except IpcTransportError as exc:
+        if not autostart or not transport_error_allows_autostart(exc):
+            raise
+        start_canonical_daemon(socket_path)
+        return request()
 
+
+def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -145,18 +161,31 @@ def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
     if not location.is_dir():
         return _status_failure(f"workspace path is not a directory: {location}")
 
+    uses_canonical_socket = socket_path is None
+    if socket_path is None:
+        try:
+            defaults = default_runtime_paths()
+            ensure_private_runtime_directory(defaults.socket.parent)
+            socket_path = defaults.socket
+        except RuntimePathError as exc:
+            return _status_failure(str(exc))
+
     try:
-        status = request_workspace_status(
-            socket_path,
-            [
-                WorkspaceHint(
-                    path=location,
-                    source="cli-location",
-                    match_mode=WorkspaceHintMatchMode.LOCATION,
-                )
-            ],
+        status = _request_with_canonical_autostart(
+            lambda: request_workspace_status(
+                socket_path,
+                [
+                    WorkspaceHint(
+                        path=location,
+                        source="cli-location",
+                        match_mode=WorkspaceHintMatchMode.LOCATION,
+                    )
+                ],
+            ),
+            socket_path=socket_path,
+            autostart=uses_canonical_socket,
         )
-    except IpcError as exc:
+    except (DaemonAutostartError, IpcError) as exc:
         return _status_failure(str(exc))
 
     _print_workspace_status(status)
@@ -164,14 +193,6 @@ def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
 
 
 def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
-    if socket_path is None:
-        try:
-            defaults = default_runtime_paths()
-            require_private_runtime_directory(defaults.socket.parent)
-            socket_path = defaults.socket
-        except RuntimePathError as exc:
-            return _scan_failure(str(exc))
-
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -179,9 +200,22 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
     if not location.is_dir():
         return _scan_failure(f"workspace path is not a directory: {location}")
 
+    uses_canonical_socket = socket_path is None
+    if socket_path is None:
+        try:
+            defaults = default_runtime_paths()
+            ensure_private_runtime_directory(defaults.socket.parent)
+            socket_path = defaults.socket
+        except RuntimePathError as exc:
+            return _scan_failure(str(exc))
+
     try:
-        result = request_workspace_scan(socket_path, location)
-    except IpcError as exc:
+        result = _request_with_canonical_autostart(
+            lambda: request_workspace_scan(socket_path, location),
+            socket_path=socket_path,
+            autostart=uses_canonical_socket,
+        )
+    except (DaemonAutostartError, IpcError) as exc:
         return _scan_failure(str(exc))
 
     _print_workspace_scan(result)
