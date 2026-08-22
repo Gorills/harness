@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from harness.entrypoints import harnessd_main
 
 
