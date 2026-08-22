@@ -60,11 +60,11 @@ class InsecureSocketDirectoryError(DaemonError):
 
 
 class InsecureDaemonLockError(DaemonError):
-    """Raised when the daemon singleton lock path is not safe to use."""
+    """Raised when a daemon singleton lock path is not safe to use."""
 
 
 class DaemonAlreadyRunningError(DaemonError):
-    """Raised when another daemon already owns or serves the selected IPC endpoint."""
+    """Raised when another daemon already owns the selected endpoint or database."""
 
 
 class SocketPathInUseError(DaemonError):
@@ -174,13 +174,15 @@ def serve_daemon(
     """Serve bounded local IPC status and deterministic scan paths until asked to stop."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
-    lock_fd = _acquire_daemon_lock(socket_path)
+    socket_lock_fd = _acquire_daemon_lock(socket_path)
 
+    database_lock_fd: int | None = None
     database: sqlite3.Connection | None = None
     server: socket.socket | None = None
     socket_identity: tuple[int, int] | None = None
     try:
         _prepare_socket_path_for_bind(socket_path)
+        database_lock_fd = _acquire_database_lock(database_path)
         initialize_database(database_path)
         database = connect_database(database_path)
 
@@ -208,7 +210,9 @@ def serve_daemon(
         if database is not None:
             database.close()
         _unlink_owned_socket(socket_path, socket_identity)
-        os.close(lock_fd)
+        if database_lock_fd is not None:
+            os.close(database_lock_fd)
+        os.close(socket_lock_fd)
 
 
 def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
@@ -424,10 +428,40 @@ def _daemon_lock_path(socket_path: Path) -> Path:
     return socket_path.with_name(f"{socket_path.name}.lock")
 
 
+def _database_lock_path(database_path: Path) -> Path:
+    try:
+        resolved = database_path.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise InsecureDaemonLockError(
+            f"daemon database path could not be resolved: {database_path}"
+        ) from exc
+    return resolved.with_name(f"{resolved.name}.lock")
+
+
 def _acquire_daemon_lock(socket_path: Path) -> int:
+    return _acquire_lock_file(
+        _daemon_lock_path(socket_path),
+        conflict_message=f"another Harness daemon already owns the IPC endpoint: {socket_path}",
+    )
+
+
+def _acquire_database_lock(database_path: Path) -> int:
+    lock_path = _database_lock_path(database_path)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise InsecureDaemonLockError(
+            f"daemon database lock parent could not be prepared: {lock_path.parent}"
+        ) from exc
+    return _acquire_lock_file(
+        lock_path,
+        conflict_message=f"another Harness daemon already owns the database: {database_path}",
+    )
+
+
+def _acquire_lock_file(lock_path: Path, *, conflict_message: str) -> int:
     import fcntl
 
-    lock_path = _daemon_lock_path(socket_path)
     try:
         existing = lock_path.lstat()
     except FileNotFoundError:
@@ -469,9 +503,7 @@ def _acquire_daemon_lock(socket_path: Path) -> int:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise DaemonAlreadyRunningError(
-                f"another Harness daemon already owns the IPC endpoint: {socket_path}"
-            ) from exc
+            raise DaemonAlreadyRunningError(conflict_message) from exc
         except OSError as exc:
             raise DaemonError(f"daemon singleton lock could not be acquired: {lock_path}") from exc
     except Exception:
