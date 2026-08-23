@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -320,6 +320,70 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             )
             """
         )
+        return
+    if target_version == 6:
+        connection.execute(
+            """
+            CREATE TABLE task_checkpoints (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_revision INTEGER NOT NULL CHECK (task_revision > 1),
+                state TEXT NOT NULL CHECK (state IN ('working', 'waiting', 'completed')),
+                wait_reason TEXT,
+                summary TEXT NOT NULL CHECK (
+                    summary <> '' AND length(CAST(summary AS BLOB)) <= 4096
+                ),
+                next_step TEXT CHECK (
+                    next_step IS NULL
+                    OR (next_step <> '' AND length(CAST(next_step AS BLOB)) <= 2048)
+                ),
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                baseline_head TEXT CHECK (baseline_head IS NULL OR baseline_head <> ''),
+                current_head TEXT CHECK (current_head IS NULL OR current_head <> ''),
+                current_branch TEXT CHECK (current_branch IS NULL OR current_branch <> ''),
+                current_dirty_path_count INTEGER NOT NULL CHECK (current_dirty_path_count >= 0),
+                CHECK (
+                    (
+                        state = 'waiting'
+                        AND wait_reason IS NOT NULL
+                        AND wait_reason IN ('operator_review', 'operator_input', 'external')
+                        AND next_step IS NOT NULL
+                    )
+                    OR (state <> 'waiting' AND wait_reason IS NULL)
+                ),
+                UNIQUE (task_id, task_revision),
+                UNIQUE (id, task_id, task_revision)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE task_checkpoint_changed_paths (
+                checkpoint_id TEXT NOT NULL
+                    REFERENCES task_checkpoints(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL CHECK (relative_path <> ''),
+                PRIMARY KEY (checkpoint_id, relative_path)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_revision INTEGER NOT NULL CHECK (task_revision > 1),
+                event_type TEXT NOT NULL CHECK (event_type = 'checkpoint'),
+                checkpoint_id TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                FOREIGN KEY (checkpoint_id, task_id, task_revision)
+                    REFERENCES task_checkpoints(id, task_id, task_revision) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX task_checkpoints_task_id_idx ON task_checkpoints(task_id, task_revision)"
+        )
+        connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 

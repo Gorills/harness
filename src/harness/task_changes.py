@@ -50,6 +50,8 @@ class TaskChangedFiles:
     workspace_id: str
     baseline_head: str | None
     current_head: str | None
+    current_branch: str | None
+    current_dirty_path_count: int
     relative_paths: tuple[str, ...]
 
 
@@ -103,6 +105,8 @@ def calculate_task_changed_files(
         workspace_id=workspace.workspace_id,
         baseline_head=baseline.snapshot.head,
         current_head=first_git.head,
+        current_branch=first_git.branch,
+        current_dirty_path_count=len(first_git.dirty_paths),
         relative_paths=relative_paths,
     )
 
