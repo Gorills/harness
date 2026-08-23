@@ -12,6 +12,10 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 
 from harness.git_workspace import _git_environment, inspect_git_workspace
+from harness.knowledge import (
+    reconcile_knowledge_staleness,
+    snapshot_fresh_anchored_knowledge_ids,
+)
 from harness.registry import WorkspaceRecord, get_workspace
 
 _DEFAULT_EXCLUDES = (
@@ -80,6 +84,7 @@ def scan_workspace(
     _require_scan_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
     _require_registered_layout(workspace)
+    eligible_knowledge_ids = snapshot_fresh_anchored_knowledge_ids(connection, workspace_id)
     snapshot = _build_snapshot(workspace, deadline=deadline)
     _require_scan_deadline(deadline)
     _require_registered_layout(workspace)
@@ -132,6 +137,15 @@ def scan_workspace(
                 (workspace_id, relative_path),
             )
 
+        reconcile_knowledge_staleness(
+            connection,
+            workspace_id,
+            {
+                relative_path: (record.kind.value, record.content_sha256)
+                for relative_path, record in snapshot.items()
+            },
+            eligible_knowledge_ids=eligible_knowledge_ids,
+        )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:

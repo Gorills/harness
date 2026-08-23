@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime
 
+from harness.knowledge import KnowledgeDraft
 from harness.registry import get_workspace
 from harness.task_checkpoints import (
     TaskCheckpointMutation,
@@ -107,6 +109,7 @@ def task_checkpoint(
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
+    knowledge: Sequence[KnowledgeDraft] = (),
     now: datetime | None = None,
 ) -> TaskCheckpointMutation:
     """Checkpoint the explicit Task only after verifying immutable Workspace ownership."""
@@ -119,6 +122,7 @@ def task_checkpoint(
         summary=summary,
         next_step=next_step,
         wait_reason=wait_reason,
+        knowledge=knowledge,
         now=now,
     )
 

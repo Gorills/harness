@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -445,6 +445,78 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             ON task_events(task_id, task_revision)
             WHERE event_type = 'resumed'
             """
+        )
+        return
+    if target_version == 8:
+        connection.execute(
+            """
+            CREATE TABLE knowledge_cards (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (
+                    kind IN (
+                        'behavior', 'data_flow', 'invariant', 'architecture_rationale',
+                        'decision', 'caveat', 'operational_detail'
+                    )
+                ),
+                title TEXT NOT NULL CHECK (
+                    title <> '' AND length(CAST(title AS BLOB)) <= 256
+                ),
+                body TEXT NOT NULL CHECK (
+                    body <> '' AND length(CAST(body AS BLOB)) <= 8192
+                ),
+                source_type TEXT NOT NULL CHECK (
+                    source_type IN ('agent_asserted', 'operator', 'repository_document', 'ADR')
+                ),
+                source_task_id TEXT,
+                source_checkpoint_id TEXT,
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                updated_at TEXT NOT NULL CHECK (updated_at <> ''),
+                freshness TEXT NOT NULL CHECK (
+                    freshness IN ('fresh', 'needs_revalidation')
+                ),
+                CHECK (
+                    (
+                        source_type = 'agent_asserted'
+                        AND source_task_id IS NOT NULL
+                        AND source_task_id <> ''
+                        AND source_checkpoint_id IS NOT NULL
+                        AND source_checkpoint_id <> ''
+                    )
+                    OR source_type <> 'agent_asserted'
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE knowledge_anchors (
+                knowledge_id TEXT NOT NULL
+                    REFERENCES knowledge_cards(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL CHECK (workspace_id <> ''),
+                relative_path TEXT NOT NULL CHECK (
+                    relative_path <> ''
+                    AND length(CAST(relative_path AS BLOB)) <= 4096
+                ),
+                symbol TEXT NOT NULL DEFAULT '' CHECK (
+                    length(CAST(symbol AS BLOB)) <= 512
+                ),
+                fingerprint_kind TEXT NOT NULL CHECK (
+                    fingerprint_kind IN ('file', 'symlink')
+                ),
+                content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+                PRIMARY KEY (knowledge_id, workspace_id, relative_path, symbol)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX knowledge_cards_project_idx ON knowledge_cards(project_id, created_at, id)"
+        )
+        connection.execute(
+            "CREATE INDEX knowledge_cards_freshness_idx ON knowledge_cards(project_id, freshness)"
+        )
+        connection.execute(
+            "CREATE INDEX knowledge_anchors_workspace_idx ON knowledge_anchors(workspace_id, knowledge_id)"
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

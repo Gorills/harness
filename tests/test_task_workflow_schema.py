@@ -156,14 +156,16 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
         )
         connection.execute("DROP TABLE task_events_v7_current")
         connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DROP TABLE knowledge_anchors")
+        connection.execute("DROP TABLE knowledge_cards")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 7")
         connection.commit()
     finally:
         connection.close()
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 7
+    assert status.schema_version == SCHEMA_VERSION == 8
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

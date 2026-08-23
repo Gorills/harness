@@ -86,8 +86,8 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
         connection.close()
 
 
-def test_schema_version_is_checkpoint_schema() -> None:
-    assert SCHEMA_VERSION == 7
+def test_schema_version_includes_knowledge_schema() -> None:
+    assert SCHEMA_VERSION == 8
 
 
 def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
