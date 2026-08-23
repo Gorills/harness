@@ -110,7 +110,7 @@ def main() -> int:
                 )
 
         search_help = _run((str(harness), "search", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--socket", "--limit", "Structural Index"):
+        for expected in ("--socket", "--limit", "bounded path or identifier query"):
             if expected not in search_help.stdout:
                 raise RuntimeError(
                     f"installed harness search --help did not contain {expected!r}: "
