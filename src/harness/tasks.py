@@ -82,9 +82,7 @@ def create_task_record(
         get_workspace(connection, workspace_id)
         existing = _working_task(connection, workspace_id)
         if existing is not None:
-            raise TaskConflictError(
-                f"workspace already has a working task: {existing.task_id}"
-            )
+            raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
 
         task = TaskRecord(
             task_id=uuid4().hex,
@@ -176,9 +174,7 @@ def transition_task_state(
         if state is TaskState.WORKING:
             existing = _working_task(connection, current.workspace_id)
             if existing is not None and existing.task_id != current.task_id:
-                raise TaskConflictError(
-                    f"workspace already has a working task: {existing.task_id}"
-                )
+                raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
 
         cursor = connection.execute(
             """
