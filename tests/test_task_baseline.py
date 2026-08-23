@@ -214,7 +214,9 @@ def test_dirty_submodule_baseline_is_explicitly_opaque(tmp_path: Path) -> None:
         connection.close()
 
 
-def test_baseline_capture_failure_rolls_back_new_task(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_baseline_capture_failure_rolls_back_new_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _root, connection, workspace_id = _registered(tmp_path)
 
     def fail_capture(*args: object, **kwargs: object) -> object:
