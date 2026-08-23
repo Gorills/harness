@@ -12,6 +12,10 @@ from typing import cast
 
 import pytest
 
+import harness.git_workspace as git_workspace_module
+import harness.ipc as ipc_module
+import harness.knowledge as knowledge_module
+import harness.task_changes as task_changes_module
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import (
@@ -105,6 +109,19 @@ def _raw_request(socket_path: Path, payload: dict[str, object]) -> dict[str, obj
     value: object = json.loads(response.decode("utf-8"))
     assert isinstance(value, dict)
     return cast(dict[str, object], value)
+
+
+def test_default_task_ipc_timeout_exceeds_stacked_checkpoint_mechanical_budgets() -> None:
+    # task_checkpoint can legitimately spend these bounded phases sequentially:
+    # Workspace identity resolution (three rev-parse calls), changed-file capture,
+    # then Knowledge anchor capture. The client must remain connected beyond all
+    # of them so a successful commit cannot become an ambiguous transport timeout.
+    stacked_budget = (
+        3 * git_workspace_module._GIT_COMMAND_TIMEOUT_SECONDS
+        + task_changes_module._CHANGED_FILES_TIMEOUT_SECONDS
+        + knowledge_module._KNOWLEDGE_ANCHOR_CAPTURE_TIMEOUT_SECONDS
+    )
+    assert ipc_module._TASK_REQUEST_TIMEOUT_SECONDS >= stacked_budget + 10.0
 
 
 def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Path) -> None:
