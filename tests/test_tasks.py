@@ -252,9 +252,7 @@ def test_parallel_same_revision_writers_cannot_both_commit(tmp_path: Path) -> No
                     task.task_id,
                     expected_revision=1,
                     state=target,
-                    wait_reason=(
-                        TaskWaitReason.EXTERNAL if target is TaskState.WAITING else None
-                    ),
+                    wait_reason=(TaskWaitReason.EXTERNAL if target is TaskState.WAITING else None),
                 )
             except TaskRevisionConflictError:
                 return "conflict"
