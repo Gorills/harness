@@ -554,6 +554,7 @@ def _dirty_path_state(
 
     if stat.S_ISREG(before.st_mode):
         digest.update(b"file\0")
+        _digest_field(digest, str(stat.S_IMODE(before.st_mode)))
         try:
             with path.open("rb") as stream:
                 opened_before = os.fstat(stream.fileno())

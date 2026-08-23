@@ -34,7 +34,7 @@ A baseline captures:
 Dirty-path fingerprints are local mechanical evidence, not persisted source:
 
 - every fingerprint is domain-versioned and includes the path's exact staged Git-index entry bytes (`git ls-files --stage -z`) so staged-state changes cannot hide behind an unchanged porcelain status/worktree;
-- `file`: hash additionally includes Git status metadata plus regular-file bytes read with before/open/after stability checks;
+- `file`: hash additionally includes Git status metadata, stable regular-file permission mode, and file bytes read with before/open/after stability checks;
 - `symlink`: hash additionally includes Git status metadata plus the link target string and never follows the target for content;
 - `missing`: hash records status metadata plus a missing-path sentinel;
 - `opaque`: used for entries such as a dirty submodule/directory where Harness does not claim a complete content fingerprint.

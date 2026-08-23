@@ -21,7 +21,7 @@ The result is the conservative union of:
 - baseline-dirty paths whose current dirty record no longer exactly matches the baseline record;
 - both sides of a rename/copy when a changed dirty record carries an origin path.
 
-ADR-0012's dirty fingerprint is strengthened in the same prerequisite slice with a `task-dirty-state-v2` domain marker plus exact `git ls-files --stage -z` bytes for that path. Without this, a pre-existing `MM` file could have its staged blob replaced while its worktree bytes and two-character status returned to the same values, producing a false negative. Existing v5 baseline rows created by older code have no fingerprint-version column; the v2 domain marker therefore makes such cross-version comparisons conservatively mismatch rather than silently treating unverifiable staged state as unchanged.
+ADR-0012's dirty fingerprint is strengthened in the same prerequisite slice with a `task-dirty-state-v2` domain marker, exact `git ls-files --stage -z` bytes for that path, and stable regular-file permission mode. Without the index state, a pre-existing `MM` file could have its staged blob replaced while its worktree bytes and two-character status returned to the same values; without the file mode, a pre-existing dirty regular file could change executable/permission state while preserving the same status and bytes. Either case would otherwise produce a false negative. Existing v5 baseline rows created by older code have no fingerprint-version column; the v2 domain marker therefore makes such cross-version comparisons conservatively mismatch rather than silently treating unverifiable state as unchanged.
 
 A pre-existing dirty path is excluded only when all of the following are true:
 
@@ -66,6 +66,7 @@ Automated tests must prove:
 - unchanged clean Tasks return no paths and do not change Task revision;
 - new tracked and untracked worktree edits are included;
 - identical pre-existing dirty state is excluded;
+- a pre-existing dirty regular file whose permission mode changes is included even when its bytes and porcelain status remain identical;
 - a pre-existing dirty file edited again is included;
 - a pre-existing dirty file that becomes clean is included;
 - a committed Task-time change is included even with a clean worktree;

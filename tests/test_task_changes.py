@@ -160,6 +160,23 @@ def test_changed_files_detect_staged_blob_change_with_identical_mm_worktree(
         connection.close()
 
 
+def test_changed_files_detect_regular_file_mode_change_with_identical_dirty_content(
+    tmp_path: Path,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    try:
+        tracked = root / "tracked.txt"
+        tracked.write_text("dirty before task\n", encoding="utf-8")
+        created = create_task_with_baseline(connection, workspace_id, "Mode change")
+        tracked.chmod(tracked.stat().st_mode | 0o111)
+
+        changed = calculate_task_changed_files(connection, created.task.task_id)
+
+        assert changed.relative_paths == ("tracked.txt",)
+    finally:
+        connection.close()
+
+
 def test_changed_files_include_committed_tree_change_with_clean_worktree(tmp_path: Path) -> None:
     root, connection, workspace_id = _registered(tmp_path)
     try:
