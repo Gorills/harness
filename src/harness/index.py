@@ -440,7 +440,7 @@ def _record_from_row(row: tuple[object, ...]) -> IndexedFileRecord:
         or not isinstance(size_bytes, int)
         or size_bytes < 0
         or not isinstance(content_sha256, str)
-        or len(content_sha256) != 64
+        or not _is_sha256(content_sha256)
     ):
         raise IndexingError("indexed file row has invalid persisted types")
     try:
@@ -454,3 +454,13 @@ def _record_from_row(row: tuple[object, ...]) -> IndexedFileRecord:
         size_bytes=size_bytes,
         content_sha256=content_sha256,
     )
+
+
+def _is_sha256(value: str) -> bool:
+    if len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
