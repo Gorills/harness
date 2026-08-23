@@ -22,11 +22,14 @@ from harness.ipc import (
     StatusResult,
     UnsupportedIpcTransportError,
     WorkspaceScanResult,
+    WorkspaceSearchHit,
+    WorkspaceSearchResult,
     WorkspaceStatusResult,
     receive_request,
     send_error_response,
     send_status_response,
     send_workspace_scan_response,
+    send_workspace_search_response,
     send_workspace_status_response,
 )
 from harness.registry import (
@@ -36,6 +39,7 @@ from harness.registry import (
     list_workspaces,
     register_workspace_for_scan,
 )
+from harness.search import SearchError, search_indexed_paths
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.workspace_resolution import (
     WorkspaceCandidate,
@@ -141,6 +145,69 @@ def read_workspace_status(
     )
 
 
+def read_workspace_search(
+    connection: sqlite3.Connection,
+    hints: Sequence[WorkspaceHint],
+    query: str,
+    limit: int,
+) -> WorkspaceSearchResult:
+    """Resolve one registered Workspace and search its current Structural Index snapshot."""
+    registered = list_workspaces(connection)
+    resolution = WorkspaceResolver(
+        [
+            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
+            for workspace in registered
+        ]
+    ).resolve(hints)
+    workspace = get_workspace(connection, resolution.workspace_id)
+
+    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    if (
+        runtime_identity.layout.workspace_root != workspace.workspace_root
+        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
+    ):
+        raise WorkspaceResolutionError(
+            f"registered workspace Git identity changed: {workspace.workspace_root}"
+        )
+
+    connection.execute("BEGIN")
+    try:
+        current_workspace = get_workspace(connection, workspace.workspace_id)
+        if current_workspace != workspace:
+            raise WorkspaceResolutionError("workspace registry identity changed during search")
+        project = get_project(connection, workspace.project_id)
+        search_results = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            query,
+            limit=limit,
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+        raise WorkspaceResolutionError("workspace Git identity changed during search")
+
+    return WorkspaceSearchResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        project_id=project.project_id,
+        workspace_root=workspace.workspace_root,
+        results=tuple(
+            WorkspaceSearchHit(
+                relative_path=result.relative_path,
+                kind=result.kind,
+                size_bytes=result.size_bytes,
+                match_kind=result.match_kind,
+            )
+            for result in search_results
+        ),
+    )
+
+
 def scan_workspace_path(connection: sqlite3.Connection, path: Path) -> WorkspaceScanResult:
     """Register/reuse one Git Workspace and run a bounded deterministic reconciliation."""
     deadline = monotonic() + _SCAN_DEADLINE_SECONDS
@@ -171,7 +238,7 @@ def serve_daemon(
     *,
     stop_event: Event | None = None,
 ) -> None:
-    """Serve bounded local IPC status and deterministic scan paths until asked to stop."""
+    """Serve bounded local IPC status, search, and scan paths until asked to stop."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
     socket_lock_fd = _acquire_daemon_lock(socket_path)
@@ -230,6 +297,20 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
         return
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
+        return
+    if (
+        request.method == "workspace_search"
+        and request.search_query is not None
+        and request.search_limit is not None
+    ):
+        _serve_workspace_search(
+            client,
+            database,
+            request.request_id,
+            request.workspace_hints,
+            request.search_query,
+            request.search_limit,
+        )
         return
     if request.method == "scan_workspace" and request.scan_path is not None:
         _serve_workspace_scan(client, database, request.request_id, request.scan_path)
@@ -308,6 +389,76 @@ def _serve_workspace_status(
             request_id=request_id,
             code="response_too_large",
             message="Workspace status exceeds IPC byte limit",
+        )
+
+
+def _serve_workspace_search(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    hints: Sequence[WorkspaceHint],
+    query: str,
+    limit: int,
+) -> None:
+    try:
+        result = read_workspace_search(database, hints, query, limit)
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message="daemon could not read Workspace registry state",
+        )
+        return
+    except IndexingError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="index_error",
+            message=str(exc),
+        )
+        return
+    except SearchError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="search_error",
+            message=str(exc),
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not search Workspace index",
+        )
+        return
+
+    try:
+        send_workspace_search_response(client, request_id, result)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace search result exceeds IPC byte limit",
         )
 
 
