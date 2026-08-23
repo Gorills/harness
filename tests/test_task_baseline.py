@@ -203,6 +203,7 @@ def test_dirty_submodule_baseline_is_explicitly_opaque(tmp_path: Path) -> None:
         _git(root, "add", ".gitmodules", "vendor/sub")
         _commit(root, "add submodule")
         scan_workspace(connection, workspace_id)
+        _git(root, "config", "submodule.vendor/sub.ignore", "all")
 
         (root / "vendor" / "sub" / "inner.txt").write_text("dirty\n", encoding="utf-8")
         created = create_task_with_baseline(connection, workspace_id, "Dirty submodule")

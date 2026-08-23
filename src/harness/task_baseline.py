@@ -105,9 +105,9 @@ def capture_workspace_task_baseline(
     indexed_files = _persisted_index_snapshot(connection, workspace_id, deadline=deadline)
     index_snapshot_sha256 = _index_snapshot_sha256(indexed_files, deadline=deadline)
 
-    first_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
+    first_git = capture_task_git_state(workspace.workspace_root, deadline=deadline)
     live_indexed_files = _capture_live_index_snapshot(workspace, deadline=deadline)
-    second_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
+    second_git = capture_task_git_state(workspace.workspace_root, deadline=deadline)
     if first_git != second_git:
         raise TaskBaselineChangedError("Workspace Git state changed during Task baseline capture")
     if _persisted_index_snapshot(connection, workspace_id, deadline=deadline) != indexed_files:
@@ -203,12 +203,19 @@ def persist_task_baseline(
     return TaskBaselineRecord(task_id=task_id, snapshot=snapshot)
 
 
-def get_task_baseline(connection: sqlite3.Connection, task_id: str) -> TaskBaselineRecord:
+def get_task_baseline(
+    connection: sqlite3.Connection,
+    task_id: str,
+    *,
+    deadline: float | None = None,
+) -> TaskBaselineRecord:
     """Load the durable mechanical baseline for one Task."""
+    _require_optional_deadline(deadline)
     task_row = connection.execute(
         "SELECT workspace_id FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
+    _require_optional_deadline(deadline)
     if task_row is None:
         raise TaskBaselineError(f"task does not exist: {task_id}")
     workspace_id = task_row[0]
@@ -229,9 +236,11 @@ def get_task_baseline(connection: sqlite3.Connection, task_id: str) -> TaskBasel
         """,
         (task_id,),
     ).fetchone()
+    _require_optional_deadline(deadline)
     if row is None:
         raise TaskBaselineError(f"task baseline does not exist: {task_id}")
 
+    dirty_paths: list[TaskBaselineDirtyPath] = []
     dirty_rows = connection.execute(
         """
         SELECT
@@ -245,16 +254,21 @@ def get_task_baseline(connection: sqlite3.Connection, task_id: str) -> TaskBasel
         ORDER BY relative_path
         """,
         (task_id,),
-    ).fetchall()
-    dirty_paths = tuple(_dirty_path_from_row(dirty_row) for dirty_row in dirty_rows)
+    )
+    for dirty_row in dirty_rows:
+        _require_optional_deadline(deadline)
+        dirty_paths.append(_dirty_path_from_row(dirty_row))
+    _require_optional_deadline(deadline)
     return TaskBaselineRecord(
         task_id=task_id,
-        snapshot=_snapshot_from_row(workspace_id, row, dirty_paths),
+        snapshot=_snapshot_from_row(workspace_id, row, tuple(dirty_paths)),
     )
 
 
 @dataclass(frozen=True, slots=True)
-class _GitBaselineState:
+class TaskGitState:
+    """One content-sensitive Git/worktree sample used by Task baseline logic."""
+
     head: str | None
     branch: str | None
     dirty_paths: tuple[TaskBaselineDirtyPath, ...]
@@ -318,12 +332,12 @@ def _capture_live_index_snapshot(
     return tuple(snapshot[path] for path in sorted(snapshot))
 
 
-def _capture_git_state(workspace_root: Path, *, deadline: float) -> _GitBaselineState:
+def capture_task_git_state(workspace_root: Path, *, deadline: float) -> TaskGitState:
     head = _git_head(workspace_root, deadline=deadline)
     branch = _git_branch(workspace_root, deadline=deadline)
     status = _git_status(workspace_root, deadline=deadline)
     dirty_paths = _parse_dirty_paths(workspace_root, status, deadline=deadline)
-    return _GitBaselineState(head=head, branch=branch, dirty_paths=dirty_paths)
+    return TaskGitState(head=head, branch=branch, dirty_paths=dirty_paths)
 
 
 def _git_head(workspace_root: Path, *, deadline: float) -> str | None:
@@ -367,6 +381,7 @@ def _git_status(workspace_root: Path, *, deadline: float) -> bytes:
         "--porcelain=v1",
         "-z",
         "--untracked-files=all",
+        "--ignore-submodules=none",
         deadline=deadline,
         accepted_returncodes=(0,),
     )
@@ -498,9 +513,14 @@ def _dirty_path_state(
     deadline: float,
 ) -> tuple[TaskBaselineFingerprintKind, str]:
     digest = hashlib.sha256()
+    digest.update(b"task-dirty-state-v2\0")
     _digest_field(digest, status_code)
     _digest_field(digest, relative_path)
     _digest_field(digest, original_relative_path or "")
+    _digest_bytes(
+        digest,
+        _git_index_state(workspace_root, relative_path, deadline=deadline),
+    )
     path = workspace_root / relative_path
     try:
         parent = path.parent.resolve(strict=True)
@@ -534,6 +554,7 @@ def _dirty_path_state(
 
     if stat.S_ISREG(before.st_mode):
         digest.update(b"file\0")
+        _digest_field(digest, str(stat.S_IMODE(before.st_mode)))
         try:
             with path.open("rb") as stream:
                 opened_before = os.fstat(stream.fileno())
@@ -561,6 +582,25 @@ def _dirty_path_state(
     _digest_field(digest, str(before.st_size))
     _digest_field(digest, str(before.st_mtime_ns))
     return TaskBaselineFingerprintKind.OPAQUE, digest.hexdigest()
+
+
+def _git_index_state(workspace_root: Path, relative_path: str, *, deadline: float) -> bytes:
+    result = _run_git(
+        workspace_root,
+        "ls-files",
+        "--stage",
+        "-z",
+        "--",
+        relative_path,
+        deadline=deadline,
+        accepted_returncodes=(0,),
+    )
+    return result.stdout
+
+
+def _digest_bytes(digest: Any, value: bytes) -> None:
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
 
 
 def _require_stable_stat(relative_path: str, before: os.stat_result, after: os.stat_result) -> None:
@@ -698,6 +738,11 @@ def _remaining_seconds(deadline: float) -> float:
     if remaining <= 0:
         raise TaskBaselineTimeoutError("Task baseline capture deadline exceeded")
     return remaining
+
+
+def _require_optional_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise TaskBaselineTimeoutError("Task baseline operation deadline exceeded")
 
 
 def _require_deadline(deadline: float) -> None:
