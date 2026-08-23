@@ -32,7 +32,7 @@ def test_task_baseline_reader_rejects_non_hex_snapshot_hash(tmp_path: Path) -> N
                 index_is_fresh, index_file_count, index_snapshot_sha256
             ) VALUES ('task', NULL, 'main', 'captured', 1, 0, ?)
             """,
-            ("z" * 64,),
+            ("0" * 62 + "_0",),
         )
 
         with pytest.raises(TaskBaselineError, match="invalid persisted types"):
