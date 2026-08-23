@@ -20,6 +20,7 @@ from harness.tasks import (
     TaskTransitionError,
     TaskValidationError,
     TaskWaitReason,
+    TaskWorkspaceConflictError,
     get_task,
 )
 
@@ -36,8 +37,10 @@ class TaskCheckpointMechanicalError(TaskCheckpointError):
 
 
 class TaskEventType(StrEnum):
-    """Persisted Task event kinds implemented by the current checkpoint slice."""
+    """Persisted Task event kinds implemented by the public Task domain workflow."""
 
+    CREATED = "created"
+    RESUMED = "resumed"
     CHECKPOINT = "checkpoint"
 
 
@@ -68,7 +71,7 @@ class TaskEventRecord:
     task_id: str
     task_revision: int
     event_type: TaskEventType
-    checkpoint_id: str
+    checkpoint_id: str | None
     created_at: str
 
 
@@ -87,6 +90,7 @@ def checkpoint_task(
     *,
     expected_revision: int,
     state: TaskState,
+    expected_workspace_id: str | None = None,
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
@@ -112,6 +116,10 @@ def checkpoint_task(
     connection.execute("BEGIN IMMEDIATE")
     try:
         current = get_task(connection, task_id)
+        if expected_workspace_id is not None and current.workspace_id != expected_workspace_id:
+            raise TaskWorkspaceConflictError(
+                f"task {task_id} does not belong to workspace {expected_workspace_id}"
+            )
         if current.revision != expected_revision:
             raise TaskRevisionConflictError(
                 f"task revision mismatch: expected {expected_revision}, current {current.revision}"
@@ -491,10 +499,9 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         or not task_id
         or isinstance(task_revision, bool)
         or not isinstance(task_revision, int)
-        or task_revision <= 1
+        or task_revision <= 0
         or not isinstance(event_type, str)
-        or not isinstance(checkpoint_id, str)
-        or not checkpoint_id
+        or (checkpoint_id is not None and (not isinstance(checkpoint_id, str) or not checkpoint_id))
         or not isinstance(created_at, str)
         or not created_at
     ):
@@ -503,6 +510,14 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         parsed_event_type = TaskEventType(event_type)
     except ValueError as exc:
         raise TaskCheckpointError(f"task event has unsupported type: {event_type!r}") from exc
+    if parsed_event_type is TaskEventType.CREATED:
+        if task_revision != 1 or checkpoint_id is not None:
+            raise TaskCheckpointError("created Task event has invalid persisted linkage")
+    elif parsed_event_type is TaskEventType.RESUMED:
+        if task_revision <= 1 or checkpoint_id is not None:
+            raise TaskCheckpointError("resumed Task event has invalid persisted linkage")
+    elif task_revision <= 1 or checkpoint_id is None:
+        raise TaskCheckpointError("checkpoint Task event has invalid persisted linkage")
     return TaskEventRecord(
         event_id=event_id,
         task_id=task_id,

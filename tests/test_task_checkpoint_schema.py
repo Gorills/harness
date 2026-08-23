@@ -9,7 +9,7 @@ from harness.storage import SCHEMA_VERSION, connect_database, initialize_databas
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint
 
 
-def test_schema_v6_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
+def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     initialize_database(database)
     connection = connect_database(database)
@@ -87,7 +87,7 @@ def test_schema_v6_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
 
 
 def test_schema_version_is_checkpoint_schema() -> None:
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
