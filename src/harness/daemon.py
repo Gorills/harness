@@ -20,6 +20,10 @@ from harness.ipc import (
     IpcMessageTooLargeError,
     IpcProtocolError,
     StatusResult,
+    TaskCheckpointRequestData,
+    TaskCheckpointResult,
+    TaskStartRequestData,
+    TaskStartResult,
     UnsupportedIpcTransportError,
     WorkspaceScanResult,
     WorkspaceSearchHit,
@@ -28,12 +32,16 @@ from harness.ipc import (
     receive_request,
     send_error_response,
     send_status_response,
+    send_task_checkpoint_response,
+    send_task_start_response,
     send_workspace_scan_response,
     send_workspace_search_response,
     send_workspace_status_response,
 )
+from harness.knowledge import KnowledgeError, KnowledgeValidationError
 from harness.registry import (
     RegistryError,
+    WorkspaceRecord,
     get_project,
     get_workspace,
     list_workspaces,
@@ -41,6 +49,25 @@ from harness.registry import (
 )
 from harness.search import SearchError, search_indexed_paths
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.task_baseline import TaskBaselineError
+from harness.task_checkpoints import TaskCheckpointMechanicalError
+from harness.task_workflow import (
+    task_checkpoint as domain_task_checkpoint,
+)
+from harness.task_workflow import (
+    task_resume as domain_task_resume,
+)
+from harness.task_workflow import (
+    task_start as domain_task_start,
+)
+from harness.tasks import (
+    TaskConflictError,
+    TaskNotFoundError,
+    TaskRevisionConflictError,
+    TaskTransitionError,
+    TaskValidationError,
+    TaskWorkspaceConflictError,
+)
 from harness.workspace_resolution import (
     WorkspaceCandidate,
     WorkspaceHint,
@@ -208,6 +235,85 @@ def read_workspace_search(
     )
 
 
+def mutate_task_start(
+    connection: sqlite3.Connection,
+    request: TaskStartRequestData,
+) -> TaskStartResult:
+    """Resolve one Workspace and delegate Task create/resume to the domain workflow."""
+    workspace = _resolve_task_workspace(connection, request.workspace_hints)
+    if request.task_id is None:
+        if request.title is None:
+            raise TaskValidationError("new task_start requires title")
+        task = domain_task_start(connection, workspace.workspace_id, request.title)
+    else:
+        task = domain_task_resume(
+            connection,
+            workspace.workspace_id,
+            request.task_id,
+            expected_revision=request.expected_revision,
+        )
+    return TaskStartResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        task_id=task.task_id,
+        state=task.state,
+        wait_reason=task.wait_reason,
+        revision=task.revision,
+    )
+
+
+def mutate_task_checkpoint(
+    connection: sqlite3.Connection,
+    request: TaskCheckpointRequestData,
+) -> TaskCheckpointResult:
+    """Resolve one Workspace and delegate one explicit revision-CAS checkpoint."""
+    workspace = _resolve_task_workspace(connection, request.workspace_hints)
+    mutation = domain_task_checkpoint(
+        connection,
+        workspace.workspace_id,
+        request.task_id,
+        expected_revision=request.expected_revision,
+        state=request.state,
+        summary=request.summary,
+        next_step=request.next_step,
+        wait_reason=request.wait_reason,
+        knowledge=request.knowledge,
+    )
+    return TaskCheckpointResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        task_id=mutation.task.task_id,
+        state=mutation.task.state,
+        wait_reason=mutation.task.wait_reason,
+        revision=mutation.task.revision,
+        checkpoint_id=mutation.checkpoint.checkpoint_id,
+        knowledge_ids=tuple(card.knowledge_id for card in mutation.knowledge_cards),
+    )
+
+
+def _resolve_task_workspace(
+    connection: sqlite3.Connection,
+    hints: Sequence[WorkspaceHint],
+) -> WorkspaceRecord:
+    registered = list_workspaces(connection)
+    resolution = WorkspaceResolver(
+        [
+            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
+            for workspace in registered
+        ]
+    ).resolve(hints)
+    workspace = get_workspace(connection, resolution.workspace_id)
+    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    if (
+        runtime_identity.layout.workspace_root != workspace.workspace_root
+        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
+    ):
+        raise WorkspaceResolutionError(
+            f"registered workspace Git identity changed: {workspace.workspace_root}"
+        )
+    return workspace
+
+
 def scan_workspace_path(connection: sqlite3.Connection, path: Path) -> WorkspaceScanResult:
     """Register/reuse one Git Workspace and run a bounded deterministic reconciliation."""
     deadline = monotonic() + _SCAN_DEADLINE_SECONDS
@@ -311,6 +417,12 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
             request.search_query,
             request.search_limit,
         )
+        return
+    if request.method == "task_start" and request.task_start is not None:
+        _serve_task_start(client, database, request.request_id, request.task_start)
+        return
+    if request.method == "task_checkpoint" and request.task_checkpoint is not None:
+        _serve_task_checkpoint(client, database, request.request_id, request.task_checkpoint)
         return
     if request.method == "scan_workspace" and request.scan_path is not None:
         _serve_workspace_scan(client, database, request.request_id, request.scan_path)
@@ -459,6 +571,166 @@ def _serve_workspace_search(
             request_id=request_id,
             code="response_too_large",
             message="Workspace search result exceeds IPC byte limit",
+        )
+
+
+def _serve_task_start(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    request: TaskStartRequestData,
+) -> None:
+    try:
+        result = mutate_task_start(database, request)
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except TaskRevisionConflictError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_revision_conflict", message=str(exc)
+        )
+        return
+    except TaskWorkspaceConflictError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_workspace_conflict", message=str(exc)
+        )
+        return
+    except TaskNotFoundError as exc:
+        _try_send_error(client, request_id=request_id, code="task_not_found", message=str(exc))
+        return
+    except TaskConflictError as exc:
+        _try_send_error(client, request_id=request_id, code="task_conflict", message=str(exc))
+        return
+    except TaskTransitionError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_transition_error", message=str(exc)
+        )
+        return
+    except TaskValidationError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_validation_error", message=str(exc)
+        )
+        return
+    except TaskBaselineError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="task_mechanical_error",
+            message="daemon could not capture Task mechanical baseline",
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
+        return
+    except RegistryError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message="daemon could not read Workspace registry state",
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not mutate Task state",
+        )
+        return
+    try:
+        send_task_start_response(client, request_id, result)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Task result exceeds IPC byte limit",
+        )
+
+
+def _serve_task_checkpoint(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    request: TaskCheckpointRequestData,
+) -> None:
+    try:
+        result = mutate_task_checkpoint(database, request)
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except TaskRevisionConflictError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_revision_conflict", message=str(exc)
+        )
+        return
+    except TaskWorkspaceConflictError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_workspace_conflict", message=str(exc)
+        )
+        return
+    except TaskNotFoundError as exc:
+        _try_send_error(client, request_id=request_id, code="task_not_found", message=str(exc))
+        return
+    except TaskConflictError as exc:
+        _try_send_error(client, request_id=request_id, code="task_conflict", message=str(exc))
+        return
+    except TaskTransitionError as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_transition_error", message=str(exc)
+        )
+        return
+    except (TaskValidationError, KnowledgeValidationError) as exc:
+        _try_send_error(
+            client, request_id=request_id, code="task_validation_error", message=str(exc)
+        )
+        return
+    except (TaskCheckpointMechanicalError, KnowledgeError):
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="task_mechanical_error",
+            message="daemon could not capture Task checkpoint evidence",
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
+        return
+    except RegistryError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message="daemon could not read Workspace registry state",
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not checkpoint Task",
+        )
+        return
+    try:
+        send_task_checkpoint_response(client, request_id, result)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Task checkpoint result exceeds IPC byte limit",
         )
 
 

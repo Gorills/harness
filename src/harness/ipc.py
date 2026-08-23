@@ -11,12 +11,21 @@ from typing import Any, cast
 from uuid import uuid4
 
 from harness.index import IndexedFileKind
+from harness.knowledge import (
+    MAX_KNOWLEDGE_ANCHORS_PER_CARD,
+    MAX_KNOWLEDGE_CARDS_PER_CHECKPOINT,
+    KnowledgeAnchorDraft,
+    KnowledgeDraft,
+    KnowledgeKind,
+)
 from harness.search import (
     DEFAULT_SEARCH_LIMIT,
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_QUERY_BYTES,
     SearchMatchKind,
 )
+from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_CHECKPOINT_SUMMARY_BYTES
+from harness.tasks import MAX_TASK_TITLE_BYTES, TaskState, TaskWaitReason
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 PROTOCOL_VERSION = 1
@@ -27,6 +36,8 @@ _HINT_PATH_MAX_LENGTH = 4096
 _MAX_WORKSPACE_HINTS = 4
 _DEFAULT_TIMEOUT_SECONDS = 2.0
 _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
+_TASK_REQUEST_TIMEOUT_SECONDS = 60.0
+_TASK_ID_MAX_LENGTH = 128
 
 
 class IpcError(RuntimeError):
@@ -121,6 +132,56 @@ class WorkspaceSearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskStartRequestData:
+    """Validated daemon-domain Task start/resume request data."""
+
+    workspace_hints: tuple[WorkspaceHint, ...]
+    title: str | None
+    task_id: str | None
+    expected_revision: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCheckpointRequestData:
+    """Validated daemon-domain Task checkpoint request data."""
+
+    workspace_hints: tuple[WorkspaceHint, ...]
+    task_id: str
+    expected_revision: int
+    state: TaskState
+    summary: str
+    next_step: str | None
+    wait_reason: TaskWaitReason | None
+    knowledge: tuple[KnowledgeDraft, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStartResult:
+    """Bounded Task identity/state result returned by task_start IPC."""
+
+    schema_version: int
+    workspace_id: str
+    task_id: str
+    state: TaskState
+    wait_reason: TaskWaitReason | None
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCheckpointResult:
+    """Bounded Task/checkpoint identities returned by task_checkpoint IPC."""
+
+    schema_version: int
+    workspace_id: str
+    task_id: str
+    state: TaskState
+    wait_reason: TaskWaitReason | None
+    revision: int
+    checkpoint_id: str
+    knowledge_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class IpcRequest:
     """Validated internal request independent of MCP wire objects."""
 
@@ -130,6 +191,8 @@ class IpcRequest:
     scan_path: Path | None = None
     search_query: str | None = None
     search_limit: int | None = None
+    task_start: TaskStartRequestData | None = None
+    task_checkpoint: TaskCheckpointRequestData | None = None
 
 
 def request_status(
@@ -220,6 +283,74 @@ def request_workspace_search(
     return _workspace_search_from_response(response, expected_request_id=request_id)
 
 
+def request_task_start(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    *,
+    title: str | None = None,
+    task_id: str | None = None,
+    expected_revision: int | None = None,
+    timeout: float = _TASK_REQUEST_TIMEOUT_SECONDS,
+) -> TaskStartResult:
+    """Create or resume one explicit Harness Task through daemon-owned IPC."""
+    params = _task_start_params_to_wire(
+        hints,
+        title=title,
+        task_id=task_id,
+        expected_revision=expected_revision,
+    )
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "task_start",
+            "params": params,
+        },
+        timeout=timeout,
+    )
+    return _task_start_from_response(response, expected_request_id=request_id)
+
+
+def request_task_checkpoint(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    task_id: str,
+    *,
+    expected_revision: int,
+    state: TaskState,
+    summary: str,
+    next_step: str | None = None,
+    wait_reason: TaskWaitReason | None = None,
+    knowledge: Sequence[KnowledgeDraft] = (),
+    timeout: float = _TASK_REQUEST_TIMEOUT_SECONDS,
+) -> TaskCheckpointResult:
+    """Checkpoint one explicit Harness Task through daemon-owned IPC."""
+    params = _task_checkpoint_params_to_wire(
+        hints,
+        task_id,
+        expected_revision=expected_revision,
+        state=state,
+        summary=summary,
+        next_step=next_step,
+        wait_reason=wait_reason,
+        knowledge=knowledge,
+    )
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "task_checkpoint",
+            "params": params,
+        },
+        timeout=timeout,
+    )
+    return _task_checkpoint_from_response(response, expected_request_id=request_id)
+
+
 def receive_request(peer: socket.socket) -> IpcRequest:
     """Receive and validate exactly one bounded request frame."""
     payload = _decode_json(_receive_frame(peer))
@@ -273,6 +404,18 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             search_query=query,
             search_limit=limit,
         )
+
+    if method == "task_start":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("task_start request fields do not match the IPC schema")
+        task_start = _task_start_from_params(payload["params"])
+        return IpcRequest(request_id=request_id, method=method, task_start=task_start)
+
+    if method == "task_checkpoint":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("task_checkpoint request fields do not match the IPC schema")
+        task_checkpoint = _task_checkpoint_from_params(payload["params"])
+        return IpcRequest(request_id=request_id, method=method, task_checkpoint=task_checkpoint)
 
     raise IpcProtocolError("unsupported IPC method")
 
@@ -385,6 +528,62 @@ def send_workspace_search_response(
     )
 
 
+def send_task_start_response(
+    peer: socket.socket,
+    request_id: str,
+    result: TaskStartResult,
+) -> None:
+    """Send the exact bounded success contract for task_start/resume."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "task_id": result.task_id,
+                    "state": result.state.value,
+                    "wait_reason": (
+                        result.wait_reason.value if result.wait_reason is not None else None
+                    ),
+                    "revision": result.revision,
+                },
+            }
+        )
+    )
+
+
+def send_task_checkpoint_response(
+    peer: socket.socket,
+    request_id: str,
+    result: TaskCheckpointResult,
+) -> None:
+    """Send the exact bounded success contract for task_checkpoint."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "task_id": result.task_id,
+                    "state": result.state.value,
+                    "wait_reason": (
+                        result.wait_reason.value if result.wait_reason is not None else None
+                    ),
+                    "revision": result.revision,
+                    "checkpoint_id": result.checkpoint_id,
+                    "knowledge_ids": list(result.knowledge_ids),
+                },
+            }
+        )
+    )
+
+
 def send_error_response(
     peer: socket.socket,
     *,
@@ -486,6 +685,253 @@ def _workspace_search_from_params(
     _validate_search_query(query)
     _validate_search_limit(limit)
     return hints, cast(str, query), cast(int, limit)
+
+
+def _task_start_params_to_wire(
+    hints: Sequence[WorkspaceHint],
+    *,
+    title: str | None,
+    task_id: str | None,
+    expected_revision: int | None,
+) -> dict[str, object]:
+    wire_hints = _workspace_hints_to_wire(hints)
+    if task_id is None:
+        _validate_task_text(title, "task title", MAX_TASK_TITLE_BYTES, required=True)
+        if expected_revision is not None:
+            raise IpcProtocolError("new task_start must not include expected_revision")
+        return {"hints": wire_hints, "title": title}
+    _validate_task_id(task_id)
+    if title is not None:
+        raise IpcProtocolError("task_start resume must not include title")
+    if expected_revision is not None:
+        _validate_expected_revision(expected_revision)
+        return {
+            "hints": wire_hints,
+            "task_id": task_id,
+            "expected_revision": expected_revision,
+        }
+    return {"hints": wire_hints, "task_id": task_id}
+
+
+def _task_start_from_params(value: object) -> TaskStartRequestData:
+    if not isinstance(value, dict):
+        raise IpcProtocolError("task_start params must be an object")
+    fields = set(value)
+    create_fields = {"hints", "title"}
+    resume_fields = {"hints", "task_id"}
+    resume_revision_fields = {"hints", "task_id", "expected_revision"}
+    if fields == create_fields:
+        hints = _workspace_hints_from_params({"hints": value["hints"]})
+        title = value["title"]
+        _validate_task_text(title, "task title", MAX_TASK_TITLE_BYTES, required=True)
+        return TaskStartRequestData(hints, cast(str, title), None, None)
+    if fields == resume_fields or fields == resume_revision_fields:
+        hints = _workspace_hints_from_params({"hints": value["hints"]})
+        task_id = value["task_id"]
+        _validate_task_id(task_id)
+        expected_revision = value.get("expected_revision")
+        if expected_revision is not None:
+            _validate_expected_revision(expected_revision)
+        return TaskStartRequestData(
+            hints,
+            None,
+            cast(str, task_id),
+            cast(int | None, expected_revision),
+        )
+    raise IpcProtocolError("task_start params do not match the IPC schema")
+
+
+def _task_checkpoint_params_to_wire(
+    hints: Sequence[WorkspaceHint],
+    task_id: str,
+    *,
+    expected_revision: int,
+    state: TaskState,
+    summary: str,
+    next_step: str | None,
+    wait_reason: TaskWaitReason | None,
+    knowledge: Sequence[KnowledgeDraft],
+) -> dict[str, object]:
+    _validate_task_id(task_id)
+    _validate_expected_revision(expected_revision)
+    if not isinstance(state, TaskState):
+        raise IpcProtocolError("task checkpoint state must be a TaskState")
+    if wait_reason is not None and not isinstance(wait_reason, TaskWaitReason):
+        raise IpcProtocolError("task checkpoint wait_reason must be a TaskWaitReason")
+    _validate_task_text(summary, "checkpoint summary", MAX_CHECKPOINT_SUMMARY_BYTES, required=True)
+    _validate_task_text(
+        next_step,
+        "checkpoint next_step",
+        MAX_CHECKPOINT_NEXT_STEP_BYTES,
+        required=False,
+    )
+    return {
+        "hints": _workspace_hints_to_wire(hints),
+        "task_id": task_id,
+        "expected_revision": expected_revision,
+        "state": state.value,
+        "summary": summary,
+        "next_step": next_step,
+        "wait_reason": wait_reason.value if wait_reason is not None else None,
+        "knowledge": _knowledge_to_wire(knowledge),
+    }
+
+
+def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
+    expected_fields = {
+        "hints",
+        "task_id",
+        "expected_revision",
+        "state",
+        "summary",
+        "next_step",
+        "wait_reason",
+        "knowledge",
+    }
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise IpcProtocolError("task_checkpoint params do not match the IPC schema")
+    hints = _workspace_hints_from_params({"hints": value["hints"]})
+    task_id = value["task_id"]
+    expected_revision = value["expected_revision"]
+    raw_state = value["state"]
+    summary = value["summary"]
+    next_step = value["next_step"]
+    raw_wait_reason = value["wait_reason"]
+    _validate_task_id(task_id)
+    _validate_expected_revision(expected_revision)
+    if not isinstance(raw_state, str):
+        raise IpcProtocolError("task checkpoint state must be text")
+    try:
+        state = TaskState(raw_state)
+    except ValueError as exc:
+        raise IpcProtocolError("task checkpoint state is unsupported") from exc
+    _validate_task_text(summary, "checkpoint summary", MAX_CHECKPOINT_SUMMARY_BYTES, required=True)
+    _validate_task_text(
+        next_step,
+        "checkpoint next_step",
+        MAX_CHECKPOINT_NEXT_STEP_BYTES,
+        required=False,
+    )
+    if raw_wait_reason is None:
+        wait_reason = None
+    elif isinstance(raw_wait_reason, str):
+        try:
+            wait_reason = TaskWaitReason(raw_wait_reason)
+        except ValueError as exc:
+            raise IpcProtocolError("task checkpoint wait_reason is unsupported") from exc
+    else:
+        raise IpcProtocolError("task checkpoint wait_reason has invalid type")
+    knowledge = _knowledge_from_wire(value["knowledge"])
+    return TaskCheckpointRequestData(
+        hints,
+        cast(str, task_id),
+        cast(int, expected_revision),
+        state,
+        cast(str, summary),
+        cast(str | None, next_step),
+        wait_reason,
+        knowledge,
+    )
+
+
+def _knowledge_to_wire(knowledge: Sequence[KnowledgeDraft]) -> list[dict[str, object]]:
+    if len(knowledge) > MAX_KNOWLEDGE_CARDS_PER_CHECKPOINT:
+        raise IpcProtocolError("task checkpoint knowledge exceeds card limit")
+    result: list[dict[str, object]] = []
+    for card in knowledge:
+        if not isinstance(card, KnowledgeDraft) or not isinstance(card.kind, KnowledgeKind):
+            raise IpcProtocolError("task checkpoint knowledge item has invalid type")
+        if len(card.anchors) > MAX_KNOWLEDGE_ANCHORS_PER_CARD:
+            raise IpcProtocolError("task checkpoint knowledge card exceeds anchor limit")
+        wire_anchors: list[dict[str, object]] = []
+        for anchor in card.anchors:
+            if not isinstance(anchor, KnowledgeAnchorDraft):
+                raise IpcProtocolError("task checkpoint knowledge anchor has invalid type")
+            wire_anchors.append({"path": anchor.path, "symbol": anchor.symbol})
+        result.append(
+            {
+                "kind": card.kind.value,
+                "title": card.title,
+                "body": card.body,
+                "anchors": wire_anchors,
+            }
+        )
+    return result
+
+
+def _knowledge_from_wire(value: object) -> tuple[KnowledgeDraft, ...]:
+    if not isinstance(value, list) or len(value) > MAX_KNOWLEDGE_CARDS_PER_CHECKPOINT:
+        raise IpcProtocolError("task checkpoint knowledge must be a bounded list")
+    cards: list[KnowledgeDraft] = []
+    for raw_card in value:
+        if not isinstance(raw_card, dict) or set(raw_card) != {
+            "kind",
+            "title",
+            "body",
+            "anchors",
+        }:
+            raise IpcProtocolError("task checkpoint knowledge fields do not match the IPC schema")
+        raw_kind = raw_card["kind"]
+        if not isinstance(raw_kind, str):
+            raise IpcProtocolError("task checkpoint knowledge kind has invalid type")
+        try:
+            kind = KnowledgeKind(raw_kind)
+        except ValueError as exc:
+            raise IpcProtocolError("task checkpoint knowledge kind is unsupported") from exc
+        title = raw_card["title"]
+        body = raw_card["body"]
+        if not isinstance(title, str) or not isinstance(body, str):
+            raise IpcProtocolError("task checkpoint knowledge text has invalid type")
+        raw_anchors = raw_card["anchors"]
+        if not isinstance(raw_anchors, list) or len(raw_anchors) > MAX_KNOWLEDGE_ANCHORS_PER_CARD:
+            raise IpcProtocolError("task checkpoint knowledge anchors must be a bounded list")
+        anchors: list[KnowledgeAnchorDraft] = []
+        for raw_anchor in raw_anchors:
+            if not isinstance(raw_anchor, dict) or set(raw_anchor) != {"path", "symbol"}:
+                raise IpcProtocolError(
+                    "task checkpoint knowledge anchor fields do not match the IPC schema"
+                )
+            path = raw_anchor["path"]
+            symbol = raw_anchor["symbol"]
+            if not isinstance(path, str) or (symbol is not None and not isinstance(symbol, str)):
+                raise IpcProtocolError("task checkpoint knowledge anchor has invalid types")
+            anchors.append(KnowledgeAnchorDraft(path=path, symbol=symbol))
+        cards.append(KnowledgeDraft(kind=kind, title=title, body=body, anchors=tuple(anchors)))
+    return tuple(cards)
+
+
+def _validate_task_id(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _TASK_ID_MAX_LENGTH
+        or "\x00" in value
+    ):
+        raise IpcProtocolError("task_id must be a non-empty bounded string")
+
+
+def _validate_expected_revision(value: object) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise IpcProtocolError("expected_revision must be a positive integer")
+
+
+def _validate_task_text(
+    value: object,
+    label: str,
+    maximum_bytes: int,
+    *,
+    required: bool,
+) -> None:
+    if value is None and not required:
+        return
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise IpcProtocolError(f"{label} must be non-empty text")
+    try:
+        size = len(value.strip().encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise IpcProtocolError(f"{label} must be valid UTF-8 text") from exc
+    if size > maximum_bytes:
+        raise IpcProtocolError(f"{label} exceeds {maximum_bytes} UTF-8 bytes")
 
 
 def _scan_path_from_params(value: object) -> Path:
@@ -828,6 +1274,105 @@ def _workspace_search_from_response(
         workspace_root=workspace_root,
         results=tuple(hits),
     )
+
+
+def _task_start_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> TaskStartResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "workspace_id",
+        "task_id",
+        "state",
+        "wait_reason",
+        "revision",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon task_start result does not match the IPC schema")
+    schema_version = result["schema_version"]
+    revision = result["revision"]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in (schema_version, revision)
+    ):
+        raise IpcProtocolError("daemon task_start result has invalid integer fields")
+    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+    task_id = _bounded_response_string(result["task_id"], "task_id", _TASK_ID_MAX_LENGTH)
+    state, wait_reason = _task_state_from_response(result["state"], result["wait_reason"])
+    return TaskStartResult(schema_version, workspace_id, task_id, state, wait_reason, revision)
+
+
+def _task_checkpoint_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> TaskCheckpointResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "workspace_id",
+        "task_id",
+        "state",
+        "wait_reason",
+        "revision",
+        "checkpoint_id",
+        "knowledge_ids",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon task_checkpoint result does not match the IPC schema")
+    schema_version = result["schema_version"]
+    revision = result["revision"]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in (schema_version, revision)
+    ):
+        raise IpcProtocolError("daemon task_checkpoint result has invalid integer fields")
+    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+    task_id = _bounded_response_string(result["task_id"], "task_id", _TASK_ID_MAX_LENGTH)
+    checkpoint_id = _bounded_response_string(result["checkpoint_id"], "checkpoint_id", 128)
+    state, wait_reason = _task_state_from_response(result["state"], result["wait_reason"])
+    raw_knowledge_ids = result["knowledge_ids"]
+    if (
+        not isinstance(raw_knowledge_ids, list)
+        or len(raw_knowledge_ids) > MAX_KNOWLEDGE_CARDS_PER_CHECKPOINT
+    ):
+        raise IpcProtocolError("daemon task_checkpoint knowledge_ids are invalid")
+    knowledge_ids = tuple(
+        _bounded_response_string(value, "knowledge_id", 128) for value in raw_knowledge_ids
+    )
+    return TaskCheckpointResult(
+        schema_version,
+        workspace_id,
+        task_id,
+        state,
+        wait_reason,
+        revision,
+        checkpoint_id,
+        knowledge_ids,
+    )
+
+
+def _task_state_from_response(
+    raw_state: object,
+    raw_wait_reason: object,
+) -> tuple[TaskState, TaskWaitReason | None]:
+    if not isinstance(raw_state, str):
+        raise IpcProtocolError("daemon Task state has invalid type")
+    try:
+        state = TaskState(raw_state)
+    except ValueError as exc:
+        raise IpcProtocolError("daemon Task state is unsupported") from exc
+    if raw_wait_reason is None:
+        return state, None
+    if not isinstance(raw_wait_reason, str):
+        raise IpcProtocolError("daemon Task wait_reason has invalid type")
+    try:
+        return state, TaskWaitReason(raw_wait_reason)
+    except ValueError as exc:
+        raise IpcProtocolError("daemon Task wait_reason is unsupported") from exc
 
 
 def _success_result(response: dict[str, Any], *, expected_request_id: str) -> dict[str, Any]:
