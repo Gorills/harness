@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -251,6 +251,40 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
                 PRIMARY KEY (workspace_id, relative_path)
             )
+            """
+        )
+        return
+    if target_version == 4:
+        connection.execute(
+            """
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                title TEXT NOT NULL
+                    CHECK (title <> '' AND length(CAST(title AS BLOB)) <= 256),
+                state TEXT NOT NULL
+                    CHECK (state IN ('working', 'waiting', 'completed', 'cancelled')),
+                wait_reason TEXT,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                updated_at TEXT NOT NULL CHECK (updated_at <> ''),
+                CHECK (
+                    (
+                        state = 'waiting'
+                        AND wait_reason IS NOT NULL
+                        AND wait_reason IN ('operator_review', 'operator_input', 'external')
+                    )
+                    OR (state <> 'waiting' AND wait_reason IS NULL)
+                )
+            )
+            """
+        )
+        connection.execute("CREATE INDEX tasks_workspace_id_idx ON tasks(workspace_id)")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX tasks_one_working_per_workspace_idx
+            ON tasks(workspace_id)
+            WHERE state = 'working'
             """
         )
         return
