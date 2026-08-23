@@ -312,6 +312,9 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                     original_relative_path IS NULL OR original_relative_path <> ''
                 ),
                 status_code TEXT NOT NULL CHECK (length(status_code) = 2),
+                fingerprint_kind TEXT NOT NULL CHECK (
+                    fingerprint_kind IN ('file', 'symlink', 'missing', 'opaque')
+                ),
                 state_sha256 TEXT NOT NULL CHECK (length(state_sha256) = 64),
                 PRIMARY KEY (task_id, relative_path)
             )
