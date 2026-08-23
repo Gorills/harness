@@ -9,9 +9,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import monotonic
+from typing import Any
 
 from harness.git_workspace import _git_environment, inspect_git_workspace_runtime_identity
-from harness.index import list_indexed_files
+from harness.index import (
+    IndexedFileRecord,
+    IndexingError,
+    ScanDeadlineExceededError,
+    _build_snapshot,
+    list_indexed_files,
+)
 from harness.registry import WorkspaceRecord, get_workspace
 
 _BASELINE_TIMEOUT_SECONDS = 5.0
@@ -48,8 +55,7 @@ class TaskBaselineSnapshot:
     head: str | None
     branch: str | None
     captured_at: str
-    index_generation: int | None
-    index_last_reconciled_at: str | None
+    index_is_fresh: bool
     index_file_count: int
     index_snapshot_sha256: str
     dirty_paths: tuple[TaskBaselineDirtyPath, ...]
@@ -73,18 +79,24 @@ def capture_workspace_task_baseline(
     deadline = monotonic() + _BASELINE_TIMEOUT_SECONDS
     workspace = get_workspace(connection, workspace_id)
     identity_before = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    _require_registered_identity(workspace, identity_before.layout.workspace_root, identity_before.layout.git_common_dir)
-
-    index_generation, index_last_reconciled_at = _read_index_reconciliation_state(
-        connection, workspace_id
+    _require_registered_identity(
+        workspace,
+        identity_before.layout.workspace_root,
+        identity_before.layout.git_common_dir,
     )
+
     indexed_files = list_indexed_files(connection, workspace_id)
     index_snapshot_sha256 = _index_snapshot_sha256(indexed_files)
 
     first_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
+    live_indexed_files = _capture_live_index_snapshot(workspace, deadline=deadline)
     second_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
     if first_git != second_git:
         raise TaskBaselineChangedError("Workspace Git state changed during Task baseline capture")
+    if list_indexed_files(connection, workspace_id) != indexed_files:
+        raise TaskBaselineChangedError(
+            "Workspace Structural Index changed during Task baseline capture"
+        )
 
     identity_after = inspect_git_workspace_runtime_identity(workspace.workspace_root)
     if identity_after != identity_before:
@@ -98,8 +110,7 @@ def capture_workspace_task_baseline(
         head=first_git.head,
         branch=first_git.branch,
         captured_at=_utc_timestamp(now),
-        index_generation=index_generation,
-        index_last_reconciled_at=index_last_reconciled_at,
+        index_is_fresh=live_indexed_files == indexed_files,
         index_file_count=len(indexed_files),
         index_snapshot_sha256=index_snapshot_sha256,
         dirty_paths=first_git.dirty_paths,
@@ -119,19 +130,17 @@ def persist_task_baseline(
             head,
             branch,
             captured_at,
-            index_generation,
-            index_last_reconciled_at,
+            index_is_fresh,
             index_file_count,
             index_snapshot_sha256
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task_id,
             snapshot.head,
             snapshot.branch,
             snapshot.captured_at,
-            snapshot.index_generation,
-            snapshot.index_last_reconciled_at,
+            snapshot.index_is_fresh,
             snapshot.index_file_count,
             snapshot.index_snapshot_sha256,
         ),
@@ -176,8 +185,7 @@ def get_task_baseline(connection: sqlite3.Connection, task_id: str) -> TaskBasel
             head,
             branch,
             captured_at,
-            index_generation,
-            index_last_reconciled_at,
+            index_is_fresh,
             index_file_count,
             index_snapshot_sha256
         FROM task_baselines
@@ -209,6 +217,20 @@ class _GitBaselineState:
     head: str | None
     branch: str | None
     dirty_paths: tuple[TaskBaselineDirtyPath, ...]
+
+
+def _capture_live_index_snapshot(
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float,
+) -> tuple[IndexedFileRecord, ...]:
+    try:
+        snapshot = _build_snapshot(workspace, deadline=deadline)
+    except ScanDeadlineExceededError as exc:
+        raise TaskBaselineTimeoutError("Task baseline index freshness inspection timed out") from exc
+    except IndexingError as exc:
+        raise TaskBaselineError("Task baseline index freshness inspection failed") from exc
+    return tuple(snapshot[path] for path in sorted(snapshot))
 
 
 def _capture_git_state(workspace_root: Path, *, deadline: float) -> _GitBaselineState:
@@ -463,62 +485,20 @@ def _require_stable_stat(relative_path: str, before: os.stat_result, after: os.s
         raise TaskBaselineChangedError(f"dirty path changed during capture: {relative_path}")
 
 
-def _index_snapshot_sha256(indexed_files: tuple[object, ...]) -> str:
+def _index_snapshot_sha256(indexed_files: tuple[IndexedFileRecord, ...]) -> str:
     digest = hashlib.sha256()
     for record in indexed_files:
-        relative_path = getattr(record, "relative_path", None)
-        kind = getattr(record, "kind", None)
-        size_bytes = getattr(record, "size_bytes", None)
-        content_sha256 = getattr(record, "content_sha256", None)
-        if (
-            not isinstance(relative_path, str)
-            or not isinstance(size_bytes, int)
-            or isinstance(size_bytes, bool)
-            or size_bytes < 0
-            or not isinstance(content_sha256, str)
-        ):
-            raise TaskBaselineError("Structural Index row cannot be fingerprinted for Task baseline")
-        kind_value = getattr(kind, "value", None)
-        if not isinstance(kind_value, str):
-            raise TaskBaselineError("Structural Index kind cannot be fingerprinted for Task baseline")
-        _digest_field(digest, relative_path)
-        _digest_field(digest, kind_value)
-        _digest_field(digest, str(size_bytes))
-        _digest_field(digest, content_sha256)
+        _digest_field(digest, record.relative_path)
+        _digest_field(digest, record.kind.value)
+        _digest_field(digest, str(record.size_bytes))
+        _digest_field(digest, record.content_sha256)
     return digest.hexdigest()
 
 
-def _digest_field(digest: object, value: str) -> None:
+def _digest_field(digest: Any, value: str) -> None:
     raw = value.encode("utf-8")
-    update = getattr(digest, "update")
-    update(len(raw).to_bytes(8, "big"))
-    update(raw)
-
-
-def _read_index_reconciliation_state(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-) -> tuple[int | None, str | None]:
-    row = connection.execute(
-        """
-        SELECT generation, last_reconciled_at
-        FROM workspace_index_state
-        WHERE workspace_id = ?
-        """,
-        (workspace_id,),
-    ).fetchone()
-    if row is None:
-        return None, None
-    generation, last_reconciled_at = row
-    if (
-        isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or generation <= 0
-        or not isinstance(last_reconciled_at, str)
-        or not last_reconciled_at
-    ):
-        raise TaskBaselineError("Workspace index reconciliation metadata is invalid")
-    return generation, last_reconciled_at
+    digest.update(len(raw).to_bytes(8, "big"))
+    digest.update(raw)
 
 
 def _snapshot_from_row(
@@ -526,20 +506,15 @@ def _snapshot_from_row(
     row: tuple[object, ...],
     dirty_paths: tuple[TaskBaselineDirtyPath, ...],
 ) -> TaskBaselineSnapshot:
-    (
-        head,
-        branch,
-        captured_at,
-        index_generation,
-        index_last_reconciled_at,
-        index_file_count,
-        index_snapshot_sha256,
-    ) = row
+    head, branch, captured_at, index_is_fresh, index_file_count, index_snapshot_sha256 = row
     if (
         (head is not None and (not isinstance(head, str) or not head))
         or (branch is not None and (not isinstance(branch, str) or not branch))
         or not isinstance(captured_at, str)
         or not captured_at
+        or isinstance(index_is_fresh, bool)
+        or not isinstance(index_is_fresh, int)
+        or index_is_fresh not in (0, 1)
         or isinstance(index_file_count, bool)
         or not isinstance(index_file_count, int)
         or index_file_count < 0
@@ -547,29 +522,12 @@ def _snapshot_from_row(
         or len(index_snapshot_sha256) != 64
     ):
         raise TaskBaselineError("task baseline row has invalid persisted types")
-    if index_generation is None or index_last_reconciled_at is None:
-        if index_generation is not None or index_last_reconciled_at is not None:
-            raise TaskBaselineError("task baseline has incomplete index reconciliation metadata")
-        generation = None
-        reconciled_at = None
-    else:
-        if (
-            isinstance(index_generation, bool)
-            or not isinstance(index_generation, int)
-            or index_generation <= 0
-            or not isinstance(index_last_reconciled_at, str)
-            or not index_last_reconciled_at
-        ):
-            raise TaskBaselineError("task baseline has invalid index reconciliation metadata")
-        generation = index_generation
-        reconciled_at = index_last_reconciled_at
     return TaskBaselineSnapshot(
         workspace_id=workspace_id,
         head=head,
         branch=branch,
         captured_at=captured_at,
-        index_generation=generation,
-        index_last_reconciled_at=reconciled_at,
+        index_is_fresh=bool(index_is_fresh),
         index_file_count=index_file_count,
         index_snapshot_sha256=index_snapshot_sha256,
         dirty_paths=dirty_paths,
@@ -581,7 +539,10 @@ def _dirty_path_from_row(row: tuple[object, ...]) -> TaskBaselineDirtyPath:
     if (
         not isinstance(relative_path, str)
         or not relative_path
-        or (original_relative_path is not None and not isinstance(original_relative_path, str))
+        or (
+            original_relative_path is not None
+            and (not isinstance(original_relative_path, str) or not original_relative_path)
+        )
         or not isinstance(status_code, str)
         or len(status_code) != 2
         or not isinstance(state_sha256, str)
