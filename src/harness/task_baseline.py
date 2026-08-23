@@ -110,10 +110,7 @@ def capture_workspace_task_baseline(
     second_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
     if first_git != second_git:
         raise TaskBaselineChangedError("Workspace Git state changed during Task baseline capture")
-    if (
-        _persisted_index_snapshot(connection, workspace_id, deadline=deadline)
-        != indexed_files
-    ):
+    if _persisted_index_snapshot(connection, workspace_id, deadline=deadline) != indexed_files:
         raise TaskBaselineChangedError(
             "Workspace Structural Index changed during Task baseline capture"
         )
