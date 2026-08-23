@@ -86,32 +86,8 @@ def create_task_record(
     *,
     now: datetime | None = None,
 ) -> TaskRecord:
-    """Create one foundation-only working Task without the required Task baseline."""
-    normalized_title = _validate_title(title)
-    timestamp = _utc_timestamp(now)
-
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        get_workspace(connection, workspace_id)
-        _require_no_working_task(connection, workspace_id)
-        task = _new_task_record(
-            workspace_id=workspace_id,
-            title=normalized_title,
-            timestamp=timestamp,
-        )
-        _insert_task(connection, task)
-        connection.execute("COMMIT")
-        return task
-    except sqlite3.IntegrityError as exc:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        if _working_task(connection, workspace_id) is not None:
-            raise TaskConflictError("workspace already has a working task") from exc
-        raise
-    except Exception:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        raise
+    """Create one working Task together with its mandatory mechanical baseline."""
+    return create_task_with_baseline(connection, workspace_id, title, now=now).task
 
 
 def create_task_with_baseline(
