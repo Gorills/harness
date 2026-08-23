@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint
 
 
 def test_schema_v6_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
@@ -87,3 +88,47 @@ def test_schema_v6_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
 
 def test_schema_version_is_checkpoint_schema() -> None:
     assert SCHEMA_VERSION == 6
+
+
+def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+            ) VALUES ('task', 'workspace', 'Task', 'working', NULL, 2, 'created', 'updated')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_checkpoints(
+                id, task_id, task_revision, state, wait_reason, summary, next_step,
+                created_at, baseline_head, current_head, current_branch,
+                current_dirty_path_count
+            ) VALUES (
+                'checkpoint', 'task', 2, 'working', NULL, 'Summary', NULL,
+                'now', NULL, NULL, NULL, 0
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_checkpoint_changed_paths(checkpoint_id, relative_path)
+            VALUES ('checkpoint', '../escape')
+            """
+        )
+
+        with pytest.raises(TaskCheckpointError, match="unsafe Task checkpoint changed path"):
+            get_task_checkpoint(connection, "checkpoint")
+    finally:
+        connection.close()

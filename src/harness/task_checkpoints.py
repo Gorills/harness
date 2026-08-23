@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import PurePosixPath
 from uuid import uuid4
 
 from harness.task_changes import (
@@ -381,10 +382,17 @@ def _load_changed_paths(
     paths: list[str] = []
     for row in rows:
         relative_path = row[0]
-        if not isinstance(relative_path, str) or not relative_path:
+        if not isinstance(relative_path, str):
             raise TaskCheckpointError("Task checkpoint changed path has invalid persisted value")
-        paths.append(relative_path)
+        paths.append(_validated_changed_path(relative_path))
     return tuple(paths)
+
+
+def _validated_changed_path(value: str) -> str:
+    path = PurePosixPath(value)
+    if not value or path.is_absolute() or ".." in path.parts or "\x00" in value:
+        raise TaskCheckpointError(f"unsafe Task checkpoint changed path: {value!r}")
+    return value
 
 
 def _checkpoint_from_row(
