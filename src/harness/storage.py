@@ -291,36 +291,15 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
     if target_version == 5:
         connection.execute(
             """
-            CREATE TABLE workspace_index_state (
-                workspace_id TEXT PRIMARY KEY
-                    REFERENCES workspaces(id) ON DELETE CASCADE,
-                generation INTEGER NOT NULL CHECK (generation > 0),
-                last_reconciled_at TEXT NOT NULL CHECK (last_reconciled_at <> '')
-            )
-            """
-        )
-        connection.execute(
-            """
             CREATE TABLE task_baselines (
                 task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
                 head TEXT CHECK (head IS NULL OR head <> ''),
                 branch TEXT CHECK (branch IS NULL OR branch <> ''),
                 captured_at TEXT NOT NULL CHECK (captured_at <> ''),
-                index_generation INTEGER CHECK (
-                    index_generation IS NULL OR index_generation > 0
-                ),
-                index_last_reconciled_at TEXT,
+                index_is_fresh INTEGER NOT NULL CHECK (index_is_fresh IN (0, 1)),
                 index_file_count INTEGER NOT NULL CHECK (index_file_count >= 0),
                 index_snapshot_sha256 TEXT NOT NULL
-                    CHECK (length(index_snapshot_sha256) = 64),
-                CHECK (
-                    (index_generation IS NULL AND index_last_reconciled_at IS NULL)
-                    OR (
-                        index_generation IS NOT NULL
-                        AND index_last_reconciled_at IS NOT NULL
-                        AND index_last_reconciled_at <> ''
-                    )
-                )
+                    CHECK (length(index_snapshot_sha256) = 64)
             )
             """
         )
