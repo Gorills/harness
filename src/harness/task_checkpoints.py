@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
 from uuid import uuid4
 
+from harness.knowledge import (
+    KnowledgeCardRecord,
+    KnowledgeDraft,
+    normalize_knowledge_drafts,
+    persist_checkpoint_knowledge,
+)
 from harness.task_changes import (
     TaskChangedFiles,
     TaskChangedFilesError,
@@ -77,11 +84,12 @@ class TaskEventRecord:
 
 @dataclass(frozen=True, slots=True)
 class TaskCheckpointMutation:
-    """Atomic checkpoint result: updated Task, checkpoint record, and timeline event."""
+    """Atomic checkpoint result including any Knowledge created by this checkpoint."""
 
     task: TaskRecord
     checkpoint: TaskCheckpointRecord
     event: TaskEventRecord
+    knowledge_cards: tuple[KnowledgeCardRecord, ...]
 
 
 def checkpoint_task(
@@ -94,6 +102,7 @@ def checkpoint_task(
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
+    knowledge: Sequence[KnowledgeDraft] = (),
     now: datetime | None = None,
 ) -> TaskCheckpointMutation:
     """Atomically checkpoint one working Task using stable identity and revision CAS."""
@@ -112,6 +121,7 @@ def checkpoint_task(
         maximum_bytes=MAX_CHECKPOINT_NEXT_STEP_BYTES,
         required=False,
     )
+    normalized_knowledge = normalize_knowledge_drafts(knowledge)
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -163,10 +173,22 @@ def checkpoint_task(
             timestamp=timestamp,
             mechanical=mechanical,
         )
+        knowledge_cards = persist_checkpoint_knowledge(
+            connection,
+            current,
+            checkpoint.checkpoint_id,
+            normalized_knowledge,
+            timestamp=timestamp,
+        )
         event = _insert_checkpoint_event(connection, checkpoint)
         updated = get_task(connection, task_id)
         connection.execute("COMMIT")
-        return TaskCheckpointMutation(task=updated, checkpoint=checkpoint, event=event)
+        return TaskCheckpointMutation(
+            task=updated,
+            checkpoint=checkpoint,
+            event=event,
+            knowledge_cards=knowledge_cards,
+        )
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")

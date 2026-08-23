@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 
 from harness.git_workspace import _git_environment, inspect_git_workspace
+from harness.knowledge import reconcile_knowledge_staleness
 from harness.registry import WorkspaceRecord, get_workspace
 
 _DEFAULT_EXCLUDES = (
@@ -132,6 +133,14 @@ def scan_workspace(
                 (workspace_id, relative_path),
             )
 
+        reconcile_knowledge_staleness(
+            connection,
+            workspace_id,
+            {
+                relative_path: (record.kind.value, record.content_sha256)
+                for relative_path, record in snapshot.items()
+            },
+        )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
