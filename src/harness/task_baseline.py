@@ -7,6 +7,7 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any
@@ -21,7 +22,7 @@ from harness.index import (
 )
 from harness.registry import WorkspaceRecord, get_workspace
 
-_BASELINE_TIMEOUT_SECONDS = 5.0
+_BASELINE_TIMEOUT_SECONDS = 30.0
 _HASH_CHUNK_BYTES = 128 * 1024
 
 
@@ -37,6 +38,15 @@ class TaskBaselineTimeoutError(TaskBaselineError):
     """Raised when bounded Task baseline capture exceeds its execution deadline."""
 
 
+class TaskBaselineFingerprintKind(StrEnum):
+    """Confidence class for a pre-existing dirty path fingerprint."""
+
+    FILE = "file"
+    SYMLINK = "symlink"
+    MISSING = "missing"
+    OPAQUE = "opaque"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskBaselineDirtyPath:
     """One pre-existing dirty Workspace path captured without storing source text."""
@@ -44,6 +54,7 @@ class TaskBaselineDirtyPath:
     relative_path: str
     original_relative_path: str | None
     status_code: str
+    fingerprint_kind: TaskBaselineFingerprintKind
     state_sha256: str
 
 
@@ -123,6 +134,16 @@ def persist_task_baseline(
     snapshot: TaskBaselineSnapshot,
 ) -> TaskBaselineRecord:
     """Persist one already-captured baseline inside the caller's Task transaction."""
+    task_row = connection.execute(
+        "SELECT workspace_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if task_row is None:
+        raise TaskBaselineError(f"task does not exist: {task_id}")
+    task_workspace_id = task_row[0]
+    if task_workspace_id != snapshot.workspace_id:
+        raise TaskBaselineError("Task baseline Workspace does not match Task ownership")
+
     connection.execute(
         """
         INSERT INTO task_baselines(
@@ -153,14 +174,16 @@ def persist_task_baseline(
                 relative_path,
                 original_relative_path,
                 status_code,
+                fingerprint_kind,
                 state_sha256
-            ) VALUES (?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
                 dirty_path.relative_path,
                 dirty_path.original_relative_path,
                 dirty_path.status_code,
+                dirty_path.fingerprint_kind.value,
                 dirty_path.state_sha256,
             ),
         )
@@ -198,7 +221,12 @@ def get_task_baseline(connection: sqlite3.Connection, task_id: str) -> TaskBasel
 
     dirty_rows = connection.execute(
         """
-        SELECT relative_path, original_relative_path, status_code, state_sha256
+        SELECT
+            relative_path,
+            original_relative_path,
+            status_code,
+            fingerprint_kind,
+            state_sha256
         FROM task_baseline_dirty_paths
         WHERE task_id = ?
         ORDER BY relative_path
@@ -367,18 +395,20 @@ def _parse_dirty_paths(
         if relative_path in seen_paths:
             raise TaskBaselineError(f"Git returned duplicate dirty path: {relative_path!r}")
         seen_paths.add(relative_path)
+        fingerprint_kind, state_sha256 = _dirty_path_state(
+            workspace_root,
+            relative_path,
+            original_relative_path,
+            status_code,
+            deadline=deadline,
+        )
         dirty_paths.append(
             TaskBaselineDirtyPath(
                 relative_path=relative_path,
                 original_relative_path=original_relative_path,
                 status_code=status_code,
-                state_sha256=_dirty_path_state_sha256(
-                    workspace_root,
-                    relative_path,
-                    original_relative_path,
-                    status_code,
-                    deadline=deadline,
-                ),
+                fingerprint_kind=fingerprint_kind,
+                state_sha256=state_sha256,
             )
         )
     return tuple(sorted(dirty_paths, key=lambda item: item.relative_path))
@@ -390,20 +420,24 @@ def _decode_relative_path(raw_path: bytes) -> str:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise TaskBaselineError("Workspace dirty path cannot be persisted as UTF-8") from exc
+    return _validated_relative_path(value)
+
+
+def _validated_relative_path(value: str) -> str:
     path = PurePosixPath(value)
     if not value or path.is_absolute() or ".." in path.parts or "\x00" in value:
-        raise TaskBaselineError(f"Git returned unsafe dirty path: {value!r}")
+        raise TaskBaselineError(f"unsafe Task baseline path: {value!r}")
     return value
 
 
-def _dirty_path_state_sha256(
+def _dirty_path_state(
     workspace_root: Path,
     relative_path: str,
     original_relative_path: str | None,
     status_code: str,
     *,
     deadline: float,
-) -> str:
+) -> tuple[TaskBaselineFingerprintKind, str]:
     digest = hashlib.sha256()
     _digest_field(digest, status_code)
     _digest_field(digest, relative_path)
@@ -422,7 +456,7 @@ def _dirty_path_state_sha256(
         before = path.lstat()
     except FileNotFoundError:
         digest.update(b"missing\0")
-        return digest.hexdigest()
+        return TaskBaselineFingerprintKind.MISSING, digest.hexdigest()
     except OSError as exc:
         raise TaskBaselineError(f"dirty path cannot be inspected: {relative_path}") from exc
 
@@ -435,7 +469,7 @@ def _dirty_path_state_sha256(
         _require_stable_stat(relative_path, before, after)
         digest.update(b"symlink\0")
         digest.update(os.fsencode(target))
-        return digest.hexdigest()
+        return TaskBaselineFingerprintKind.SYMLINK, digest.hexdigest()
 
     if stat.S_ISREG(before.st_mode):
         digest.update(b"file\0")
@@ -457,13 +491,13 @@ def _dirty_path_state_sha256(
             raise TaskBaselineError(f"dirty file cannot be read safely: {relative_path}") from exc
         _require_stable_stat(relative_path, opened_before, opened_after)
         _require_stable_stat(relative_path, opened_after, current)
-        return digest.hexdigest()
+        return TaskBaselineFingerprintKind.FILE, digest.hexdigest()
 
-    digest.update(b"other\0")
+    digest.update(b"opaque\0")
     _digest_field(digest, str(before.st_mode))
     _digest_field(digest, str(before.st_size))
     _digest_field(digest, str(before.st_mtime_ns))
-    return digest.hexdigest()
+    return TaskBaselineFingerprintKind.OPAQUE, digest.hexdigest()
 
 
 def _require_stable_stat(relative_path: str, before: os.stat_result, after: os.stat_result) -> None:
@@ -535,26 +569,48 @@ def _snapshot_from_row(
 
 
 def _dirty_path_from_row(row: tuple[object, ...]) -> TaskBaselineDirtyPath:
-    relative_path, original_relative_path, status_code, state_sha256 = row
-    if (
-        not isinstance(relative_path, str)
-        or not relative_path
-        or (
-            original_relative_path is not None
-            and (not isinstance(original_relative_path, str) or not original_relative_path)
-        )
-        or not isinstance(status_code, str)
-        or len(status_code) != 2
-        or not isinstance(state_sha256, str)
-        or len(state_sha256) != 64
-    ):
-        raise TaskBaselineError("task baseline dirty-path row has invalid persisted types")
+    relative_path, original_relative_path, status_code, fingerprint_kind, state_sha256 = row
+    if not isinstance(relative_path, str):
+        raise TaskBaselineError("task baseline dirty path has invalid persisted path")
+    safe_relative_path = _validated_relative_path(relative_path)
+    safe_original_path: str | None = None
+    if original_relative_path is not None:
+        if not isinstance(original_relative_path, str):
+            raise TaskBaselineError("task baseline rename origin has invalid persisted path")
+        safe_original_path = _validated_relative_path(original_relative_path)
+    if not isinstance(status_code, str) or len(status_code) != 2:
+        raise TaskBaselineError("task baseline dirty path has invalid status code")
+    try:
+        status_code.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise TaskBaselineError("task baseline dirty path has non-ASCII status code") from exc
+    if not isinstance(fingerprint_kind, str):
+        raise TaskBaselineError("task baseline dirty path has invalid fingerprint kind")
+    try:
+        kind = TaskBaselineFingerprintKind(fingerprint_kind)
+    except ValueError as exc:
+        raise TaskBaselineError(
+            f"task baseline dirty path has unsupported fingerprint kind: {fingerprint_kind!r}"
+        ) from exc
+    if not isinstance(state_sha256, str) or not _is_sha256(state_sha256):
+        raise TaskBaselineError("task baseline dirty path has invalid state fingerprint")
     return TaskBaselineDirtyPath(
-        relative_path=relative_path,
-        original_relative_path=original_relative_path,
+        relative_path=safe_relative_path,
+        original_relative_path=safe_original_path,
         status_code=status_code,
+        fingerprint_kind=kind,
         state_sha256=state_sha256,
     )
+
+
+def _is_sha256(value: str) -> bool:
+    if len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
 
 
 def _require_registered_identity(
