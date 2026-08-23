@@ -87,7 +87,7 @@ def test_non_hex_persisted_index_hash_aborts_baseline_task_creation(tmp_path: Pa
         connection.execute("PRAGMA ignore_check_constraints = ON")
         connection.execute(
             "UPDATE indexed_files SET content_sha256 = ? WHERE workspace_id = ?",
-            ("z" * 64, workspace.workspace_id),
+            ("+" + "0" * 63, workspace.workspace_id),
         )
 
         with pytest.raises(TaskBaselineError, match="persisted index inspection failed"):
