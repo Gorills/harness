@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -285,6 +285,57 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             CREATE UNIQUE INDEX tasks_one_working_per_workspace_idx
             ON tasks(workspace_id)
             WHERE state = 'working'
+            """
+        )
+        return
+    if target_version == 5:
+        connection.execute(
+            """
+            CREATE TABLE workspace_index_state (
+                workspace_id TEXT PRIMARY KEY
+                    REFERENCES workspaces(id) ON DELETE CASCADE,
+                generation INTEGER NOT NULL CHECK (generation > 0),
+                last_reconciled_at TEXT NOT NULL CHECK (last_reconciled_at <> '')
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE task_baselines (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                head TEXT CHECK (head IS NULL OR head <> ''),
+                branch TEXT CHECK (branch IS NULL OR branch <> ''),
+                captured_at TEXT NOT NULL CHECK (captured_at <> ''),
+                index_generation INTEGER CHECK (
+                    index_generation IS NULL OR index_generation > 0
+                ),
+                index_last_reconciled_at TEXT,
+                index_file_count INTEGER NOT NULL CHECK (index_file_count >= 0),
+                index_snapshot_sha256 TEXT NOT NULL
+                    CHECK (length(index_snapshot_sha256) = 64),
+                CHECK (
+                    (index_generation IS NULL AND index_last_reconciled_at IS NULL)
+                    OR (
+                        index_generation IS NOT NULL
+                        AND index_last_reconciled_at IS NOT NULL
+                        AND index_last_reconciled_at <> ''
+                    )
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE task_baseline_dirty_paths (
+                task_id TEXT NOT NULL REFERENCES task_baselines(task_id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL CHECK (relative_path <> ''),
+                original_relative_path TEXT CHECK (
+                    original_relative_path IS NULL OR original_relative_path <> ''
+                ),
+                status_code TEXT NOT NULL CHECK (length(status_code) = 2),
+                state_sha256 TEXT NOT NULL CHECK (length(state_sha256) = 64),
+                PRIMARY KEY (task_id, relative_path)
+            )
             """
         )
         return
