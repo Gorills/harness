@@ -33,7 +33,7 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
         tables = {
             row[0]
             for row in connection.execute(
@@ -47,6 +47,9 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
             "tasks",
             "task_baselines",
             "task_baseline_dirty_paths",
+            "task_checkpoints",
+            "task_checkpoint_changed_paths",
+            "task_events",
         } <= tables
     finally:
         connection.close()
@@ -64,7 +67,7 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
     finally:
         connection.close()
 
@@ -101,7 +104,7 @@ def test_initialize_database_serializes_concurrent_migrations(
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
     finally:
         connection.close()
 
@@ -138,7 +141,7 @@ def test_initialize_database_migrates_existing_version_zero_database(tmp_path: P
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
     finally:
         connection.close()
 
@@ -165,7 +168,7 @@ def test_initialize_database_migrates_existing_version_one_database(tmp_path: Pa
         versions = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
         assert connection.execute("SELECT value FROM legacy_fixture").fetchone() == ("preserved",)
         for table in (
             "projects",
@@ -234,8 +237,16 @@ def test_initialize_database_migrates_existing_version_two_database(tmp_path: Pa
         assert connection.execute("SELECT id FROM workspaces").fetchall() == [("workspace",)]
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
-        for table in ("indexed_files", "tasks", "task_baselines", "task_baseline_dirty_paths"):
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        for table in (
+            "indexed_files",
+            "tasks",
+            "task_baselines",
+            "task_baseline_dirty_paths",
+            "task_checkpoints",
+            "task_checkpoint_changed_paths",
+            "task_events",
+        ):
             assert connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?",
                 (table,),
@@ -316,8 +327,15 @@ def test_initialize_database_migrates_existing_version_three_database(tmp_path: 
         ]
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
-        for table in ("tasks", "task_baselines", "task_baseline_dirty_paths"):
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        for table in (
+            "tasks",
+            "task_baselines",
+            "task_baseline_dirty_paths",
+            "task_checkpoints",
+            "task_checkpoint_changed_paths",
+            "task_events",
+        ):
             assert connection.execute(
                 "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?",
                 (table,),
@@ -431,7 +449,7 @@ def test_initialize_database_migrates_existing_version_four_database(tmp_path: P
         ]
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_baseline_dirty_paths").fetchone() == (
             0,
@@ -448,7 +466,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     try:
         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
         connection.execute(
-            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6)"
+            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6), (7)"
         )
         connection.commit()
         before = connection.execute("PRAGMA journal_mode").fetchone()
@@ -462,7 +480,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     try:
         assert connection.execute("PRAGMA journal_mode").fetchone() == before
         versions = connection.execute("SELECT version FROM schema_migrations").fetchall()
-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,)]
     finally:
         connection.close()
 
@@ -479,3 +497,64 @@ def test_initialize_database_rejects_non_contiguous_migration_history(tmp_path: 
 
     with pytest.raises(InvalidSchemaStateError, match="not contiguous"):
         initialize_database(database)
+
+
+def test_initialize_database_migrates_existing_version_five_checkpoint_foundation(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project-v5')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace-v5', 'project-v5', '/v5/repo', '/v5/repo/.git')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+            ) VALUES (
+                'task-v5', 'workspace-v5', 'Existing v5 task', 'working', NULL, 1,
+                'created', 'updated'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_baselines(
+                task_id, head, branch, captured_at, index_is_fresh,
+                index_file_count, index_snapshot_sha256
+            ) VALUES ('task-v5', NULL, 'main', 'captured', 1, 0, ?)
+            """,
+            ("0" * 64,),
+        )
+        connection.execute("DROP TABLE task_events")
+        connection.execute("DROP TABLE task_checkpoint_changed_paths")
+        connection.execute("DROP TABLE task_checkpoints")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = initialize_database(database)
+
+    assert status.schema_version == SCHEMA_VERSION
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute(
+            "SELECT id, revision FROM tasks WHERE id = 'task-v5'"
+        ).fetchone() == ("task-v5", 1)
+        assert connection.execute(
+            "SELECT task_id, branch FROM task_baselines WHERE task_id = 'task-v5'"
+        ).fetchone() == ("task-v5", "main")
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+        assert connection.execute("SELECT COUNT(*) FROM task_checkpoints").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+    finally:
+        connection.close()
