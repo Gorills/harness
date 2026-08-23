@@ -31,6 +31,23 @@ def test_default_runtime_paths_use_absolute_xdg_locations() -> None:
     )
 
 
+def test_default_runtime_paths_read_process_xdg_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+    paths = default_runtime_paths()
+
+    assert paths == RuntimePaths(
+        database=state / "harness" / "harness.db",
+        socket=runtime / "harness" / "harness.sock",
+    )
+
+
 def test_default_runtime_paths_ignore_relative_xdg_values() -> None:
     paths = default_runtime_paths(
         environment={

@@ -79,6 +79,18 @@ uv sync --locked --all-groups
 uv run --frozen python scripts/quality.py
 ```
 
+Manual CLI/daemon work should use the repository-local runtime so development does not collide with a separately installed Harness build:
+
+```text
+scripts/dev sync
+scripts/dev harness doctor
+scripts/dev harness scan
+scripts/dev harness status
+scripts/dev stop
+```
+
+`scripts/dev` exports XDG state/runtime paths under `.harness/` and runs this checkout through `uv run`; see [`docs/development/isolated-development.md`](docs/development/isolated-development.md).
+
 The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, verifies that installed CLI help exposes the implemented commands/runtime-path override contract including search, and runs the installed `harness doctor` command.
 
 ## License

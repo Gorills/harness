@@ -25,6 +25,17 @@ uv run --frozen python scripts/quality.py
 
 The quality gate checks lock freshness, Ruff formatting/lint, strict mypy, pytest, and an isolated wheel-install smoke test for the `harness` and `harnessd` console scripts.
 
+For checkout-local CLI/daemon work that must not share state with a system Harness install:
+
+```text
+scripts/dev sync
+scripts/dev harness doctor
+scripts/dev harness scan
+scripts/dev stop
+```
+
+See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Prefer `scripts/dev` over a global `harness` on `PATH`.
+
 If direct Git/network access is unavailable but repository Git objects remain accessible through an authenticated API or connector, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). The fallback preserves exact base/tree identity, uses the PR source/toolchain artifacts for offline work, verifies staged and remote blob/tree SHAs, and moves the feature branch away from the verified base only after the complete remote tree matches the locally verified expected tree.
 
 ## Branches and pull requests

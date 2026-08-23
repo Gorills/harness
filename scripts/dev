@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+# shellcheck source=scripts/dev-env.sh
+source "$script_dir/dev-env.sh"
+
+REQUIRED_UV_VERSION="0.12.5"
+REQUIRED_PYTHON="3.13"
+
+usage() {
+    cat <<'EOF'
+Run this Harness checkout with repository-local runtime paths.
+
+Usage:
+  scripts/dev <command> [args...]
+
+Built-in commands:
+  help       show this help
+  env        print isolated XDG/runtime paths
+  sync       install Python 3.13 and sync the locked development environment
+  stop       stop the isolated development daemon for this checkout
+  quality    run the repository quality gate in the isolated environment
+  <args...>  run `uv run --frozen <args...>` from this checkout
+
+Examples:
+  scripts/dev sync
+  scripts/dev harness doctor
+  scripts/dev harness scan
+  scripts/dev harness status
+  scripts/dev harness search indexed_files
+  scripts/dev harnessd serve
+  scripts/dev stop
+  scripts/dev quality
+
+XDG_STATE_HOME and XDG_RUNTIME_DIR are exported under .harness/ so this
+checkout does not use the canonical per-user paths of a system install.
+Lazy daemon autostart inherits the same environment and launches this checkout.
+EOF
+}
+
+uv_version() {
+    local executable="$1"
+    "$executable" --version 2>/dev/null | awk '{print $2}'
+}
+
+resolve_uv() {
+    local candidate version
+    if [[ -n "${HARNESS_DEV_UV:-}" && -x "${HARNESS_DEV_UV}" ]]; then
+        candidate="$HARNESS_DEV_UV"
+        version="$(uv_version "$candidate")"
+        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
+    candidate="$repo_root/.harness/tools/uv"
+    if [[ -x "$candidate" ]]; then
+        version="$(uv_version "$candidate")"
+        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+
+    if command -v uv >/dev/null 2>&1; then
+        candidate="$(command -v uv)"
+        version="$(uv_version "$candidate")"
+        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+bootstrap_uv() {
+    local install_dir="$repo_root/.harness/tools"
+    mkdir -p -- "$install_dir"
+    chmod 700 -- "$repo_root/.harness" "$install_dir" 2>/dev/null || true
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Harness development requires uv $REQUIRED_UV_VERSION (curl is needed to bootstrap it)." >&2
+        echo "Install uv $REQUIRED_UV_VERSION and retry, or set HARNESS_DEV_UV to that executable." >&2
+        return 1
+    fi
+
+    echo "Bootstrapping uv $REQUIRED_UV_VERSION into $install_dir" >&2
+    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" \
+        | env UV_INSTALL_DIR="$install_dir" UV_NO_MODIFY_PATH=1 sh
+}
+
+ensure_uv() {
+    local executable
+    if executable="$(resolve_uv)"; then
+        printf '%s\n' "$executable"
+        return 0
+    fi
+    bootstrap_uv
+    if ! executable="$(resolve_uv)"; then
+        echo "uv $REQUIRED_UV_VERSION is required for Harness development." >&2
+        return 1
+    fi
+    printf '%s\n' "$executable"
+}
+
+ensure_project() {
+    local uv_bin="$1"
+    if [[ ! -x "$repo_root/.venv/bin/python" ]]; then
+        "$uv_bin" python install "$REQUIRED_PYTHON"
+        (cd -- "$repo_root" && "$uv_bin" sync --locked --all-groups)
+    fi
+}
+
+activate_resolved_uv() {
+    local uv_dir
+    UV_BIN="$(ensure_uv)"
+    uv_dir="$(cd -- "$(dirname -- "$UV_BIN")" && pwd)"
+    export PATH="$uv_dir:$PATH"
+}
+
+print_env() {
+    cat <<EOF
+HARNESS_DEV_ROOT=$HARNESS_DEV_ROOT
+XDG_STATE_HOME=$XDG_STATE_HOME
+XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
+database=$XDG_STATE_HOME/harness/harness.db
+socket=$XDG_RUNTIME_DIR/harness/harness.sock
+EOF
+}
+
+stop_isolated_daemon() {
+    local socket_path="$XDG_RUNTIME_DIR/harness/harness.sock"
+    if [[ ! -e "$socket_path" ]]; then
+        echo "No isolated Harness daemon socket at $socket_path"
+        return 0
+    fi
+
+    python_stop() {
+        local python_bin="${1:-python3}"
+        "$python_bin" - "$socket_path" <<'PY'
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+socket_path = Path(sys.argv[1])
+proc = Path("/proc")
+if not proc.is_dir():
+    raise SystemExit("process inspection via /proc is unavailable")
+
+runtime_dir = socket_path.parent.parent
+runtime_values = {
+    os.fsencode(str(runtime_dir)),
+    os.fsencode(str(runtime_dir.resolve())),
+}
+
+def pids() -> set[int]:
+    found: set[int] = set()
+    for cmdline_path in proc.glob("[0-9]*/cmdline"):
+        try:
+            pid = int(cmdline_path.parent.name)
+            command = cmdline_path.read_bytes()
+        except (OSError, ValueError):
+            continue
+        if b"harness.daemon_process" not in command and b"harnessd" not in command:
+            continue
+        try:
+            environ = (cmdline_path.parent / "environ").read_bytes()
+        except OSError:
+            continue
+        selected = {
+            entry.removeprefix(b"XDG_RUNTIME_DIR=")
+            for entry in environ.split(b"\0")
+            if entry.startswith(b"XDG_RUNTIME_DIR=")
+        }
+        if selected & runtime_values:
+            found.add(pid)
+    return found
+
+owners = pids()
+for pid in owners:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        continue
+deadline = time.monotonic() + 3
+while pids() and time.monotonic() < deadline:
+    time.sleep(0.05)
+for pid in pids():
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        continue
+if pids():
+    raise SystemExit("isolated Harness daemon did not exit")
+if socket_path.exists():
+    try:
+        socket_path.unlink()
+    except OSError as exc:
+        raise SystemExit(f"stale isolated socket could not be removed: {exc}") from exc
+PY
+    }
+
+    if [[ -x "$repo_root/.venv/bin/python" ]]; then
+        python_stop "$repo_root/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        python_stop python3
+    else
+        echo "Cannot stop the isolated daemon: Python is not available." >&2
+        return 1
+    fi
+
+    rm -f -- "$socket_path.lock" "$XDG_STATE_HOME/harness/harness.db.lock"
+    if [[ -e "$socket_path" ]]; then
+        echo "Isolated Harness daemon did not release $socket_path" >&2
+        return 1
+    fi
+    echo "Stopped isolated Harness daemon for $HARNESS_DEV_ROOT"
+}
+
+if [[ $# -eq 0 ]]; then
+    usage >&2
+    exit 1
+fi
+
+case "$1" in
+    help|-h|--help)
+        usage
+        exit 0
+        ;;
+    env)
+        print_env
+        exit 0
+        ;;
+    stop)
+        stop_isolated_daemon
+        exit 0
+        ;;
+    sync)
+        activate_resolved_uv
+        "$UV_BIN" python install "$REQUIRED_PYTHON"
+        cd -- "$repo_root"
+        exec "$UV_BIN" sync --locked --all-groups
+        ;;
+    quality)
+        activate_resolved_uv
+        ensure_project "$UV_BIN"
+        cd -- "$repo_root"
+        exec "$UV_BIN" run --frozen python scripts/quality.py
+        ;;
+esac
+
+activate_resolved_uv
+ensure_project "$UV_BIN"
+cd -- "$repo_root"
+exec "$UV_BIN" run --frozen "$@"

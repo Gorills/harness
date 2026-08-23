@@ -1,0 +1,47 @@
+# Repository-local Harness runtime isolation.
+#
+# Redirects canonical POSIX path selection (ADR-0007) into this checkout's
+# `.harness/` tree so development does not share database or IPC state with a
+# separately installed Harness build.
+#
+# Usage:
+#   . scripts/dev-env.sh
+#   uv run --frozen harness status
+#
+# Prefer `scripts/dev`, which applies this environment and runs the checkout.
+
+_harness_dev_repo_root() {
+    # Resolve from this file, not the caller. Sourcing from `.envrc` or another
+    # directory must not walk up from the caller's path or change the caller's cwd.
+    local script_path="${BASH_SOURCE[0]}"
+    local script_dir
+    script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd)"
+    (cd -- "$script_dir/.." && pwd)
+}
+
+_harness_dev_prepare_directory() {
+    local directory="$1"
+    mkdir -p -- "$directory"
+    chmod 700 -- "$directory"
+}
+
+harness_dev_activate() {
+    local root
+    root="$(_harness_dev_repo_root)"
+    export HARNESS_DEV_ROOT="$root"
+    export XDG_STATE_HOME="$root/.harness/state"
+    export XDG_RUNTIME_DIR="$root/.harness/runtime"
+
+    mkdir -p -- "$root/.harness"
+    chmod 700 -- "$root/.harness"
+    _harness_dev_prepare_directory "$XDG_STATE_HOME"
+    _harness_dev_prepare_directory "$XDG_RUNTIME_DIR"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "Source this file instead of executing it:" >&2
+    echo "  . scripts/dev-env.sh" >&2
+    exit 1
+fi
+
+harness_dev_activate
