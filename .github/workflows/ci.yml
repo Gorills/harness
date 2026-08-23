@@ -60,3 +60,34 @@ jobs:
 
       - name: Run quality gate
         run: uv run --frozen python scripts/quality.py
+
+      - name: Build offline PR toolchain bundle
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          offline_cache="$RUNNER_TEMP/harness-offline-uv-cache"
+          offline_venv="$RUNNER_TEMP/harness-offline-venv"
+          bundle_dir="$RUNNER_TEMP/harness-toolchain"
+          rm -rf "$offline_cache" "$offline_venv" "$bundle_dir"
+          mkdir -p "$bundle_dir"
+          UV_CACHE_DIR="$offline_cache" \
+          UV_PROJECT_ENVIRONMENT="$offline_venv" \
+            uv sync --locked --all-groups --no-install-project
+          cp "$(command -v uv)" "$bundle_dir/uv"
+          chmod 0755 "$bundle_dir/uv"
+          tar --format=posix -czf "$bundle_dir/uv-cache.tar.gz" -C "$offline_cache" .
+          tar --format=posix \
+            -czf "$RUNNER_TEMP/harness-toolchain-$PR_HEAD_SHA.tar.gz" \
+            -C "$bundle_dir" \
+            uv uv-cache.tar.gz
+
+      - name: Upload offline PR toolchain bundle
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: harness-toolchain-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/harness-toolchain-${{ github.event.pull_request.head.sha }}.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
