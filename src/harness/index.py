@@ -457,10 +457,6 @@ def _record_from_row(row: tuple[object, ...]) -> IndexedFileRecord:
 
 
 def _is_sha256(value: str) -> bool:
-    if len(value) != 64:
-        return False
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
+    return len(value) == 64 and all(
+        character in "0123456789abcdefABCDEF" for character in value
+    )
