@@ -1,0 +1,1 @@
+Temporary CI source-snapshot trigger for current main verification; remove before any merge.
