@@ -23,6 +23,7 @@ The audited architecture and accepted ADRs control implementation when the origi
 - After implementation, review the diff as a critic and run checks proportionate to the changed risk.
 - Never report a check as verified unless it actually ran successfully.
 - If a task uncovers a larger follow-up, document it and stop at the current boundary rather than silently expanding scope.
+- If normal Git remote transport is unavailable but authenticated repository-object access still exists, follow `docs/development/network-constrained-git.md`; preserve exact base/tree identity and do not move a feature branch ref away from the verified base until the complete remote tree matches the locally verified expected tree.
 
 ## Architecture invariants
 
