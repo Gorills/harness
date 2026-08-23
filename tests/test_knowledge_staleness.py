@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+import threading
 from pathlib import Path
 
-from harness.index import scan_workspace
+import pytest
+
+import harness.index as index_module
+from harness.index import IndexedFileRecord, scan_workspace
 from harness.knowledge import (
     KnowledgeAnchorDraft,
     KnowledgeDraft,
@@ -12,7 +16,7 @@ from harness.knowledge import (
     KnowledgeKind,
     get_knowledge_card,
 )
-from harness.registry import create_project, register_workspace
+from harness.registry import WorkspaceRecord, create_project, register_workspace
 from harness.storage import connect_database, initialize_database
 from harness.task_workflow import task_checkpoint, task_start
 from harness.tasks import TaskState
@@ -78,6 +82,76 @@ def test_matching_scan_keeps_anchored_knowledge_fresh(tmp_path: Path) -> None:
 
         assert get_knowledge_card(connection, knowledge_id).freshness is KnowledgeFreshness.FRESH
     finally:
+        connection.close()
+
+
+def test_scan_snapshot_does_not_stale_knowledge_created_after_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _setup(tmp_path)
+    release_scan = threading.Event()
+    scan_thread: threading.Thread | None = None
+    try:
+        task = task_start(connection, workspace_id, "Concurrent Knowledge")
+        snapshot_captured = threading.Event()
+        original_build_snapshot = index_module._build_snapshot
+
+        def blocked_build_snapshot(
+            workspace: WorkspaceRecord,
+            *,
+            deadline: float | None,
+        ) -> dict[str, IndexedFileRecord]:
+            snapshot = original_build_snapshot(workspace, deadline=deadline)
+            snapshot_captured.set()
+            assert release_scan.wait(5)
+            return snapshot
+
+        monkeypatch.setattr(index_module, "_build_snapshot", blocked_build_snapshot)
+        scan_errors: list[BaseException] = []
+
+        def run_scan() -> None:
+            scan_connection = connect_database(tmp_path / "harness.db")
+            try:
+                scan_workspace(scan_connection, workspace_id)
+            except BaseException as exc:  # pragma: no cover - surfaced below
+                scan_errors.append(exc)
+            finally:
+                scan_connection.close()
+
+        scan_thread = threading.Thread(target=run_scan)
+        scan_thread.start()
+        assert snapshot_captured.wait(5)
+
+        (root / "tracked.txt").write_text("changed after snapshot\n", encoding="utf-8")
+        mutation = task_checkpoint(
+            connection,
+            workspace_id,
+            task.task_id,
+            expected_revision=1,
+            state=TaskState.WORKING,
+            summary="Learned after scan snapshot",
+            knowledge=(
+                KnowledgeDraft(
+                    kind=KnowledgeKind.INVARIANT,
+                    title="Post-snapshot fact",
+                    body="This fact was learned from the changed file.",
+                    anchors=(KnowledgeAnchorDraft(path="tracked.txt"),),
+                ),
+            ),
+        )
+        knowledge_id = mutation.knowledge_cards[0].knowledge_id
+        assert get_knowledge_card(connection, knowledge_id).freshness is KnowledgeFreshness.FRESH
+
+        release_scan.set()
+        scan_thread.join(5)
+        assert not scan_thread.is_alive()
+        assert scan_errors == []
+        assert get_knowledge_card(connection, knowledge_id).freshness is KnowledgeFreshness.FRESH
+    finally:
+        release_scan.set()
+        if scan_thread is not None:
+            scan_thread.join(5)
         connection.close()
 
 

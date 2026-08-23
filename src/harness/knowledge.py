@@ -330,14 +330,39 @@ def list_project_knowledge(
     return tuple(_card_from_row(connection, row) for row in rows)
 
 
+def snapshot_fresh_anchored_knowledge_ids(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> frozenset[str]:
+    """Capture fresh anchored Knowledge that existed before a filesystem scan snapshot."""
+    get_workspace(connection, workspace_id)
+    rows = connection.execute(
+        """
+        SELECT DISTINCT a.knowledge_id
+        FROM knowledge_anchors AS a
+        JOIN knowledge_cards AS c ON c.id = a.knowledge_id
+        WHERE a.workspace_id = ? AND c.freshness = 'fresh'
+        ORDER BY a.knowledge_id
+        """,
+        (workspace_id,),
+    ).fetchall()
+    knowledge_ids: set[str] = set()
+    for (knowledge_id,) in rows:
+        if not isinstance(knowledge_id, str) or not knowledge_id:
+            raise KnowledgeCorruptionError("knowledge anchor has invalid persisted identity")
+        knowledge_ids.add(knowledge_id)
+    return frozenset(knowledge_ids)
+
+
 def reconcile_knowledge_staleness(
     connection: sqlite3.Connection,
     workspace_id: str,
     current_snapshot: Mapping[str, tuple[str, str]],
     *,
+    eligible_knowledge_ids: frozenset[str],
     now: datetime | None = None,
 ) -> int:
-    """Mark fresh cards stale when any source-Workspace anchor no longer matches a scan."""
+    """Mark pre-snapshot fresh cards stale when source-Workspace anchors no longer match."""
     if not connection.in_transaction:
         raise KnowledgeError("Knowledge staleness reconciliation requires an active transaction")
     get_workspace(connection, workspace_id)
@@ -356,6 +381,8 @@ def reconcile_knowledge_staleness(
     stale_ids: set[str] = set()
     for row in rows:
         anchor = _anchor_from_row(row)
+        if anchor.knowledge_id not in eligible_knowledge_ids:
+            continue
         current = current_snapshot.get(anchor.relative_path)
         expected = (anchor.fingerprint_kind.value, anchor.content_sha256)
         if current != expected:
