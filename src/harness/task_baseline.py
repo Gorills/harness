@@ -24,7 +24,7 @@ from harness.index import (
     IndexingError,
     ScanDeadlineExceededError,
     _build_snapshot,
-    list_indexed_files,
+    _record_from_row,
 )
 from harness.registry import WorkspaceRecord, get_workspace
 
@@ -102,15 +102,18 @@ def capture_workspace_task_baseline(
         identity_before.layout.git_common_dir,
     )
 
-    indexed_files = _persisted_index_snapshot(connection, workspace_id)
-    index_snapshot_sha256 = _index_snapshot_sha256(indexed_files)
+    indexed_files = _persisted_index_snapshot(connection, workspace_id, deadline=deadline)
+    index_snapshot_sha256 = _index_snapshot_sha256(indexed_files, deadline=deadline)
 
     first_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
     live_indexed_files = _capture_live_index_snapshot(workspace, deadline=deadline)
     second_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
     if first_git != second_git:
         raise TaskBaselineChangedError("Workspace Git state changed during Task baseline capture")
-    if _persisted_index_snapshot(connection, workspace_id) != indexed_files:
+    if (
+        _persisted_index_snapshot(connection, workspace_id, deadline=deadline)
+        != indexed_files
+    ):
         raise TaskBaselineChangedError(
             "Workspace Structural Index changed during Task baseline capture"
         )
@@ -126,12 +129,15 @@ def capture_workspace_task_baseline(
             "Workspace registry identity changed during Task baseline capture"
         )
 
+    index_is_fresh = live_indexed_files == indexed_files
+    captured_at = _utc_timestamp(now)
+    _require_deadline(deadline)
     return TaskBaselineSnapshot(
         workspace_id=workspace.workspace_id,
         head=first_git.head,
         branch=first_git.branch,
-        captured_at=_utc_timestamp(now),
-        index_is_fresh=live_indexed_files == indexed_files,
+        captured_at=captured_at,
+        index_is_fresh=index_is_fresh,
         index_file_count=len(indexed_files),
         index_snapshot_sha256=index_snapshot_sha256,
         dirty_paths=first_git.dirty_paths,
@@ -275,11 +281,28 @@ def _inspect_git_runtime_identity(
 def _persisted_index_snapshot(
     connection: sqlite3.Connection,
     workspace_id: str,
+    *,
+    deadline: float,
 ) -> tuple[IndexedFileRecord, ...]:
+    _require_deadline(deadline)
+    records: list[IndexedFileRecord] = []
     try:
-        return list_indexed_files(connection, workspace_id)
+        rows = connection.execute(
+            """
+            SELECT workspace_id, relative_path, kind, size_bytes, content_sha256
+            FROM indexed_files
+            WHERE workspace_id = ?
+            ORDER BY relative_path
+            """,
+            (workspace_id,),
+        )
+        for row in rows:
+            _require_deadline(deadline)
+            records.append(_record_from_row(row))
     except IndexingError as exc:
         raise TaskBaselineError("Task baseline persisted index inspection failed") from exc
+    _require_deadline(deadline)
+    return tuple(records)
 
 
 def _capture_live_index_snapshot(
@@ -562,13 +585,20 @@ def _require_stable_stat(relative_path: str, before: os.stat_result, after: os.s
         raise TaskBaselineChangedError(f"dirty path changed during capture: {relative_path}")
 
 
-def _index_snapshot_sha256(indexed_files: tuple[IndexedFileRecord, ...]) -> str:
+def _index_snapshot_sha256(
+    indexed_files: tuple[IndexedFileRecord, ...],
+    *,
+    deadline: float,
+) -> str:
+    _require_deadline(deadline)
     digest = hashlib.sha256()
     for record in indexed_files:
+        _require_deadline(deadline)
         _digest_field(digest, record.relative_path)
         _digest_field(digest, record.kind.value)
         _digest_field(digest, str(record.size_bytes))
         _digest_field(digest, record.content_sha256)
+    _require_deadline(deadline)
     return digest.hexdigest()
 
 
