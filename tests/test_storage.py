@@ -426,14 +426,16 @@ def test_initialize_database_migrates_existing_version_four_database(tmp_path: P
     assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute(
-            "SELECT id, state, revision FROM tasks"
-        ).fetchall() == [("task", "waiting", 2)]
+        assert connection.execute("SELECT id, state, revision FROM tasks").fetchall() == [
+            ("task", "waiting", 2)
+        ]
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (0,)
-        assert connection.execute("SELECT COUNT(*) FROM task_baseline_dirty_paths").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM task_baseline_dirty_paths").fetchone() == (
+            0,
+        )
     finally:
         connection.close()
 
