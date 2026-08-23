@@ -305,9 +305,9 @@ def test_initialize_database_migrates_existing_version_three_database(tmp_path: 
     assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute(
-            "SELECT relative_path FROM indexed_files"
-        ).fetchall() == [("README.md",)]
+        assert connection.execute("SELECT relative_path FROM indexed_files").fetchall() == [
+            ("README.md",)
+        ]
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall() == [(1,), (2,), (3,), (4,)]
@@ -325,9 +325,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
     connection = sqlite3.connect(database)
     try:
         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
-        connection.execute(
-            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5)"
-        )
+        connection.execute("INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5)")
         connection.commit()
         before = connection.execute("PRAGMA journal_mode").fetchone()
     finally:
