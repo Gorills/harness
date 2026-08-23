@@ -12,7 +12,13 @@ from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any
 
-from harness.git_workspace import _git_environment, inspect_git_workspace_runtime_identity
+from harness.git_workspace import (
+    GitWorkspaceDeadlineExceededError,
+    GitWorkspaceError,
+    GitWorkspaceRuntimeIdentity,
+    _git_environment,
+    inspect_git_workspace_runtime_identity,
+)
 from harness.index import (
     IndexedFileRecord,
     IndexingError,
@@ -89,7 +95,7 @@ def capture_workspace_task_baseline(
     """Capture one stable Git/index baseline for a registered Workspace."""
     deadline = monotonic() + _BASELINE_TIMEOUT_SECONDS
     workspace = get_workspace(connection, workspace_id)
-    identity_before = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    identity_before = _inspect_git_runtime_identity(workspace.workspace_root, deadline=deadline)
     _require_registered_identity(
         workspace,
         identity_before.layout.workspace_root,
@@ -109,7 +115,7 @@ def capture_workspace_task_baseline(
             "Workspace Structural Index changed during Task baseline capture"
         )
 
-    identity_after = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    identity_after = _inspect_git_runtime_identity(workspace.workspace_root, deadline=deadline)
     if identity_after != identity_before:
         raise TaskBaselineChangedError(
             "Workspace Git identity changed during Task baseline capture"
@@ -249,6 +255,21 @@ class _GitBaselineState:
     head: str | None
     branch: str | None
     dirty_paths: tuple[TaskBaselineDirtyPath, ...]
+
+
+def _inspect_git_runtime_identity(
+    workspace_root: Path,
+    *,
+    deadline: float,
+) -> GitWorkspaceRuntimeIdentity:
+    try:
+        identity = inspect_git_workspace_runtime_identity(workspace_root, deadline=deadline)
+    except GitWorkspaceDeadlineExceededError as exc:
+        raise TaskBaselineTimeoutError("Task baseline Git identity inspection timed out") from exc
+    except GitWorkspaceError as exc:
+        raise TaskBaselineError("Task baseline Git identity inspection failed") from exc
+    _require_deadline(deadline)
+    return identity
 
 
 def _persisted_index_snapshot(
