@@ -4,6 +4,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
 _GIT_COMMAND_TIMEOUT_SECONDS = 1.5
 _GIT_CONTEXT_ENVIRONMENT = (
@@ -21,6 +22,10 @@ _GIT_CONTEXT_ENVIRONMENT = (
 
 class GitWorkspaceError(RuntimeError):
     """Base class for Git Workspace inspection failures."""
+
+
+class GitWorkspaceDeadlineExceededError(GitWorkspaceError):
+    """Raised when a caller-supplied Git Workspace inspection deadline expires."""
 
 
 class GitExecutableUnavailableError(GitWorkspaceError):
@@ -59,35 +64,47 @@ class GitWorkingTreeStatus:
     dirty_path_count: int
 
 
-def inspect_git_workspace(path: Path) -> GitWorkspaceLayout:
+def inspect_git_workspace(path: Path, *, deadline: float | None = None) -> GitWorkspaceLayout:
     """Return canonical worktree and shared Git-directory paths for ``path``."""
+    _require_git_workspace_deadline(deadline)
     invocation_dir = _existing_directory(path)
-    workspace_root = _normalize_existing_path(Path(_rev_parse(invocation_dir, "--show-toplevel")))
+    workspace_root = _normalize_existing_path(
+        Path(_rev_parse(invocation_dir, "--show-toplevel", deadline=deadline))
+    )
 
-    common_dir = Path(_rev_parse(invocation_dir, "--git-common-dir"))
+    common_dir = Path(_rev_parse(invocation_dir, "--git-common-dir", deadline=deadline))
     if not common_dir.is_absolute():
         common_dir = invocation_dir / common_dir
 
-    return GitWorkspaceLayout(
+    layout = GitWorkspaceLayout(
         workspace_root=workspace_root,
         git_common_dir=_normalize_existing_path(common_dir),
     )
+    _require_git_workspace_deadline(deadline)
+    return layout
 
 
-def inspect_git_workspace_runtime_identity(path: Path) -> GitWorkspaceRuntimeIdentity:
+def inspect_git_workspace_runtime_identity(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> GitWorkspaceRuntimeIdentity:
     """Return canonical Git paths plus ephemeral inode identity for one live status read."""
-    layout = inspect_git_workspace(path)
-    git_dir = Path(_rev_parse(layout.workspace_root, "--git-dir"))
+    _require_git_workspace_deadline(deadline)
+    layout = inspect_git_workspace(path, deadline=deadline)
+    git_dir = Path(_rev_parse(layout.workspace_root, "--git-dir", deadline=deadline))
     if not git_dir.is_absolute():
         git_dir = layout.workspace_root / git_dir
     normalized_git_dir = _normalize_existing_path(git_dir)
-    return GitWorkspaceRuntimeIdentity(
+    identity = GitWorkspaceRuntimeIdentity(
         layout=layout,
         git_dir=normalized_git_dir,
         workspace_root_identity=_filesystem_identity(layout.workspace_root),
         git_dir_identity=_filesystem_identity(normalized_git_dir),
         git_common_dir_identity=_filesystem_identity(layout.git_common_dir),
     )
+    _require_git_workspace_deadline(deadline)
+    return identity
 
 
 def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
@@ -198,7 +215,13 @@ def _decode_git_value(value: bytes) -> str:
     return output
 
 
-def _rev_parse(invocation_dir: Path, argument: str) -> str:
+def _rev_parse(
+    invocation_dir: Path,
+    argument: str,
+    *,
+    deadline: float | None = None,
+) -> str:
+    timeout = _git_command_timeout(deadline)
     try:
         result = subprocess.run(
             ["git", "rev-parse", argument],
@@ -206,9 +229,13 @@ def _rev_parse(invocation_dir: Path, argument: str) -> str:
             check=False,
             capture_output=True,
             env=_git_environment(),
-            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
+        if deadline is not None and monotonic() >= deadline:
+            raise GitWorkspaceDeadlineExceededError(
+                f"Git workspace inspection deadline exceeded at {invocation_dir}"
+            ) from exc
         raise GitWorkspaceError(f"Git workspace inspection timed out at {invocation_dir}") from exc
     except FileNotFoundError as exc:
         raise GitExecutableUnavailableError("Git executable is not available") from exc
@@ -226,3 +253,17 @@ def _rev_parse(invocation_dir: Path, argument: str) -> str:
     if not output:
         raise GitWorkspaceError(f"Git returned no value for {argument} at {invocation_dir}")
     return output
+
+
+def _git_command_timeout(deadline: float | None) -> float:
+    if deadline is None:
+        return _GIT_COMMAND_TIMEOUT_SECONDS
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise GitWorkspaceDeadlineExceededError("Git workspace inspection deadline exceeded")
+    return min(_GIT_COMMAND_TIMEOUT_SECONDS, remaining)
+
+
+def _require_git_workspace_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise GitWorkspaceDeadlineExceededError("Git workspace inspection deadline exceeded")
