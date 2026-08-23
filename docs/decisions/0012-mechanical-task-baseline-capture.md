@@ -33,12 +33,13 @@ A baseline captures:
 
 Dirty-path fingerprints are local mechanical evidence, not persisted source:
 
-- `file`: hash includes Git status metadata plus regular-file bytes read with before/open/after stability checks;
-- `symlink`: hash includes Git status metadata plus the link target string and never follows the target for content;
+- every fingerprint is domain-versioned and includes the path's exact staged Git-index entry bytes (`git ls-files --stage -z`) so staged-state changes cannot hide behind an unchanged porcelain status/worktree;
+- `file`: hash additionally includes Git status metadata plus regular-file bytes read with before/open/after stability checks;
+- `symlink`: hash additionally includes Git status metadata plus the link target string and never follows the target for content;
 - `missing`: hash records status metadata plus a missing-path sentinel;
 - `opaque`: used for entries such as a dirty submodule/directory where Harness does not claim a complete content fingerprint.
 
-Future changed-file calculation must treat an `opaque` pre-existing entry conservatively. Equality of an opaque fingerprint is not proof that nested content stayed unchanged.
+Future changed-file calculation must treat an `opaque` pre-existing entry conservatively. Equality of an opaque fingerprint is not proof that nested content stayed unchanged. Git status explicitly uses `--ignore-submodules=none` so repository configuration cannot suppress dirty submodule evidence required by this rule.
 
 Baseline capture is bounded by a finite deadline and fails closed if Git metadata, dirty-file state, Workspace registry identity, Git filesystem identity, or the persisted Structural Index changes during capture. Git state is sampled twice around the live index snapshot; dirty regular files are content-fingerprinted on both samples.
 
