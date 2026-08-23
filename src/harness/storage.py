@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -384,6 +384,68 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             "CREATE INDEX task_checkpoints_task_id_idx ON task_checkpoints(task_id, task_revision)"
         )
         connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
+        return
+    if target_version == 7:
+        connection.execute(
+            """
+            CREATE TABLE task_events_v7 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_revision INTEGER NOT NULL CHECK (task_revision > 0),
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN ('created', 'resumed', 'checkpoint')
+                ),
+                checkpoint_id TEXT UNIQUE,
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                CHECK (
+                    (
+                        event_type = 'created'
+                        AND task_revision = 1
+                        AND checkpoint_id IS NULL
+                    )
+                    OR (
+                        event_type = 'resumed'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                    )
+                    OR (
+                        event_type = 'checkpoint'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NOT NULL
+                    )
+                ),
+                FOREIGN KEY (checkpoint_id, task_id, task_revision)
+                    REFERENCES task_checkpoints(id, task_id, task_revision) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events_v7(
+                id, task_id, task_revision, event_type, checkpoint_id, created_at
+            )
+            SELECT id, task_id, task_revision, event_type, checkpoint_id, created_at
+            FROM task_events
+            ORDER BY id
+            """
+        )
+        connection.execute("DROP TABLE task_events")
+        connection.execute("ALTER TABLE task_events_v7 RENAME TO task_events")
+        connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_created_per_task_idx
+            ON task_events(task_id)
+            WHERE event_type = 'created'
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_resumed_per_revision_idx
+            ON task_events(task_id, task_revision)
+            WHERE event_type = 'resumed'
+            """
+        )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 

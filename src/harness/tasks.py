@@ -32,6 +32,10 @@ class TaskRevisionConflictError(TaskConflictError):
     """Raised when an existing Task mutation uses a stale revision."""
 
 
+class TaskWorkspaceConflictError(TaskConflictError):
+    """Raised when an explicit Task does not belong to the caller's Workspace."""
+
+
 class TaskTransitionError(TaskError):
     """Raised when a Task state transition is not valid in v1."""
 
@@ -98,27 +102,16 @@ def create_task_with_baseline(
     now: datetime | None = None,
 ) -> TaskCreationRecord:
     """Atomically create a new working Task and its mandatory mechanical baseline."""
-    normalized_title = _validate_title(title)
-
     connection.execute("BEGIN IMMEDIATE")
     try:
-        get_workspace(connection, workspace_id)
-        _require_no_working_task(connection, workspace_id)
-        snapshot = capture_workspace_task_baseline(connection, workspace_id, now=now)
-        task = _new_task_record(
-            workspace_id=workspace_id,
-            title=normalized_title,
-            timestamp=snapshot.captured_at,
+        created = _create_task_with_baseline_in_transaction(
+            connection,
+            workspace_id,
+            title,
+            now=now,
         )
-        try:
-            _insert_task(connection, task)
-        except sqlite3.IntegrityError as exc:
-            if _working_task(connection, workspace_id) is not None:
-                raise TaskConflictError("workspace already has a working task") from exc
-            raise
-        baseline = persist_task_baseline(connection, task.task_id, snapshot)
         connection.execute("COMMIT")
-        return TaskCreationRecord(task=task, baseline=baseline)
+        return created
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -165,18 +158,72 @@ def transition_task_state(
 
     connection.execute("BEGIN IMMEDIATE")
     try:
-        current = get_task(connection, task_id)
-        if current.revision != expected_revision:
-            raise TaskRevisionConflictError(
-                f"task revision mismatch: expected {expected_revision}, current {current.revision}"
-            )
-        _validate_transition(current.state, state)
+        updated = _transition_task_state_in_transaction(
+            connection,
+            task_id,
+            expected_revision=expected_revision,
+            state=state,
+            wait_reason=wait_reason,
+            timestamp=timestamp,
+        )
+        connection.execute("COMMIT")
+        return updated
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
 
-        if state is TaskState.WORKING:
-            existing = _working_task(connection, current.workspace_id)
-            if existing is not None and existing.task_id != current.task_id:
-                raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
 
+def _create_task_with_baseline_in_transaction(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    title: str,
+    *,
+    now: datetime | None = None,
+) -> TaskCreationRecord:
+    """Create Task + baseline inside a caller-owned ``BEGIN IMMEDIATE`` transaction."""
+    normalized_title = _validate_title(title)
+    get_workspace(connection, workspace_id)
+    _require_no_working_task(connection, workspace_id)
+    snapshot = capture_workspace_task_baseline(connection, workspace_id, now=now)
+    task = _new_task_record(
+        workspace_id=workspace_id,
+        title=normalized_title,
+        timestamp=snapshot.captured_at,
+    )
+    try:
+        _insert_task(connection, task)
+    except sqlite3.IntegrityError as exc:
+        if _working_task(connection, workspace_id) is not None:
+            raise TaskConflictError("workspace already has a working task") from exc
+        raise
+    baseline = persist_task_baseline(connection, task.task_id, snapshot)
+    return TaskCreationRecord(task=task, baseline=baseline)
+
+
+def _transition_task_state_in_transaction(
+    connection: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_revision: int,
+    state: TaskState,
+    wait_reason: TaskWaitReason | None,
+    timestamp: str,
+) -> TaskRecord:
+    """Transition an existing Task inside a caller-owned ``BEGIN IMMEDIATE`` transaction."""
+    current = get_task(connection, task_id)
+    if current.revision != expected_revision:
+        raise TaskRevisionConflictError(
+            f"task revision mismatch: expected {expected_revision}, current {current.revision}"
+        )
+    _validate_transition(current.state, state)
+
+    if state is TaskState.WORKING:
+        existing = _working_task(connection, current.workspace_id)
+        if existing is not None and existing.task_id != current.task_id:
+            raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
+
+    try:
         cursor = connection.execute(
             """
             UPDATE tasks
@@ -191,23 +238,15 @@ def transition_task_state(
                 expected_revision,
             ),
         )
-        if cursor.rowcount != 1:
-            raise TaskRevisionConflictError(
-                f"task revision changed during mutation: expected {expected_revision}"
-            )
-        updated = get_task(connection, task_id)
-        connection.execute("COMMIT")
-        return updated
     except sqlite3.IntegrityError as exc:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
         if state is TaskState.WORKING:
             raise TaskConflictError("workspace already has a working task") from exc
         raise
-    except Exception:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        raise
+    if cursor.rowcount != 1:
+        raise TaskRevisionConflictError(
+            f"task revision changed during mutation: expected {expected_revision}"
+        )
+    return get_task(connection, task_id)
 
 
 def _require_no_working_task(connection: sqlite3.Connection, workspace_id: str) -> None:
