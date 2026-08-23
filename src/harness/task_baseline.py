@@ -111,10 +111,14 @@ def capture_workspace_task_baseline(
 
     identity_after = inspect_git_workspace_runtime_identity(workspace.workspace_root)
     if identity_after != identity_before:
-        raise TaskBaselineChangedError("Workspace Git identity changed during Task baseline capture")
+        raise TaskBaselineChangedError(
+            "Workspace Git identity changed during Task baseline capture"
+        )
     current_workspace = get_workspace(connection, workspace_id)
     if current_workspace != workspace:
-        raise TaskBaselineChangedError("Workspace registry identity changed during Task baseline capture")
+        raise TaskBaselineChangedError(
+            "Workspace registry identity changed during Task baseline capture"
+        )
 
     return TaskBaselineSnapshot(
         workspace_id=workspace.workspace_id,
@@ -265,7 +269,9 @@ def _capture_live_index_snapshot(
     try:
         snapshot = _build_snapshot(workspace, deadline=deadline)
     except ScanDeadlineExceededError as exc:
-        raise TaskBaselineTimeoutError("Task baseline index freshness inspection timed out") from exc
+        raise TaskBaselineTimeoutError(
+            "Task baseline index freshness inspection timed out"
+        ) from exc
     except IndexingError as exc:
         raise TaskBaselineError("Task baseline index freshness inspection failed") from exc
     return tuple(snapshot[path] for path in sorted(snapshot))
@@ -345,7 +351,9 @@ def _run_git(
     except subprocess.TimeoutExpired as exc:
         raise TaskBaselineTimeoutError("Task baseline Git inspection timed out") from exc
     except FileNotFoundError as exc:
-        raise TaskBaselineError("Git executable is not available for Task baseline capture") from exc
+        raise TaskBaselineError(
+            "Git executable is not available for Task baseline capture"
+        ) from exc
     except OSError as exc:
         raise TaskBaselineError(f"Git could not inspect Task baseline at {workspace_root}") from exc
     if result.returncode not in accepted_returncodes:
@@ -475,7 +483,9 @@ def _dirty_path_state(
             target = os.readlink(path)
             after = path.lstat()
         except OSError as exc:
-            raise TaskBaselineChangedError(f"dirty symlink changed during capture: {relative_path}") from exc
+            raise TaskBaselineChangedError(
+                f"dirty symlink changed during capture: {relative_path}"
+            ) from exc
         _require_stable_stat(relative_path, before, after)
         digest.update(b"symlink\0")
         digest.update(os.fsencode(target))
@@ -496,7 +506,9 @@ def _dirty_path_state(
                 opened_after = os.fstat(stream.fileno())
             current = path.lstat()
         except FileNotFoundError as exc:
-            raise TaskBaselineChangedError(f"dirty file changed during capture: {relative_path}") from exc
+            raise TaskBaselineChangedError(
+                f"dirty file changed during capture: {relative_path}"
+            ) from exc
         except OSError as exc:
             raise TaskBaselineError(f"dirty file cannot be read safely: {relative_path}") from exc
         _require_stable_stat(relative_path, opened_before, opened_after)
