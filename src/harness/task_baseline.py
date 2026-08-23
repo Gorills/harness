@@ -626,9 +626,7 @@ def _dirty_path_from_row(row: tuple[object, ...]) -> TaskBaselineDirtyPath:
 
 
 def _is_sha256(value: str) -> bool:
-    return len(value) == 64 and all(
-        character in "0123456789abcdefABCDEF" for character in value
-    )
+    return len(value) == 64 and all(character in "0123456789abcdefABCDEF" for character in value)
 
 
 def _require_registered_identity(
