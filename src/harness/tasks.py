@@ -7,6 +7,11 @@ from enum import StrEnum
 from uuid import uuid4
 
 from harness.registry import get_workspace
+from harness.task_baseline import (
+    TaskBaselineRecord,
+    capture_workspace_task_baseline,
+    persist_task_baseline,
+)
 
 MAX_TASK_TITLE_BYTES = 256
 
@@ -66,6 +71,14 @@ class TaskRecord:
     updated_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class TaskCreationRecord:
+    """Atomic new-Task creation result including its required mechanical baseline."""
+
+    task: TaskRecord
+    baseline: TaskBaselineRecord
+
+
 def create_task_record(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -73,51 +86,63 @@ def create_task_record(
     *,
     now: datetime | None = None,
 ) -> TaskRecord:
-    """Create one working Task without exposing the future ``task_start`` orchestration."""
+    """Create one foundation-only working Task without the required Task baseline."""
     normalized_title = _validate_title(title)
     timestamp = _utc_timestamp(now)
 
     connection.execute("BEGIN IMMEDIATE")
     try:
         get_workspace(connection, workspace_id)
-        existing = _working_task(connection, workspace_id)
-        if existing is not None:
-            raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
-
-        task = TaskRecord(
-            task_id=uuid4().hex,
+        _require_no_working_task(connection, workspace_id)
+        task = _new_task_record(
             workspace_id=workspace_id,
             title=normalized_title,
-            state=TaskState.WORKING,
-            wait_reason=None,
-            revision=1,
-            created_at=timestamp,
-            updated_at=timestamp,
+            timestamp=timestamp,
+        )
+        _insert_task(connection, task)
+        connection.execute("COMMIT")
+        return task
+    except sqlite3.IntegrityError as exc:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        if _working_task(connection, workspace_id) is not None:
+            raise TaskConflictError("workspace already has a working task") from exc
+        raise
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def create_task_with_baseline(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    title: str,
+    *,
+    now: datetime | None = None,
+) -> TaskCreationRecord:
+    """Atomically create a new working Task and its mandatory mechanical baseline."""
+    normalized_title = _validate_title(title)
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        get_workspace(connection, workspace_id)
+        _require_no_working_task(connection, workspace_id)
+        snapshot = capture_workspace_task_baseline(connection, workspace_id, now=now)
+        task = _new_task_record(
+            workspace_id=workspace_id,
+            title=normalized_title,
+            timestamp=snapshot.captured_at,
         )
         try:
-            connection.execute(
-                """
-                INSERT INTO tasks(
-                    id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task.task_id,
-                    task.workspace_id,
-                    task.title,
-                    task.state.value,
-                    None,
-                    task.revision,
-                    task.created_at,
-                    task.updated_at,
-                ),
-            )
+            _insert_task(connection, task)
         except sqlite3.IntegrityError as exc:
             if _working_task(connection, workspace_id) is not None:
                 raise TaskConflictError("workspace already has a working task") from exc
             raise
+        baseline = persist_task_baseline(connection, task.task_id, snapshot)
         connection.execute("COMMIT")
-        return task
+        return TaskCreationRecord(task=task, baseline=baseline)
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -207,6 +232,45 @@ def transition_task_state(
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
+
+
+def _require_no_working_task(connection: sqlite3.Connection, workspace_id: str) -> None:
+    existing = _working_task(connection, workspace_id)
+    if existing is not None:
+        raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
+
+
+def _new_task_record(*, workspace_id: str, title: str, timestamp: str) -> TaskRecord:
+    return TaskRecord(
+        task_id=uuid4().hex,
+        workspace_id=workspace_id,
+        title=title,
+        state=TaskState.WORKING,
+        wait_reason=None,
+        revision=1,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+
+
+def _insert_task(connection: sqlite3.Connection, task: TaskRecord) -> None:
+    connection.execute(
+        """
+        INSERT INTO tasks(
+            id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task.task_id,
+            task.workspace_id,
+            task.title,
+            task.state.value,
+            None,
+            task.revision,
+            task.created_at,
+            task.updated_at,
+        ),
+    )
 
 
 def _working_task(
