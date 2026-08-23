@@ -269,9 +269,11 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 created_at TEXT NOT NULL CHECK (created_at <> ''),
                 updated_at TEXT NOT NULL CHECK (updated_at <> ''),
                 CHECK (
-                    (state = 'waiting' AND wait_reason IN (
-                        'operator_review', 'operator_input', 'external'
-                    ))
+                    (
+                        state = 'waiting'
+                        AND wait_reason IS NOT NULL
+                        AND wait_reason IN ('operator_review', 'operator_input', 'external')
+                    )
                     OR (state <> 'waiting' AND wait_reason IS NULL)
                 )
             )
