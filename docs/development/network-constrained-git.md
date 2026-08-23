@@ -34,17 +34,21 @@ The resulting tree SHA must equal the freshly confirmed base tree SHA. If reposi
 
 When artifact metadata exposes a digest, verify the downloaded artifact against that digest before trusting its bytes. Validate archives before extraction: reject path traversal, unexpected absolute paths, and unexpected archive contents.
 
-For offline execution, keep dependency resolution disabled. A typical loop is:
+For offline execution, keep dependency resolution disabled and put the bundled `uv` directory first in `PATH`. This is required because `scripts/quality.py` invokes child `uv` commands by name; calling the bundled executable for the outer `uv run` is not sufficient if another `uv` appears earlier in `PATH`. A typical loop is:
 
 ```text
-UV_PYTHON_DOWNLOADS=never
-UV_CACHE_DIR=<extracted-cache>
-UV_PROJECT_ENVIRONMENT=<local-venv>
-<bundled-uv> sync --locked --all-groups --offline
-<bundled-uv> run --frozen --offline python scripts/quality.py
+toolchain_dir=/absolute/path/to/harness-toolchain
+cache_dir=/absolute/path/to/extracted-uv-cache
+venv_dir=/absolute/path/to/local-venv
+export PATH="$toolchain_dir:$PATH"
+export UV_PYTHON_DOWNLOADS=never
+export UV_CACHE_DIR="$cache_dir"
+export UV_PROJECT_ENVIRONMENT="$venv_dir"
+"$toolchain_dir/uv" sync --locked --all-groups --offline
+"$toolchain_dir/uv" run --frozen --offline python scripts/quality.py
 ```
 
-The exact extraction paths are environment-specific; the invariant is that the committed lockfile, bundled `uv`, and downloaded cache are sufficient with networking disabled.
+The exact extraction paths are environment-specific; the invariant is that the committed lockfile, bundled `uv`, and downloaded cache are sufficient with networking disabled, and every `uv` subprocess in the quality gate resolves to that bundled executable.
 
 ## 3. Build one local expected tree
 
