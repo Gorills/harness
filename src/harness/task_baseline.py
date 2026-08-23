@@ -96,7 +96,7 @@ def capture_workspace_task_baseline(
         identity_before.layout.git_common_dir,
     )
 
-    indexed_files = list_indexed_files(connection, workspace_id)
+    indexed_files = _persisted_index_snapshot(connection, workspace_id)
     index_snapshot_sha256 = _index_snapshot_sha256(indexed_files)
 
     first_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
@@ -104,7 +104,7 @@ def capture_workspace_task_baseline(
     second_git = _capture_git_state(workspace.workspace_root, deadline=deadline)
     if first_git != second_git:
         raise TaskBaselineChangedError("Workspace Git state changed during Task baseline capture")
-    if list_indexed_files(connection, workspace_id) != indexed_files:
+    if _persisted_index_snapshot(connection, workspace_id) != indexed_files:
         raise TaskBaselineChangedError(
             "Workspace Structural Index changed during Task baseline capture"
         )
@@ -245,6 +245,16 @@ class _GitBaselineState:
     head: str | None
     branch: str | None
     dirty_paths: tuple[TaskBaselineDirtyPath, ...]
+
+
+def _persisted_index_snapshot(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> tuple[IndexedFileRecord, ...]:
+    try:
+        return list_indexed_files(connection, workspace_id)
+    except IndexingError as exc:
+        raise TaskBaselineError("Task baseline persisted index inspection failed") from exc
 
 
 def _capture_live_index_snapshot(
@@ -553,7 +563,7 @@ def _snapshot_from_row(
         or not isinstance(index_file_count, int)
         or index_file_count < 0
         or not isinstance(index_snapshot_sha256, str)
-        or len(index_snapshot_sha256) != 64
+        or not _is_sha256(index_snapshot_sha256)
     ):
         raise TaskBaselineError("task baseline row has invalid persisted types")
     return TaskBaselineSnapshot(
