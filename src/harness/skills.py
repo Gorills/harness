@@ -560,7 +560,7 @@ def _load_skill_definition(directory: Path) -> SkillDefinition:
 
 
 def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
-    """Return non-empty top-level fields from a bounded portable SKILL.md frontmatter block."""
+    """Return conservatively valid non-empty top-level SKILL.md frontmatter fields."""
     try:
         with skill_file.open("rb") as handle:
             payload = handle.read(_MAX_SKILL_FRONTMATTER_BYTES + 1)
@@ -579,22 +579,40 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
         return frozenset()
 
     fields: set[str] = set()
+    seen_top_level: set[str] = set()
+    allow_indented = False
     for raw in lines[1:]:
         stripped = raw.strip()
         if stripped == "---":
             return frozenset(fields)
-        if not stripped or stripped.startswith("#") or raw[:1].isspace() or ":" not in raw:
+        if not stripped or stripped.startswith("#"):
             continue
+        if raw[:1].isspace():
+            if not allow_indented:
+                return frozenset()
+            continue
+        if ":" not in raw:
+            return frozenset()
         key, value = raw.split(":", 1)
         key = key.strip()
+        if not key or key in seen_top_level:
+            return frozenset()
+        seen_top_level.add(key)
         scalar = value.strip()
+        allow_indented = not scalar or scalar.startswith(("|", ">"))
         if (
-            not key
-            or not scalar
+            not scalar
             or scalar.startswith("#")
             or scalar in {"~", "null", "Null", "NULL", "''", '""', "|", ">", "|-", ">-", "|+", ">+"}
         ):
             continue
+        if scalar[:1] in {"'", '"'}:
+            try:
+                parsed = ast.literal_eval(scalar)
+            except (SyntaxError, ValueError):
+                continue
+            if not isinstance(parsed, str) or not parsed.strip():
+                continue
         fields.add(key)
     return frozenset()
 

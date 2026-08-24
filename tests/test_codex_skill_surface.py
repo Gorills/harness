@@ -55,6 +55,30 @@ def test_codex_projection_rejects_skill_without_required_frontmatter(tmp_path: P
         plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
 
 
+def test_codex_projection_rejects_structurally_malformed_frontmatter(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        "---\nname: fastapi\ndescription: Looks valid\n- malformed\n---\n\n# FastAPI\n",
+    )
+
+    with pytest.raises(SkillProjectionError, match=r"frontmatter.*description, name"):
+        plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
+
+
+def test_codex_projection_rejects_duplicate_top_level_frontmatter_key(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        "---\nname: fastapi\nname: duplicate\ndescription: Looks valid\n---\n",
+    )
+
+    with pytest.raises(SkillProjectionError, match=r"frontmatter.*description, name"):
+        plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
+
+
 def test_claude_projection_does_not_inherit_codex_frontmatter_requirement(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
