@@ -1,0 +1,35 @@
+name: Publish MCP stdio shutdown fix
+
+on:
+  push:
+    branches:
+      - chore/publish-mcp-stdio-shutdown
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact fix tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publish/mcp-stdio-shutdown/part-00.patch .publish/mcp-stdio-shutdown/part-01.patch > /tmp/fix.patch
+          echo '64c49c8c32b7099898d4ef65341867ef514fd29b8e8244fd80ce0064cfa870d2  /tmp/fix.patch' | sha256sum -c -
+          git fetch origin fix/mcp-stdio-shutdown
+          test "$(git rev-parse origin/fix/mcp-stdio-shutdown)" = 'f3c9e12ff6ccff1c21019fb238253b762228e9a0'
+          git checkout -B fix/mcp-stdio-shutdown f3c9e12ff6ccff1c21019fb238253b762228e9a0
+          git apply --check /tmp/fix.patch
+          git apply /tmp/fix.patch
+          git diff --check
+          git add src/harness/mcp_bridge.py tests/test_mcp_bridge.py
+          test "$(git write-tree)" = 'b098272d9e9d8ac74340d4b26d1882775cc8a503'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: drain MCP stdio on shutdown'
+          git push origin HEAD:refs/heads/fix/mcp-stdio-shutdown
