@@ -9,9 +9,10 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from harness.skills import SkillProjectionSurface
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
@@ -49,6 +50,8 @@ class HostAdapter(Protocol):
 
     def unregister_mcp(self) -> IntegrationChange: ...
 
+    def skill_projection_surface(self) -> SkillProjectionSurface: ...
+
 
 @dataclass(frozen=True, slots=True)
 class ClaudeCodeAdapter:
@@ -60,6 +63,15 @@ class ClaudeCodeAdapter:
     @property
     def profile(self) -> str:
         return _CLAUDE_PROFILE
+
+    def skill_projection_surface(self) -> SkillProjectionSurface:
+        """Return Claude Code's documented project skill visibility surface."""
+        root = PurePosixPath(".claude/skills")
+        return SkillProjectionSurface(
+            profile=self.profile,
+            target_root=root,
+            visible_roots=(root,),
+        )
 
     def workspace_hints(self, environment: Mapping[str, str]) -> tuple[WorkspaceHint, ...]:
         configured = environment.get(_CLAUDE_PROJECT_DIR_ENV)

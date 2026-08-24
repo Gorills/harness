@@ -30,7 +30,7 @@ from harness.ipc import (
 from harness.knowledge import KnowledgeDraft, KnowledgeKind
 from harness.registry import create_project, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
-from harness.tasks import TaskState, TaskWaitReason
+from harness.tasks import TaskState, TaskWaitReason, get_task_stack_hints
 from harness.workspace_resolution import WorkspaceHint
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX IPC slice")
@@ -135,6 +135,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
             socket_path,
             [WorkspaceHint(root, "explicit-root")],
             title="Investigate token rotation",
+            stack_hints=(" FastAPI ", "POSTGRES"),
         )
         assert started == TaskStartResult(
             schema_version=SCHEMA_VERSION,
@@ -260,6 +261,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
         assert connection.execute(
             "SELECT COUNT(*) FROM task_checkpoints WHERE task_id = ?", (started.task_id,)
         ).fetchone() == (1,)
+        assert get_task_stack_hints(connection, started.task_id) == ("fastapi", "postgres")
         knowledge_row = connection.execute(
             "SELECT body, source_task_id, source_checkpoint_id FROM knowledge_cards"
         ).fetchone()
@@ -324,6 +326,59 @@ def test_waiting_resume_requires_revision_and_working_resume_is_idempotent(tmp_p
         ).fetchone() == (1,)
     finally:
         connection.close()
+
+
+def test_task_start_wire_rejects_stack_hints_on_resume_and_malformed_hints(tmp_path: Path) -> None:
+    root, database, _workspace_id = _registered_database(tmp_path)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        started = request_task_start(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            title="Wire hints",
+            stack_hints=("fastapi",),
+        )
+        hints = [
+            {
+                "path": str(root.resolve()),
+                "source": "explicit-root",
+                "match_mode": "location",
+            }
+        ]
+        resume_with_hints = _raw_request(
+            socket_path,
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": "resume-hints",
+                "method": "task_start",
+                "params": {
+                    "hints": hints,
+                    "task_id": started.task_id,
+                    "stack_hints": ["postgres"],
+                },
+            },
+        )
+        malformed_create = _raw_request(
+            socket_path,
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": "malformed-hints",
+                "method": "task_start",
+                "params": {"hints": hints, "title": "Bad hints", "stack_hints": "fastapi"},
+            },
+        )
+
+        assert resume_with_hints["error"] == {
+            "code": "invalid_request",
+            "message": "IPC request is invalid",
+        }
+        assert malformed_create["error"] == {
+            "code": "invalid_request",
+            "message": "IPC request is invalid",
+        }
+    finally:
+        _stop_server(stop_event, executor, future)
 
 
 def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: Path) -> None:

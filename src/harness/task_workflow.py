@@ -34,6 +34,7 @@ def task_start(
     workspace_id: str,
     title: str,
     *,
+    stack_hints: tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> TaskRecord:
     """Create a public-domain working Task, baseline, and creation event atomically."""
@@ -43,6 +44,7 @@ def task_start(
             connection,
             workspace_id,
             title,
+            stack_hints=stack_hints,
             now=now,
         )
         _insert_lifecycle_event(connection, created.task, TaskEventType.CREATED)

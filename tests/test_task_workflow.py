@@ -28,6 +28,7 @@ from harness.tasks import (
     TaskWaitReason,
     TaskWorkspaceConflictError,
     get_task,
+    get_task_stack_hints,
 )
 
 
@@ -91,6 +92,28 @@ def test_task_start_atomically_creates_baseline_and_created_event(tmp_path: Path
         connection.close()
 
 
+def test_task_start_persists_normalized_ordered_stack_hints(tmp_path: Path) -> None:
+    _database_path, connection, workspace_id = _database(tmp_path)
+    try:
+        task = task_start(
+            connection,
+            workspace_id,
+            "Greenfield API",
+            stack_hints=(" FastAPI ", "POSTGRES"),
+        )
+
+        assert get_task_stack_hints(connection, task.task_id) == ("fastapi", "postgres")
+        with pytest.raises(TaskValidationError, match="duplicates"):
+            task_start(
+                connection,
+                workspace_id,
+                "Duplicate hints",
+                stack_hints=("FastAPI", "fastapi"),
+            )
+    finally:
+        connection.close()
+
+
 def test_task_start_rolls_back_task_and_baseline_when_event_persistence_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -108,6 +131,7 @@ def test_task_start_rolls_back_task_and_baseline_when_event_persistence_fails(
         assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM task_stack_hints").fetchone() == (0,)
     finally:
         connection.close()
 

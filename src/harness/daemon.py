@@ -404,7 +404,12 @@ def mutate_task_start(
     if request.task_id is None:
         if request.title is None:
             raise TaskValidationError("new task_start requires title")
-        task = domain_task_start(connection, workspace.workspace_id, request.title)
+        task = domain_task_start(
+            connection,
+            workspace.workspace_id,
+            request.title,
+            stack_hints=request.stack_hints,
+        )
     else:
         task = domain_task_resume(
             connection,

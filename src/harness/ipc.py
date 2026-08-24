@@ -26,7 +26,13 @@ from harness.search import (
     SearchMatchKind,
 )
 from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_CHECKPOINT_SUMMARY_BYTES
-from harness.tasks import MAX_TASK_TITLE_BYTES, TaskState, TaskWaitReason
+from harness.tasks import (
+    MAX_TASK_STACK_HINT_BYTES,
+    MAX_TASK_STACK_HINTS,
+    MAX_TASK_TITLE_BYTES,
+    TaskState,
+    TaskWaitReason,
+)
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 PROTOCOL_VERSION = 1
@@ -184,6 +190,7 @@ class TaskStartRequestData:
 
     workspace_hints: tuple[WorkspaceHint, ...]
     title: str | None
+    stack_hints: tuple[str, ...]
     task_id: str | None
     expected_revision: int | None
 
@@ -390,6 +397,7 @@ def request_task_start(
     hints: Sequence[WorkspaceHint],
     *,
     title: str | None = None,
+    stack_hints: Sequence[str] = (),
     task_id: str | None = None,
     expected_revision: int | None = None,
     timeout: float = _TASK_REQUEST_TIMEOUT_SECONDS,
@@ -398,6 +406,7 @@ def request_task_start(
     params = _task_start_params_to_wire(
         hints,
         title=title,
+        stack_hints=stack_hints,
         task_id=task_id,
         expected_revision=expected_revision,
     )
@@ -916,18 +925,25 @@ def _task_start_params_to_wire(
     hints: Sequence[WorkspaceHint],
     *,
     title: str | None,
+    stack_hints: Sequence[str],
     task_id: str | None,
     expected_revision: int | None,
 ) -> dict[str, object]:
     wire_hints = _workspace_hints_to_wire(hints)
+    normalized_stack_hints = _validate_task_stack_hints(stack_hints)
     if task_id is None:
         _validate_task_text(title, "task title", MAX_TASK_TITLE_BYTES, required=True)
         if expected_revision is not None:
             raise IpcProtocolError("new task_start must not include expected_revision")
-        return {"hints": wire_hints, "title": title}
+        params: dict[str, object] = {"hints": wire_hints, "title": title}
+        if normalized_stack_hints:
+            params["stack_hints"] = list(normalized_stack_hints)
+        return params
     _validate_task_id(task_id)
     if title is not None:
         raise IpcProtocolError("task_start resume must not include title")
+    if normalized_stack_hints:
+        raise IpcProtocolError("task_start resume must not include stack_hints")
     if expected_revision is not None:
         _validate_expected_revision(expected_revision)
         return {
@@ -943,13 +959,21 @@ def _task_start_from_params(value: object) -> TaskStartRequestData:
         raise IpcProtocolError("task_start params must be an object")
     fields = set(value)
     create_fields = {"hints", "title"}
+    create_stack_fields = {"hints", "title", "stack_hints"}
     resume_fields = {"hints", "task_id"}
     resume_revision_fields = {"hints", "task_id", "expected_revision"}
-    if fields == create_fields:
+    if fields == create_fields or fields == create_stack_fields:
         hints = _workspace_hints_from_params({"hints": value["hints"]})
         title = value["title"]
         _validate_task_text(title, "task title", MAX_TASK_TITLE_BYTES, required=True)
-        return TaskStartRequestData(hints, cast(str, title), None, None)
+        stack_hints = _validate_task_stack_hints(value.get("stack_hints", []))
+        return TaskStartRequestData(
+            workspace_hints=hints,
+            title=cast(str, title),
+            stack_hints=stack_hints,
+            task_id=None,
+            expected_revision=None,
+        )
     if fields == resume_fields or fields == resume_revision_fields:
         hints = _workspace_hints_from_params({"hints": value["hints"]})
         task_id = value["task_id"]
@@ -958,12 +982,37 @@ def _task_start_from_params(value: object) -> TaskStartRequestData:
         if expected_revision is not None:
             _validate_expected_revision(expected_revision)
         return TaskStartRequestData(
-            hints,
-            None,
-            cast(str, task_id),
-            cast(int | None, expected_revision),
+            workspace_hints=hints,
+            title=None,
+            stack_hints=(),
+            task_id=cast(str, task_id),
+            expected_revision=cast(int | None, expected_revision),
         )
     raise IpcProtocolError("task_start params do not match the IPC schema")
+
+
+def _validate_task_stack_hints(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise IpcProtocolError("task stack_hints must be an array")
+    if len(value) > MAX_TASK_STACK_HINTS:
+        raise IpcProtocolError(f"task stack_hints exceeds {MAX_TASK_STACK_HINTS} items")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise IpcProtocolError("task stack hint must be text")
+        hint = item.strip().casefold()
+        _validate_task_text(
+            hint,
+            "task stack hint",
+            MAX_TASK_STACK_HINT_BYTES,
+            required=True,
+        )
+        if hint in seen:
+            raise IpcProtocolError("task stack_hints must not contain duplicates")
+        seen.add(hint)
+        normalized.append(hint)
+    return tuple(normalized)
 
 
 def _task_checkpoint_params_to_wire(

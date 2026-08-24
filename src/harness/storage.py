@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -517,6 +517,21 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
         )
         connection.execute(
             "CREATE INDEX knowledge_anchors_workspace_idx ON knowledge_anchors(workspace_id, knowledge_id)"
+        )
+        return
+    if target_version == 9:
+        connection.execute(
+            """
+            CREATE TABLE task_stack_hints (
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK (position >= 0 AND position < 16),
+                hint TEXT NOT NULL CHECK (
+                    hint <> '' AND length(CAST(hint AS BLOB)) <= 128
+                ),
+                PRIMARY KEY (task_id, position),
+                UNIQUE (task_id, hint)
+            )
+            """
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
