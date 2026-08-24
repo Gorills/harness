@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -16,6 +17,7 @@ from harness.skills import (
     ResolvedSkill,
     SkillDefinition,
     SkillProjectionCollisionError,
+    SkillProjectionError,
     SkillProjectionSurface,
     apply_skill_projection,
     load_skill_registry,
@@ -190,4 +192,72 @@ def test_skill_update_rechecks_ownership_after_preflight(
         apply_skill_projection(update_plan)
 
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "# user replacement\n"
+    assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
+
+
+def test_rollback_validates_committed_projection_after_atomic_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _git_init(root)
+    surface = _surface()
+    registry = tmp_path / "registry"
+    resolved = _resolved_fastapi(registry)
+    apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
+    target = root / ".claude" / "skills" / "fastapi"
+
+    (registry / "fastapi" / "SKILL.md").write_text("# FastAPI v2\n", encoding="utf-8")
+    updated = resolve_skills(
+        load_skill_registry(registry),
+        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
+        task_hints=("fastapi",),
+    )
+    update_plan = plan_skill_projection(root, updated, (surface,))
+    original_commit = skills_module._commit_projection_changes
+    original_replace = os.replace
+    original_rmtree = shutil.rmtree
+    raced = False
+
+    def install_user_replacement() -> None:
+        nonlocal raced
+        if raced:
+            return
+        original_rmtree(target)
+        target.mkdir()
+        (target / "USER.txt").write_text("do not delete\n", encoding="utf-8")
+        raced = True
+
+    def fail_after_commit(
+        workspace_root: Path,
+        prepared: list[skills_module._PreparedProjection],
+    ) -> None:
+        original_commit(workspace_root, prepared)
+        raise SkillProjectionError("forced post-commit failure")
+
+    def replace_with_rollback_race(source: Path | str, destination: Path | str) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not raced
+            and source_path == target
+            and destination_path.name.startswith(".harness-fastapi-")
+        ):
+            install_user_replacement()
+        original_replace(source, destination)
+
+    def rmtree_with_rollback_race(path: Path | str, *args: Any, **kwargs: Any) -> None:
+        if not raced and Path(path) == target:
+            install_user_replacement()
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(skills_module, "_commit_projection_changes", fail_after_commit)
+    monkeypatch.setattr("harness.skills.os.replace", replace_with_rollback_race)
+    monkeypatch.setattr("harness.skills.shutil.rmtree", rmtree_with_rollback_race)
+
+    with pytest.raises(SkillProjectionError):
+        apply_skill_projection(update_plan)
+
+    assert raced is True
+    assert (target / "USER.txt").read_text(encoding="utf-8") == "do not delete\n"
     assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()

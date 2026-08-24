@@ -487,7 +487,7 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
         if exclude_changed:
             _replace_file_if_unchanged(exclude_path, original_exclude, updated_exclude)
     except Exception as exc:
-        rollback_error = _rollback_projection_changes(prepared)
+        rollback_error = _rollback_projection_changes(workspace_root, prepared)
         _cleanup_prepared_replacements(prepared)
         if rollback_error is not None:
             raise SkillProjectionError(
@@ -1034,6 +1034,7 @@ def _restore_uncommitted_projection_backup(
 
 
 def _rollback_projection_changes(
+    workspace_root: Path,
     prepared: Sequence[_PreparedProjection],
 ) -> Exception | None:
     first_error: Exception | None = None
@@ -1041,19 +1042,82 @@ def _rollback_projection_changes(
         if not item.committed:
             continue
         try:
-            current_state = _projection_state_sha256(item.target)
-            if current_state != item.committed_state_sha256:
-                raise SkillProjectionCollisionError(
-                    f"skill projection target changed before rollback: {item.target}"
-                )
-            if item.target.exists():
-                shutil.rmtree(item.target)
-            if item.backup is not None and item.backup.exists():
-                os.replace(item.backup, item.target)
+            if item.replacement is not None:
+                _stage_committed_projection_for_rollback(workspace_root, item)
+            else:
+                current_state = _projection_state_sha256(item.target)
+                if current_state != item.committed_state_sha256:
+                    raise SkillProjectionCollisionError(
+                        f"skill projection target changed before rollback: {item.target}"
+                    )
+            if item.backup is not None:
+                _restore_uncommitted_projection_backup(workspace_root, item)
         except (OSError, SkillProjectionError) as exc:
             if first_error is None:
                 first_error = exc
     return first_error
+
+
+def _stage_committed_projection_for_rollback(
+    workspace_root: Path,
+    item: _PreparedProjection,
+) -> None:
+    staging = item.replacement
+    if staging is None or item.committed_state_sha256 is None:
+        raise SkillProjectionError("materialized skill projection is missing rollback state")
+    if _projection_entry_exists(staging):
+        raise SkillProjectionCollisionError(
+            f"skill projection rollback staging path exists: {staging}"
+        )
+    try:
+        os.replace(item.target, staging)
+    except OSError as exc:
+        raise SkillProjectionError(
+            f"skill projection target could not be staged for rollback: {item.target}"
+        ) from exc
+    try:
+        moved_state = _projection_state_sha256(staging)
+    except Exception:
+        _restore_rollback_candidate(workspace_root, item)
+        raise
+    if moved_state != item.committed_state_sha256:
+        _restore_rollback_candidate(workspace_root, item)
+        raise SkillProjectionCollisionError(
+            f"skill projection target changed during rollback mutation: {item.target}"
+        )
+
+
+def _restore_rollback_candidate(
+    workspace_root: Path,
+    item: _PreparedProjection,
+) -> None:
+    staging = item.replacement
+    if staging is None:
+        return
+    if _projection_entry_exists(item.target):
+        item.replacement = None
+        raise SkillProjectionError(
+            "skill projection rollback moved content could not be restored; preserved at "
+            f"{staging.relative_to(workspace_root)}"
+        )
+    try:
+        os.replace(staging, item.target)
+    except OSError as exc:
+        item.replacement = None
+        raise SkillProjectionError(
+            "skill projection rollback moved content could not be restored; preserved at "
+            f"{staging.relative_to(workspace_root)}"
+        ) from exc
+
+
+def _projection_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise SkillProjectionError(f"skill projection path cannot be inspected: {path}") from exc
+    return True
 
 
 def _finalize_projection_changes(prepared: Sequence[_PreparedProjection]) -> None:
