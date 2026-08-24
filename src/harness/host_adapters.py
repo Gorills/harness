@@ -367,6 +367,7 @@ def codex_skill_projection_surface() -> SkillProjectionSurface:
         profile=_CODEX_PROFILE,
         target_root=root,
         visible_roots=(root,),
+        required_frontmatter_fields=("name", "description"),
     )
 
 

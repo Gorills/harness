@@ -30,6 +30,7 @@ DEFAULT_MAX_VISIBLE_SKILLS = 12
 _SKILL_MARKER_VERSION = 1
 _GIT_TIMEOUT_SECONDS = 1.5
 _MAX_METADATA_BYTES = 64 * 1024
+_MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024
 _SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 _LANGUAGE_SUFFIXES: Mapping[str, str] = {
@@ -93,6 +94,7 @@ class SkillDefinition:
     source_directory: Path
     portable_files: tuple[PurePosixPath, ...]
     content_sha256: str
+    frontmatter_fields: frozenset[str]
     applies: SkillApplicability
     task_hints: tuple[str, ...]
 
@@ -128,6 +130,7 @@ class SkillProjectionSurface:
     profile: str
     target_root: PurePosixPath
     visible_roots: tuple[PurePosixPath, ...]
+    required_frontmatter_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.profile or "\x00" in self.profile:
@@ -141,6 +144,13 @@ class SkillProjectionSurface:
         if target not in visible:
             raise SkillProjectionError(
                 "skill projection target root must be visible to its profile"
+            )
+        required_fields = self.required_frontmatter_fields
+        if len(set(required_fields)) != len(required_fields) or any(
+            not field or field.strip() != field or "\x00" in field for field in required_fields
+        ):
+            raise SkillProjectionError(
+                "skill projection required frontmatter fields must be unique non-empty text"
             )
 
 
@@ -369,6 +379,18 @@ def plan_skill_projection(
     profiles = [surface.profile for surface in surfaces]
     if len(set(profiles)) != len(profiles):
         raise SkillProjectionError("skill projection profiles must be unique")
+    for surface in surfaces:
+        required = set(surface.required_frontmatter_fields)
+        if not required:
+            continue
+        for resolved in resolved_skills:
+            missing = sorted(required - resolved.definition.frontmatter_fields)
+            if missing:
+                raise SkillProjectionError(
+                    f"skill {resolved.definition.skill_id!r} is incompatible with "
+                    f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing "
+                    f"required fields: {', '.join(missing)}"
+                )
     candidates = tuple(sorted({surface.target_root for surface in surfaces}, key=str))
     valid: list[tuple[int, tuple[str, ...], tuple[PurePosixPath, ...]]] = []
     for count in range(1, len(candidates) + 1):
@@ -525,14 +547,74 @@ def _load_skill_definition(directory: Path) -> SkillDefinition:
     if PurePosixPath(SKILL_FILE_NAME) not in portable_files:
         raise SkillRegistryError(f"skill is missing {SKILL_FILE_NAME}: {skill_id}")
     content_sha256 = _portable_tree_sha256(directory, portable_files)
+    frontmatter_fields = _portable_skill_frontmatter_fields(skill_file)
     return SkillDefinition(
         skill_id=skill_id,
         source_directory=directory,
         portable_files=portable_files,
         content_sha256=content_sha256,
+        frontmatter_fields=frontmatter_fields,
         applies=applies,
         task_hints=task_hints,
     )
+
+
+def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
+    """Return conservatively valid non-empty top-level SKILL.md frontmatter fields."""
+    try:
+        with skill_file.open("rb") as handle:
+            payload = handle.read(_MAX_SKILL_FRONTMATTER_BYTES + 1)
+    except OSError as exc:
+        raise SkillRegistryError(
+            f"skill {SKILL_FILE_NAME} cannot be read: {skill_file.parent.name}"
+        ) from exc
+    if len(payload) > _MAX_SKILL_FRONTMATTER_BYTES:
+        payload = payload[:_MAX_SKILL_FRONTMATTER_BYTES]
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return frozenset()
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return frozenset()
+
+    fields: set[str] = set()
+    seen_top_level: set[str] = set()
+    allow_indented = False
+    for raw in lines[1:]:
+        stripped = raw.strip()
+        if stripped == "---":
+            return frozenset(fields)
+        if not stripped or stripped.startswith("#"):
+            continue
+        if raw[:1].isspace():
+            if not allow_indented:
+                return frozenset()
+            continue
+        if ":" not in raw:
+            return frozenset()
+        key, value = raw.split(":", 1)
+        key = key.strip()
+        if not key or key in seen_top_level:
+            return frozenset()
+        seen_top_level.add(key)
+        scalar = value.strip()
+        allow_indented = not scalar or scalar.startswith(("|", ">"))
+        if (
+            not scalar
+            or scalar.startswith("#")
+            or scalar in {"~", "null", "Null", "NULL", "''", '""', "|", ">", "|-", ">-", "|+", ">+"}
+        ):
+            continue
+        if scalar[:1] in {"'", '"'}:
+            try:
+                parsed = ast.literal_eval(scalar)
+            except (SyntaxError, ValueError):
+                continue
+            if not isinstance(parsed, str) or not parsed.strip():
+                continue
+        fields.add(key)
+    return frozenset()
 
 
 def _parse_metadata(
@@ -945,6 +1027,8 @@ def _build_projected_skill(parent: Path, definition: SkillDefinition) -> Path:
             destination = temporary / Path(*relative.parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination, follow_symlinks=False)
+        if _portable_tree_sha256(temporary, definition.portable_files) != definition.content_sha256:
+            raise SkillProjectionError("skill registry content changed during projection")
         marker = {
             "version": _SKILL_MARKER_VERSION,
             "skill_id": definition.skill_id,
