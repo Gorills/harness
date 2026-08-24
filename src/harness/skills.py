@@ -965,11 +965,11 @@ def _commit_projection_changes(
     for item in prepared:
         relative_parent = PurePosixPath(item.target.parent.relative_to(workspace_root).as_posix())
         _require_projection_parents_safe(workspace_root, relative_parent)
-        if item.replacement is None:
+        if item.expected_state_sha256 is not None:
             marker = _read_projection_marker(item.target)
             if marker is None or marker.get("skill_id") != item.target.name:
                 raise SkillProjectionCollisionError(
-                    "stale Harness skill projection changed ownership before mutation: "
+                    "Harness skill projection changed ownership before mutation: "
                     f"{item.target.relative_to(workspace_root)}"
                 )
         current_state = _projection_state_sha256(item.target)
@@ -987,9 +987,50 @@ def _commit_projection_changes(
             backup.rmdir()
             os.replace(item.target, backup)
             item.backup = backup
+            try:
+                moved_marker = _read_projection_marker(backup)
+                moved_state = _projection_state_sha256(backup)
+            except Exception:
+                _restore_uncommitted_projection_backup(workspace_root, item)
+                raise
+            if moved_state != item.expected_state_sha256 or (
+                item.expected_state_sha256 is not None
+                and (moved_marker is None or moved_marker.get("skill_id") != item.target.name)
+            ):
+                _restore_uncommitted_projection_backup(workspace_root, item)
+                raise SkillProjectionCollisionError(
+                    "skill projection target changed during mutation: "
+                    f"{item.target.relative_to(workspace_root)}"
+                )
         if item.replacement is not None:
-            os.replace(item.replacement, item.target)
+            try:
+                os.replace(item.replacement, item.target)
+            except Exception:
+                _restore_uncommitted_projection_backup(workspace_root, item)
+                raise
         item.committed = True
+
+
+def _restore_uncommitted_projection_backup(
+    workspace_root: Path,
+    item: _PreparedProjection,
+) -> None:
+    backup = item.backup
+    if backup is None:
+        return
+    if item.target.exists():
+        raise SkillProjectionError(
+            "skill projection target changed during mutation and moved content could not be "
+            f"restored: {item.target.relative_to(workspace_root)}"
+        )
+    try:
+        os.replace(backup, item.target)
+    except OSError as exc:
+        raise SkillProjectionError(
+            "skill projection target could not be restored after mutation validation failed: "
+            f"{item.target.relative_to(workspace_root)}"
+        ) from exc
+    item.backup = None
 
 
 def _rollback_projection_changes(

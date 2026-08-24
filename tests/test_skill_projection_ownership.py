@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Mapping
@@ -111,3 +112,82 @@ def test_stale_cleanup_rejects_marker_for_different_skill(tmp_path: Path) -> Non
 
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "# user content\n"
     assert (target / SKILL_OWNERSHIP_MARKER_NAME).is_file()
+
+
+def test_stale_cleanup_rechecks_target_at_atomic_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _git_init(root)
+    surface = _surface()
+    resolved = _resolved_fastapi(tmp_path / "registry")
+    apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
+    target = root / ".claude" / "skills" / "fastapi"
+    empty_plan = plan_skill_projection(root, (), (surface,))
+    original_replace = os.replace
+    raced = False
+
+    def replace_with_race(source: Path | str, destination: Path | str) -> None:
+        nonlocal raced
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if (
+            not raced
+            and source_path == target
+            and destination_path.name.startswith(".harness-backup-fastapi-")
+        ):
+            shutil.rmtree(target)
+            target.mkdir()
+            (target / "SKILL.md").write_text("# user at rename\n", encoding="utf-8")
+            raced = True
+        original_replace(source, destination)
+
+    monkeypatch.setattr("harness.skills.os.replace", replace_with_race)
+
+    with pytest.raises(SkillProjectionCollisionError, match="changed during mutation"):
+        apply_skill_projection(empty_plan)
+
+    assert raced is True
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == "# user at rename\n"
+    assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
+
+
+def test_skill_update_rechecks_ownership_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _git_init(root)
+    surface = _surface()
+    registry = tmp_path / "registry"
+    resolved = _resolved_fastapi(registry)
+    apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
+    target = root / ".claude" / "skills" / "fastapi"
+
+    (registry / "fastapi" / "SKILL.md").write_text("# FastAPI v2\n", encoding="utf-8")
+    updated = resolve_skills(
+        load_skill_registry(registry),
+        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
+        task_hints=("fastapi",),
+    )
+    update_plan = plan_skill_projection(root, updated, (surface,))
+    original_preflight = skills_module._preflight_projection_paths
+
+    def replace_after_preflight(
+        workspace_root: Path,
+        desired: Mapping[PurePosixPath, SkillDefinition],
+        existing_owned: set[PurePosixPath],
+    ) -> None:
+        original_preflight(workspace_root, desired, existing_owned)
+        shutil.rmtree(target)
+        target.mkdir()
+        (target / "SKILL.md").write_text("# user replacement\n", encoding="utf-8")
+
+    monkeypatch.setattr(skills_module, "_preflight_projection_paths", replace_after_preflight)
+
+    with pytest.raises(SkillProjectionCollisionError, match="changed ownership before mutation"):
+        apply_skill_projection(update_plan)
+
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == "# user replacement\n"
+    assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
