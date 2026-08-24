@@ -142,6 +142,25 @@ def get_working_task(
     return _working_task(connection, workspace_id)
 
 
+def get_relevant_task(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> TaskRecord | None:
+    """Return the current working Task, or the most recently updated waiting Task."""
+    get_workspace(connection, workspace_id)
+    row = connection.execute(
+        """
+        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        FROM tasks
+        WHERE workspace_id = ? AND state IN ('working', 'waiting')
+        ORDER BY CASE state WHEN 'working' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+    return None if row is None else _task_from_row(row)
+
+
 def transition_task_state(
     connection: sqlite3.Connection,
     task_id: str,

@@ -21,6 +21,14 @@ class SearchError(RuntimeError):
     """Raised when an indexed-path search request violates its bounded contract."""
 
 
+class IndexedPathSearchScope(StrEnum):
+    """Mechanical path classes supported by the indexed-path search channel."""
+
+    ALL = "all"
+    CODE = "code"
+    DOCS = "docs"
+
+
 class SearchMatchKind(StrEnum):
     """Mechanical reason one indexed path matched the search query."""
 
@@ -46,17 +54,25 @@ def search_indexed_paths(
     query: str,
     *,
     limit: int = DEFAULT_SEARCH_LIMIT,
+    scope: IndexedPathSearchScope = IndexedPathSearchScope.ALL,
 ) -> tuple[IndexedPathSearchResult, ...]:
     """Search one Workspace's current Structural Index using deterministic path signals."""
     get_workspace(connection, workspace_id)
     normalized_query = _validate_query(query)
     _validate_limit(limit)
+    if not isinstance(scope, IndexedPathSearchScope):
+        raise SearchError("search scope is unsupported")
 
     query_path = normalized_query.replace("\\", "/").casefold()
     query_tokens = frozenset(_identifier_tokens(normalized_query))
     ranked: list[tuple[int, str, IndexedPathSearchResult]] = []
 
     for record in list_indexed_files(connection, workspace_id):
+        is_document = _is_document_path(record.relative_path)
+        if scope is IndexedPathSearchScope.DOCS and not is_document:
+            continue
+        if scope is IndexedPathSearchScope.CODE and is_document:
+            continue
         match = _match_path(record.relative_path, query_path, query_tokens)
         if match is None:
             continue
@@ -119,3 +135,8 @@ def _identifier_tokens(value: str) -> tuple[str, ...]:
         split_component = _CAMEL_ACRONYM_BOUNDARY.sub(" ", split_component)
         tokens.extend(token.casefold() for token in split_component.split())
     return tuple(tokens)
+
+
+def _is_document_path(path: str) -> bool:
+    lowered = path.casefold()
+    return lowered.endswith((".md", ".mdx", ".rst", ".txt")) or "/docs/" in f"/{lowered}"

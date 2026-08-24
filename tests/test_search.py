@@ -12,6 +12,7 @@ from harness.registry import create_project, register_workspace
 from harness.search import (
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_QUERY_BYTES,
+    IndexedPathSearchScope,
     SearchError,
     SearchMatchKind,
     search_indexed_paths,
@@ -155,6 +156,8 @@ def test_search_limit_is_bounded_and_deterministic(tmp_path: Path) -> None:
             )
         with pytest.raises(SearchError, match="between 1"):
             search_indexed_paths(connection, workspace_id, "token", limit=True)
+        with pytest.raises(SearchError, match="scope is unsupported"):
+            search_indexed_paths(connection, workspace_id, "token", scope="docs")  # type: ignore[arg-type]
     finally:
         connection.close()
 
@@ -172,6 +175,42 @@ def test_search_rejects_empty_nul_and_oversized_queries(tmp_path: Path) -> None:
                 workspace_id,
                 "x" * (MAX_SEARCH_QUERY_BYTES + 1),
             )
+    finally:
+        connection.close()
+
+
+def test_search_scope_filters_before_limit(tmp_path: Path) -> None:
+    root = _repo(
+        tmp_path / "scoped-repo",
+        {
+            **{f"aa/token_{index:02}.py": "x = 1\n" for index in range(12)},
+            "zz/token_notes.md": "token documentation\n",
+        },
+    )
+    database = tmp_path / "scoped.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+
+        docs = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "token",
+            limit=1,
+            scope=IndexedPathSearchScope.DOCS,
+        )
+        code = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "token",
+            limit=3,
+            scope=IndexedPathSearchScope.CODE,
+        )
+        assert [item.relative_path for item in docs] == ["zz/token_notes.md"]
+        assert all(not item.relative_path.endswith(".md") for item in code)
     finally:
         connection.close()
 

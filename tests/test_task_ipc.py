@@ -25,6 +25,7 @@ from harness.ipc import (
     request_status,
     request_task_checkpoint,
     request_task_start,
+    request_workspace_task_status,
 )
 from harness.knowledge import KnowledgeDraft, KnowledgeKind
 from harness.registry import create_project, register_workspace
@@ -323,6 +324,82 @@ def test_waiting_resume_requires_revision_and_working_resume_is_idempotent(tmp_p
         ).fetchone() == (1,)
     finally:
         connection.close()
+
+
+def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        started = request_task_start(
+            socket_path, [WorkspaceHint(root, "explicit-root")], title="Continue after restart"
+        )
+        working = request_task_checkpoint(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            started.task_id,
+            expected_revision=1,
+            state=TaskState.WORKING,
+            summary="First checkpoint",
+            next_step="Continue from the persisted checkpoint",
+        )
+        status = request_workspace_task_status(socket_path, [WorkspaceHint(root, "explicit-root")])
+        assert status.workspace_id == workspace_id
+        assert status.task is not None
+        assert status.task.task_id == started.task_id
+        assert status.task.title == "Continue after restart"
+        assert status.task.state is TaskState.WORKING
+        assert status.task.revision == working.revision == 2
+        assert status.last_checkpoint is not None
+        assert status.last_checkpoint.checkpoint_id == working.checkpoint_id
+        assert status.last_checkpoint.task_revision == 2
+        assert status.last_checkpoint.next_step == "Continue from the persisted checkpoint"
+        raw_status = _raw_request(
+            socket_path,
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": "task-continuity-status",
+                "method": "workspace_task_status",
+                "params": {
+                    "hints": [
+                        {
+                            "path": str(root.resolve()),
+                            "source": "explicit-root",
+                            "match_mode": "root",
+                        }
+                    ]
+                },
+            },
+        )
+        raw_result = raw_status["result"]
+        assert isinstance(raw_result, dict)
+        assert set(raw_result) == {"schema_version", "workspace_id", "task", "last_checkpoint"}
+        assert "First checkpoint" not in json.dumps(raw_status, sort_keys=True)
+        for forbidden in ("summary", "changed_paths", "baseline_head", "knowledge_ids"):
+            assert forbidden not in json.dumps(raw_status, sort_keys=True)
+
+        waiting = request_task_checkpoint(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            started.task_id,
+            expected_revision=2,
+            state=TaskState.WAITING,
+            summary="Waiting for operator",
+            next_step="Resume this exact Task after feedback",
+            wait_reason=TaskWaitReason.OPERATOR_INPUT,
+        )
+        waiting_status = request_workspace_task_status(
+            socket_path, [WorkspaceHint(root, "explicit-root")]
+        )
+        assert waiting_status.task is not None
+        assert waiting_status.task.task_id == started.task_id
+        assert waiting_status.task.state is TaskState.WAITING
+        assert waiting_status.task.revision == waiting.revision == 3
+        assert waiting_status.last_checkpoint is not None
+        assert waiting_status.last_checkpoint.checkpoint_id == waiting.checkpoint_id
+        assert waiting_status.last_checkpoint.next_step == "Resume this exact Task after feedback"
+    finally:
+        _stop_server(stop_event, executor, future)
 
 
 def test_stale_task_checkpoint_is_non_mutating_including_knowledge(tmp_path: Path) -> None:

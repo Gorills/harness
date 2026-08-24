@@ -3,6 +3,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -63,6 +64,17 @@ def main() -> int:
         if len(wheels) != 1:
             raise RuntimeError(f"expected exactly one Harness wheel, found {len(wheels)}")
         wheel = wheels[0]
+        with zipfile.ZipFile(wheel) as archive:
+            metadata_names = [
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            if len(metadata_names) != 1:
+                raise RuntimeError("wheel must contain exactly one dist-info/METADATA file")
+            metadata = archive.read(metadata_names[0]).decode("utf-8")
+        if "Requires-Dist: mcp==2.0.0" not in metadata:
+            raise RuntimeError(
+                "wheel metadata does not pin the official MCP SDK runtime dependency"
+            )
 
         _run((uv, "venv", "--python", "3.13", "--no-project", str(venv)), cwd=workspace)
         scripts_dir = _venv_scripts_dir(venv)
@@ -87,7 +99,7 @@ def main() -> int:
         harness = scripts_dir / f"harness{suffix}"
         harnessd = scripts_dir / f"harnessd{suffix}"
         help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("doctor", "status", "scan", "search"):
+        for expected in ("doctor", "status", "scan", "search", "mcp"):
             if expected not in help_result.stdout:
                 raise RuntimeError(
                     f"installed harness --help did not contain {expected!r}: {help_result.stdout!r}"
@@ -115,6 +127,14 @@ def main() -> int:
                 raise RuntimeError(
                     f"installed harness search --help did not contain {expected!r}: "
                     f"{search_help.stdout!r}"
+                )
+
+        mcp_help = _run((str(harness), "mcp", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("model-facing MCP", "stdio"):
+            if expected not in mcp_help.stdout:
+                raise RuntimeError(
+                    f"installed harness mcp --help did not contain {expected!r}: "
+                    f"{mcp_help.stdout!r}"
                 )
 
         serve_help = _run((str(harnessd), "serve", "--help"), cwd=workspace, env=isolated_env)

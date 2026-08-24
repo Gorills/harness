@@ -71,6 +71,18 @@ class TaskCheckpointRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskCheckpointStatusRecord:
+    """Bounded latest-checkpoint state used by compact Task status reads."""
+
+    checkpoint_id: str
+    task_id: str
+    task_revision: int
+    state: TaskState
+    wait_reason: TaskWaitReason | None
+    next_step: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class TaskEventRecord:
     """One immutable Task timeline event persisted by Harness."""
 
@@ -260,6 +272,68 @@ def list_task_checkpoints(
             raise TaskCheckpointError("task checkpoint row has invalid persisted identity")
         records.append(_checkpoint_from_row(row, _load_changed_paths(connection, checkpoint_id)))
     return tuple(records)
+
+
+def get_latest_task_checkpoint_status(
+    connection: sqlite3.Connection,
+    task_id: str,
+) -> TaskCheckpointStatusRecord | None:
+    """Load only the latest checkpoint fields required for bounded status continuity."""
+    get_task(connection, task_id)
+    row = connection.execute(
+        """
+        SELECT id, task_id, task_revision, state, wait_reason, next_step
+        FROM task_checkpoints
+        WHERE task_id = ?
+        ORDER BY task_revision DESC
+        LIMIT 1
+        """,
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    checkpoint_id, persisted_task_id, task_revision, state, wait_reason, next_step = row
+    if (
+        not isinstance(checkpoint_id, str)
+        or not checkpoint_id
+        or persisted_task_id != task_id
+        or isinstance(task_revision, bool)
+        or not isinstance(task_revision, int)
+        or task_revision <= 0
+        or not isinstance(state, str)
+        or (wait_reason is not None and not isinstance(wait_reason, str))
+        or (next_step is not None and not isinstance(next_step, str))
+    ):
+        raise TaskCheckpointError("latest Task checkpoint status has invalid persisted types")
+    try:
+        task_state = TaskState(state)
+    except ValueError as exc:
+        raise TaskCheckpointError(
+            f"latest Task checkpoint status has unsupported state: {state!r}"
+        ) from exc
+    if task_state is TaskState.CANCELLED:
+        raise TaskCheckpointError("latest Task checkpoint status cannot persist cancelled state")
+    try:
+        task_wait_reason = TaskWaitReason(wait_reason) if wait_reason is not None else None
+    except ValueError as exc:
+        raise TaskCheckpointError(
+            f"latest Task checkpoint status has unsupported wait_reason: {wait_reason!r}"
+        ) from exc
+    _validate_checkpoint_state(task_state, task_wait_reason, next_step)
+    normalized_next_step = _validate_text(
+        next_step,
+        label="checkpoint next_step",
+        maximum_bytes=MAX_CHECKPOINT_NEXT_STEP_BYTES,
+        required=False,
+    )
+    return TaskCheckpointStatusRecord(
+        checkpoint_id=checkpoint_id,
+        task_id=task_id,
+        task_revision=task_revision,
+        state=task_state,
+        wait_reason=task_wait_reason,
+        next_step=normalized_next_step,
+    )
 
 
 def list_task_events(

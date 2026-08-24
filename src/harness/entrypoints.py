@@ -386,6 +386,12 @@ def harness_main() -> int:
         help="override the canonical per-user Unix-domain socket path",
     )
 
+    subparsers.add_parser(
+        "mcp",
+        help="serve the five bounded Harness MCP tools over stdio",
+        description="Serve the Harness model-facing MCP surface over stdio using daemon IPC.",
+    )
+
     args = parser.parse_args()
     if args.command == "doctor":
         return _run_doctor(args.database)
@@ -395,6 +401,12 @@ def harness_main() -> int:
         return _run_scan(args.path, args.socket)
     if args.command == "search":
         return _run_search(args.query, args.path, args.socket, args.limit)
+
+    if args.command == "mcp":
+        from harness.mcp_bridge import run_mcp_server
+
+        run_mcp_server()
+        return 0
 
     parser.print_help()
     return 0
