@@ -1,0 +1,23 @@
++The installed CLI also exposes `harness mcp`, implemented with the official `mcp==2.0.0` SDK and the MCP 2026-07-28 sessionless protocol path. It serves exactly `project_status`, `project_search`, `project_context`, `task_start`, and `task_checkpoint` over stdio and delegates durable state to `harnessd`. Set `HARNESS_WORKSPACE_ROOT` to an exact registered Workspace root when launching the bridge; without it the current process directory is used as a location hint. `project_status` includes the current working Task, or the most recently updated relevant waiting Task, plus its latest checkpoint identity and `next_step`, so a new bridge process can resume the same durable Task using the returned `task_id` and `revision`. The current `project_search`/`project_context` implementation remains limited to bounded mechanical indexed-path references; `project_context` resolves those refs through an exact read-only daemon index lookup rather than reusing the shorter search-query contract. Richer semantic channels are not claimed yet.
+ 
+ Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
+ 
+diff --git a/src/harness/daemon.py b/src/harness/daemon.py
+index 4538f9d..817ec99 100644
+--- a/src/harness/daemon.py
++++ b/src/harness/daemon.py
+@@ -15,7 +15,13 @@ from harness.git_workspace import (
+     inspect_git_working_tree_status,
+     inspect_git_workspace_runtime_identity,
+ )
+-from harness.index import IndexingError, ScanDeadlineExceededError, scan_workspace
++from harness.index import (
++    IndexedFileRecord,
++    IndexingError,
++    ScanDeadlineExceededError,
++    get_indexed_file,
++    scan_workspace,
++)
+ from harness.ipc import (
+     IpcMessageTooLargeError,
+     IpcProtocolError,

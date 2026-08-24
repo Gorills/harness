@@ -1,0 +1,44 @@
++    workspace_root_value = _bounded_response_string(
++        result["workspace_root"], "workspace_root", _HINT_PATH_MAX_LENGTH
++    )
++    workspace_root = Path(workspace_root_value)
++    if not workspace_root.is_absolute():
++        raise IpcProtocolError("daemon workspace index entry root must be absolute")
++    relative_path = _bounded_response_string(
++        result["relative_path"], "relative_path", _INDEX_RELATIVE_PATH_MAX_BYTES
++    )
++    _validate_index_relative_path(relative_path)
++    try:
++        kind = IndexedFileKind(_bounded_response_string(result["kind"], "kind", 16))
++    except ValueError as exc:
++        raise IpcProtocolError("daemon workspace index entry has unsupported kind") from exc
++    return WorkspaceIndexEntryResult(
++        schema_version=schema_version,
++        workspace_id=workspace_id,
++        project_id=project_id,
++        workspace_root=workspace_root,
++        relative_path=relative_path,
++        kind=kind,
++        size_bytes=size_bytes,
++    )
++
++
+ def _task_start_from_response(
+     response: dict[str, Any],
+     *,
+diff --git a/src/harness/mcp_bridge.py b/src/harness/mcp_bridge.py
+index 6559c9a..8180d6c 100644
+--- a/src/harness/mcp_bridge.py
++++ b/src/harness/mcp_bridge.py
+@@ -9,17 +9,19 @@ from typing import Any, Literal
+ from mcp.server import MCPServer
+ from mcp.server.mcpserver.context import Context
+ from mcp.shared.exceptions import MCPError
+-from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult
++from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult, TextContent
+ from mcp_types import Tool as MCPTool
+ from pydantic import BaseModel, ConfigDict, Field, StrictInt
+ 
+ from harness.daemon_autostart import ensure_canonical_daemon
+ from harness.ipc import (
++    IpcRemoteError,

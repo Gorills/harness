@@ -1,0 +1,32 @@
++            )
++        assert exc_info.value.code == "index_entry_not_found"
++    finally:
++        _stop_server(stop_event, executor, future)
++
++    connection = connect_database(database)
++    try:
++        connection.execute("PRAGMA ignore_check_constraints = ON")
++        connection.execute(
++            "UPDATE indexed_files SET kind = 'corrupt' WHERE relative_path = ?",
++            ("src/rotateRefreshToken.py",),
++        )
++    finally:
++        connection.close()
++
++    stop_event, executor, future = _start_server(database, socket_path)
++    try:
++        with pytest.raises(IpcRemoteError) as exc_info:
++            request_workspace_index_entry(
++                socket_path,
++                [WorkspaceHint(root.resolve(), "cwd", WorkspaceHintMatchMode.LOCATION)],
++                "src/rotateRefreshToken.py",
++            )
++        assert exc_info.value.code == "index_error"
++        assert "unsupported kind" in exc_info.value.message
++    finally:
++        _stop_server(stop_event, executor, future)
++
++
+ @pytest.mark.parametrize(
+     "params",
+     [

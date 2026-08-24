@@ -1,0 +1,48 @@
++    """Send the exact success contract for one current Structural Index entry."""
++    peer.sendall(
++        _encode_json(
++            {
++                "version": PROTOCOL_VERSION,
++                "request_id": request_id,
++                "ok": True,
++                "result": {
++                    "schema_version": result.schema_version,
++                    "workspace_id": result.workspace_id,
++                    "project_id": result.project_id,
++                    "workspace_root": str(result.workspace_root),
++                    "relative_path": result.relative_path,
++                    "kind": result.kind.value,
++                    "size_bytes": result.size_bytes,
++                },
++            }
++        )
++    )
++
++
+ def send_task_start_response(
+     peer: socket.socket,
+     request_id: str,
+@@ -821,6 +901,17 @@ def _workspace_search_from_params(
+     return hints, cast(str, query), cast(int, limit), scope
+ 
+ 
++def _workspace_index_entry_from_params(
++    value: object,
++) -> tuple[tuple[WorkspaceHint, ...], str]:
++    if not isinstance(value, dict) or set(value) != {"hints", "relative_path"}:
++        raise IpcProtocolError("workspace index entry params do not match the IPC schema")
++    hints = _workspace_hints_from_params({"hints": value["hints"]})
++    relative_path = value["relative_path"]
++    _validate_index_relative_path(relative_path)
++    return hints, cast(str, relative_path)
++
++
+ def _task_start_params_to_wire(
+     hints: Sequence[WorkspaceHint],
+     *,
+@@ -1105,6 +1196,23 @@ def _validate_search_limit(value: object) -> None:
+         )
+ 
+ 
++def _validate_index_relative_path(value: object) -> None:
++    if not isinstance(value, str) or not value or "\x00" in value:

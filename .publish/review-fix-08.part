@@ -1,0 +1,54 @@
+ def _require_registered_layout(workspace: WorkspaceRecord) -> None:
+     layout = inspect_git_workspace(workspace.workspace_root)
+     if (
+diff --git a/src/harness/ipc.py b/src/harness/ipc.py
+index 8b5a16c..3db4a47 100644
+--- a/src/harness/ipc.py
++++ b/src/harness/ipc.py
+@@ -39,6 +39,7 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
+ _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
+ _TASK_REQUEST_TIMEOUT_SECONDS = 60.0
+ _TASK_ID_MAX_LENGTH = 128
++_INDEX_RELATIVE_PATH_MAX_BYTES = 4096
+ 
+ 
+ class IpcError(RuntimeError):
+@@ -164,6 +165,19 @@ class WorkspaceSearchResult:
+     results: tuple[WorkspaceSearchHit, ...]
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class WorkspaceIndexEntryResult:
++    """One exact bounded Structural Index entry returned by the daemon."""
++
++    schema_version: int
++    workspace_id: str
++    project_id: str
++    workspace_root: Path
++    relative_path: str
++    kind: IndexedFileKind
++    size_bytes: int
++
++
+ @dataclass(frozen=True, slots=True)
+ class TaskStartRequestData:
+     """Validated daemon-domain Task start/resume request data."""
+@@ -225,6 +239,7 @@ class IpcRequest:
+     search_query: str | None = None
+     search_limit: int | None = None
+     search_scope: IndexedPathSearchScope | None = None
++    index_relative_path: str | None = None
+     task_start: TaskStartRequestData | None = None
+     task_checkpoint: TaskCheckpointRequestData | None = None
+ 
+@@ -344,6 +359,32 @@ def request_workspace_search(
+     return _workspace_search_from_response(response, expected_request_id=request_id)
+ 
+ 
++def request_workspace_index_entry(
++    socket_path: Path,
++    hints: Sequence[WorkspaceHint],
++    relative_path: str,
++    *,
++    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
++) -> WorkspaceIndexEntryResult:

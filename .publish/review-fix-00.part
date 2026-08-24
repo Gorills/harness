@@ -1,0 +1,8 @@
+diff --git a/README.md b/README.md
+index 06f1a5a..30c04f2 100644
+--- a/README.md
++++ b/README.md
+@@ -70,9 +70,9 @@ The installed `harnessd` console script exposes `harnessd serve [--database PATH
+ 
+ The global status result remains deliberately small: schema version plus Project and Workspace counts. `workspace_status` accepts at most four ordered absolute filesystem hints, resolves them against the durable Workspace registry with the existing fail-closed priority rules, verifies the registered Git identity, and returns only compact mechanical state: Project/Workspace identity, effective visibility mode, canonical Workspace root, live Git branch/HEAD, dirty-path count, and current indexed-file count. It does not expose source text, search results, Tasks, Knowledge, or MCP objects. `workspace_search` uses the same bounded hint contract, additionally accepts the bounded query and item limit, verifies registered Git identity around a consistent database read snapshot, and returns only Project/Workspace identity plus mechanical search hits. It never returns indexed content hashes or source content.
+ 

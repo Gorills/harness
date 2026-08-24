@@ -1,0 +1,52 @@
++    source.parent.mkdir(parents=True)
++    source.write_text("TOKEN = 1\n", encoding="utf-8")
++    _git(root, "init")
++    _git(root, "add", ".")
++    _git(
++        root,
++        "-c",
++        "user.name=Test",
++        "-c",
++        "user.email=t@example.invalid",
++        "commit",
++        "-m",
++        "init",
++    )
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        project = create_project(connection)
++        workspace = register_workspace(connection, project_id=project.project_id, path=root)
++        scan_workspace(connection, workspace.workspace_id)
++    finally:
++        connection.close()
++
++    runtime = tmp_path / "runtime"
++    socket_path = runtime / "harness" / "harness.sock"
++    stop, executor, future = _start_daemon(database, socket_path)
++    env = dict(os.environ)
++    env.update(
++        {
++            "XDG_STATE_HOME": str(tmp_path / "state"),
++            "XDG_RUNTIME_DIR": str(runtime),
++            "HARNESS_WORKSPACE_ROOT": str(root),
++        }
++    )
++    params = StdioServerParameters(
++        command=sys.executable,
++        args=["-m", "harness.mcp_process"],
++        env=env,
++        cwd=str(root),
++    )
++    try:
++        async with Client(stdio_client(params)) as client:
++            searched = await client.call_tool(
++                "project_search", {"query": "token", "scope": "code", "limit": 1}
++            )
++            assert searched.is_error is False
++            assert searched.structured_content is not None
++            ref = searched.structured_content["results"][0]["ref"]
++            assert len(ref.encode("utf-8")) > 256
++
++            context = await client.call_tool("project_context", {"refs": [ref]})

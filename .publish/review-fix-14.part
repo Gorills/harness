@@ -1,0 +1,41 @@
++                not isinstance(ref, str)
++                or not ref.startswith("code:")
++                or "\x00" in ref
++                or len(ref.encode("utf-8")) > _CONTEXT_REF_MAX_BYTES
++            ):
++                raise ValueError("unsupported or invalid context ref")
+             relative_path = ref.removeprefix("code:")
+-            result = request_workspace_search(
+-                _socket_path(), _workspace_hints(), relative_path, limit=1
+-            )
+-            if not result.results or result.results[0].relative_path != relative_path:
+-                raise ValueError(f"context ref is not present in the current index: {ref}")
+-            hit = result.results[0]
++            try:
++                hit = request_workspace_index_entry(
++                    _socket_path(), _workspace_hints(), relative_path
++                )
++            except IpcRemoteError as exc:
++                if exc.code == "index_entry_not_found":
++                    raise ValueError("context ref is not present in the current index") from exc
++                raise
+             items.append(
+                 {
+                     "ref": ref,
+@@ -421,4 +442,17 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
+     return payload
+ 
+ 
++def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:
++    limit = _TOOL_RESPONSE_MAX_BYTES.get(name)
++    if limit is None:
++        return result
++    encoded = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
++    if len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= limit:
++        return result
++    return CallToolResult(
++        content=[TextContent(type="text", text="Tool response exceeds model exposure budget")],
++        is_error=True,
++    )
++
++

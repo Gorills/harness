@@ -1,0 +1,45 @@
+name: Publish verified MCP context bounds fix
+
+on:
+  push:
+    branches:
+      - chore/publish-mcp-context-bounds
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publish/review-fix-*.part > /tmp/review-fix.patch
+          printf '%s  %s\n' 'aae01fc319cfd858eb414ab8a0d7694001060c93d73e38c215e0a21d84033d85' '/tmp/review-fix.patch' | sha256sum -c -
+      - name: Apply to exact verified parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout --detach 0b702afc945731494410789cef63a48c0038c393
+          test "$(git rev-parse HEAD)" = '0b702afc945731494410789cef63a48c0038c393'
+          git apply --check /tmp/review-fix.patch
+          git apply --index /tmp/review-fix.patch
+          git diff --cached --check
+          test "$(git write-tree)" = 'ec0c9960bf45801e020611a927ba2b8beb958013'
+      - name: Publish exact tree
+        shell: bash
+        env:
+          TARGET_BRANCH: fix/mcp-context-bounds
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: bound MCP context and wire responses'
+          test "$(git rev-parse HEAD^{tree})" = 'ec0c9960bf45801e020611a927ba2b8beb958013'
+          git push --force-with-lease origin HEAD:"${TARGET_BRANCH}"

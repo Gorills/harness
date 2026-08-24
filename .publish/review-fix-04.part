@@ -1,0 +1,53 @@
+@@ -25,6 +31,7 @@ from harness.ipc import (
+     TaskStartRequestData,
+     TaskStartResult,
+     UnsupportedIpcTransportError,
++    WorkspaceIndexEntryResult,
+     WorkspaceScanResult,
+     WorkspaceSearchHit,
+     WorkspaceSearchResult,
+@@ -37,6 +44,7 @@ from harness.ipc import (
+     send_status_response,
+     send_task_checkpoint_response,
+     send_task_start_response,
++    send_workspace_index_entry_response,
+     send_workspace_scan_response,
+     send_workspace_search_response,
+     send_workspace_status_response,
+@@ -88,6 +96,12 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
+ _ACCEPT_POLL_SECONDS = 0.2
+ _ERROR_MESSAGE_MAX_LENGTH = 1024
+ _SCAN_DEADLINE_SECONDS = 30.0
++
++
++class WorkspaceIndexEntryNotFoundError(RuntimeError):
++    """Raised when an exact current Structural Index entry does not exist."""
++
++
+ _EXISTING_SOCKET_PROBE_SECONDS = 0.2
+ 
+ 
+@@ -318,6 +332,69 @@ def read_workspace_search(
+     )
+ 
+ 
++def read_workspace_index_entry(
++    connection: sqlite3.Connection,
++    hints: Sequence[WorkspaceHint],
++    relative_path: str,
++) -> WorkspaceIndexEntryResult:
++    """Resolve one Workspace and return one exact current Structural Index entry."""
++    registered = list_workspaces(connection)
++    resolution = WorkspaceResolver(
++        [
++            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
++            for workspace in registered
++        ]
++    ).resolve(hints)
++    workspace = get_workspace(connection, resolution.workspace_id)
++
++    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
++    if (
++        runtime_identity.layout.workspace_root != workspace.workspace_root
++        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
++    ):

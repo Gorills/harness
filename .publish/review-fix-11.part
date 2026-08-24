@@ -1,0 +1,49 @@
++        raise IpcProtocolError("workspace index relative_path must be non-empty text")
++    try:
++        size = len(value.encode("utf-8"))
++    except UnicodeEncodeError as exc:
++        raise IpcProtocolError("workspace index relative_path must be valid UTF-8 text") from exc
++    path = Path(value)
++    if (
++        size > _INDEX_RELATIVE_PATH_MAX_BYTES
++        or path.is_absolute()
++        or "." in path.parts
++        or ".." in path.parts
++    ):
++        raise IpcProtocolError("workspace index relative_path is unsafe or too large")
++
++
+ def _validate_hint_fields(
+     path: str,
+     source: str,
+@@ -1500,6 +1608,58 @@ def _workspace_search_from_response(
+     )
+ 
+ 
++def _workspace_index_entry_from_response(
++    response: dict[str, Any],
++    *,
++    expected_request_id: str,
++) -> WorkspaceIndexEntryResult:
++    result = _success_result(response, expected_request_id=expected_request_id)
++    expected_fields = {
++        "schema_version",
++        "workspace_id",
++        "project_id",
++        "workspace_root",
++        "relative_path",
++        "kind",
++        "size_bytes",
++    }
++    if set(result) != expected_fields:
++        raise IpcProtocolError("daemon workspace index entry does not match the IPC schema")
++
++    schema_version = result["schema_version"]
++    size_bytes = result["size_bytes"]
++    if any(
++        isinstance(value, bool) or not isinstance(value, int) or value < 0
++        for value in (schema_version, size_bytes)
++    ):
++        raise IpcProtocolError("daemon workspace index entry has invalid integer fields")
++    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
++    project_id = _bounded_response_string(result["project_id"], "project_id", 128)

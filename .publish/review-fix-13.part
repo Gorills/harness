@@ -1,0 +1,45 @@
+     TaskCheckpointResult,
+     TaskStartResult,
+     WorkspaceTaskSummary,
+     request_task_checkpoint,
+     request_task_start,
++    request_workspace_index_entry,
+     request_workspace_search,
+     request_workspace_status,
+     request_workspace_task_status,
+@@ -42,7 +44,16 @@ _STATUS_MAX_BYTES = 4 * 1024
+ _SEARCH_MAX_BYTES = 12 * 1024
+ _CONTEXT_MAX_BYTES = 12 * 1024
+ _TASK_MAX_BYTES = 4 * 1024
++_CONTEXT_REF_MAX_BYTES = 4096 + len("code:")
++_MCP_WIRE_OVERHEAD_BYTES = 1024
+ _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
++_TOOL_RESPONSE_MAX_BYTES = {
++    "project_status": _STATUS_MAX_BYTES,
++    "project_search": _SEARCH_MAX_BYTES,
++    "project_context": _CONTEXT_MAX_BYTES,
++    "task_start": _TASK_MAX_BYTES,
++    "task_checkpoint": _TASK_MAX_BYTES,
++}
+ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+     "project_status": frozenset(),
+     "project_search": frozenset({"query", "scope", "limit"}),
+@@ -115,7 +126,10 @@ class HarnessMCPServer(MCPServer):
+                     message="Unknown tool argument fields",
+                     data={"tool": name, "unknown_field_count": len(unknown)},
+                 )
+-        return await super().call_tool(name, arguments, context)
++        result = await super().call_tool(name, arguments, context)
++        if isinstance(result, CallToolResult):
++            return _bounded_call_result(name, result)
++        return result
+ 
+ 
+ def build_mcp_server() -> MCPServer:
+@@ -252,15 +266,22 @@ def build_mcp_server() -> MCPServer:
+             raise ValueError("refs must not contain duplicates")
+         items: list[dict[str, Any]] = []
+         for ref in refs:
+-            if not isinstance(ref, str) or not ref.startswith("code:"):
+-                raise ValueError(f"unsupported or invalid context ref: {ref!r}")
++            if (

@@ -1,0 +1,51 @@
++    """Request one exact current Structural Index entry through daemon-owned IPC."""
++    _validate_index_relative_path(relative_path)
++    request_id = uuid4().hex
++    response = _request_response(
++        socket_path,
++        {
++            "version": PROTOCOL_VERSION,
++            "request_id": request_id,
++            "method": "workspace_index_entry",
++            "params": {
++                "hints": _workspace_hints_to_wire(hints),
++                "relative_path": relative_path,
++            },
++        },
++        timeout=timeout,
++    )
++    return _workspace_index_entry_from_response(response, expected_request_id=request_id)
++
++
+ def request_task_start(
+     socket_path: Path,
+     hints: Sequence[WorkspaceHint],
+@@ -478,6 +519,19 @@ def receive_request(peer: socket.socket) -> IpcRequest:
+             search_scope=scope,
+         )
+ 
++    if method == "workspace_index_entry":
++        if set(payload) != {"version", "request_id", "method", "params"}:
++            raise IpcProtocolError(
++                "workspace index entry request fields do not match the IPC schema"
++            )
++        hints, relative_path = _workspace_index_entry_from_params(payload["params"])
++        return IpcRequest(
++            request_id=request_id,
++            method=method,
++            workspace_hints=hints,
++            index_relative_path=relative_path,
++        )
++
+     if method == "task_start":
+         if set(payload) != {"version", "request_id", "method", "params"}:
+             raise IpcProtocolError("task_start request fields do not match the IPC schema")
+@@ -652,6 +706,32 @@ def send_workspace_search_response(
+     )
+ 
+ 
++def send_workspace_index_entry_response(
++    peer: socket.socket,
++    request_id: str,
++    result: WorkspaceIndexEntryResult,
++) -> None:

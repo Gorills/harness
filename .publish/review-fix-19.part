@@ -1,0 +1,48 @@
++            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
++            process.stdin.flush()
++            ready, _, _ = select.select([process.stdout], [], [], 3)
++            assert ready, f"no MCP response for {request['method']}"
++            raw = process.stdout.readline()
++            if request["id"] == 1:
++                continue
++            assert len(raw.encode("utf-8")) < 12 * 1024
++            response = json.loads(raw)
++            if request["id"] == 2:
++                assert response["result"]["isError"] is False
++                assert response["result"]["content"]
++                assert len(response["result"]["structuredContent"]["results"]) == 3
++            else:
++                assert response["result"]["isError"] is True
++                assert (
++                    "response exceeds model exposure budget"
++                    in response["result"]["content"][0]["text"]
++                )
+     finally:
+         process.terminate()
+         process.wait(timeout=3)
++        stop.set()
++        executor.shutdown(wait=True)
++        future.result()
+ 
+ 
+ @pytest.mark.anyio
+diff --git a/tests/test_search_ipc.py b/tests/test_search_ipc.py
+index 0d38119..91cc237 100644
+--- a/tests/test_search_ipc.py
++++ b/tests/test_search_ipc.py
+@@ -19,9 +19,11 @@ from harness.ipc import (
+     PROTOCOL_VERSION,
+     IpcRemoteError,
+     StatusResult,
++    WorkspaceIndexEntryResult,
+     WorkspaceSearchHit,
+     WorkspaceSearchResult,
+     request_status,
++    request_workspace_index_entry,
+     request_workspace_search,
+ )
+ from harness.registry import create_project, register_workspace
+@@ -195,6 +197,76 @@ def test_workspace_search_round_trip_is_scoped_bounded_and_mechanical(tmp_path:
+         _stop_server(stop_event, executor, future)
+ 
+ 

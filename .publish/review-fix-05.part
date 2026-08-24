@@ -1,0 +1,47 @@
++        raise WorkspaceResolutionError(
++            f"registered workspace Git identity changed: {workspace.workspace_root}"
++        )
++
++    connection.execute("BEGIN")
++    try:
++        current_workspace = get_workspace(connection, workspace.workspace_id)
++        if current_workspace != workspace:
++            raise WorkspaceResolutionError(
++                "workspace registry identity changed during index entry read"
++            )
++        project = get_project(connection, workspace.project_id)
++        entry = get_indexed_file(connection, workspace.workspace_id, relative_path)
++        if entry is None:
++            raise WorkspaceIndexEntryNotFoundError
++        connection.execute("COMMIT")
++    except Exception:
++        if connection.in_transaction:
++            connection.execute("ROLLBACK")
++        raise
++
++    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
++        raise WorkspaceResolutionError("workspace Git identity changed during index entry read")
++
++    return _workspace_index_entry_result(workspace, project.project_id, entry)
++
++
++def _workspace_index_entry_result(
++    workspace: WorkspaceRecord,
++    project_id: str,
++    entry: IndexedFileRecord,
++) -> WorkspaceIndexEntryResult:
++    return WorkspaceIndexEntryResult(
++        schema_version=SCHEMA_VERSION,
++        workspace_id=workspace.workspace_id,
++        project_id=project_id,
++        workspace_root=workspace.workspace_root,
++        relative_path=entry.relative_path,
++        kind=entry.kind,
++        size_bytes=entry.size_bytes,
++    )
++
++
+ def mutate_task_start(
+     connection: sqlite3.Connection,
+     request: TaskStartRequestData,
+@@ -506,6 +583,15 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:

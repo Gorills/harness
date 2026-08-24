@@ -1,0 +1,53 @@
++            assert context.is_error is False
++            assert context.structured_content == {
++                "items": [
++                    {
++                        "ref": ref,
++                        "kind": "code",
++                        "title": "token_service.py",
++                        "location": relative_path,
++                        "path": relative_path,
++                        "entry_kind": "file",
++                        "size_bytes": source.stat().st_size,
++                        "freshness": "indexed_snapshot",
++                    }
++                ]
++            }
++    finally:
++        stop.set()
++        executor.shutdown(wait=True)
++        future.result()
++
++
++def test_project_search_success_wire_stays_within_model_budget(tmp_path: Path) -> None:
++    root = tmp_path / "repo"
++    root.mkdir()
++    directory = "a" * 150
++    for index in range(10):
++        source = root / directory / f"token_{index:02}_service.py"
++        source.parent.mkdir(parents=True, exist_ok=True)
++        source.write_text("TOKEN = 1\n", encoding="utf-8")
++    _git(root, "init")
++    _git(root, "add", ".")
++    _git(
++        root,
++        "-c",
++        "user.name=Test",
++        "-c",
++        "user.email=t@example.invalid",
++        "commit",
++        "-m",
++        "init",
++    )
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        project = create_project(connection)
++        workspace = register_workspace(connection, project_id=project.project_id, path=root)
++        scan_workspace(connection, workspace.workspace_id)
++    finally:
++        connection.close()
++
++    runtime = tmp_path / "runtime"
++    socket_path = runtime / "harness" / "harness.sock"
