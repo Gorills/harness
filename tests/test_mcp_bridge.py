@@ -367,6 +367,35 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
         process.wait(timeout=3)
 
 
+def test_stdio_transport_flushes_response_and_exits_after_stdin_eof() -> None:
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "eof-review", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {"_meta": meta},
+    }
+    completed = subprocess.run(
+        [sys.executable, "-m", "harness.mcp_process"],
+        input=json.dumps(request, separators=(",", ":")) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    assert completed.returncode == 0
+    lines = completed.stdout.splitlines()
+    assert len(lines) == 1
+    assert len(lines[0].encode("utf-8")) < 12 * 1024
+    response = json.loads(lines[0])
+    assert response["id"] == 1
+    assert "result" in response
+
+
 def test_stdio_transport_bounds_client_controlled_envelope_fields() -> None:
     process = subprocess.Popen(
         [sys.executable, "-m", "harness.mcp_process"],

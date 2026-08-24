@@ -137,9 +137,13 @@ class HarnessMCPServer(MCPServer):
                         await filtered_send.send(item)
 
             async def relay_outbound() -> None:
-                async with bounded_receive:
-                    async for item in bounded_receive:
-                        await write_stream.send(_bounded_stdio_message(item))
+                try:
+                    async with bounded_receive:
+                        async for item in bounded_receive:
+                            await write_stream.send(_bounded_stdio_message(item))
+                finally:
+                    with anyio.CancelScope(shield=True):
+                        await write_stream.aclose()
 
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(relay_inbound)
@@ -150,7 +154,6 @@ class HarnessMCPServer(MCPServer):
                         bounded_send,
                         self._lowlevel_server.create_initialization_options(),
                     )
-                task_group.cancel_scope.cancel()
 
     async def list_tools(self) -> list[MCPTool]:
         tools = await super().list_tools()
