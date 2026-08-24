@@ -178,6 +178,23 @@ def list_indexed_files(
     return tuple(_record_from_row(row) for row in rows)
 
 
+def get_indexed_file(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    relative_path: str,
+) -> IndexedFileRecord | None:
+    """Return one exact current index entry by Workspace-relative path."""
+    row = connection.execute(
+        """
+        SELECT workspace_id, relative_path, kind, size_bytes, content_sha256
+        FROM indexed_files
+        WHERE workspace_id = ? AND relative_path = ?
+        """,
+        (workspace_id, relative_path),
+    ).fetchone()
+    return None if row is None else _record_from_row(row)
+
+
 def _require_registered_layout(workspace: WorkspaceRecord) -> None:
     layout = inspect_git_workspace(workspace.workspace_root)
     if (

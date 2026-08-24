@@ -15,7 +15,13 @@ from harness.git_workspace import (
     inspect_git_working_tree_status,
     inspect_git_workspace_runtime_identity,
 )
-from harness.index import IndexingError, ScanDeadlineExceededError, scan_workspace
+from harness.index import (
+    IndexedFileRecord,
+    IndexingError,
+    ScanDeadlineExceededError,
+    get_indexed_file,
+    scan_workspace,
+)
 from harness.ipc import (
     IpcMessageTooLargeError,
     IpcProtocolError,
@@ -25,6 +31,7 @@ from harness.ipc import (
     TaskStartRequestData,
     TaskStartResult,
     UnsupportedIpcTransportError,
+    WorkspaceIndexEntryResult,
     WorkspaceScanResult,
     WorkspaceSearchHit,
     WorkspaceSearchResult,
@@ -37,6 +44,7 @@ from harness.ipc import (
     send_status_response,
     send_task_checkpoint_response,
     send_task_start_response,
+    send_workspace_index_entry_response,
     send_workspace_scan_response,
     send_workspace_search_response,
     send_workspace_status_response,
@@ -88,6 +96,12 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
 _SCAN_DEADLINE_SECONDS = 30.0
+
+
+class WorkspaceIndexEntryNotFoundError(RuntimeError):
+    """Raised when an exact current Structural Index entry does not exist."""
+
+
 _EXISTING_SOCKET_PROBE_SECONDS = 0.2
 
 
@@ -318,6 +332,69 @@ def read_workspace_search(
     )
 
 
+def read_workspace_index_entry(
+    connection: sqlite3.Connection,
+    hints: Sequence[WorkspaceHint],
+    relative_path: str,
+) -> WorkspaceIndexEntryResult:
+    """Resolve one Workspace and return one exact current Structural Index entry."""
+    registered = list_workspaces(connection)
+    resolution = WorkspaceResolver(
+        [
+            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
+            for workspace in registered
+        ]
+    ).resolve(hints)
+    workspace = get_workspace(connection, resolution.workspace_id)
+
+    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    if (
+        runtime_identity.layout.workspace_root != workspace.workspace_root
+        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
+    ):
+        raise WorkspaceResolutionError(
+            f"registered workspace Git identity changed: {workspace.workspace_root}"
+        )
+
+    connection.execute("BEGIN")
+    try:
+        current_workspace = get_workspace(connection, workspace.workspace_id)
+        if current_workspace != workspace:
+            raise WorkspaceResolutionError(
+                "workspace registry identity changed during index entry read"
+            )
+        project = get_project(connection, workspace.project_id)
+        entry = get_indexed_file(connection, workspace.workspace_id, relative_path)
+        if entry is None:
+            raise WorkspaceIndexEntryNotFoundError
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+        raise WorkspaceResolutionError("workspace Git identity changed during index entry read")
+
+    return _workspace_index_entry_result(workspace, project.project_id, entry)
+
+
+def _workspace_index_entry_result(
+    workspace: WorkspaceRecord,
+    project_id: str,
+    entry: IndexedFileRecord,
+) -> WorkspaceIndexEntryResult:
+    return WorkspaceIndexEntryResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        project_id=project_id,
+        workspace_root=workspace.workspace_root,
+        relative_path=entry.relative_path,
+        kind=entry.kind,
+        size_bytes=entry.size_bytes,
+    )
+
+
 def mutate_task_start(
     connection: sqlite3.Connection,
     request: TaskStartRequestData,
@@ -504,6 +581,15 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
             request.search_query,
             request.search_limit,
             request.search_scope,
+        )
+        return
+    if request.method == "workspace_index_entry" and request.index_relative_path is not None:
+        _serve_workspace_index_entry(
+            client,
+            database,
+            request.request_id,
+            request.workspace_hints,
+            request.index_relative_path,
         )
         return
     if request.method == "task_start" and request.task_start is not None:
@@ -719,6 +805,74 @@ def _serve_workspace_search(
             request_id=request_id,
             code="response_too_large",
             message="Workspace search result exceeds IPC byte limit",
+        )
+
+
+def _serve_workspace_index_entry(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    hints: Sequence[WorkspaceHint],
+    relative_path: str,
+) -> None:
+    try:
+        result = read_workspace_index_entry(database, hints, relative_path)
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message="daemon could not read Workspace registry state",
+        )
+        return
+    except WorkspaceIndexEntryNotFoundError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="index_entry_not_found",
+            message="requested Structural Index entry is not present",
+        )
+        return
+    except IndexingError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="index_error",
+            message=str(exc),
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not read Workspace index entry",
+        )
+        return
+    try:
+        send_workspace_index_entry_response(client, request_id, result)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace index entry exceeds IPC byte limit",
         )
 
 
