@@ -10,6 +10,7 @@ import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.server.stdio import stdio_server
+from mcp.shared.dispatcher import as_request_id, coerce_request_id
 from mcp.shared.exceptions import MCPError
 from mcp.shared.message import SessionMessage
 from mcp_types import (
@@ -19,6 +20,7 @@ from mcp_types import (
     ErrorData,
     InputRequiredResult,
     JSONRPCError,
+    JSONRPCNotification,
     JSONRPCRequest,
     JSONRPCResponse,
     TextContent,
@@ -61,6 +63,7 @@ _CONTEXT_REF_MAX_BYTES = 4096 + len("code:")
 _MCP_WIRE_OVERHEAD_BYTES = 1024
 _MCP_STDIO_FRAME_MAX_BYTES = 12 * 1024
 _MCP_REQUEST_ID_MAX_BYTES = 256
+_MCP_EOF_DRAIN_TIMEOUT_SECONDS = 65.0
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _TOOL_RESPONSE_MAX_BYTES = {
     "project_status": _STATUS_MAX_BYTES,
@@ -127,6 +130,52 @@ class HarnessMCPServer(MCPServer):
             ](0)
             bounded_send, bounded_receive = anyio.create_memory_object_stream[SessionMessage](0)
             rejection_send = bounded_send.clone()
+            pending_requests: dict[str | int, int] = {}
+            pending_condition = anyio.Condition()
+
+            async def add_pending(request_id: str | int) -> None:
+                async with pending_condition:
+                    key = coerce_request_id(request_id)
+                    pending_requests[key] = pending_requests.get(key, 0) + 1
+
+            async def settle_pending(request_id: str | int) -> None:
+                async with pending_condition:
+                    key = coerce_request_id(request_id)
+                    count = pending_requests.get(key)
+                    if count is None:
+                        return
+                    if count == 1:
+                        del pending_requests[key]
+                    else:
+                        pending_requests[key] = count - 1
+                    pending_condition.notify_all()
+
+            async def complete_pending(item: SessionMessage) -> None:
+                message = item.message
+                if not isinstance(message, (JSONRPCResponse, JSONRPCError)) or message.id is None:
+                    return
+                await settle_pending(message.id)
+
+            async def cancel_pending(item: SessionMessage | Exception) -> None:
+                if not isinstance(item, SessionMessage) or not isinstance(
+                    item.message, JSONRPCNotification
+                ):
+                    return
+                if item.message.method != "notifications/cancelled":
+                    return
+                request_id = as_request_id((item.message.params or {}).get("requestId"))
+                if request_id is not None:
+                    await settle_pending(request_id)
+
+            async def drain_pending_after_eof() -> None:
+                # The SDK treats read-stream EOF as abandonment and cancels in-flight handlers.
+                # Delay that logical EOF long enough for every request already accepted from
+                # physical stdin to put its response onto the outbound stream. The timeout keeps
+                # a broken/hung handler from recreating the historical shutdown deadlock.
+                with anyio.move_on_after(_MCP_EOF_DRAIN_TIMEOUT_SECONDS):
+                    async with pending_condition:
+                        while pending_requests:
+                            await pending_condition.wait()
 
             async def relay_inbound() -> None:
                 async with filtered_send, rejection_send:
@@ -134,13 +183,20 @@ class HarnessMCPServer(MCPServer):
                         if _has_oversized_request_id(item):
                             await rejection_send.send(_oversized_request_id_error())
                             continue
+                        if isinstance(item, SessionMessage) and isinstance(
+                            item.message, JSONRPCRequest
+                        ):
+                            await add_pending(item.message.id)
                         await filtered_send.send(item)
+                        await cancel_pending(item)
+                    await drain_pending_after_eof()
 
             async def relay_outbound() -> None:
                 try:
                     async with bounded_receive:
                         async for item in bounded_receive:
                             await write_stream.send(_bounded_stdio_message(item))
+                            await complete_pending(item)
                 finally:
                     with anyio.CancelScope(shield=True):
                         await write_stream.aclose()
