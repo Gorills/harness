@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -1004,7 +1006,11 @@ def _commit_projection_changes(
                 )
         if item.replacement is not None:
             try:
-                os.replace(item.replacement, item.target)
+                if not _move_projection_entry_if_absent(item.replacement, item.target):
+                    raise SkillProjectionCollisionError(
+                        "skill projection target appeared before materialization: "
+                        f"{item.target.relative_to(workspace_root)}"
+                    )
             except Exception:
                 _restore_uncommitted_projection_backup(workspace_root, item)
                 raise
@@ -1024,7 +1030,11 @@ def _restore_uncommitted_projection_backup(
             f"restored: {item.target.relative_to(workspace_root)}"
         )
     try:
-        os.replace(backup, item.target)
+        if not _move_projection_entry_if_absent(backup, item.target):
+            raise SkillProjectionError(
+                "skill projection target changed during mutation and moved content could not be "
+                f"restored: {item.target.relative_to(workspace_root)}"
+            )
     except OSError as exc:
         raise SkillProjectionError(
             "skill projection target could not be restored after mutation validation failed: "
@@ -1101,7 +1111,12 @@ def _restore_rollback_candidate(
             f"{staging.relative_to(workspace_root)}"
         )
     try:
-        os.replace(staging, item.target)
+        if not _move_projection_entry_if_absent(staging, item.target):
+            item.replacement = None
+            raise SkillProjectionError(
+                "skill projection rollback moved content could not be restored; preserved at "
+                f"{staging.relative_to(workspace_root)}"
+            )
     except OSError as exc:
         item.replacement = None
         raise SkillProjectionError(
@@ -1118,6 +1133,46 @@ def _projection_entry_exists(path: Path) -> bool:
     except OSError as exc:
         raise SkillProjectionError(f"skill projection path cannot be inspected: {path}") from exc
     return True
+
+
+def _move_projection_entry_if_absent(source: Path, target: Path) -> bool:
+    if os.name == "nt":
+        try:
+            os.rename(source, target)
+        except FileExistsError:
+            return False
+        return True
+
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+    except OSError as exc:
+        raise SkillProjectionError("atomic no-clobber rename is unavailable") from exc
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    renameat2 = getattr(library, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, source_bytes, -100, target_bytes, 1)
+    else:
+        renamex_np = getattr(library, "renamex_np", None)
+        if renamex_np is None:
+            raise SkillProjectionError("atomic no-clobber rename is unavailable")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(source_bytes, target_bytes, 0x00000004)
+    if result == 0:
+        return True
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        return False
+    raise OSError(error_number, os.strerror(error_number), target)
 
 
 def _finalize_projection_changes(prepared: Sequence[_PreparedProjection]) -> None:
