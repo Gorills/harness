@@ -87,7 +87,10 @@ class ClaudeCodeAdapter:
             if self._is_desired_registration(observed):
                 return IntegrationChange.UNCHANGED
             previous_registration = self._owned_registration_config(observed)
-            removed_previous = self._remove_owned_registration() is IntegrationChange.CHANGED
+            removed_previous = (
+                self._remove_owned_registration(expected_registration=previous_registration)
+                is IntegrationChange.CHANGED
+            )
 
         completed = self._add_registration(self._desired_registration())
         if completed.returncode != 0:
@@ -261,7 +264,11 @@ class ClaudeCodeAdapter:
             "could not be restored"
         )
 
-    def _remove_owned_registration(self) -> IntegrationChange:
+    def _remove_owned_registration(
+        self,
+        *,
+        expected_registration: Mapping[str, object] | None = None,
+    ) -> IntegrationChange:
         # Re-read immediately before mutation so stale Harness observations cannot authorize
         # deletion of an entry that has already been replaced by another integration. Claude's
         # CLI does not expose a compare-and-set primitive, so this is the narrowest available
@@ -272,6 +279,12 @@ class ClaudeCodeAdapter:
         if not self._is_owned_registration(observed):
             raise HostRegistrationCollisionError(
                 "Claude Code MCP server named 'harness' changed ownership before removal"
+            )
+        if expected_registration is not None and not self._registration_matches(
+            observed, expected_registration
+        ):
+            raise HostIntegrationError(
+                "Claude Code Harness MCP registration changed before removal"
             )
 
         completed = self._run(
