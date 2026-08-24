@@ -316,3 +316,107 @@ def test_uncommitted_restore_does_not_overwrite_dangling_symlink(tmp_path: Path)
     assert target.readlink() == tmp_path / "concurrent-user-target"
     assert backup.is_symlink()
     assert backup.readlink() == tmp_path / "moved-user-target"
+
+
+def test_skill_creation_does_not_overwrite_target_created_after_existence_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _git_init(root)
+    surface = _surface()
+    resolved = _resolved_fastapi(tmp_path / "registry")
+    target = root / ".claude" / "skills" / "fastapi"
+    original_exists = skills_module._projection_entry_exists
+    raced = False
+
+    def create_target_after_check(path: Path) -> bool:
+        nonlocal raced
+        exists = original_exists(path)
+        if path == target and not exists and not raced:
+            target.mkdir(parents=True)
+            raced = True
+        return exists
+
+    monkeypatch.setattr(skills_module, "_projection_entry_exists", create_target_after_check)
+
+    with pytest.raises(SkillProjectionCollisionError, match="appeared before materialization"):
+        apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
+
+    assert raced is True
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+
+
+def test_uncommitted_restore_does_not_overwrite_target_created_after_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "fastapi"
+    backup = tmp_path / ".harness-backup-fastapi"
+    backup.mkdir()
+    (backup / "MOVED.txt").write_text("preserve\n", encoding="utf-8")
+    item = skills_module._PreparedProjection(
+        target=target,
+        replacement=None,
+        expected_state_sha256=None,
+        committed_state_sha256=None,
+        backup=backup,
+    )
+    original_exists = skills_module._projection_entry_exists
+    raced = False
+
+    def create_target_after_check(path: Path) -> bool:
+        nonlocal raced
+        exists = original_exists(path)
+        if path == target and not exists and not raced:
+            target.mkdir()
+            raced = True
+        return exists
+
+    monkeypatch.setattr(skills_module, "_projection_entry_exists", create_target_after_check)
+
+    with pytest.raises(SkillProjectionError, match="moved content could not be restored"):
+        skills_module._restore_uncommitted_projection_backup(tmp_path, item)
+
+    assert raced is True
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert (backup / "MOVED.txt").read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_rollback_restore_does_not_overwrite_target_created_after_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "fastapi"
+    staging = tmp_path / ".harness-fastapi-staging"
+    staging.mkdir()
+    (staging / "MOVED.txt").write_text("preserve\n", encoding="utf-8")
+    item = skills_module._PreparedProjection(
+        target=target,
+        replacement=staging,
+        expected_state_sha256=None,
+        committed_state_sha256="0" * 64,
+    )
+    original_exists = skills_module._projection_entry_exists
+    raced = False
+
+    def create_target_after_check(path: Path) -> bool:
+        nonlocal raced
+        exists = original_exists(path)
+        if path == target and not exists and not raced:
+            target.mkdir()
+            raced = True
+        return exists
+
+    monkeypatch.setattr(skills_module, "_projection_entry_exists", create_target_after_check)
+
+    with pytest.raises(SkillProjectionError, match="preserved at"):
+        skills_module._restore_rollback_candidate(tmp_path, item)
+
+    assert raced is True
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert (staging / "MOVED.txt").read_text(encoding="utf-8") == "preserve\n"
+    assert item.replacement is None
