@@ -42,15 +42,23 @@ with log_path.open("a", encoding="utf-8") as log:
 args = sys.argv[1:]
 if args[:2] == ["mcp", "get"]:
     foreign_on_get = os.environ.get("FAKE_CLAUDE_FOREIGN_ON_GET")
-    if foreign_on_get is not None:
+    owned_on_get = os.environ.get("FAKE_CLAUDE_OWNED_ON_GET")
+    if foreign_on_get is not None or owned_on_get is not None:
         commands = [json.loads(line) for line in log_path.read_text().splitlines()]
         get_count = sum(command[:2] == ["mcp", "get"] for command in commands)
-        if get_count == int(foreign_on_get):
+        if foreign_on_get is not None and get_count == int(foreign_on_get):
             state_path.write_text(json.dumps({
                 "type": "stdio",
                 "command": "/foreign/tool",
                 "args": ["serve"],
                 "env": {},
+            }))
+        if owned_on_get is not None and get_count == int(owned_on_get):
+            state_path.write_text(json.dumps({
+                "type": "stdio",
+                "command": os.environ["FAKE_CLAUDE_OWNED_COMMAND"],
+                "args": ["-m", "harness.mcp_process"],
+                "env": {"HARNESS_HOST_PROFILE": "claude-code"},
             }))
     if not state_path.exists():
         print('No MCP server found with name: "harness"')
@@ -143,6 +151,33 @@ def test_extra_environment_is_not_accepted_as_canonical_registration(
     commands = [json.loads(line) for line in log_path.read_text().splitlines()]
     assert any(command[:2] == ["mcp", "remove"] for command in commands)
     assert sum(command[:2] == ["mcp", "add-json"] for command in commands) == 1
+
+
+def test_replacement_does_not_remove_concurrent_different_owned_registration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable, state_path, log_path = _write_fake_claude(tmp_path)
+    old_command = "/old/venv/bin/python"
+    concurrent_command = "/concurrent/venv/bin/python"
+    state_path.write_text(json.dumps(_registration(old_command)))
+    _set_fake_environment(
+        monkeypatch,
+        state_path,
+        log_path,
+        old_command=old_command,
+        add_mode="ok",
+    )
+    monkeypatch.setenv("FAKE_CLAUDE_OWNED_ON_GET", "2")
+    monkeypatch.setenv("FAKE_CLAUDE_OWNED_COMMAND", concurrent_command)
+
+    with pytest.raises(HostIntegrationError, match="changed before removal"):
+        _adapter(executable).register_mcp()
+
+    assert json.loads(state_path.read_text()) == _registration(concurrent_command)
+    commands = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert not any(command[:2] == ["mcp", "remove"] for command in commands)
+    assert not any(command[:2] == ["mcp", "add-json"] for command in commands)
 
 
 def test_stale_registration_is_restored_when_replacement_add_fails(
