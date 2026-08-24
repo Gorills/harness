@@ -25,6 +25,17 @@ The audited architecture and accepted ADRs control implementation when the origi
 - If a task uncovers a larger follow-up, document it and stop at the current boundary rather than silently expanding scope.
 - If normal Git remote transport is unavailable but authenticated repository-object access still exists, follow `docs/development/network-constrained-git.md`; preserve exact base/tree identity and do not move a feature branch ref away from the verified base until the complete remote tree matches the locally verified expected tree.
 
+## Correctness-review terminology
+
+Keep review language aligned with the actual engineering domain.
+
+- For concurrency, rollback, data-integrity, filesystem-ownership, compatibility, or state-machine defects that are not security issues, describe them as correctness defects.
+- When critically reviewing prior work, prefer `independent correctness review` over security-oriented labels unless the task is specifically about security.
+- Describe races in terms of the actual concurrent filesystem or state change being tested.
+- Prefer terms such as `data-integrity`, `correctness`, `compatibility`, and `rollback safety` when they accurately describe the risk.
+- Reserve terms such as `attack`, `exploit`, `vulnerability`, and `security boundary` for work that genuinely concerns a security property.
+- Terminology choices must never reduce technical precision, test coverage, or review rigor; preserve the exact mechanics needed to reproduce and verify a defect.
+
 ## Architecture invariants
 
 - `harnessd` owns durable business state. Host adapters and the MCP bridge are thin integration layers.
