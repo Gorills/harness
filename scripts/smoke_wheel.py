@@ -186,7 +186,12 @@ def main() -> int:
         skill = skill_registry / "fastapi"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(
-            "# FastAPI\n\nUse the project conventions.\n", encoding="utf-8"
+            "---\n"
+            "name: fastapi\n"
+            "description: Apply the project FastAPI conventions.\n"
+            "---\n\n"
+            "# FastAPI\n\nUse the project conventions.\n",
+            encoding="utf-8",
         )
         (skill / "harness.yaml").write_text(
             "id: fastapi\ntask_hints:\n  - fastapi\n", encoding="utf-8"
@@ -197,36 +202,54 @@ def main() -> int:
                 "-c",
                 (
                     "from pathlib import Path; "
-                    "from harness.host_adapters import ClaudeCodeAdapter; "
+                    "from harness.host_adapters import ClaudeCodeAdapter,codex_skill_projection_surface; "
                     "from harness.skills import "
                     "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
                     "plan_skill_projection,resolve_skills; "
                     f"root=Path({str(skill_project)!r}); registry=Path({str(skill_registry)!r}); "
                     "definitions=load_skill_registry(registry); "
                     "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
-                    "surface=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
-                    "result=apply_skill_projection(plan_skill_projection(root,resolved,(surface,))); "
-                    "target=root/'.claude'/'skills'/'fastapi'; "
+                    "claude=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
+                    "codex=codex_skill_projection_surface(); "
+                    "result=apply_skill_projection(plan_skill_projection(root,resolved,(claude,codex))); "
+                    "claude_target=root/'.claude'/'skills'/'fastapi'; "
+                    "codex_target=root/'.agents'/'skills'/'fastapi'; "
                     "print(len(resolved)); print(result.materialized); "
-                    "print((target/'SKILL.md').is_file()); "
-                    "print((target/'.harness-skill.json').is_file()); "
-                    "print((target/'harness.yaml').exists())"
+                    "print((claude_target/'SKILL.md').is_file()); "
+                    "print((codex_target/'SKILL.md').is_file()); "
+                    "print((claude_target/'.harness-skill.json').is_file()); "
+                    "print((codex_target/'.harness-skill.json').is_file()); "
+                    "print((codex_target/'harness.yaml').exists())"
                 ),
             ),
             cwd=workspace,
             env=isolated_env,
         )
-        if skill_probe.stdout.splitlines() != ["1", "1", "True", "True", "False"]:
+        if skill_probe.stdout.splitlines() != [
+            "1",
+            "2",
+            "True",
+            "True",
+            "True",
+            "True",
+            "False",
+        ]:
             raise RuntimeError(
                 f"installed skill resolver/projection probe was unexpected: {skill_probe.stdout!r}"
             )
-        ignored = _run(
-            ("git", "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md"),
-            cwd=skill_project,
-            env=isolated_env,
-        )
-        if ignored.returncode != 0:
-            raise RuntimeError("installed skill projection was not ignored by Git")
+        for projected_skill in (
+            ".claude/skills/fastapi/SKILL.md",
+            ".agents/skills/fastapi/SKILL.md",
+        ):
+            ignored = _run(
+                ("git", "check-ignore", "-q", projected_skill),
+                cwd=skill_project,
+                env=isolated_env,
+            )
+            if ignored.returncode != 0:
+                raise RuntimeError(
+                    f"installed skill projection was not ignored by Git: {projected_skill}"
+                )
 
         if os.name != "nt":
             fake_bin = workspace / "fake-claude-bin"
