@@ -19,9 +19,11 @@ from harness.ipc import (
     PROTOCOL_VERSION,
     IpcRemoteError,
     StatusResult,
+    WorkspaceIndexEntryResult,
     WorkspaceSearchHit,
     WorkspaceSearchResult,
     request_status,
+    request_workspace_index_entry,
     request_workspace_search,
 )
 from harness.registry import create_project, register_workspace
@@ -191,6 +193,76 @@ def test_workspace_search_round_trip_is_scoped_bounded_and_mechanical(tmp_path: 
         serialized = json.dumps(raw, sort_keys=True)
         assert "content_sha256" not in serialized
         assert "TOKEN = 1" not in serialized
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_workspace_index_entry_round_trip_supports_long_exact_refs(tmp_path: Path) -> None:
+    first = "a" * 140
+    second = "b" * 140
+    relative_path = f"{first}/{second}/token_service.py"
+    root, database, project_id, workspace_id = _registered_workspace_database(
+        tmp_path,
+        files={relative_path: "TOKEN = 1\n"},
+    )
+    assert len(relative_path.encode("utf-8")) > 256
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        result = request_workspace_index_entry(
+            socket_path,
+            [WorkspaceHint(root.resolve(), "explicit-root")],
+            relative_path,
+        )
+        assert result == WorkspaceIndexEntryResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            workspace_root=root.resolve(),
+            relative_path=relative_path,
+            kind=IndexedFileKind.FILE,
+            size_bytes=(root / relative_path).stat().st_size,
+        )
+        assert "content_sha256" not in repr(result)
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_workspace_index_entry_missing_and_corrupt_rows_fail_distinctly(tmp_path: Path) -> None:
+    root, database, _project_id, _workspace_id = _registered_workspace_database(tmp_path)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with pytest.raises(IpcRemoteError) as exc_info:
+            request_workspace_index_entry(
+                socket_path,
+                [WorkspaceHint(root.resolve(), "cwd", WorkspaceHintMatchMode.LOCATION)],
+                "missing.py",
+            )
+        assert exc_info.value.code == "index_entry_not_found"
+    finally:
+        _stop_server(stop_event, executor, future)
+
+    connection = connect_database(database)
+    try:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE indexed_files SET kind = 'corrupt' WHERE relative_path = ?",
+            ("src/rotateRefreshToken.py",),
+        )
+    finally:
+        connection.close()
+
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with pytest.raises(IpcRemoteError) as exc_info:
+            request_workspace_index_entry(
+                socket_path,
+                [WorkspaceHint(root.resolve(), "cwd", WorkspaceHintMatchMode.LOCATION)],
+                "src/rotateRefreshToken.py",
+            )
+        assert exc_info.value.code == "index_error"
+        assert "unsupported kind" in exc_info.value.message
     finally:
         _stop_server(stop_event, executor, future)
 

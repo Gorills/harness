@@ -9,17 +9,19 @@ from typing import Any, Literal
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult
+from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult, TextContent
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.ipc import (
+    IpcRemoteError,
     TaskCheckpointResult,
     TaskStartResult,
     WorkspaceTaskSummary,
     request_task_checkpoint,
     request_task_start,
+    request_workspace_index_entry,
     request_workspace_search,
     request_workspace_status,
     request_workspace_task_status,
@@ -42,7 +44,16 @@ _STATUS_MAX_BYTES = 4 * 1024
 _SEARCH_MAX_BYTES = 12 * 1024
 _CONTEXT_MAX_BYTES = 12 * 1024
 _TASK_MAX_BYTES = 4 * 1024
+_CONTEXT_REF_MAX_BYTES = 4096 + len("code:")
+_MCP_WIRE_OVERHEAD_BYTES = 1024
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+_TOOL_RESPONSE_MAX_BYTES = {
+    "project_status": _STATUS_MAX_BYTES,
+    "project_search": _SEARCH_MAX_BYTES,
+    "project_context": _CONTEXT_MAX_BYTES,
+    "task_start": _TASK_MAX_BYTES,
+    "task_checkpoint": _TASK_MAX_BYTES,
+}
 _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "project_status": frozenset(),
     "project_search": frozenset({"query", "scope", "limit"}),
@@ -115,7 +126,10 @@ class HarnessMCPServer(MCPServer):
                     message="Unknown tool argument fields",
                     data={"tool": name, "unknown_field_count": len(unknown)},
                 )
-        return await super().call_tool(name, arguments, context)
+        result = await super().call_tool(name, arguments, context)
+        if isinstance(result, CallToolResult):
+            return _bounded_call_result(name, result)
+        return result
 
 
 def build_mcp_server() -> MCPServer:
@@ -252,15 +266,22 @@ def build_mcp_server() -> MCPServer:
             raise ValueError("refs must not contain duplicates")
         items: list[dict[str, Any]] = []
         for ref in refs:
-            if not isinstance(ref, str) or not ref.startswith("code:"):
-                raise ValueError(f"unsupported or invalid context ref: {ref!r}")
+            if (
+                not isinstance(ref, str)
+                or not ref.startswith("code:")
+                or "\x00" in ref
+                or len(ref.encode("utf-8")) > _CONTEXT_REF_MAX_BYTES
+            ):
+                raise ValueError("unsupported or invalid context ref")
             relative_path = ref.removeprefix("code:")
-            result = request_workspace_search(
-                _socket_path(), _workspace_hints(), relative_path, limit=1
-            )
-            if not result.results or result.results[0].relative_path != relative_path:
-                raise ValueError(f"context ref is not present in the current index: {ref}")
-            hit = result.results[0]
+            try:
+                hit = request_workspace_index_entry(
+                    _socket_path(), _workspace_hints(), relative_path
+                )
+            except IpcRemoteError as exc:
+                if exc.code == "index_entry_not_found":
+                    raise ValueError("context ref is not present in the current index") from exc
+                raise
             items.append(
                 {
                     "ref": ref,
@@ -419,6 +440,19 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
     if len(encoded) > limit:
         raise ValueError(message)
     return payload
+
+
+def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:
+    limit = _TOOL_RESPONSE_MAX_BYTES.get(name)
+    if limit is None:
+        return result
+    encoded = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
+    if len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= limit:
+        return result
+    return CallToolResult(
+        content=[TextContent(type="text", text="Tool response exceeds model exposure budget")],
+        is_error=True,
+    )
 
 
 __all__ = ["build_mcp_server", "run_mcp_server"]

@@ -339,9 +339,226 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 serialized = json.dumps(tools, sort_keys=True)
                 for forbidden in ("content_sha256", "baseline_head", "source_checkpoint_id"):
                     assert forbidden not in serialized
+
+        oversized_ref = "x" * 20_000
+        request = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "project_context",
+                "arguments": {"refs": [oversized_ref]},
+            },
+        }
+        process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+        ready, _, _ = select.select([process.stdout], [], [], 3)
+        assert ready, "no MCP response for oversized project_context ref"
+        raw = process.stdout.readline()
+        assert len(raw.encode("utf-8")) < 4 * 1024
+        response = json.loads(raw)
+        assert response["result"]["isError"] is True
+        serialized_error = json.dumps(response, sort_keys=True)
+        assert oversized_ref[:256] not in serialized_error
     finally:
         process.terminate()
         process.wait(timeout=3)
+
+
+@pytest.mark.anyio
+async def test_project_context_expands_long_ref_returned_by_project_search(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    first = "a" * 140
+    second = "b" * 140
+    relative_path = f"{first}/{second}/token_service.py"
+    source = root / relative_path
+    source.parent.mkdir(parents=True)
+    source.write_text("TOKEN = 1\n", encoding="utf-8")
+    _git(root, "init")
+    _git(root, "add", ".")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-m",
+        "init",
+    )
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+    finally:
+        connection.close()
+
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "harness.mcp_process"],
+        env=env,
+        cwd=str(root),
+    )
+    try:
+        async with Client(stdio_client(params)) as client:
+            searched = await client.call_tool(
+                "project_search", {"query": "token", "scope": "code", "limit": 1}
+            )
+            assert searched.is_error is False
+            assert searched.structured_content is not None
+            ref = searched.structured_content["results"][0]["ref"]
+            assert len(ref.encode("utf-8")) > 256
+
+            context = await client.call_tool("project_context", {"refs": [ref]})
+            assert context.is_error is False
+            assert context.structured_content == {
+                "items": [
+                    {
+                        "ref": ref,
+                        "kind": "code",
+                        "title": "token_service.py",
+                        "location": relative_path,
+                        "path": relative_path,
+                        "entry_kind": "file",
+                        "size_bytes": source.stat().st_size,
+                        "freshness": "indexed_snapshot",
+                    }
+                ]
+            }
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_project_search_success_wire_stays_within_model_budget(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    directory = "a" * 150
+    for index in range(10):
+        source = root / directory / f"token_{index:02}_service.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("TOKEN = 1\n", encoding="utf-8")
+    _git(root, "init")
+    _git(root, "add", ".")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=t@example.invalid",
+        "commit",
+        "-m",
+        "init",
+    )
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+    finally:
+        connection.close()
+
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "harness.mcp_process"],
+        cwd=root,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "raw-budget-test", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    try:
+        for request in (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": meta},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "_meta": meta,
+                    "name": "project_search",
+                    "arguments": {"query": "token", "limit": 3},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "_meta": meta,
+                    "name": "project_search",
+                    "arguments": {"query": "token", "limit": 10},
+                },
+            },
+        ):
+            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+            ready, _, _ = select.select([process.stdout], [], [], 3)
+            assert ready, f"no MCP response for {request['method']}"
+            raw = process.stdout.readline()
+            if request["id"] == 1:
+                continue
+            assert len(raw.encode("utf-8")) < 12 * 1024
+            response = json.loads(raw)
+            if request["id"] == 2:
+                assert response["result"]["isError"] is False
+                assert response["result"]["content"]
+                assert len(response["result"]["structuredContent"]["results"]) == 3
+            else:
+                assert response["result"]["isError"] is True
+                assert (
+                    "response exceeds model exposure budget"
+                    in response["result"]["content"][0]["text"]
+                )
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
 
 @pytest.mark.anyio

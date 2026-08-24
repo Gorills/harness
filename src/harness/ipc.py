@@ -39,6 +39,7 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
 _TASK_REQUEST_TIMEOUT_SECONDS = 60.0
 _TASK_ID_MAX_LENGTH = 128
+_INDEX_RELATIVE_PATH_MAX_BYTES = 4096
 
 
 class IpcError(RuntimeError):
@@ -165,6 +166,19 @@ class WorkspaceSearchResult:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceIndexEntryResult:
+    """One exact bounded Structural Index entry returned by the daemon."""
+
+    schema_version: int
+    workspace_id: str
+    project_id: str
+    workspace_root: Path
+    relative_path: str
+    kind: IndexedFileKind
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class TaskStartRequestData:
     """Validated daemon-domain Task start/resume request data."""
 
@@ -225,6 +239,7 @@ class IpcRequest:
     search_query: str | None = None
     search_limit: int | None = None
     search_scope: IndexedPathSearchScope | None = None
+    index_relative_path: str | None = None
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
 
@@ -342,6 +357,32 @@ def request_workspace_search(
         timeout=timeout,
     )
     return _workspace_search_from_response(response, expected_request_id=request_id)
+
+
+def request_workspace_index_entry(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    relative_path: str,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> WorkspaceIndexEntryResult:
+    """Request one exact current Structural Index entry through daemon-owned IPC."""
+    _validate_index_relative_path(relative_path)
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "workspace_index_entry",
+            "params": {
+                "hints": _workspace_hints_to_wire(hints),
+                "relative_path": relative_path,
+            },
+        },
+        timeout=timeout,
+    )
+    return _workspace_index_entry_from_response(response, expected_request_id=request_id)
 
 
 def request_task_start(
@@ -476,6 +517,19 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             search_query=query,
             search_limit=limit,
             search_scope=scope,
+        )
+
+    if method == "workspace_index_entry":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError(
+                "workspace index entry request fields do not match the IPC schema"
+            )
+        hints, relative_path = _workspace_index_entry_from_params(payload["params"])
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            workspace_hints=hints,
+            index_relative_path=relative_path,
         )
 
     if method == "task_start":
@@ -652,6 +706,32 @@ def send_workspace_search_response(
     )
 
 
+def send_workspace_index_entry_response(
+    peer: socket.socket,
+    request_id: str,
+    result: WorkspaceIndexEntryResult,
+) -> None:
+    """Send the exact success contract for one current Structural Index entry."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "project_id": result.project_id,
+                    "workspace_root": str(result.workspace_root),
+                    "relative_path": result.relative_path,
+                    "kind": result.kind.value,
+                    "size_bytes": result.size_bytes,
+                },
+            }
+        )
+    )
+
+
 def send_task_start_response(
     peer: socket.socket,
     request_id: str,
@@ -819,6 +899,17 @@ def _workspace_search_from_params(
     except ValueError as exc:
         raise IpcProtocolError("workspace search scope is unsupported") from exc
     return hints, cast(str, query), cast(int, limit), scope
+
+
+def _workspace_index_entry_from_params(
+    value: object,
+) -> tuple[tuple[WorkspaceHint, ...], str]:
+    if not isinstance(value, dict) or set(value) != {"hints", "relative_path"}:
+        raise IpcProtocolError("workspace index entry params do not match the IPC schema")
+    hints = _workspace_hints_from_params({"hints": value["hints"]})
+    relative_path = value["relative_path"]
+    _validate_index_relative_path(relative_path)
+    return hints, cast(str, relative_path)
 
 
 def _task_start_params_to_wire(
@@ -1103,6 +1194,23 @@ def _validate_search_limit(value: object) -> None:
         raise IpcProtocolError(
             f"workspace search limit must be an integer between 1 and {MAX_SEARCH_LIMIT}"
         )
+
+
+def _validate_index_relative_path(value: object) -> None:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise IpcProtocolError("workspace index relative_path must be non-empty text")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise IpcProtocolError("workspace index relative_path must be valid UTF-8 text") from exc
+    path = Path(value)
+    if (
+        size > _INDEX_RELATIVE_PATH_MAX_BYTES
+        or path.is_absolute()
+        or "." in path.parts
+        or ".." in path.parts
+    ):
+        raise IpcProtocolError("workspace index relative_path is unsafe or too large")
 
 
 def _validate_hint_fields(
@@ -1497,6 +1605,58 @@ def _workspace_search_from_response(
         project_id=project_id,
         workspace_root=workspace_root,
         results=tuple(hits),
+    )
+
+
+def _workspace_index_entry_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> WorkspaceIndexEntryResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "workspace_id",
+        "project_id",
+        "workspace_root",
+        "relative_path",
+        "kind",
+        "size_bytes",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon workspace index entry does not match the IPC schema")
+
+    schema_version = result["schema_version"]
+    size_bytes = result["size_bytes"]
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (schema_version, size_bytes)
+    ):
+        raise IpcProtocolError("daemon workspace index entry has invalid integer fields")
+    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+    project_id = _bounded_response_string(result["project_id"], "project_id", 128)
+    workspace_root_value = _bounded_response_string(
+        result["workspace_root"], "workspace_root", _HINT_PATH_MAX_LENGTH
+    )
+    workspace_root = Path(workspace_root_value)
+    if not workspace_root.is_absolute():
+        raise IpcProtocolError("daemon workspace index entry root must be absolute")
+    relative_path = _bounded_response_string(
+        result["relative_path"], "relative_path", _INDEX_RELATIVE_PATH_MAX_BYTES
+    )
+    _validate_index_relative_path(relative_path)
+    try:
+        kind = IndexedFileKind(_bounded_response_string(result["kind"], "kind", 16))
+    except ValueError as exc:
+        raise IpcProtocolError("daemon workspace index entry has unsupported kind") from exc
+    return WorkspaceIndexEntryResult(
+        schema_version=schema_version,
+        workspace_id=workspace_id,
+        project_id=project_id,
+        workspace_root=workspace_root,
+        relative_path=relative_path,
+        kind=kind,
+        size_bytes=size_bytes,
     )
 
 
