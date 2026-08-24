@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -61,6 +61,16 @@ def test_discover_claude_code_adapter_uses_path_and_selected_python(
     )
 
     assert adapter == ClaudeCodeAdapter(executable=claude, python_executable=python)
+
+
+def test_claude_code_skill_projection_surface_uses_native_project_root(tmp_path: Path) -> None:
+    adapter = ClaudeCodeAdapter(tmp_path / "claude", tmp_path / "python")
+
+    surface = adapter.skill_projection_surface()
+
+    assert surface.profile == "claude-code"
+    assert surface.target_root == PurePosixPath(".claude/skills")
+    assert surface.visible_roots == (PurePosixPath(".claude/skills"),)
 
 
 def test_discover_claude_code_adapter_returns_none_when_cli_is_absent(tmp_path: Path) -> None:

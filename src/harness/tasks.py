@@ -14,6 +14,8 @@ from harness.task_baseline import (
 )
 
 MAX_TASK_TITLE_BYTES = 256
+MAX_TASK_STACK_HINTS = 16
+MAX_TASK_STACK_HINT_BYTES = 128
 
 
 class TaskError(RuntimeError):
@@ -88,10 +90,13 @@ def create_task_record(
     workspace_id: str,
     title: str,
     *,
+    stack_hints: tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> TaskRecord:
     """Create one working Task together with its mandatory mechanical baseline."""
-    return create_task_with_baseline(connection, workspace_id, title, now=now).task
+    return create_task_with_baseline(
+        connection, workspace_id, title, stack_hints=stack_hints, now=now
+    ).task
 
 
 def create_task_with_baseline(
@@ -99,6 +104,7 @@ def create_task_with_baseline(
     workspace_id: str,
     title: str,
     *,
+    stack_hints: tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> TaskCreationRecord:
     """Atomically create a new working Task and its mandatory mechanical baseline."""
@@ -108,6 +114,7 @@ def create_task_with_baseline(
             connection,
             workspace_id,
             title,
+            stack_hints=stack_hints,
             now=now,
         )
         connection.execute("COMMIT")
@@ -131,6 +138,45 @@ def get_task(connection: sqlite3.Connection, task_id: str) -> TaskRecord:
     if row is None:
         raise TaskNotFoundError(f"task does not exist: {task_id}")
     return _task_from_row(row)
+
+
+def get_task_stack_hints(connection: sqlite3.Connection, task_id: str) -> tuple[str, ...]:
+    """Return normalized Task stack hints in caller-supplied order."""
+    get_task(connection, task_id)
+    rows = connection.execute(
+        "SELECT hint FROM task_stack_hints WHERE task_id = ? ORDER BY position",
+        (task_id,),
+    ).fetchall()
+    return tuple(str(row[0]) for row in rows)
+
+
+def normalize_task_stack_hints(stack_hints: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate and canonicalize bounded greenfield stack hints."""
+    if not isinstance(stack_hints, tuple):
+        raise TaskValidationError("task stack_hints must be a tuple")
+    if len(stack_hints) > MAX_TASK_STACK_HINTS:
+        raise TaskValidationError(f"task stack_hints exceeds {MAX_TASK_STACK_HINTS} items")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in stack_hints:
+        if not isinstance(value, str):
+            raise TaskValidationError("task stack hint must be text")
+        hint = value.strip().casefold()
+        if not hint or "\x00" in hint:
+            raise TaskValidationError("task stack hint must be non-empty text")
+        try:
+            size = len(hint.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise TaskValidationError("task stack hint must be valid UTF-8 text") from exc
+        if size > MAX_TASK_STACK_HINT_BYTES:
+            raise TaskValidationError(
+                f"task stack hint exceeds {MAX_TASK_STACK_HINT_BYTES} UTF-8 bytes"
+            )
+        if hint in seen:
+            raise TaskValidationError("task stack_hints must not contain duplicates")
+        seen.add(hint)
+        normalized.append(hint)
+    return tuple(normalized)
 
 
 def get_working_task(
@@ -198,10 +244,12 @@ def _create_task_with_baseline_in_transaction(
     workspace_id: str,
     title: str,
     *,
+    stack_hints: tuple[str, ...] = (),
     now: datetime | None = None,
 ) -> TaskCreationRecord:
     """Create Task + baseline inside a caller-owned ``BEGIN IMMEDIATE`` transaction."""
     normalized_title = _validate_title(title)
+    normalized_stack_hints = normalize_task_stack_hints(stack_hints)
     get_workspace(connection, workspace_id)
     _require_no_working_task(connection, workspace_id)
     snapshot = capture_workspace_task_baseline(connection, workspace_id, now=now)
@@ -212,6 +260,7 @@ def _create_task_with_baseline_in_transaction(
     )
     try:
         _insert_task(connection, task)
+        _insert_task_stack_hints(connection, task.task_id, normalized_stack_hints)
     except sqlite3.IntegrityError as exc:
         if _working_task(connection, workspace_id) is not None:
             raise TaskConflictError("workspace already has a working task") from exc
@@ -304,6 +353,17 @@ def _insert_task(connection: sqlite3.Connection, task: TaskRecord) -> None:
             task.created_at,
             task.updated_at,
         ),
+    )
+
+
+def _insert_task_stack_hints(
+    connection: sqlite3.Connection,
+    task_id: str,
+    stack_hints: tuple[str, ...],
+) -> None:
+    connection.executemany(
+        "INSERT INTO task_stack_hints(task_id, position, hint) VALUES (?, ?, ?)",
+        ((task_id, position, hint) for position, hint in enumerate(stack_hints)),
     )
 
 

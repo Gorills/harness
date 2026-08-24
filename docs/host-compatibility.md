@@ -32,6 +32,14 @@ When that marker is present in the bridge process, Workspace hint construction i
 
 Automated tests prove command construction, ownership/collision handling, idempotence, error fail-closed behavior, normalized root-hint selection, a real Harness MCP stdio subprocess using the Claude profile, and an installed-wheel root-hint plus fake-Claude registration/unregistration round trip. They do **not** prove that a proprietary Claude Code build discovers the registration, injects `CLAUDE_PROJECT_DIR`, exposes all five tools, or preserves continuity across real host restarts; those items remain unchecked in the real-host acceptance matrix below.
 
+### Implemented skill resolver/projection boundary
+
+The current core skills slice loads Harness-owned canonical skills from `~/.harness/skills/`, with portable `SKILL.md` content separated from strict Harness applicability metadata in `harness.yaml`. Deterministic relevance combines indexed languages/manifests/dependencies, durable Task `stack_hints`, and explicit resolver include/exclude inputs under a bounded visible-skill budget. No proprietary host is trusted to perform that selection.
+
+Projection planning takes explicit host visibility surfaces and chooses a minimal set of native project roots where every active profile sees exactly one generated Harness copy; if the compatibility graph cannot satisfy that invariant, projection fails closed. Reconciliation removes only exact Harness-owned stale projections, refuses user-owned or Git-tracked collisions (including same-name content in another active compatibility root), rechecks filesystem identity before mutation, and maintains generated-path exclusions through `git rev-parse --git-path info/exclude` without changing `.gitignore`. Linked-worktree behavior is covered by automated Git fixtures. Claude Code currently contributes its documented `.claude/skills` project surface; other host adapters and real-host visibility remain later/acceptance work.
+
+Automated tests prove registry parsing, legacy and greenfield relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Claude Code, Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
+
 ### Codex
 
 - MCP config defaults to `~/.codex/config.toml`; trusted projects may use `.codex/config.toml`.

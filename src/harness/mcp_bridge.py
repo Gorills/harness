@@ -75,7 +75,7 @@ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "project_status": frozenset(),
     "project_search": frozenset({"query", "scope", "limit"}),
     "project_context": frozenset({"refs"}),
-    "task_start": frozenset({"title", "task_id", "expected_revision"}),
+    "task_start": frozenset({"title", "stack_hints", "task_id", "expected_revision"}),
     "task_checkpoint": frozenset(
         {
             "task_id",
@@ -415,6 +415,7 @@ def build_mcp_server() -> MCPServer:
     )
     def task_start(
         title: str | None = None,
+        stack_hints: list[str] | None = None,
         task_id: str | None = None,
         expected_revision: StrictInt | None = None,
     ) -> dict[str, Any]:
@@ -422,6 +423,7 @@ def build_mcp_server() -> MCPServer:
             _socket_path(),
             _workspace_hints(),
             title=title,
+            stack_hints=() if stack_hints is None else stack_hints,
             task_id=task_id,
             expected_revision=expected_revision,
         )

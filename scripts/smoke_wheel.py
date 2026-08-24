@@ -179,6 +179,55 @@ def main() -> int:
                 f"installed Claude host adapter produced unexpected root hint: {host_probe.stdout!r}"
             )
 
+        skill_project = workspace / "skill-project"
+        skill_project.mkdir()
+        _run(("git", "init", "-b", "main"), cwd=skill_project, env=isolated_env)
+        skill_registry = workspace / "skill-registry"
+        skill = skill_registry / "fastapi"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "# FastAPI\n\nUse the project conventions.\n", encoding="utf-8"
+        )
+        (skill / "harness.yaml").write_text(
+            "id: fastapi\ntask_hints:\n  - fastapi\n", encoding="utf-8"
+        )
+        skill_probe = _run(
+            (
+                str(python),
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from harness.host_adapters import ClaudeCodeAdapter; "
+                    "from harness.skills import "
+                    "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
+                    "plan_skill_projection,resolve_skills; "
+                    f"root=Path({str(skill_project)!r}); registry=Path({str(skill_registry)!r}); "
+                    "definitions=load_skill_registry(registry); "
+                    "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
+                    "surface=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
+                    "result=apply_skill_projection(plan_skill_projection(root,resolved,(surface,))); "
+                    "target=root/'.claude'/'skills'/'fastapi'; "
+                    "print(len(resolved)); print(result.materialized); "
+                    "print((target/'SKILL.md').is_file()); "
+                    "print((target/'.harness-skill.json').is_file()); "
+                    "print((target/'harness.yaml').exists())"
+                ),
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
+        if skill_probe.stdout.splitlines() != ["1", "1", "True", "True", "False"]:
+            raise RuntimeError(
+                f"installed skill resolver/projection probe was unexpected: {skill_probe.stdout!r}"
+            )
+        ignored = _run(
+            ("git", "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md"),
+            cwd=skill_project,
+            env=isolated_env,
+        )
+        if ignored.returncode != 0:
+            raise RuntimeError("installed skill projection was not ignored by Git")
+
         if os.name != "nt":
             fake_bin = workspace / "fake-claude-bin"
             fake_bin.mkdir()

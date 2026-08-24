@@ -20,6 +20,7 @@ from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
 from harness.storage import connect_database, initialize_database
+from harness.tasks import get_task_stack_hints
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
@@ -135,7 +136,10 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                 "next_step",
                 "schema_version",
             }
-            started = await client.call_tool("task_start", {"title": "MCP continuity"})
+            started = await client.call_tool(
+                "task_start",
+                {"title": "MCP continuity", "stack_hints": [" FastAPI ", "POSTGRES"]},
+            )
             assert started.is_error is False
             assert started.structured_content is not None
             task_id = started.structured_content["task_id"]
@@ -212,6 +216,12 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+    connection = connect_database(database)
+    try:
+        assert get_task_stack_hints(connection, task_id) == ("fastapi", "postgres")
+    finally:
+        connection.close()
 
 
 @pytest.mark.anyio
@@ -333,6 +343,10 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 ]
                 for tool in tools:
                     assert tool["inputSchema"]["additionalProperties"] is False
+                task_start_schema = next(
+                    tool["inputSchema"] for tool in tools if tool["name"] == "task_start"
+                )
+                assert "stack_hints" in task_start_schema["properties"]
                 checkpoint_schema = next(
                     tool["inputSchema"] for tool in tools if tool["name"] == "task_checkpoint"
                 )
