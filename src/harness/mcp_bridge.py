@@ -6,10 +6,23 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any, Literal
 
+import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
-from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult, TextContent
+from mcp.shared.message import SessionMessage
+from mcp_types import (
+    INVALID_PARAMS,
+    INVALID_REQUEST,
+    CallToolResult,
+    ErrorData,
+    InputRequiredResult,
+    JSONRPCError,
+    JSONRPCRequest,
+    JSONRPCResponse,
+    TextContent,
+)
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
@@ -46,6 +59,8 @@ _CONTEXT_MAX_BYTES = 12 * 1024
 _TASK_MAX_BYTES = 4 * 1024
 _CONTEXT_REF_MAX_BYTES = 4096 + len("code:")
 _MCP_WIRE_OVERHEAD_BYTES = 1024
+_MCP_STDIO_FRAME_MAX_BYTES = 12 * 1024
+_MCP_REQUEST_ID_MAX_BYTES = 256
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _TOOL_RESPONSE_MAX_BYTES = {
     "project_status": _STATUS_MAX_BYTES,
@@ -102,7 +117,40 @@ class KnowledgeInput(_StrictInputModel):
 
 
 class HarnessMCPServer(MCPServer):
-    """MCPServer with an explicit fail-closed model-facing argument contract."""
+    """MCPServer with explicit fail-closed model and stdio wire contracts."""
+
+    async def run_stdio_async(self) -> None:
+        """Run official SDK stdio with bounded request identity and response frames."""
+        async with stdio_server() as (read_stream, write_stream):
+            filtered_send, filtered_receive = anyio.create_memory_object_stream[
+                SessionMessage | Exception
+            ](0)
+            bounded_send, bounded_receive = anyio.create_memory_object_stream[SessionMessage](0)
+            rejection_send = bounded_send.clone()
+
+            async def relay_inbound() -> None:
+                async with filtered_send, rejection_send:
+                    async for item in read_stream:
+                        if _has_oversized_request_id(item):
+                            await rejection_send.send(_oversized_request_id_error())
+                            continue
+                        await filtered_send.send(item)
+
+            async def relay_outbound() -> None:
+                async with bounded_receive:
+                    async for item in bounded_receive:
+                        await write_stream.send(_bounded_stdio_message(item))
+
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(relay_inbound)
+                task_group.start_soon(relay_outbound)
+                async with bounded_send:
+                    await self._lowlevel_server.run(
+                        filtered_receive,
+                        bounded_send,
+                        self._lowlevel_server.create_initialization_options(),
+                    )
+                task_group.cancel_scope.cancel()
 
     async def list_tools(self) -> list[MCPTool]:
         tools = await super().list_tools()
@@ -452,6 +500,54 @@ def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:
     return CallToolResult(
         content=[TextContent(type="text", text="Tool response exceeds model exposure budget")],
         is_error=True,
+    )
+
+
+def _has_oversized_request_id(item: SessionMessage | Exception) -> bool:
+    return (
+        isinstance(item, SessionMessage)
+        and isinstance(item.message, JSONRPCRequest)
+        and _request_id_is_oversized(item.message.id)
+    )
+
+
+def _request_id_is_oversized(request_id: str | int) -> bool:
+    encoded_id = json.dumps(request_id, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return len(encoded_id) > _MCP_REQUEST_ID_MAX_BYTES
+
+
+def _oversized_request_id_error() -> SessionMessage:
+    return SessionMessage(
+        JSONRPCError(
+            jsonrpc="2.0",
+            id=None,
+            error=ErrorData(
+                code=INVALID_REQUEST,
+                message="JSON-RPC request id exceeds Harness wire budget",
+            ),
+        )
+    )
+
+
+def _bounded_stdio_message(item: SessionMessage) -> SessionMessage:
+    encoded = item.message.model_dump_json(by_alias=True, exclude_unset=True).encode("utf-8")
+    if len(encoded) + 1 <= _MCP_STDIO_FRAME_MAX_BYTES:
+        return item
+    response_id: str | int | None = None
+    if isinstance(item.message, (JSONRPCResponse, JSONRPCError)):
+        candidate = item.message.id
+        if candidate is not None and not _request_id_is_oversized(candidate):
+            response_id = candidate
+    return SessionMessage(
+        JSONRPCError(
+            jsonrpc="2.0",
+            id=response_id,
+            error=ErrorData(
+                code=INVALID_REQUEST,
+                message="MCP response exceeds Harness stdio wire budget",
+            ),
+        ),
+        metadata=item.metadata,
     )
 
 

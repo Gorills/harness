@@ -9,6 +9,7 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import pytest
 from mcp import Client, StdioServerParameters
@@ -364,6 +365,222 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
     finally:
         process.terminate()
         process.wait(timeout=3)
+
+
+def test_stdio_transport_bounds_client_controlled_envelope_fields() -> None:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "harness.mcp_process"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    stdin = process.stdin
+    stdout = process.stdout
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "wire-review", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+
+    def exchange(request: dict[str, object]) -> tuple[str, dict[str, object]]:
+        stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        stdin.flush()
+        ready, _, _ = select.select([stdout], [], [], 3)
+        assert ready, f"no MCP response for {request['method']}"
+        raw = stdout.readline()
+        assert len(raw.encode("utf-8")) < 12 * 1024
+        return raw, json.loads(raw)
+
+    try:
+        _, oversized_opening = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": "R" * 20_000,
+                "method": "server/discover",
+                "params": {"_meta": meta},
+            }
+        )
+        assert oversized_opening["id"] is None
+        assert "error" in oversized_opening
+
+        _, discovered = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": meta},
+            }
+        )
+        assert discovered["id"] == 1
+
+        oversized_cases: tuple[tuple[dict[str, object], object], ...] = (
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": int("9" * 300),
+                    "method": "server/discover",
+                    "params": {"_meta": meta},
+                },
+                None,
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "X" * 20_000,
+                    "params": {"_meta": meta},
+                },
+                2,
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "server/discover",
+                    "params": {
+                        "_meta": {
+                            **meta,
+                            "io.modelcontextprotocol/protocolVersion": "V" * 20_000,
+                        }
+                    },
+                },
+                3,
+            ),
+            (
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": meta,
+                        "name": "T" * 20_000,
+                        "arguments": {},
+                    },
+                },
+                4,
+            ),
+        )
+        for request, expected_id in oversized_cases:
+            raw, response = exchange(request)
+            assert response["id"] == expected_id
+            assert "error" in response
+            assert "R" * 512 not in raw
+            assert "X" * 512 not in raw
+            assert "V" * 512 not in raw
+            assert "T" * 512 not in raw
+
+        _, listed = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/list",
+                "params": {"_meta": meta},
+            }
+        )
+        assert listed["id"] == 5
+        assert "result" in listed
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+
+
+def test_oversized_request_id_is_rejected_before_task_mutation(tmp_path: Path) -> None:
+    root, database = _repo(tmp_path)
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-m", "harness.mcp_process"],
+        cwd=root,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    stdin = process.stdin
+    stdout = process.stdout
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "mutation-review", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+
+    def exchange(request: dict[str, object]) -> dict[str, object]:
+        stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+        stdin.flush()
+        ready, _, _ = select.select([stdout], [], [], 3)
+        assert ready, f"no MCP response for {request['method']}"
+        raw = stdout.readline()
+        assert len(raw.encode("utf-8")) < 12 * 1024
+        return cast(dict[str, object], json.loads(raw))
+
+    try:
+        discovered = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"_meta": meta},
+            }
+        )
+        assert discovered["id"] == 1
+
+        rejected = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": "M" * 20_000,
+                "method": "tools/call",
+                "params": {
+                    "_meta": meta,
+                    "name": "task_start",
+                    "arguments": {"title": "must not mutate"},
+                },
+            }
+        )
+        assert rejected["id"] is None
+        assert "error" in rejected
+
+        started = exchange(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "_meta": meta,
+                    "name": "task_start",
+                    "arguments": {"title": "only task"},
+                },
+            }
+        )
+        assert started["id"] == 2
+        result = started["result"]
+        assert isinstance(result, dict)
+        assert result["isError"] is False
+        structured = result["structuredContent"]
+        assert isinstance(structured, dict)
+        assert structured["revision"] == 1
+    finally:
+        process.terminate()
+        process.wait(timeout=3)
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
 
 @pytest.mark.anyio
