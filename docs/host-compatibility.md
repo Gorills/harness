@@ -1,6 +1,8 @@
 # Host compatibility baseline
 
-**Checked:** 2026-08-21 against current official host documentation.
+**Baseline checked:** 2026-08-21 against current official host documentation.
+
+**Claude Code MCP evidence re-checked:** 2026-08-24.
 
 This file is evidence for adapter design, not a promise that undocumented host internals remain stable. Re-check official docs when adapter behavior changes.
 
@@ -8,7 +10,7 @@ This file is evidence for adapter design, not a promise that undocumented host i
 
 | Host | Global/user MCP | Project MCP | Project root signal | Project skills | Global/user skills | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude.json` user scope | `.mcp.json` | `CLAUDE_PROJECT_DIR` documented for stdio server | `.claude/skills/` | `~/.claude/skills/` | Reads `CLAUDE.md`, not `AGENTS.md`; use `CLAUDE.md` importing `@AGENTS.md`. |
+| Claude Code | `~/.claude.json` user scope | `.mcp.json` | `CLAUDE_PROJECT_DIR` documented for stdio server | `.claude/skills/` | `~/.claude/skills/` | MCP registration/root adapter implemented; real-host acceptance still required. Reads `CLAUDE.md`, not `AGENTS.md`; use `CLAUDE.md` importing `@AGENTS.md`. |
 | Codex CLI / IDE / ChatGPT desktop local config | `~/.codex/config.toml` | `.codex/config.toml` in trusted project | No universal active-root guarantee established by docs reviewed here; requires acceptance | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | MCP server instructions are used; first 512 chars should be self-contained. |
 | Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | `${workspaceFolder}` documented for project config; global active-root semantics require acceptance | `.agents/skills/`, `.cursor/skills/`, plus compatibility roots | `~/.agents/skills/`, `~/.cursor/skills/`, plus compatibility roots | Cursor also scans Claude/Codex skill directories: duplication risk. |
 | Antigravity | `~/.gemini/config/mcp_config.json` | `.agents/mcp_config.json` | Needs real-host acceptance for global stdio current-root behavior | `.agents/skills/` | IDE docs: `~/.gemini/config/skills/`; Antigravity CLI migration docs: `~/.gemini/antigravity-cli/skills/` | Model skills follow progressive disclosure. Keep IDE/CLI skill profile differences explicit. |
@@ -21,6 +23,14 @@ This file is evidence for adapter design, not a promise that undocumented host i
 - For local stdio MCP servers Claude Code sets `CLAUDE_PROJECT_DIR` to the project root.
 - Project/personal skills use `.claude/skills` and `~/.claude/skills`.
 - Claude Code reads `CLAUDE.md`, not `AGENTS.md`, and explicitly documents importing `@AGENTS.md` to share instructions.
+
+### Implemented Claude Code adapter boundary
+
+The first adapter slice uses the official `claude mcp` CLI rather than editing Claude configuration files directly. Harness registers one user-scope stdio server named `harness` with a Harness-owned `HARNESS_HOST_PROFILE=claude-code` environment marker and launches the installed Python interpreter with `-m harness.mcp_process`. Registration is idempotent for the exact owned entry, replaces only a stale entry carrying the same Harness ownership marker, and fails on a same-name foreign entry instead of overwriting it. Removal likewise requires the Harness marker before invoking the host CLI.
+
+When that marker is present in the bridge process, Workspace hint construction is adapter-owned: `CLAUDE_PROJECT_DIR` is required and becomes an exact `ROOT` hint. A generic `HARNESS_WORKSPACE_ROOT` value or process cwd cannot override that stronger documented host signal. Without a Harness host-profile marker, the pre-adapter generic behavior remains available for manual/development launches.
+
+Automated tests prove command construction, ownership/collision handling, idempotence, error fail-closed behavior, normalized root-hint selection, a real Harness MCP stdio subprocess using the Claude profile, and an installed-wheel root-hint plus fake-Claude registration/unregistration round trip. They do **not** prove that a proprietary Claude Code build discovers the registration, injects `CLAUDE_PROJECT_DIR`, exposes all five tools, or preserves continuity across real host restarts; those items remain unchecked in the real-host acceptance matrix below.
 
 ### Codex
 

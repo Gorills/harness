@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +28,7 @@ from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from harness.daemon_autostart import ensure_canonical_daemon
+from harness.host_adapters import workspace_hints_from_environment
 from harness.ipc import (
     IpcRemoteError,
     TaskCheckpointResult,
@@ -45,7 +45,7 @@ from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKin
 from harness.runtime_paths import default_runtime_paths
 from harness.search import IndexedPathSearchScope
 from harness.tasks import TaskState, TaskWaitReason
-from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
+from harness.workspace_resolution import WorkspaceHint
 
 _SERVER_INSTRUCTIONS = (
     "Use project_status before broad repository exploration. Use project_search to locate likely "
@@ -64,7 +64,6 @@ _MCP_WIRE_OVERHEAD_BYTES = 1024
 _MCP_STDIO_FRAME_MAX_BYTES = 12 * 1024
 _MCP_REQUEST_ID_MAX_BYTES = 256
 _MCP_EOF_DRAIN_TIMEOUT_SECONDS = 65.0
-_WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _TOOL_RESPONSE_MAX_BYTES = {
     "project_status": _STATUS_MAX_BYTES,
     "project_search": _SEARCH_MAX_BYTES,
@@ -477,23 +476,7 @@ def _socket_path() -> Path:
 
 
 def _workspace_hints() -> tuple[WorkspaceHint, ...]:
-    configured = os.environ.get(_WORKSPACE_ROOT_ENV)
-    path = Path(configured) if configured else Path.cwd()
-    try:
-        resolved = path.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"active Workspace hint cannot be resolved: {path}: {exc}") from exc
-    if not resolved.is_dir():
-        raise ValueError(f"active Workspace hint is not a directory: {resolved}")
-    return (
-        WorkspaceHint(
-            path=resolved,
-            source="mcp-configured-root" if configured else "mcp-process-cwd",
-            match_mode=(
-                WorkspaceHintMatchMode.ROOT if configured else WorkspaceHintMatchMode.LOCATION
-            ),
-        ),
-    )
+    return workspace_hints_from_environment()
 
 
 def _knowledge_drafts(items: list[KnowledgeInput]) -> tuple[KnowledgeDraft, ...]:
