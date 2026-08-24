@@ -111,9 +111,9 @@ With [direnv](https://direnv.net/), `.envrc` sources the same file. Run `direnv 
 
 Those flags still bypass default path selection. Isolated development normally does not need them: the XDG overrides already separate state from a system install.
 
-## MCP (not implemented yet)
+## MCP
 
-When `harness mcp` exists, point host config at this wrapper so the host uses checkout code and isolated paths:
+For development, point host config at this wrapper so the host uses checkout code and isolated paths:
 
 ```json
 {
@@ -121,3 +121,7 @@ When `harness mcp` exists, point host config at this wrapper so the host uses ch
   "args": ["harness", "mcp"]
 }
 ```
+
+Set `HARNESS_WORKSPACE_ROOT` to the exact registered Workspace root in host configurations where
+the host does not provide a separately proven current-directory contract. The bridge uses the
+official MCP v2 SDK and delegates durable state to the isolated daemon under `.harness/`.

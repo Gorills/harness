@@ -29,6 +29,9 @@ from harness.ipc import (
     WorkspaceSearchHit,
     WorkspaceSearchResult,
     WorkspaceStatusResult,
+    WorkspaceTaskCheckpointSummary,
+    WorkspaceTaskStatusResult,
+    WorkspaceTaskSummary,
     receive_request,
     send_error_response,
     send_status_response,
@@ -37,6 +40,7 @@ from harness.ipc import (
     send_workspace_scan_response,
     send_workspace_search_response,
     send_workspace_status_response,
+    send_workspace_task_status_response,
 )
 from harness.knowledge import KnowledgeError, KnowledgeValidationError
 from harness.registry import (
@@ -47,10 +51,13 @@ from harness.registry import (
     list_workspaces,
     register_workspace_for_scan,
 )
-from harness.search import SearchError, search_indexed_paths
+from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.task_baseline import TaskBaselineError
-from harness.task_checkpoints import TaskCheckpointMechanicalError
+from harness.task_checkpoints import (
+    TaskCheckpointMechanicalError,
+    get_latest_task_checkpoint_status,
+)
 from harness.task_workflow import (
     task_checkpoint as domain_task_checkpoint,
 )
@@ -62,11 +69,13 @@ from harness.task_workflow import (
 )
 from harness.tasks import (
     TaskConflictError,
+    TaskError,
     TaskNotFoundError,
     TaskRevisionConflictError,
     TaskTransitionError,
     TaskValidationError,
     TaskWorkspaceConflictError,
+    get_relevant_task,
 )
 from harness.workspace_resolution import (
     WorkspaceCandidate,
@@ -172,11 +181,84 @@ def read_workspace_status(
     )
 
 
+def read_workspace_task_status(
+    connection: sqlite3.Connection,
+    hints: Sequence[WorkspaceHint],
+) -> WorkspaceTaskStatusResult:
+    """Read the current working or most relevant waiting Task for one Workspace."""
+    registered = list_workspaces(connection)
+    resolution = WorkspaceResolver(
+        [
+            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
+            for workspace in registered
+        ]
+    ).resolve(hints)
+    workspace = get_workspace(connection, resolution.workspace_id)
+    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+    if (
+        runtime_identity.layout.workspace_root != workspace.workspace_root
+        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
+    ):
+        raise WorkspaceResolutionError(
+            f"registered workspace Git identity changed: {workspace.workspace_root}"
+        )
+
+    connection.execute("BEGIN")
+    try:
+        current_workspace = get_workspace(connection, workspace.workspace_id)
+        if current_workspace != workspace:
+            raise WorkspaceResolutionError("workspace registry identity changed during Task status")
+        task = get_relevant_task(connection, workspace.workspace_id)
+        checkpoint = (
+            get_latest_task_checkpoint_status(connection, task.task_id)
+            if task is not None
+            else None
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+        raise WorkspaceResolutionError("workspace Git identity changed during Task status")
+
+    task_summary = (
+        None
+        if task is None
+        else WorkspaceTaskSummary(
+            task_id=task.task_id,
+            title=task.title,
+            state=task.state,
+            wait_reason=task.wait_reason,
+            revision=task.revision,
+        )
+    )
+    checkpoint_summary = (
+        None
+        if checkpoint is None
+        else WorkspaceTaskCheckpointSummary(
+            checkpoint_id=checkpoint.checkpoint_id,
+            task_revision=checkpoint.task_revision,
+            state=checkpoint.state,
+            wait_reason=checkpoint.wait_reason,
+            next_step=checkpoint.next_step,
+        )
+    )
+    return WorkspaceTaskStatusResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_id=workspace.workspace_id,
+        task=task_summary,
+        last_checkpoint=checkpoint_summary,
+    )
+
+
 def read_workspace_search(
     connection: sqlite3.Connection,
     hints: Sequence[WorkspaceHint],
     query: str,
     limit: int,
+    scope: IndexedPathSearchScope = IndexedPathSearchScope.ALL,
 ) -> WorkspaceSearchResult:
     """Resolve one registered Workspace and search its current Structural Index snapshot."""
     registered = list_workspaces(connection)
@@ -208,6 +290,7 @@ def read_workspace_search(
             workspace.workspace_id,
             query,
             limit=limit,
+            scope=scope,
         )
         connection.execute("COMMIT")
     except Exception:
@@ -404,10 +487,14 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
         return
+    if request.method == "workspace_task_status":
+        _serve_workspace_task_status(client, database, request.request_id, request.workspace_hints)
+        return
     if (
         request.method == "workspace_search"
         and request.search_query is not None
         and request.search_limit is not None
+        and request.search_scope is not None
     ):
         _serve_workspace_search(
             client,
@@ -416,6 +503,7 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
             request.workspace_hints,
             request.search_query,
             request.search_limit,
+            request.search_scope,
         )
         return
     if request.method == "task_start" and request.task_start is not None:
@@ -504,6 +592,65 @@ def _serve_workspace_status(
         )
 
 
+def _serve_workspace_task_status(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    hints: Sequence[WorkspaceHint],
+) -> None:
+    try:
+        status = read_workspace_task_status(database, hints)
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message="daemon could not read Workspace registry state",
+        )
+        return
+    except TaskError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="task_error",
+            message="daemon could not read Task status",
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not read Task status",
+        )
+        return
+    try:
+        send_workspace_task_status_response(client, request_id, status)
+    except IpcMessageTooLargeError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="response_too_large",
+            message="Workspace Task status exceeds IPC byte limit",
+        )
+
+
 def _serve_workspace_search(
     client: socket.socket,
     database: sqlite3.Connection,
@@ -511,9 +658,10 @@ def _serve_workspace_search(
     hints: Sequence[WorkspaceHint],
     query: str,
     limit: int,
+    scope: IndexedPathSearchScope,
 ) -> None:
     try:
-        result = read_workspace_search(database, hints, query, limit)
+        result = read_workspace_search(database, hints, query, limit, scope)
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client,

@@ -2,24 +2,31 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
 from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.context import Context
+from mcp.shared.exceptions import MCPError
+from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult
+from mcp_types import Tool as MCPTool
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.ipc import (
     TaskCheckpointResult,
     TaskStartResult,
+    WorkspaceTaskSummary,
     request_task_checkpoint,
     request_task_start,
     request_workspace_search,
     request_workspace_status,
+    request_workspace_task_status,
 )
 from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
 from harness.runtime_paths import default_runtime_paths
+from harness.search import IndexedPathSearchScope
 from harness.tasks import TaskState, TaskWaitReason
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -36,18 +43,37 @@ _SEARCH_MAX_BYTES = 12 * 1024
 _CONTEXT_MAX_BYTES = 12 * 1024
 _TASK_MAX_BYTES = 4 * 1024
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+    "project_status": frozenset(),
+    "project_search": frozenset({"query", "scope", "limit"}),
+    "project_context": frozenset({"refs"}),
+    "task_start": frozenset({"title", "task_id", "expected_revision"}),
+    "task_checkpoint": frozenset(
+        {
+            "task_id",
+            "expected_revision",
+            "state",
+            "summary",
+            "next_step",
+            "wait_reason",
+            "knowledge",
+        }
+    ),
+}
 
 
-@dataclass(frozen=True, slots=True)
-class KnowledgeAnchorInput:
+class _StrictInputModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class KnowledgeAnchorInput(_StrictInputModel):
     """Strict model-facing Knowledge anchor input."""
 
     path: str
     symbol: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class KnowledgeInput:
+class KnowledgeInput(_StrictInputModel):
     """Strict model-facing Knowledge card input."""
 
     kind: Literal[
@@ -61,12 +87,40 @@ class KnowledgeInput:
     ]
     title: str
     body: str
-    anchors: list[KnowledgeAnchorInput] = field(default_factory=list)
+    anchors: list[KnowledgeAnchorInput] = Field(default_factory=list)
+
+
+class HarnessMCPServer(MCPServer):
+    """MCPServer with an explicit fail-closed model-facing argument contract."""
+
+    async def list_tools(self) -> list[MCPTool]:
+        tools = await super().list_tools()
+        for tool in tools:
+            if tool.name in _TOOL_ARGUMENTS:
+                tool.input_schema["additionalProperties"] = False
+        return tools
+
+    async def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[Any, Any] | None = None,
+    ) -> CallToolResult | InputRequiredResult:
+        allowed = _TOOL_ARGUMENTS.get(name)
+        if allowed is not None:
+            unknown = sorted(set(arguments).difference(allowed))
+            if unknown:
+                raise MCPError(
+                    code=INVALID_PARAMS,
+                    message="Unknown tool argument fields",
+                    data={"tool": name, "unknown_field_count": len(unknown)},
+                )
+        return await super().call_tool(name, arguments, context)
 
 
 def build_mcp_server() -> MCPServer:
     """Build the production stdio MCP adapter without owning domain state."""
-    server = MCPServer(
+    server = HarnessMCPServer(
         "Harness",
         description="Local-first project intelligence and durable task continuity.",
         instructions=_SERVER_INSTRUCTIONS,
@@ -75,10 +129,30 @@ def build_mcp_server() -> MCPServer:
     )
 
     @server.tool(
-        description="Return compact current mechanical state for the active Harness Workspace."
+        description="Return compact current Workspace, Git, index, and durable Task continuity state."
     )
     def project_status() -> dict[str, Any]:
-        status = request_workspace_status(_socket_path(), _workspace_hints())
+        socket_path = _socket_path()
+        hints = _workspace_hints()
+        status = request_workspace_status(socket_path, hints)
+        task_status = request_workspace_task_status(socket_path, hints)
+        if (
+            task_status.workspace_id != status.workspace_id
+            or task_status.schema_version != status.schema_version
+        ):
+            raise ValueError("project_status Workspace changed during bounded status read")
+        selected_task = task_status.task
+        current_task = (
+            _status_task_payload(selected_task)
+            if selected_task is not None and selected_task.state is TaskState.WORKING
+            else None
+        )
+        relevant_waiting_task = (
+            _status_task_payload(selected_task)
+            if selected_task is not None and selected_task.state is TaskState.WAITING
+            else None
+        )
+        last_checkpoint = task_status.last_checkpoint
         return _bounded(
             {
                 "project_id": status.project_id,
@@ -91,6 +165,23 @@ def build_mcp_server() -> MCPServer:
                     "dirty_path_count": status.dirty_path_count,
                 },
                 "index": {"indexed_file_count": status.indexed_file_count},
+                "current_task": current_task,
+                "relevant_waiting_task": relevant_waiting_task,
+                "last_checkpoint": (
+                    None
+                    if last_checkpoint is None
+                    else {
+                        "checkpoint_id": last_checkpoint.checkpoint_id,
+                        "task_revision": last_checkpoint.task_revision,
+                        "state": last_checkpoint.state.value,
+                        "wait_reason": (
+                            last_checkpoint.wait_reason.value
+                            if last_checkpoint.wait_reason is not None
+                            else None
+                        ),
+                    }
+                ),
+                "next_step": last_checkpoint.next_step if last_checkpoint is not None else None,
                 "schema_version": status.schema_version,
             },
             _STATUS_MAX_BYTES,
@@ -106,7 +197,7 @@ def build_mcp_server() -> MCPServer:
     def project_search(
         query: str,
         scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
-        limit: int = _SEARCH_DEFAULT_LIMIT,
+        limit: StrictInt = _SEARCH_DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         if not 1 <= limit <= _SEARCH_HARD_LIMIT:
             raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
@@ -121,11 +212,15 @@ def build_mcp_server() -> MCPServer:
                 _SEARCH_MAX_BYTES,
                 "project_search response exceeds model exposure budget",
             )
-        result = request_workspace_search(_socket_path(), _workspace_hints(), query, limit=limit)
+        result = request_workspace_search(
+            _socket_path(),
+            _workspace_hints(),
+            query,
+            limit=limit,
+            scope=IndexedPathSearchScope(scope),
+        )
         hits = []
         for hit in result.results[:limit]:
-            if scope == "docs" and not _looks_like_document(hit.relative_path):
-                continue
             hits.append(
                 {
                     "ref": f"code:{hit.relative_path}",
@@ -193,7 +288,7 @@ def build_mcp_server() -> MCPServer:
     def task_start(
         title: str | None = None,
         task_id: str | None = None,
-        expected_revision: int | None = None,
+        expected_revision: StrictInt | None = None,
     ) -> dict[str, Any]:
         result = request_task_start(
             _socket_path(),
@@ -214,7 +309,7 @@ def build_mcp_server() -> MCPServer:
     )
     def task_checkpoint(
         task_id: str,
-        expected_revision: int,
+        expected_revision: StrictInt,
         state: Literal["working", "waiting", "completed"],
         summary: str,
         next_step: str | None = None,
@@ -297,6 +392,16 @@ def _task_start_payload(result: TaskStartResult) -> dict[str, Any]:
     }
 
 
+def _status_task_payload(task: WorkspaceTaskSummary) -> dict[str, Any]:
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "state": task.state.value,
+        "wait_reason": task.wait_reason.value if task.wait_reason is not None else None,
+        "revision": task.revision,
+    }
+
+
 def _task_checkpoint_payload(result: TaskCheckpointResult) -> dict[str, Any]:
     return {
         "workspace_id": result.workspace_id,
@@ -314,11 +419,6 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
     if len(encoded) > limit:
         raise ValueError(message)
     return payload
-
-
-def _looks_like_document(path: str) -> bool:
-    lowered = path.casefold()
-    return lowered.endswith((".md", ".mdx", ".rst", ".txt")) or "/docs/" in f"/{lowered}"
 
 
 __all__ = ["build_mcp_server", "run_mcp_server"]

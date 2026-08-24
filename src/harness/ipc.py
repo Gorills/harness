@@ -22,6 +22,7 @@ from harness.search import (
     DEFAULT_SEARCH_LIMIT,
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_QUERY_BYTES,
+    IndexedPathSearchScope,
     SearchMatchKind,
 )
 from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_CHECKPOINT_SUMMARY_BYTES
@@ -91,6 +92,38 @@ class WorkspaceStatusResult:
     branch: str | None
     dirty_path_count: int
     indexed_file_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceTaskSummary:
+    """Bounded Task identity/state exposed by the daemon for status continuity."""
+
+    task_id: str
+    title: str
+    state: TaskState
+    wait_reason: TaskWaitReason | None
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceTaskCheckpointSummary:
+    """Bounded latest-checkpoint identity/state exposed for status continuity."""
+
+    checkpoint_id: str
+    task_revision: int
+    state: TaskState
+    wait_reason: TaskWaitReason | None
+    next_step: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceTaskStatusResult:
+    """Current/relevant Task status for one resolved Workspace."""
+
+    schema_version: int
+    workspace_id: str
+    task: WorkspaceTaskSummary | None
+    last_checkpoint: WorkspaceTaskCheckpointSummary | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +224,7 @@ class IpcRequest:
     scan_path: Path | None = None
     search_query: str | None = None
     search_limit: int | None = None
+    search_scope: IndexedPathSearchScope | None = None
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
 
@@ -231,6 +265,27 @@ def request_workspace_status(
     return _workspace_status_from_response(response, expected_request_id=request_id)
 
 
+def request_workspace_task_status(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> WorkspaceTaskStatusResult:
+    """Request bounded current/relevant Task status for one resolved Workspace."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "workspace_task_status",
+            "params": {"hints": _workspace_hints_to_wire(hints)},
+        },
+        timeout=timeout,
+    )
+    return _workspace_task_status_from_response(response, expected_request_id=request_id)
+
+
 def request_workspace_scan(
     socket_path: Path,
     path: Path,
@@ -261,22 +316,28 @@ def request_workspace_search(
     *,
     limit: int = DEFAULT_SEARCH_LIMIT,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    scope: IndexedPathSearchScope | None = None,
 ) -> WorkspaceSearchResult:
     """Request bounded deterministic indexed-path search for one registered Workspace."""
     _validate_search_query(query)
     _validate_search_limit(limit)
     request_id = uuid4().hex
+    params: dict[str, object] = {
+        "hints": _workspace_hints_to_wire(hints),
+        "query": query,
+        "limit": limit,
+    }
+    if scope is not None:
+        if not isinstance(scope, IndexedPathSearchScope):
+            raise IpcProtocolError("workspace search scope is unsupported")
+        params["scope"] = scope.value
     response = _request_response(
         socket_path,
         {
             "version": PROTOCOL_VERSION,
             "request_id": request_id,
             "method": "workspace_search",
-            "params": {
-                "hints": _workspace_hints_to_wire(hints),
-                "query": query,
-                "limit": limit,
-            },
+            "params": params,
         },
         timeout=timeout,
     )
@@ -384,6 +445,17 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             workspace_hints=_workspace_hints_from_params(payload["params"]),
         )
 
+    if method == "workspace_task_status":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError(
+                "workspace task status request fields do not match the IPC schema"
+            )
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            workspace_hints=_workspace_hints_from_params(payload["params"]),
+        )
+
     if method == "scan_workspace":
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace scan request fields do not match the IPC schema")
@@ -396,13 +468,14 @@ def receive_request(peer: socket.socket) -> IpcRequest:
     if method == "workspace_search":
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace search request fields do not match the IPC schema")
-        hints, query, limit = _workspace_search_from_params(payload["params"])
+        hints, query, limit, scope = _workspace_search_from_params(payload["params"])
         return IpcRequest(
             request_id=request_id,
             method=method,
             workspace_hints=hints,
             search_query=query,
             search_limit=limit,
+            search_scope=scope,
         )
 
     if method == "task_start":
@@ -460,6 +533,57 @@ def send_workspace_status_response(
                     "branch": status.branch,
                     "dirty_path_count": status.dirty_path_count,
                     "indexed_file_count": status.indexed_file_count,
+                },
+            }
+        )
+    )
+
+
+def send_workspace_task_status_response(
+    peer: socket.socket,
+    request_id: str,
+    status: WorkspaceTaskStatusResult,
+) -> None:
+    """Send the exact bounded current/relevant Task status contract."""
+    task = status.task
+    checkpoint = status.last_checkpoint
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": status.schema_version,
+                    "workspace_id": status.workspace_id,
+                    "task": (
+                        None
+                        if task is None
+                        else {
+                            "task_id": task.task_id,
+                            "title": task.title,
+                            "state": task.state.value,
+                            "wait_reason": (
+                                task.wait_reason.value if task.wait_reason is not None else None
+                            ),
+                            "revision": task.revision,
+                        }
+                    ),
+                    "last_checkpoint": (
+                        None
+                        if checkpoint is None
+                        else {
+                            "checkpoint_id": checkpoint.checkpoint_id,
+                            "task_revision": checkpoint.task_revision,
+                            "state": checkpoint.state.value,
+                            "wait_reason": (
+                                checkpoint.wait_reason.value
+                                if checkpoint.wait_reason is not None
+                                else None
+                            ),
+                            "next_step": checkpoint.next_step,
+                        }
+                    ),
                 },
             }
         )
@@ -676,15 +800,25 @@ def _workspace_hints_from_params(value: object) -> tuple[WorkspaceHint, ...]:
 
 def _workspace_search_from_params(
     value: object,
-) -> tuple[tuple[WorkspaceHint, ...], str, int]:
-    if not isinstance(value, dict) or set(value) != {"hints", "query", "limit"}:
+) -> tuple[tuple[WorkspaceHint, ...], str, int, IndexedPathSearchScope]:
+    if not isinstance(value, dict) or set(value) not in (
+        {"hints", "query", "limit"},
+        {"hints", "query", "limit", "scope"},
+    ):
         raise IpcProtocolError("workspace search params do not match the IPC schema")
     hints = _workspace_hints_from_params({"hints": value["hints"]})
     query = value["query"]
     limit = value["limit"]
     _validate_search_query(query)
     _validate_search_limit(limit)
-    return hints, cast(str, query), cast(int, limit)
+    raw_scope = value.get("scope", IndexedPathSearchScope.ALL.value)
+    if not isinstance(raw_scope, str):
+        raise IpcProtocolError("workspace search scope must be text")
+    try:
+        scope = IndexedPathSearchScope(raw_scope)
+    except ValueError as exc:
+        raise IpcProtocolError("workspace search scope is unsupported") from exc
+    return hints, cast(str, query), cast(int, limit), scope
 
 
 def _task_start_params_to_wire(
@@ -1120,6 +1254,96 @@ def _workspace_status_from_response(
         dirty_path_count=dirty_path_count,
         indexed_file_count=indexed_file_count,
     )
+
+
+def _workspace_task_status_from_response(
+    response: dict[str, Any],
+    *,
+    expected_request_id: str,
+) -> WorkspaceTaskStatusResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    if set(result) != {"schema_version", "workspace_id", "task", "last_checkpoint"}:
+        raise IpcProtocolError("daemon workspace task status result does not match the IPC schema")
+    schema_version = result["schema_version"]
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version <= 0
+    ):
+        raise IpcProtocolError("daemon workspace task status schema version has invalid type")
+    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+
+    raw_task = result["task"]
+    task: WorkspaceTaskSummary | None
+    if raw_task is None:
+        task = None
+    else:
+        if not isinstance(raw_task, dict) or set(raw_task) != {
+            "task_id",
+            "title",
+            "state",
+            "wait_reason",
+            "revision",
+        }:
+            raise IpcProtocolError(
+                "daemon workspace task status task does not match the IPC schema"
+            )
+        task_id = _bounded_response_string(raw_task["task_id"], "task_id", _TASK_ID_MAX_LENGTH)
+        title = _bounded_response_string(raw_task["title"], "title", MAX_TASK_TITLE_BYTES)
+        revision = raw_task["revision"]
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+            raise IpcProtocolError("daemon workspace task status task has invalid revision")
+        state, wait_reason = _task_state_from_response(raw_task["state"], raw_task["wait_reason"])
+        if state not in {TaskState.WORKING, TaskState.WAITING}:
+            raise IpcProtocolError(
+                "daemon workspace task status returned an irrelevant terminal Task"
+            )
+        task = WorkspaceTaskSummary(task_id, title, state, wait_reason, revision)
+
+    raw_checkpoint = result["last_checkpoint"]
+    checkpoint: WorkspaceTaskCheckpointSummary | None
+    if raw_checkpoint is None:
+        checkpoint = None
+    else:
+        if task is None:
+            raise IpcProtocolError("daemon workspace task status checkpoint has no Task")
+        if not isinstance(raw_checkpoint, dict) or set(raw_checkpoint) != {
+            "checkpoint_id",
+            "task_revision",
+            "state",
+            "wait_reason",
+            "next_step",
+        }:
+            raise IpcProtocolError(
+                "daemon workspace task status checkpoint does not match the IPC schema"
+            )
+        checkpoint_id = _bounded_response_string(
+            raw_checkpoint["checkpoint_id"], "checkpoint_id", 128
+        )
+        task_revision = raw_checkpoint["task_revision"]
+        if (
+            isinstance(task_revision, bool)
+            or not isinstance(task_revision, int)
+            or task_revision <= 0
+            or task_revision > task.revision
+        ):
+            raise IpcProtocolError("daemon workspace task status checkpoint has invalid revision")
+        state, wait_reason = _task_state_from_response(
+            raw_checkpoint["state"], raw_checkpoint["wait_reason"]
+        )
+        next_step = raw_checkpoint["next_step"]
+        if next_step is not None:
+            next_step = _bounded_response_string(
+                next_step, "next_step", MAX_CHECKPOINT_NEXT_STEP_BYTES
+            )
+        checkpoint = WorkspaceTaskCheckpointSummary(
+            checkpoint_id,
+            task_revision,
+            state,
+            wait_reason,
+            cast(str | None, next_step),
+        )
+    return WorkspaceTaskStatusResult(schema_version, workspace_id, task, checkpoint)
 
 
 def _workspace_scan_from_response(
