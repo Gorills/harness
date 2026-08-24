@@ -965,6 +965,13 @@ def _commit_projection_changes(
     for item in prepared:
         relative_parent = PurePosixPath(item.target.parent.relative_to(workspace_root).as_posix())
         _require_projection_parents_safe(workspace_root, relative_parent)
+        if item.replacement is None:
+            marker = _read_projection_marker(item.target)
+            if marker is None or marker.get("skill_id") != item.target.name:
+                raise SkillProjectionCollisionError(
+                    "stale Harness skill projection changed ownership before mutation: "
+                    f"{item.target.relative_to(workspace_root)}"
+                )
         current_state = _projection_state_sha256(item.target)
         if current_state != item.expected_state_sha256:
             raise SkillProjectionCollisionError(
