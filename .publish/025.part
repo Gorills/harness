@@ -1,0 +1,14 @@
++        assert status.task.revision == working.revision == 2
++        assert status.last_checkpoint is not None
++        assert status.last_checkpoint.checkpoint_id == working.checkpoint_id
++        assert status.last_checkpoint.task_revision == 2
++        assert status.last_checkpoint.next_step == "Continue from the persisted checkpoint"
++        raw_status = _raw_request(
++            socket_path,
++            {
++                "version": PROTOCOL_VERSION,
++                "request_id": "task-continuity-status",
++                "method": "workspace_task_status",
++                "params": {
++                    "hints": [
++                        {

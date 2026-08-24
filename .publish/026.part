@@ -1,0 +1,15 @@
++                            "path": str(root.resolve()),
++                            "source": "explicit-root",
++                            "match_mode": "root",
++                        }
++                    ]
++                },
++            },
++        )
++        raw_result = raw_status["result"]
++        assert isinstance(raw_result, dict)
++        assert set(raw_result) == {"schema_version", "workspace_id", "task", "last_checkpoint"}
++        assert "First checkpoint" not in json.dumps(raw_status, sort_keys=True)
++        for forbidden in ("summary", "changed_paths", "baseline_head", "knowledge_ids"):
++            assert forbidden not in json.dumps(raw_status, sort_keys=True)
++

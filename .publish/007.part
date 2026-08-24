@@ -1,0 +1,59 @@
+     """Build the production stdio MCP adapter without owning domain state."""
+-    server = MCPServer(
++    server = HarnessMCPServer(
+         "Harness",
+         description="Local-first project intelligence and durable task continuity.",
+         instructions=_SERVER_INSTRUCTIONS,
+@@ -75,10 +129,30 @@ def build_mcp_server() -> MCPServer:
+     )
+ 
+     @server.tool(
+-        description="Return compact current mechanical state for the active Harness Workspace."
++        description="Return compact current Workspace, Git, index, and durable Task continuity state."
+     )
+     def project_status() -> dict[str, Any]:
+-        status = request_workspace_status(_socket_path(), _workspace_hints())
++        socket_path = _socket_path()
++        hints = _workspace_hints()
++        status = request_workspace_status(socket_path, hints)
++        task_status = request_workspace_task_status(socket_path, hints)
++        if (
++            task_status.workspace_id != status.workspace_id
++            or task_status.schema_version != status.schema_version
++        ):
++            raise ValueError("project_status Workspace changed during bounded status read")
++        selected_task = task_status.task
++        current_task = (
++            _status_task_payload(selected_task)
++            if selected_task is not None and selected_task.state is TaskState.WORKING
++            else None
++        )
++        relevant_waiting_task = (
++            _status_task_payload(selected_task)
++            if selected_task is not None and selected_task.state is TaskState.WAITING
++            else None
++        )
++        last_checkpoint = task_status.last_checkpoint
+         return _bounded(
+             {
+                 "project_id": status.project_id,
+@@ -91,6 +165,23 @@ def build_mcp_server() -> MCPServer:
+                     "dirty_path_count": status.dirty_path_count,
+                 },
+                 "index": {"indexed_file_count": status.indexed_file_count},
++                "current_task": current_task,
++                "relevant_waiting_task": relevant_waiting_task,
++                "last_checkpoint": (
++                    None
++                    if last_checkpoint is None
++                    else {
++                        "checkpoint_id": last_checkpoint.checkpoint_id,
++                        "task_revision": last_checkpoint.task_revision,
++                        "state": last_checkpoint.state.value,
++                        "wait_reason": (
++                            last_checkpoint.wait_reason.value
++                            if last_checkpoint.wait_reason is not None
++                            else None
++                        ),
++                    }
++                ),

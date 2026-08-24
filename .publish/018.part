@@ -1,0 +1,29 @@
++            assert code.structured_content is not None
++            assert all(
++                not item["path"].endswith(".md") for item in code.structured_content["results"]
++            )
+     finally:
+         stop.set()
+         executor.shutdown(wait=True)
+@@ -187,9 +326,84 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
+                     "task_start",
+                     "task_checkpoint",
+                 ]
++                for tool in tools:
++                    assert tool["inputSchema"]["additionalProperties"] is False
++                checkpoint_schema = next(
++                    tool["inputSchema"] for tool in tools if tool["name"] == "task_checkpoint"
++                )
++                assert checkpoint_schema["$defs"]["KnowledgeInput"]["additionalProperties"] is False
++                assert (
++                    checkpoint_schema["$defs"]["KnowledgeAnchorInput"]["additionalProperties"]
++                    is False
++                )
+                 serialized = json.dumps(tools, sort_keys=True)
+                 for forbidden in ("content_sha256", "baseline_head", "source_checkpoint_id"):
+                     assert forbidden not in serialized
+     finally:
+         process.terminate()
+         process.wait(timeout=3)
++
++

@@ -1,0 +1,68 @@
+     task_id: str,
+diff --git a/src/harness/tasks.py b/src/harness/tasks.py
+index 792144f..4929d8a 100644
+--- a/src/harness/tasks.py
++++ b/src/harness/tasks.py
+@@ -142,6 +142,25 @@ def get_working_task(
+     return _working_task(connection, workspace_id)
+ 
+ 
++def get_relevant_task(
++    connection: sqlite3.Connection,
++    workspace_id: str,
++) -> TaskRecord | None:
++    """Return the current working Task, or the most recently updated waiting Task."""
++    get_workspace(connection, workspace_id)
++    row = connection.execute(
++        """
++        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
++        FROM tasks
++        WHERE workspace_id = ? AND state IN ('working', 'waiting')
++        ORDER BY CASE state WHEN 'working' THEN 0 ELSE 1 END, updated_at DESC, id DESC
++        LIMIT 1
++        """,
++        (workspace_id,),
++    ).fetchone()
++    return None if row is None else _task_from_row(row)
++
++
+ def transition_task_state(
+     connection: sqlite3.Connection,
+     task_id: str,
+diff --git a/tests/test_mcp_bridge.py b/tests/test_mcp_bridge.py
+index 7ef6447..d5d5fef 100644
+--- a/tests/test_mcp_bridge.py
++++ b/tests/test_mcp_bridge.py
+@@ -13,6 +13,7 @@ from threading import Event
+ import pytest
+ from mcp import Client, StdioServerParameters
+ from mcp.client.stdio import stdio_client
++from mcp.shared.exceptions import MCPError
+ 
+ from harness.daemon import serve_daemon
+ from harness.index import scan_workspace
+@@ -106,6 +107,13 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
+             assert len(results) <= 5
+             assert results[0]["ref"] == "code:src/token_service.py"
+             assert "TOKEN = 1" not in str(searched.structured_content)
++            with pytest.raises(MCPError, match="Unknown tool argument fields"):
++                await client.call_tool("project_status", {"unexpected": True})
++            with pytest.raises(MCPError, match="Unknown tool argument fields"):
++                await client.call_tool(
++                    "task_start", {"taskID": "typo-must-not-be-ignored", "title": "Unsafe"}
++                )
++
+             status = await client.call_tool("project_status")
+             assert status.is_error is False
+             assert status.structured_content is not None
+@@ -116,6 +124,10 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
+                 "workspace_root",
+                 "git",
+                 "index",
++                "current_task",
++                "relevant_waiting_task",
++                "last_checkpoint",
++                "next_step",
+                 "schema_version",
+             }
+             started = await client.call_tool("task_start", {"title": "MCP continuity"})

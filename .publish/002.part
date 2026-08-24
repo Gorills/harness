@@ -1,0 +1,132 @@
+-The current internal IPC protocol is independent of MCP wire objects, uses protocol version `1`, allows exactly one request/response per connection, enforces a 16 KiB message limit, uses bounded request/response timeouts, and rejects unknown fields/methods fail-closed. `workspace_status`, `workspace_search`, and `scan_workspace` are additive protocol-v1 methods; the original global `status` wire shape remains unchanged. The scan client uses a longer bounded receive timeout than read-only status/search because the daemon performs deterministic filesystem reconciliation, while the daemon applies its own finite scan execution deadline and returns a structured `scan_timeout` error when that deadline is exceeded. Canonical POSIX `status`/`search`/`scan` clients lazily start the daemon from the installed Python package when needed, with a three-second readiness bound and existing runtime-directory validation. This still does not install/manage an OS service, expose MCP, or claim a verified Windows named-pipe/equivalent transport; Windows daemon IPC and canonical Windows transport paths therefore remain unsupported until that separate platform task is proven.
++The current internal IPC protocol is independent of MCP wire objects, uses protocol version `1`, allows exactly one request/response per connection, enforces a 16 KiB message limit, uses bounded request/response timeouts, and rejects unknown fields/methods fail-closed. `workspace_status`, `workspace_task_status`, `workspace_search`, `scan_workspace`, `task_start`, and `task_checkpoint` are additive protocol-v1 methods; the original global `status` wire shape remains unchanged. The scan and Task clients use longer bounded receive timeouts for their bounded mechanical work. Canonical POSIX clients lazily start the daemon from the installed Python package when needed, with a three-second readiness bound and existing runtime-directory validation. Windows daemon IPC and canonical Windows transport paths remain unsupported until that separate platform task is proven.
++
++The installed CLI also exposes `harness mcp`, implemented with the official `mcp==2.0.0` SDK and the MCP 2026-07-28 sessionless protocol path. It serves exactly `project_status`, `project_search`, `project_context`, `task_start`, and `task_checkpoint` over stdio and delegates durable state to `harnessd`. Set `HARNESS_WORKSPACE_ROOT` to an exact registered Workspace root when launching the bridge; without it the current process directory is used as a location hint. `project_status` includes the current working Task, or the most recently updated relevant waiting Task, plus its latest checkpoint identity and `next_step`, so a new bridge process can resume the same durable Task using the returned `task_id` and `revision`. The current `project_search`/`project_context` implementation remains limited to bounded mechanical indexed-path references; richer semantic channels are not claimed yet.
+ 
+ Development uses `uv 0.12.5`. Install/sync exactly from the committed lock and run the repository quality gate with:
+ 
+diff --git a/docs/development/isolated-development.md b/docs/development/isolated-development.md
+index 077ab60..8017a6e 100644
+--- a/docs/development/isolated-development.md
++++ b/docs/development/isolated-development.md
+@@ -111,9 +111,9 @@ With [direnv](https://direnv.net/), `.envrc` sources the same file. Run `direnv
+ 
+ Those flags still bypass default path selection. Isolated development normally does not need them: the XDG overrides already separate state from a system install.
+ 
+-## MCP (not implemented yet)
++## MCP
+ 
+-When `harness mcp` exists, point host config at this wrapper so the host uses checkout code and isolated paths:
++For development, point host config at this wrapper so the host uses checkout code and isolated paths:
+ 
+ ```json
+ {
+@@ -121,3 +121,7 @@ When `harness mcp` exists, point host config at this wrapper so the host uses ch
+   "args": ["harness", "mcp"]
+ }
+ ```
++
++Set `HARNESS_WORKSPACE_ROOT` to the exact registered Workspace root in host configurations where
++the host does not provide a separately proven current-directory contract. The bridge uses the
++official MCP v2 SDK and delegates durable state to the isolated daemon under `.harness/`.
+diff --git a/src/harness/daemon.py b/src/harness/daemon.py
+index b15a656..4538f9d 100644
+--- a/src/harness/daemon.py
++++ b/src/harness/daemon.py
+@@ -29,6 +29,9 @@ from harness.ipc import (
+     WorkspaceSearchHit,
+     WorkspaceSearchResult,
+     WorkspaceStatusResult,
++    WorkspaceTaskCheckpointSummary,
++    WorkspaceTaskStatusResult,
++    WorkspaceTaskSummary,
+     receive_request,
+     send_error_response,
+     send_status_response,
+@@ -37,6 +40,7 @@ from harness.ipc import (
+     send_workspace_scan_response,
+     send_workspace_search_response,
+     send_workspace_status_response,
++    send_workspace_task_status_response,
+ )
+ from harness.knowledge import KnowledgeError, KnowledgeValidationError
+ from harness.registry import (
+@@ -47,10 +51,13 @@ from harness.registry import (
+     list_workspaces,
+     register_workspace_for_scan,
+ )
+-from harness.search import SearchError, search_indexed_paths
++from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
+ from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+ from harness.task_baseline import TaskBaselineError
+-from harness.task_checkpoints import TaskCheckpointMechanicalError
++from harness.task_checkpoints import (
++    TaskCheckpointMechanicalError,
++    get_latest_task_checkpoint_status,
++)
+ from harness.task_workflow import (
+     task_checkpoint as domain_task_checkpoint,
+ )
+@@ -62,11 +69,13 @@ from harness.task_workflow import (
+ )
+ from harness.tasks import (
+     TaskConflictError,
++    TaskError,
+     TaskNotFoundError,
+     TaskRevisionConflictError,
+     TaskTransitionError,
+     TaskValidationError,
+     TaskWorkspaceConflictError,
++    get_relevant_task,
+ )
+ from harness.workspace_resolution import (
+     WorkspaceCandidate,
+@@ -172,11 +181,84 @@ def read_workspace_status(
+     )
+ 
+ 
++def read_workspace_task_status(
++    connection: sqlite3.Connection,
++    hints: Sequence[WorkspaceHint],
++) -> WorkspaceTaskStatusResult:
++    """Read the current working or most relevant waiting Task for one Workspace."""
++    registered = list_workspaces(connection)
++    resolution = WorkspaceResolver(
++        [
++            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
++            for workspace in registered
++        ]
++    ).resolve(hints)
++    workspace = get_workspace(connection, resolution.workspace_id)
++    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
++    if (
++        runtime_identity.layout.workspace_root != workspace.workspace_root
++        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
++    ):
++        raise WorkspaceResolutionError(
++            f"registered workspace Git identity changed: {workspace.workspace_root}"
++        )
++
++    connection.execute("BEGIN")
++    try:
++        current_workspace = get_workspace(connection, workspace.workspace_id)
++        if current_workspace != workspace:
++            raise WorkspaceResolutionError("workspace registry identity changed during Task status")
++        task = get_relevant_task(connection, workspace.workspace_id)
++        checkpoint = (
++            get_latest_task_checkpoint_status(connection, task.task_id)
++            if task is not None
++            else None
++        )
++        connection.execute("COMMIT")
++    except Exception:
++        if connection.in_transaction:
++            connection.execute("ROLLBACK")
++        raise
++
++    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
++        raise WorkspaceResolutionError("workspace Git identity changed during Task status")
++
++    task_summary = (
++        None
++        if task is None

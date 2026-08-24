@@ -1,0 +1,14 @@
++            invalid_knowledge = await client.call_tool(
++                "task_checkpoint",
++                {
++                    "task_id": task_id,
++                    "expected_revision": 2,
++                    "state": "working",
++                    "summary": "Invalid Knowledge must not commit",
++                    "knowledge": [
++                        {
++                            "kind": "behavior",
++                            "title": "Token behavior",
++                            "body": "Observed during the task",
++                            "anchors": [{"path": "src/token_service.py"}],
++                            "unexpected": "must be rejected",

@@ -1,0 +1,41 @@
+name: Publish verified MCP review fix
+
+on:
+  push:
+    branches: [chore/publish-mcp-review-fix]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out verified payload
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out exact target feature head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/mcp-v2-bridge
+          path: target
+          fetch-depth: 1
+
+      - name: Apply only the verified review fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .publish/*.part > "$RUNNER_TEMP/review.patch"
+          echo "e62e1f3490560f50ab60987a4b5713b7d20df3d0e0cc6ce58398052040eb3997  $RUNNER_TEMP/review.patch" | sha256sum -c -
+
+          cd target
+          test "$(git rev-parse HEAD)" = "143bb9bd7d7c32a413e395770964cb614a074c70"
+          git apply --check "$RUNNER_TEMP/review.patch"
+          git apply --index "$RUNNER_TEMP/review.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = "c18c94a30e6885fb15bbfac679d0e28fc0e05a2c"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "fix: harden MCP continuity and contracts"
+          git push origin HEAD:feat/mcp-v2-bridge

@@ -1,0 +1,15 @@
++        waiting = request_task_checkpoint(
++            socket_path,
++            [WorkspaceHint(root, "explicit-root")],
++            started.task_id,
++            expected_revision=2,
++            state=TaskState.WAITING,
++            summary="Waiting for operator",
++            next_step="Resume this exact Task after feedback",
++            wait_reason=TaskWaitReason.OPERATOR_INPUT,
++        )
++        waiting_status = request_workspace_task_status(
++            socket_path, [WorkspaceHint(root, "explicit-root")]
++        )
++        assert waiting_status.task is not None
++        assert waiting_status.task.task_id == started.task_id

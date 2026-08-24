@@ -1,0 +1,12 @@
++        assert waiting_status.task.state is TaskState.WAITING
++        assert waiting_status.task.revision == waiting.revision == 3
++        assert waiting_status.last_checkpoint is not None
++        assert waiting_status.last_checkpoint.checkpoint_id == waiting.checkpoint_id
++        assert waiting_status.last_checkpoint.next_step == "Resume this exact Task after feedback"
++    finally:
++        _stop_server(stop_event, executor, future)
++
++
+ def test_stale_task_checkpoint_is_non_mutating_including_knowledge(tmp_path: Path) -> None:
+     root, database, _workspace_id = _registered_database(tmp_path)
+     socket_path = tmp_path / "ipc" / "harness.sock"

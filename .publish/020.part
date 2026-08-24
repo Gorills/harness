@@ -1,0 +1,28 @@
++                    "next_step": "Resume from this exact checkpoint",
++                },
++            )
++            assert checkpoint.is_error is False
++            assert checkpoint.structured_content is not None
++            assert checkpoint.structured_content["revision"] == 2
++
++        async with Client(stdio_client(params)) as second_client:
++            status = await second_client.call_tool("project_status")
++            assert status.is_error is False
++            assert status.structured_content is not None
++            current = status.structured_content["current_task"]
++            assert current == {
++                "task_id": task_id,
++                "title": "Durable continuity",
++                "state": "working",
++                "wait_reason": None,
++                "revision": 2,
++            }
++            assert status.structured_content["relevant_waiting_task"] is None
++            assert status.structured_content["next_step"] == "Resume from this exact checkpoint"
++            resumed = await second_client.call_tool("task_start", {"task_id": task_id})
++            assert resumed.is_error is False
++            assert resumed.structured_content is not None
++            assert resumed.structured_content["revision"] == 2
++    finally:
++        stop.set()
++        executor.shutdown(wait=True)

@@ -1,0 +1,12 @@
+@@ -123,6 +135,21 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
+             assert started.structured_content is not None
+             task_id = started.structured_content["task_id"]
+             assert started.structured_content["revision"] == 1
++            for invalid_revision in (True, "1"):
++                invalid_checkpoint = await client.call_tool(
++                    "task_checkpoint",
++                    {
++                        "task_id": task_id,
++                        "expected_revision": invalid_revision,
++                        "state": "working",
++                        "summary": "Schema-invalid revision must not mutate",

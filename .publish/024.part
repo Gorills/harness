@@ -1,0 +1,14 @@
++            socket_path,
++            [WorkspaceHint(root, "explicit-root")],
++            started.task_id,
++            expected_revision=1,
++            state=TaskState.WORKING,
++            summary="First checkpoint",
++            next_step="Continue from the persisted checkpoint",
++        )
++        status = request_workspace_task_status(socket_path, [WorkspaceHint(root, "explicit-root")])
++        assert status.workspace_id == workspace_id
++        assert status.task is not None
++        assert status.task.task_id == started.task_id
++        assert status.task.title == "Continue after restart"
++        assert status.task.state is TaskState.WORKING

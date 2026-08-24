@@ -1,0 +1,17 @@
++                        }
++                    ],
++                },
++            )
++            assert invalid_knowledge.is_error is True
++            valid_knowledge = await client.call_tool(
++                "task_checkpoint",
++                {
++                    "task_id": task_id,
++                    "expected_revision": 2,
++                    "state": "working",
++                    "summary": "Persist strict Knowledge",
++                    "knowledge": [
++                        {
++                            "kind": "behavior",
++                            "title": "Token behavior",
++                            "body": "Observed during the task",

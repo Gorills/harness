@@ -1,0 +1,41 @@
++                            "anchors": [{"path": "src/token_service.py"}],
++                        }
++                    ],
++                },
++            )
++            assert valid_knowledge.is_error is False
++            assert valid_knowledge.structured_content is not None
++            assert valid_knowledge.structured_content["revision"] == 3
++            assert len(valid_knowledge.structured_content["knowledge_ids"]) == 1
++    finally:
++        stop.set()
++        executor.shutdown(wait=True)
++        future.result()
++
++
++@pytest.mark.anyio
++async def test_project_search_scope_filters_before_backend_limit(tmp_path: Path) -> None:
++    root = tmp_path / "repo"
++    root.mkdir()
++    (root / "aa").mkdir()
++    (root / "zz").mkdir()
++    for index in range(12):
++        (root / "aa" / f"token_{index:02}.py").write_text("x = 1\n", encoding="utf-8")
++    (root / "zz" / "token_notes.md").write_text("token documentation\n", encoding="utf-8")
++    _git(root, "init")
++    _git(root, "add", ".")
++    _git(
++        root,
++        "-c",
++        "user.name=Test",
++        "-c",
++        "user.email=t@example.invalid",
++        "commit",
++        "-m",
++        "init",
++    )
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        project = create_project(connection)

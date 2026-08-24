@@ -1,0 +1,14 @@
++                    },
++                )
++                assert invalid_checkpoint.is_error is True
++            invalid_limit = await client.call_tool(
++                "project_search", {"query": "token", "limit": "1"}
++            )
++            assert invalid_limit.is_error is True
+             checkpoint = await client.call_tool(
+                 "task_checkpoint",
+                 {
+@@ -136,6 +163,118 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
+             assert checkpoint.structured_content is not None
+             assert checkpoint.structured_content["task_id"] == task_id
+             assert checkpoint.structured_content["revision"] == 2

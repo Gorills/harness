@@ -1,0 +1,72 @@
++                "next_step": last_checkpoint.next_step if last_checkpoint is not None else None,
+                 "schema_version": status.schema_version,
+             },
+             _STATUS_MAX_BYTES,
+@@ -106,7 +197,7 @@ def build_mcp_server() -> MCPServer:
+     def project_search(
+         query: str,
+         scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
+-        limit: int = _SEARCH_DEFAULT_LIMIT,
++        limit: StrictInt = _SEARCH_DEFAULT_LIMIT,
+     ) -> dict[str, Any]:
+         if not 1 <= limit <= _SEARCH_HARD_LIMIT:
+             raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
+@@ -121,11 +212,15 @@ def build_mcp_server() -> MCPServer:
+                 _SEARCH_MAX_BYTES,
+                 "project_search response exceeds model exposure budget",
+             )
+-        result = request_workspace_search(_socket_path(), _workspace_hints(), query, limit=limit)
++        result = request_workspace_search(
++            _socket_path(),
++            _workspace_hints(),
++            query,
++            limit=limit,
++            scope=IndexedPathSearchScope(scope),
++        )
+         hits = []
+         for hit in result.results[:limit]:
+-            if scope == "docs" and not _looks_like_document(hit.relative_path):
+-                continue
+             hits.append(
+                 {
+                     "ref": f"code:{hit.relative_path}",
+@@ -193,7 +288,7 @@ def build_mcp_server() -> MCPServer:
+     def task_start(
+         title: str | None = None,
+         task_id: str | None = None,
+-        expected_revision: int | None = None,
++        expected_revision: StrictInt | None = None,
+     ) -> dict[str, Any]:
+         result = request_task_start(
+             _socket_path(),
+@@ -214,7 +309,7 @@ def build_mcp_server() -> MCPServer:
+     )
+     def task_checkpoint(
+         task_id: str,
+-        expected_revision: int,
++        expected_revision: StrictInt,
+         state: Literal["working", "waiting", "completed"],
+         summary: str,
+         next_step: str | None = None,
+@@ -297,6 +392,16 @@ def _task_start_payload(result: TaskStartResult) -> dict[str, Any]:
+     }
+ 
+ 
++def _status_task_payload(task: WorkspaceTaskSummary) -> dict[str, Any]:
++    return {
++        "task_id": task.task_id,
++        "title": task.title,
++        "state": task.state.value,
++        "wait_reason": task.wait_reason.value if task.wait_reason is not None else None,
++        "revision": task.revision,
++    }
++
++
+ def _task_checkpoint_payload(result: TaskCheckpointResult) -> dict[str, Any]:
+     return {
+         "workspace_id": result.workspace_id,
+@@ -316,9 +421,4 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
+     return payload
+ 
+ 
+-def _looks_like_document(path: str) -> bool:

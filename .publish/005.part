@@ -1,0 +1,75 @@
++            raise IpcProtocolError("daemon workspace task status checkpoint has no Task")
++        if not isinstance(raw_checkpoint, dict) or set(raw_checkpoint) != {
++            "checkpoint_id",
++            "task_revision",
++            "state",
++            "wait_reason",
++            "next_step",
++        }:
++            raise IpcProtocolError(
++                "daemon workspace task status checkpoint does not match the IPC schema"
++            )
++        checkpoint_id = _bounded_response_string(
++            raw_checkpoint["checkpoint_id"], "checkpoint_id", 128
++        )
++        task_revision = raw_checkpoint["task_revision"]
++        if (
++            isinstance(task_revision, bool)
++            or not isinstance(task_revision, int)
++            or task_revision <= 0
++            or task_revision > task.revision
++        ):
++            raise IpcProtocolError("daemon workspace task status checkpoint has invalid revision")
++        state, wait_reason = _task_state_from_response(
++            raw_checkpoint["state"], raw_checkpoint["wait_reason"]
++        )
++        next_step = raw_checkpoint["next_step"]
++        if next_step is not None:
++            next_step = _bounded_response_string(
++                next_step, "next_step", MAX_CHECKPOINT_NEXT_STEP_BYTES
++            )
++        checkpoint = WorkspaceTaskCheckpointSummary(
++            checkpoint_id,
++            task_revision,
++            state,
++            wait_reason,
++            cast(str | None, next_step),
++        )
++    return WorkspaceTaskStatusResult(schema_version, workspace_id, task, checkpoint)
++
++
+ def _workspace_scan_from_response(
+     response: dict[str, Any],
+     *,
+diff --git a/src/harness/mcp_bridge.py b/src/harness/mcp_bridge.py
+index 311170e..6559c9a 100644
+--- a/src/harness/mcp_bridge.py
++++ b/src/harness/mcp_bridge.py
+@@ -2,24 +2,31 @@ from __future__ import annotations
+ 
+ import json
+ import os
+-from dataclasses import dataclass, field
+ from importlib.metadata import version as distribution_version
+ from pathlib import Path
+ from typing import Any, Literal
+ 
+ from mcp.server import MCPServer
++from mcp.server.mcpserver.context import Context
++from mcp.shared.exceptions import MCPError
++from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult
++from mcp_types import Tool as MCPTool
++from pydantic import BaseModel, ConfigDict, Field, StrictInt
+ 
+ from harness.daemon_autostart import ensure_canonical_daemon
+ from harness.ipc import (
+     TaskCheckpointResult,
+     TaskStartResult,
++    WorkspaceTaskSummary,
+     request_task_checkpoint,
+     request_task_start,
+     request_workspace_search,
+     request_workspace_status,
++    request_workspace_task_status,
+ )
+ from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind

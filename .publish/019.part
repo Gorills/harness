@@ -1,0 +1,34 @@
++@pytest.mark.anyio
++async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path) -> None:
++    root, database = _repo(tmp_path)
++    state = tmp_path / "state"
++    runtime = tmp_path / "runtime"
++    socket_path = runtime / "harness" / "harness.sock"
++    stop, executor, future = _start_daemon(database, socket_path)
++    env = dict(os.environ)
++    env.update(
++        {
++            "XDG_STATE_HOME": str(state),
++            "XDG_RUNTIME_DIR": str(runtime),
++            "HARNESS_WORKSPACE_ROOT": str(root),
++        }
++    )
++    params = StdioServerParameters(
++        command=sys.executable,
++        args=["-m", "harness.mcp_process"],
++        env=env,
++        cwd=str(root),
++    )
++    try:
++        async with Client(stdio_client(params)) as first_client:
++            started = await first_client.call_tool("task_start", {"title": "Durable continuity"})
++            assert started.is_error is False
++            assert started.structured_content is not None
++            task_id = started.structured_content["task_id"]
++            checkpoint = await first_client.call_tool(
++                "task_checkpoint",
++                {
++                    "task_id": task_id,
++                    "expected_revision": 1,
++                    "state": "working",
++                    "summary": "Persisted before bridge restart",

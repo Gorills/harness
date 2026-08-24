@@ -1,0 +1,244 @@
++        else WorkspaceTaskSummary(
++            task_id=task.task_id,
++            title=task.title,
++            state=task.state,
++            wait_reason=task.wait_reason,
++            revision=task.revision,
++        )
++    )
++    checkpoint_summary = (
++        None
++        if checkpoint is None
++        else WorkspaceTaskCheckpointSummary(
++            checkpoint_id=checkpoint.checkpoint_id,
++            task_revision=checkpoint.task_revision,
++            state=checkpoint.state,
++            wait_reason=checkpoint.wait_reason,
++            next_step=checkpoint.next_step,
++        )
++    )
++    return WorkspaceTaskStatusResult(
++        schema_version=SCHEMA_VERSION,
++        workspace_id=workspace.workspace_id,
++        task=task_summary,
++        last_checkpoint=checkpoint_summary,
++    )
++
++
+ def read_workspace_search(
+     connection: sqlite3.Connection,
+     hints: Sequence[WorkspaceHint],
+     query: str,
+     limit: int,
++    scope: IndexedPathSearchScope = IndexedPathSearchScope.ALL,
+ ) -> WorkspaceSearchResult:
+     """Resolve one registered Workspace and search its current Structural Index snapshot."""
+     registered = list_workspaces(connection)
+@@ -208,6 +290,7 @@ def read_workspace_search(
+             workspace.workspace_id,
+             query,
+             limit=limit,
++            scope=scope,
+         )
+         connection.execute("COMMIT")
+     except Exception:
+@@ -404,10 +487,14 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
+     if request.method == "workspace_status":
+         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
+         return
++    if request.method == "workspace_task_status":
++        _serve_workspace_task_status(client, database, request.request_id, request.workspace_hints)
++        return
+     if (
+         request.method == "workspace_search"
+         and request.search_query is not None
+         and request.search_limit is not None
++        and request.search_scope is not None
+     ):
+         _serve_workspace_search(
+             client,
+@@ -416,6 +503,7 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
+             request.workspace_hints,
+             request.search_query,
+             request.search_limit,
++            request.search_scope,
+         )
+         return
+     if request.method == "task_start" and request.task_start is not None:
+@@ -504,6 +592,65 @@ def _serve_workspace_status(
+         )
+ 
+ 
++def _serve_workspace_task_status(
++    client: socket.socket,
++    database: sqlite3.Connection,
++    request_id: str,
++    hints: Sequence[WorkspaceHint],
++) -> None:
++    try:
++        status = read_workspace_task_status(database, hints)
++    except WorkspaceResolutionError as exc:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="workspace_resolution_error",
++            message=str(exc),
++        )
++        return
++    except GitWorkspaceError as exc:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="workspace_git_error",
++            message=str(exc),
++        )
++        return
++    except RegistryError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="registry_error",
++            message="daemon could not read Workspace registry state",
++        )
++        return
++    except TaskError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="task_error",
++            message="daemon could not read Task status",
++        )
++        return
++    except sqlite3.DatabaseError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="database_error",
++            message="daemon could not read Task status",
++        )
++        return
++    try:
++        send_workspace_task_status_response(client, request_id, status)
++    except IpcMessageTooLargeError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="response_too_large",
++            message="Workspace Task status exceeds IPC byte limit",
++        )
++
++
+ def _serve_workspace_search(
+     client: socket.socket,
+     database: sqlite3.Connection,
+@@ -511,9 +658,10 @@ def _serve_workspace_search(
+     hints: Sequence[WorkspaceHint],
+     query: str,
+     limit: int,
++    scope: IndexedPathSearchScope,
+ ) -> None:
+     try:
+-        result = read_workspace_search(database, hints, query, limit)
++        result = read_workspace_search(database, hints, query, limit, scope)
+     except WorkspaceResolutionError as exc:
+         _try_send_error(
+             client,
+diff --git a/src/harness/ipc.py b/src/harness/ipc.py
+index 93eb66c..8b5a16c 100644
+--- a/src/harness/ipc.py
++++ b/src/harness/ipc.py
+@@ -22,6 +22,7 @@ from harness.search import (
+     DEFAULT_SEARCH_LIMIT,
+     MAX_SEARCH_LIMIT,
+     MAX_SEARCH_QUERY_BYTES,
++    IndexedPathSearchScope,
+     SearchMatchKind,
+ )
+ from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_CHECKPOINT_SUMMARY_BYTES
+@@ -93,6 +94,38 @@ class WorkspaceStatusResult:
+     indexed_file_count: int
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class WorkspaceTaskSummary:
++    """Bounded Task identity/state exposed by the daemon for status continuity."""
++
++    task_id: str
++    title: str
++    state: TaskState
++    wait_reason: TaskWaitReason | None
++    revision: int
++
++
++@dataclass(frozen=True, slots=True)
++class WorkspaceTaskCheckpointSummary:
++    """Bounded latest-checkpoint identity/state exposed for status continuity."""
++
++    checkpoint_id: str
++    task_revision: int
++    state: TaskState
++    wait_reason: TaskWaitReason | None
++    next_step: str | None
++
++
++@dataclass(frozen=True, slots=True)
++class WorkspaceTaskStatusResult:
++    """Current/relevant Task status for one resolved Workspace."""
++
++    schema_version: int
++    workspace_id: str
++    task: WorkspaceTaskSummary | None
++    last_checkpoint: WorkspaceTaskCheckpointSummary | None
++
++
+ @dataclass(frozen=True, slots=True)
+ class WorkspaceScanResult:
+     """Bounded registration/reconciliation result returned by ``harness scan``."""
+@@ -191,6 +224,7 @@ class IpcRequest:
+     scan_path: Path | None = None
+     search_query: str | None = None
+     search_limit: int | None = None
++    search_scope: IndexedPathSearchScope | None = None
+     task_start: TaskStartRequestData | None = None
+     task_checkpoint: TaskCheckpointRequestData | None = None
+ 
+@@ -231,6 +265,27 @@ def request_workspace_status(
+     return _workspace_status_from_response(response, expected_request_id=request_id)
+ 
+ 
++def request_workspace_task_status(
++    socket_path: Path,
++    hints: Sequence[WorkspaceHint],
++    *,
++    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
++) -> WorkspaceTaskStatusResult:
++    """Request bounded current/relevant Task status for one resolved Workspace."""
++    request_id = uuid4().hex
++    response = _request_response(
++        socket_path,
++        {
++            "version": PROTOCOL_VERSION,
++            "request_id": request_id,
++            "method": "workspace_task_status",
++            "params": {"hints": _workspace_hints_to_wire(hints)},
++        },
++        timeout=timeout,
++    )
++    return _workspace_task_status_from_response(response, expected_request_id=request_id)
++
++
+ def request_workspace_scan(
+     socket_path: Path,
+     path: Path,
+@@ -261,22 +316,28 @@ def request_workspace_search(
+     *,
+     limit: int = DEFAULT_SEARCH_LIMIT,
+     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
++    scope: IndexedPathSearchScope | None = None,
+ ) -> WorkspaceSearchResult:
+     """Request bounded deterministic indexed-path search for one registered Workspace."""
+     _validate_search_query(query)
+     _validate_search_limit(limit)
+     request_id = uuid4().hex
++    params: dict[str, object] = {
++        "hints": _workspace_hints_to_wire(hints),

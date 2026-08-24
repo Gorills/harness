@@ -1,0 +1,86 @@
+ from harness.runtime_paths import default_runtime_paths
++from harness.search import IndexedPathSearchScope
+ from harness.tasks import TaskState, TaskWaitReason
+ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
+ 
+@@ -36,18 +43,37 @@ _SEARCH_MAX_BYTES = 12 * 1024
+ _CONTEXT_MAX_BYTES = 12 * 1024
+ _TASK_MAX_BYTES = 4 * 1024
+ _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+-
+-
+-@dataclass(frozen=True, slots=True)
+-class KnowledgeAnchorInput:
++_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
++    "project_status": frozenset(),
++    "project_search": frozenset({"query", "scope", "limit"}),
++    "project_context": frozenset({"refs"}),
++    "task_start": frozenset({"title", "task_id", "expected_revision"}),
++    "task_checkpoint": frozenset(
++        {
++            "task_id",
++            "expected_revision",
++            "state",
++            "summary",
++            "next_step",
++            "wait_reason",
++            "knowledge",
++        }
++    ),
++}
++
++
++class _StrictInputModel(BaseModel):
++    model_config = ConfigDict(extra="forbid", frozen=True)
++
++
++class KnowledgeAnchorInput(_StrictInputModel):
+     """Strict model-facing Knowledge anchor input."""
+ 
+     path: str
+     symbol: str | None = None
+ 
+ 
+-@dataclass(frozen=True, slots=True)
+-class KnowledgeInput:
++class KnowledgeInput(_StrictInputModel):
+     """Strict model-facing Knowledge card input."""
+ 
+     kind: Literal[
+@@ -61,12 +87,40 @@ class KnowledgeInput:
+     ]
+     title: str
+     body: str
+-    anchors: list[KnowledgeAnchorInput] = field(default_factory=list)
++    anchors: list[KnowledgeAnchorInput] = Field(default_factory=list)
++
++
++class HarnessMCPServer(MCPServer):
++    """MCPServer with an explicit fail-closed model-facing argument contract."""
++
++    async def list_tools(self) -> list[MCPTool]:
++        tools = await super().list_tools()
++        for tool in tools:
++            if tool.name in _TOOL_ARGUMENTS:
++                tool.input_schema["additionalProperties"] = False
++        return tools
++
++    async def call_tool(
++        self,
++        name: str,
++        arguments: dict[str, Any],
++        context: Context[Any, Any] | None = None,
++    ) -> CallToolResult | InputRequiredResult:
++        allowed = _TOOL_ARGUMENTS.get(name)
++        if allowed is not None:
++            unknown = sorted(set(arguments).difference(allowed))
++            if unknown:
++                raise MCPError(
++                    code=INVALID_PARAMS,
++                    message="Unknown tool argument fields",
++                    data={"tool": name, "unknown_field_count": len(unknown)},
++                )
++        return await super().call_tool(name, arguments, context)
+ 
+ 
+ def build_mcp_server() -> MCPServer:

@@ -1,0 +1,14 @@
+ from harness.registry import create_project, register_workspace
+@@ -325,6 +326,82 @@ def test_waiting_resume_requires_revision_and_working_resume_is_idempotent(tmp_p
+         connection.close()
+ 
+ 
++def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: Path) -> None:
++    root, database, workspace_id = _registered_database(tmp_path)
++    socket_path = tmp_path / "ipc" / "harness.sock"
++    stop_event, executor, future = _start_server(database, socket_path)
++    try:
++        started = request_task_start(
++            socket_path, [WorkspaceHint(root, "explicit-root")], title="Continue after restart"
++        )
++        working = request_task_checkpoint(
