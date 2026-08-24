@@ -152,6 +152,115 @@ def main() -> int:
                     f"installed harness doctor output did not contain {expected!r}: {doctor.stdout!r}"
                 )
 
+        claude_project = workspace / "claude-project"
+        claude_project.mkdir()
+        host_probe = _run(
+            (
+                str(python),
+                "-c",
+                (
+                    "from harness.host_adapters import workspace_hints_from_environment; "
+                    "h=workspace_hints_from_environment(environment={"
+                    "'HARNESS_HOST_PROFILE':'claude-code',"
+                    f"'CLAUDE_PROJECT_DIR':{str(claude_project)!r}"
+                    "}); "
+                    "print(h[0].source); print(h[0].match_mode.value); print(h[0].path)"
+                ),
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
+        if host_probe.stdout.splitlines() != [
+            "claude-project-dir",
+            "root",
+            str(claude_project.resolve()),
+        ]:
+            raise RuntimeError(
+                f"installed Claude host adapter produced unexpected root hint: {host_probe.stdout!r}"
+            )
+
+        if os.name != "nt":
+            fake_bin = workspace / "fake-claude-bin"
+            fake_bin.mkdir()
+            fake_claude = fake_bin / "claude"
+            fake_state = workspace / "fake-claude-state.json"
+            fake_claude.write_text(
+                f"""#!{python}
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ["HARNESS_FAKE_CLAUDE_STATE"])
+args = sys.argv[1:]
+if args == ["mcp", "get", "harness"]:
+    if not state.exists():
+        print('No MCP server found with name: "harness"')
+        raise SystemExit(1)
+    value = json.loads(state.read_text(encoding="utf-8"))
+    print("harness:")
+    print("  Scope: User config (available in all your projects)")
+    print("  Status: ✓ Connected")
+    print(f"  Type: {{value['type']}}")
+    print(f"  Command: {{value['command']}}")
+    print("  Args: " + " ".join(value.get("args", [])))
+    print("  Environment:")
+    for key, item in value.get("env", {{}}).items():
+        print(f"    {{key}}={{item}}")
+    raise SystemExit(0)
+if args[:3] == ["mcp", "add-json", "harness"] and args[4:] == ["--scope", "user"]:
+    if state.exists():
+        print("MCP server harness already exists in user config")
+        raise SystemExit(1)
+    state.write_text(args[3], encoding="utf-8")
+    print("Added stdio MCP server harness")
+    raise SystemExit(0)
+if args == ["mcp", "remove", "harness", "--scope", "user"]:
+    if not state.exists():
+        print('No MCP server found with name: "harness"')
+        raise SystemExit(1)
+    state.unlink()
+    print("Removed MCP server harness")
+    raise SystemExit(0)
+print("unexpected fake claude invocation: " + repr(args))
+raise SystemExit(2)
+""",
+                encoding="utf-8",
+            )
+            fake_claude.chmod(0o755)
+            fake_env = isolated_env.copy()
+            fake_env["PATH"] = str(fake_bin)
+            fake_env["HARNESS_FAKE_CLAUDE_STATE"] = str(fake_state)
+            registration_probe = _run(
+                (
+                    str(python),
+                    "-c",
+                    (
+                        "from harness.host_adapters import "
+                        "IntegrationChange, discover_claude_code_adapter; "
+                        "a=discover_claude_code_adapter(); assert a is not None; "
+                        "print(a.python_executable); "
+                        "print(a.register_mcp().value); "
+                        "print(a.register_mcp().value); "
+                        "print(a.unregister_mcp().value); "
+                        "print(a.unregister_mcp().value)"
+                    ),
+                ),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if registration_probe.stdout.splitlines() != [
+                str(python.absolute()),
+                "changed",
+                "unchanged",
+                "changed",
+                "unchanged",
+            ]:
+                raise RuntimeError(
+                    "installed Claude host adapter registration round-trip was unexpected: "
+                    f"{registration_probe.stdout!r}"
+                )
+
     return 0
 
 

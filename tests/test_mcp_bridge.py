@@ -74,11 +74,15 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
     socket_path = runtime / "harness" / "harness.sock"
     stop, executor, future = _start_daemon(database, socket_path)
     env = dict(os.environ)
+    generic_root = tmp_path / "generic-root-must-not-win"
+    generic_root.mkdir()
     env.update(
         {
             "XDG_STATE_HOME": str(state),
             "XDG_RUNTIME_DIR": str(runtime),
-            "HARNESS_WORKSPACE_ROOT": str(root),
+            "HARNESS_HOST_PROFILE": "claude-code",
+            "CLAUDE_PROJECT_DIR": str(root),
+            "HARNESS_WORKSPACE_ROOT": str(generic_root),
         }
     )
     # The explicitly started daemon uses the same canonical socket, while its DB path is selected
@@ -88,7 +92,7 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             command=sys.executable,
             args=["-m", "harness.mcp_process"],
             env=env,
-            cwd=str(root),
+            cwd=str(tmp_path),
         )
         async with Client(stdio_client(params)) as client:
             listed = await client.list_tools()
