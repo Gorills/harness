@@ -19,6 +19,7 @@ _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 _CLAUDE_PROFILE = "claude-code"
+_CODEX_PROFILE = "codex"
 _CLAUDE_SERVER_NAME = "harness"
 _CLAUDE_COMMAND_TIMEOUT_SECONDS = 10.0
 
@@ -356,6 +357,16 @@ def discover_claude_code_adapter(
         python_executable=_absolute_executable_path(
             Path(sys.executable) if python_executable is None else python_executable
         ),
+    )
+
+
+def codex_skill_projection_surface() -> SkillProjectionSurface:
+    """Return Codex's documented repository skill visibility surface."""
+    root = PurePosixPath(".agents/skills")
+    return SkillProjectionSurface(
+        profile=_CODEX_PROFILE,
+        target_root=root,
+        visible_roots=(root,),
     )
 
 
