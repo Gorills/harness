@@ -978,7 +978,7 @@ def _commit_projection_changes(
                 f"skill projection target changed before mutation: {item.target.relative_to(workspace_root)}"
             )
         item.target.parent.mkdir(parents=True, exist_ok=True)
-        if item.target.exists():
+        if _projection_entry_exists(item.target):
             backup = Path(
                 tempfile.mkdtemp(
                     prefix=f".harness-backup-{item.target.name}-", dir=item.target.parent
@@ -1018,7 +1018,7 @@ def _restore_uncommitted_projection_backup(
     backup = item.backup
     if backup is None:
         return
-    if item.target.exists():
+    if _projection_entry_exists(item.target):
         raise SkillProjectionError(
             "skill projection target changed during mutation and moved content could not be "
             f"restored: {item.target.relative_to(workspace_root)}"

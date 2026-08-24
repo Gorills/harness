@@ -261,3 +261,58 @@ def test_rollback_validates_committed_projection_after_atomic_move(
     assert raced is True
     assert (target / "USER.txt").read_text(encoding="utf-8") == "do not delete\n"
     assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
+
+
+def test_stale_cleanup_rejects_dangling_symlink_created_after_state_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    _git_init(root)
+    surface = _surface()
+    resolved = _resolved_fastapi(tmp_path / "registry")
+    apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
+    target = root / ".claude" / "skills" / "fastapi"
+    empty_plan = plan_skill_projection(root, (), (surface,))
+    original_state = skills_module._projection_state_sha256
+    target_state_reads = 0
+
+    def replace_after_state_check(path: Path) -> str | None:
+        nonlocal target_state_reads
+        state = original_state(path)
+        if path == target:
+            target_state_reads += 1
+            if target_state_reads == 2:
+                shutil.rmtree(target)
+                target.symlink_to(root / "missing-user-target", target_is_directory=True)
+        return state
+
+    monkeypatch.setattr(skills_module, "_projection_state_sha256", replace_after_state_check)
+
+    with pytest.raises(SkillProjectionCollisionError, match="not a real directory"):
+        apply_skill_projection(empty_plan)
+
+    assert target.is_symlink()
+    assert target.readlink() == root / "missing-user-target"
+
+
+def test_uncommitted_restore_does_not_overwrite_dangling_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "fastapi"
+    backup = tmp_path / ".harness-backup-fastapi"
+    target.symlink_to(tmp_path / "concurrent-user-target", target_is_directory=True)
+    backup.symlink_to(tmp_path / "moved-user-target", target_is_directory=True)
+    item = skills_module._PreparedProjection(
+        target=target,
+        replacement=None,
+        expected_state_sha256=None,
+        committed_state_sha256=None,
+        backup=backup,
+    )
+
+    with pytest.raises(SkillProjectionError, match="moved content could not be restored"):
+        skills_module._restore_uncommitted_projection_backup(tmp_path, item)
+
+    assert target.is_symlink()
+    assert target.readlink() == tmp_path / "concurrent-user-target"
+    assert backup.is_symlink()
+    assert backup.readlink() == tmp_path / "moved-user-target"
