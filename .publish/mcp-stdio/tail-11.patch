@@ -1,0 +1,7 @@
++            assert "R" * 512 not in raw
++            assert "X" * 512 not in raw
++            assert "V" * 512 not in raw
++            assert "T" * 512 not in raw
++
++        _, listed = exchange(
++            {

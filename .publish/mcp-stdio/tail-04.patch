@@ -1,0 +1,24 @@
++        if candidate is not None and not _request_id_is_oversized(candidate):
++            response_id = candidate
++    return SessionMessage(
++        JSONRPCError(
++            jsonrpc="2.0",
++            id=response_id,
++            error=ErrorData(
++                code=INVALID_REQUEST,
++                message="MCP response exceeds Harness stdio wire budget",
++            ),
++        ),
++        metadata=item.metadata,
++    )
++
++
+ __all__ = ["build_mcp_server", "run_mcp_server"]
+diff --git a/tests/test_mcp_bridge.py b/tests/test_mcp_bridge.py
+index 1d5ab0b..b7f6c91 100644
+--- a/tests/test_mcp_bridge.py
++++ b/tests/test_mcp_bridge.py
+@@ -9,6 +9,7 @@ import time
+ from concurrent.futures import Future, ThreadPoolExecutor
+ from pathlib import Path
+ from threading import Event

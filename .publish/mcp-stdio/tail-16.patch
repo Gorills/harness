@@ -1,0 +1,24 @@
++        assert rejected["id"] is None
++        assert "error" in rejected
++
++        started = exchange(
++            {
++                "jsonrpc": "2.0",
++                "id": 2,
++                "method": "tools/call",
++                "params": {
++                    "_meta": meta,
++                    "name": "task_start",
++                    "arguments": {"title": "only task"},
++                },
++            }
++        )
++        assert started["id"] == 2
++        result = started["result"]
++        assert isinstance(result, dict)
++        assert result["isError"] is False
++        structured = result["structuredContent"]
++        assert isinstance(structured, dict)
++        assert structured["revision"] == 1
++    finally:
++        process.terminate()

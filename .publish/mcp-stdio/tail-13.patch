@@ -1,0 +1,24 @@
++            "HARNESS_WORKSPACE_ROOT": str(root),
++        }
++    )
++    process = subprocess.Popen(
++        [sys.executable, "-m", "harness.mcp_process"],
++        cwd=root,
++        env=env,
++        stdin=subprocess.PIPE,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.PIPE,
++        text=True,
++        bufsize=1,
++    )
++    assert process.stdin is not None
++    assert process.stdout is not None
++    stdin = process.stdin
++    stdout = process.stdout
++    meta = {
++        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
++        "io.modelcontextprotocol/clientInfo": {"name": "mutation-review", "version": "1.0"},
++        "io.modelcontextprotocol/clientCapabilities": {},
++    }
++
++    def exchange(request: dict[str, object]) -> dict[str, object]:

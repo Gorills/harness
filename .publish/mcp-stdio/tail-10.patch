@@ -1,0 +1,24 @@
++                            "io.modelcontextprotocol/protocolVersion": "V" * 20_000,
++                        }
++                    },
++                },
++                3,
++            ),
++            (
++                {
++                    "jsonrpc": "2.0",
++                    "id": 4,
++                    "method": "tools/call",
++                    "params": {
++                        "_meta": meta,
++                        "name": "T" * 20_000,
++                        "arguments": {},
++                    },
++                },
++                4,
++            ),
++        )
++        for request, expected_id in oversized_cases:
++            raw, response = exchange(request)
++            assert response["id"] == expected_id
++            assert "error" in response

@@ -1,0 +1,5 @@
++def _request_id_is_oversized(request_id: str | int) -> bool:
++    encoded_id = json.dumps(request_id, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
++    return len(encoded_id) > _MCP_REQUEST_ID_MAX_BYTES
++
++

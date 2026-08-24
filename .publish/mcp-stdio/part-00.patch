@@ -1,0 +1,8 @@
+diff --git a/README.md b/README.md
+index 30c04f2..fbb31da 100644
+--- a/README.md
++++ b/README.md
+@@ -72,7 +72,7 @@ The global status result remains deliberately small: schema version plus Project
+ 
+ The current internal IPC protocol is independent of MCP wire objects, uses protocol version `1`, allows exactly one request/response per connection, enforces a 16 KiB message limit, uses bounded request/response timeouts, and rejects unknown fields/methods fail-closed. `workspace_status`, `workspace_task_status`, `workspace_search`, `workspace_index_entry`, `scan_workspace`, `task_start`, and `task_checkpoint` are additive protocol-v1 methods; the original global `status` wire shape remains unchanged. The scan and Task clients use longer bounded receive timeouts for their bounded mechanical work. Canonical POSIX clients lazily start the daemon from the installed Python package when needed, with a three-second readiness bound and existing runtime-directory validation. Windows daemon IPC and canonical Windows transport paths remain unsupported until that separate platform task is proven.
+ 

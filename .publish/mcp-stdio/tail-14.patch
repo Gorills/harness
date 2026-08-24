@@ -1,0 +1,5 @@
++        stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
++        stdin.flush()
++        ready, _, _ = select.select([stdout], [], [], 3)
++        assert ready, f"no MCP response for {request['method']}"
++        raw = stdout.readline()

@@ -1,0 +1,22 @@
++                async with bounded_send:
++                    await self._lowlevel_server.run(
++                        filtered_receive,
++                        bounded_send,
++                        self._lowlevel_server.create_initialization_options(),
++                    )
++                task_group.cancel_scope.cancel()
+ 
+     async def list_tools(self) -> list[MCPTool]:
+         tools = await super().list_tools()
+@@ -455,4 +503,52 @@ def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:
+     )
+ 
+ 
++def _has_oversized_request_id(item: SessionMessage | Exception) -> bool:
++    return (
++        isinstance(item, SessionMessage)
++        and isinstance(item.message, JSONRPCRequest)
++        and _request_id_is_oversized(item.message.id)
++    )
++
++

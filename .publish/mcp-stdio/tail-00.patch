@@ -1,0 +1,15 @@
++                async with filtered_send, rejection_send:
++                    async for item in read_stream:
++                        if _has_oversized_request_id(item):
++                            await rejection_send.send(_oversized_request_id_error())
++                            continue
++                        await filtered_send.send(item)
++
++            async def relay_outbound() -> None:
++                async with bounded_receive:
++                    async for item in bounded_receive:
++                        await write_stream.send(_bounded_stdio_message(item))
++
++            async with anyio.create_task_group() as task_group:
++                task_group.start_soon(relay_inbound)
++                task_group.start_soon(relay_outbound)

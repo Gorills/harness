@@ -1,0 +1,8 @@
++                "id": 1,
++                "method": "server/discover",
++                "params": {"_meta": meta},
++            }
++        )
++        assert discovered["id"] == 1
++
++        oversized_cases: tuple[tuple[dict[str, object], object], ...] = (

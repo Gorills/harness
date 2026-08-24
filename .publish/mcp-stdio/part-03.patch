@@ -1,0 +1,45 @@
+ from mcp.server.mcpserver.context import Context
++from mcp.server.stdio import stdio_server
+ from mcp.shared.exceptions import MCPError
+-from mcp_types import INVALID_PARAMS, CallToolResult, InputRequiredResult, TextContent
++from mcp.shared.message import SessionMessage
++from mcp_types import (
++    INVALID_PARAMS,
++    INVALID_REQUEST,
++    CallToolResult,
++    ErrorData,
++    InputRequiredResult,
++    JSONRPCError,
++    JSONRPCRequest,
++    JSONRPCResponse,
++    TextContent,
++)
+ from mcp_types import Tool as MCPTool
+ from pydantic import BaseModel, ConfigDict, Field, StrictInt
+ 
+@@ -46,6 +59,8 @@ _CONTEXT_MAX_BYTES = 12 * 1024
+ _TASK_MAX_BYTES = 4 * 1024
+ _CONTEXT_REF_MAX_BYTES = 4096 + len("code:")
+ _MCP_WIRE_OVERHEAD_BYTES = 1024
++_MCP_STDIO_FRAME_MAX_BYTES = 12 * 1024
++_MCP_REQUEST_ID_MAX_BYTES = 256
+ _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+ _TOOL_RESPONSE_MAX_BYTES = {
+     "project_status": _STATUS_MAX_BYTES,
+@@ -102,7 +117,40 @@ class KnowledgeInput(_StrictInputModel):
+ 
+ 
+ class HarnessMCPServer(MCPServer):
+-    """MCPServer with an explicit fail-closed model-facing argument contract."""
++    """MCPServer with explicit fail-closed model and stdio wire contracts."""
++
++    async def run_stdio_async(self) -> None:
++        """Run official SDK stdio with bounded request identity and response frames."""
++        async with stdio_server() as (read_stream, write_stream):
++            filtered_send, filtered_receive = anyio.create_memory_object_stream[
++                SessionMessage | Exception
++            ](0)
++            bounded_send, bounded_receive = anyio.create_memory_object_stream[SessionMessage](0)
++            rejection_send = bounded_send.clone()
++
++            async def relay_inbound() -> None:

@@ -1,0 +1,26 @@
++        assert len(raw.encode("utf-8")) < 12 * 1024
++        return cast(dict[str, object], json.loads(raw))
++
++    try:
++        discovered = exchange(
++            {
++                "jsonrpc": "2.0",
++                "id": 1,
++                "method": "server/discover",
++                "params": {"_meta": meta},
++            }
++        )
++        assert discovered["id"] == 1
++
++        rejected = exchange(
++            {
++                "jsonrpc": "2.0",
++                "id": "M" * 20_000,
++                "method": "tools/call",
++                "params": {
++                    "_meta": meta,
++                    "name": "task_start",
++                    "arguments": {"title": "must not mutate"},
++                },
++            }
++        )

@@ -1,0 +1,20 @@
++def _oversized_request_id_error() -> SessionMessage:
++    return SessionMessage(
++        JSONRPCError(
++            jsonrpc="2.0",
++            id=None,
++            error=ErrorData(
++                code=INVALID_REQUEST,
++                message="JSON-RPC request id exceeds Harness wire budget",
++            ),
++        )
++    )
++
++
++def _bounded_stdio_message(item: SessionMessage) -> SessionMessage:
++    encoded = item.message.model_dump_json(by_alias=True, exclude_unset=True).encode("utf-8")
++    if len(encoded) + 1 <= _MCP_STDIO_FRAME_MAX_BYTES:
++        return item
++    response_id: str | int | None = None
++    if isinstance(item.message, (JSONRPCResponse, JSONRPCError)):
++        candidate = item.message.id

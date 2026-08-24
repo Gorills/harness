@@ -1,0 +1,26 @@
++            (
++                {
++                    "jsonrpc": "2.0",
++                    "id": int("9" * 300),
++                    "method": "server/discover",
++                    "params": {"_meta": meta},
++                },
++                None,
++            ),
++            (
++                {
++                    "jsonrpc": "2.0",
++                    "id": 2,
++                    "method": "X" * 20_000,
++                    "params": {"_meta": meta},
++                },
++                2,
++            ),
++            (
++                {
++                    "jsonrpc": "2.0",
++                    "id": 3,
++                    "method": "server/discover",
++                    "params": {
++                        "_meta": {
++                            **meta,

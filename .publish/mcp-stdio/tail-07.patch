@@ -1,0 +1,23 @@
++        stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
++        stdin.flush()
++        ready, _, _ = select.select([stdout], [], [], 3)
++        assert ready, f"no MCP response for {request['method']}"
++        raw = stdout.readline()
++        assert len(raw.encode("utf-8")) < 12 * 1024
++        return raw, json.loads(raw)
++
++    try:
++        _, oversized_opening = exchange(
++            {
++                "jsonrpc": "2.0",
++                "id": "R" * 20_000,
++                "method": "server/discover",
++                "params": {"_meta": meta},
++            }
++        )
++        assert oversized_opening["id"] is None
++        assert "error" in oversized_opening
++
++        _, discovered = exchange(
++            {
++                "jsonrpc": "2.0",

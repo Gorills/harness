@@ -1,0 +1,23 @@
++                "jsonrpc": "2.0",
++                "id": 5,
++                "method": "tools/list",
++                "params": {"_meta": meta},
++            }
++        )
++        assert listed["id"] == 5
++        assert "result" in listed
++    finally:
++        process.terminate()
++        process.wait(timeout=3)
++
++
++def test_oversized_request_id_is_rejected_before_task_mutation(tmp_path: Path) -> None:
++    root, database = _repo(tmp_path)
++    runtime = tmp_path / "runtime"
++    socket_path = runtime / "harness" / "harness.sock"
++    stop, executor, future = _start_daemon(database, socket_path)
++    env = dict(os.environ)
++    env.update(
++        {
++            "XDG_STATE_HOME": str(tmp_path / "state"),
++            "XDG_RUNTIME_DIR": str(runtime),

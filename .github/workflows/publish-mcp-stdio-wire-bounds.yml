@@ -1,0 +1,41 @@
+name: Publish MCP stdio fix
+
+on:
+  push:
+    branches:
+      - chore/publish-mcp-stdio-wire-bounds
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and publish exact fix tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat \
+            .publish/mcp-stdio/part-00.patch \
+            .publish/mcp-stdio/part-01.patch \
+            .publish/mcp-stdio/part-02.patch \
+            .publish/mcp-stdio/part-03.patch \
+            .publish/mcp-stdio/tail-{00..18}.patch \
+            > /tmp/fix.patch
+          echo 'da1d4c77ac4d12651e5de77762e2a4da5b850a59a9d35dc72eb4ca9f1922a8e6  /tmp/fix.patch' | sha256sum -c -
+          git fetch origin fix/mcp-stdio-wire-bounds
+          test "$(git rev-parse origin/fix/mcp-stdio-wire-bounds)" = 'd1c89eabc41c31034efa070e654aa8a1a52a6cba'
+          git checkout -B fix/mcp-stdio-wire-bounds d1c89eabc41c31034efa070e654aa8a1a52a6cba
+          git apply --check /tmp/fix.patch
+          git apply /tmp/fix.patch
+          git diff --check
+          git add README.md src/harness/mcp_bridge.py tests/test_mcp_bridge.py
+          test "$(git write-tree)" = '65d2eca73da0bbae1c66c6b0e7d241cfcdb67016'
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: bound MCP stdio envelope responses'
+          git push origin HEAD:refs/heads/fix/mcp-stdio-wire-bounds
