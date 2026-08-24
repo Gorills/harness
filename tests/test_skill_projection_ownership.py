@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Mapping
@@ -124,7 +125,7 @@ def test_stale_cleanup_rechecks_target_at_atomic_move(
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
     target = root / ".claude" / "skills" / "fastapi"
     empty_plan = plan_skill_projection(root, (), (surface,))
-    original_replace = skills_module.os.replace
+    original_replace = os.replace
     raced = False
 
     def replace_with_race(source: Path | str, destination: Path | str) -> None:
@@ -142,7 +143,7 @@ def test_stale_cleanup_rechecks_target_at_atomic_move(
             raced = True
         original_replace(source, destination)
 
-    monkeypatch.setattr(skills_module.os, "replace", replace_with_race)
+    monkeypatch.setattr("harness.skills.os.replace", replace_with_race)
 
     with pytest.raises(SkillProjectionCollisionError, match="changed during mutation"):
         apply_skill_projection(empty_plan)
