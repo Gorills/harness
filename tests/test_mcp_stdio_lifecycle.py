@@ -196,3 +196,72 @@ anyio.run(server.run_stdio_async)
     )
     assert completed.returncode == 0
     assert completed.stdout == ""
+
+
+@pytest.mark.parametrize("duplicate_id", [1, "1"])
+def test_stdio_transport_rejects_duplicate_coerced_request_id_before_dispatch(
+    duplicate_id: int | str,
+) -> None:
+    script = """
+import anyio
+
+from harness.mcp_bridge import HarnessMCPServer
+
+server = HarnessMCPServer("Duplicate ID review", version="0")
+
+@server.tool()
+async def slow() -> dict[str, str]:
+    await anyio.sleep(1.0)
+    return {"which": "slow"}
+
+@server.tool()
+async def fast() -> dict[str, str]:
+    return {"which": "fast"}
+
+anyio.run(server.run_stdio_async)
+"""
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "duplicate-id-review", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    first = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"_meta": meta, "name": "slow", "arguments": {}},
+    }
+    duplicate = {
+        "jsonrpc": "2.0",
+        "id": duplicate_id,
+        "method": "tools/call",
+        "params": {"_meta": meta, "name": "fast", "arguments": {}},
+    }
+    cancel = {
+        "jsonrpc": "2.0",
+        "method": "notifications/cancelled",
+        "params": {"requestId": "1", "reason": "cancel accepted request"},
+    }
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        input="".join(
+            json.dumps(item, separators=(",", ":")) + "\n" for item in (first, duplicate, cancel)
+        ),
+        capture_output=True,
+        text=True,
+        timeout=3,
+        check=False,
+    )
+    assert completed.returncode == 0
+    responses = [json.loads(line) for line in completed.stdout.splitlines()]
+    assert responses == [
+        {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {
+                "code": -32600,
+                "message": "JSON-RPC request id collides with an in-flight request",
+            },
+        }
+    ]

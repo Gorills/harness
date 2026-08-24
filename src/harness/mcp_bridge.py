@@ -130,24 +130,23 @@ class HarnessMCPServer(MCPServer):
             ](0)
             bounded_send, bounded_receive = anyio.create_memory_object_stream[SessionMessage](0)
             rejection_send = bounded_send.clone()
-            pending_requests: dict[str | int, int] = {}
+            pending_requests: set[str | int] = set()
             pending_condition = anyio.Condition()
 
-            async def add_pending(request_id: str | int) -> None:
+            async def add_pending(request_id: str | int) -> bool:
                 async with pending_condition:
                     key = coerce_request_id(request_id)
-                    pending_requests[key] = pending_requests.get(key, 0) + 1
+                    if key in pending_requests:
+                        return False
+                    pending_requests.add(key)
+                    return True
 
             async def settle_pending(request_id: str | int) -> None:
                 async with pending_condition:
                     key = coerce_request_id(request_id)
-                    count = pending_requests.get(key)
-                    if count is None:
+                    if key not in pending_requests:
                         return
-                    if count == 1:
-                        del pending_requests[key]
-                    else:
-                        pending_requests[key] = count - 1
+                    pending_requests.remove(key)
                     pending_condition.notify_all()
 
             async def complete_pending(item: SessionMessage) -> None:
@@ -186,7 +185,9 @@ class HarnessMCPServer(MCPServer):
                         if isinstance(item, SessionMessage) and isinstance(
                             item.message, JSONRPCRequest
                         ):
-                            await add_pending(item.message.id)
+                            if not await add_pending(item.message.id):
+                                await rejection_send.send(_duplicate_request_id_error())
+                                continue
                         await filtered_send.send(item)
                         await cancel_pending(item)
                     await drain_pending_after_eof()
@@ -583,6 +584,19 @@ def _oversized_request_id_error() -> SessionMessage:
             error=ErrorData(
                 code=INVALID_REQUEST,
                 message="JSON-RPC request id exceeds Harness wire budget",
+            ),
+        )
+    )
+
+
+def _duplicate_request_id_error() -> SessionMessage:
+    return SessionMessage(
+        JSONRPCError(
+            jsonrpc="2.0",
+            id=None,
+            error=ErrorData(
+                code=INVALID_REQUEST,
+                message="JSON-RPC request id collides with an in-flight request",
             ),
         )
     )
