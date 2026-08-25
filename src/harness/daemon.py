@@ -5,11 +5,13 @@ import os
 import socket
 import sqlite3
 import stat
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Event, Lock, Thread
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from harness.git_workspace import (
     GitWorkspaceError,
@@ -24,6 +26,7 @@ from harness.index import (
     scan_workspace,
 )
 from harness.ipc import (
+    DashboardUrlResult,
     IpcMessageTooLargeError,
     IpcProtocolError,
     StatusResult,
@@ -41,6 +44,7 @@ from harness.ipc import (
     WorkspaceTaskStatusResult,
     WorkspaceTaskSummary,
     receive_request,
+    send_dashboard_url_response,
     send_error_response,
     send_status_response,
     send_task_checkpoint_response,
@@ -101,6 +105,9 @@ from harness.workspace_resolution import (
     WorkspaceResolutionError,
     WorkspaceResolver,
 )
+
+if TYPE_CHECKING:
+    from harness.dashboard import DashboardServerManager
 
 _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
@@ -531,6 +538,8 @@ def serve_daemon(
     watcher_scan_deadline_seconds: float = DEFAULT_WATCH_SCAN_DEADLINE_SECONDS,
 ) -> None:
     """Serve local IPC while keeping registered Workspace indexes reconciled."""
+    from harness.dashboard import DashboardError, DashboardServerManager
+
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
     socket_lock_fd = _acquire_daemon_lock(socket_path)
@@ -544,6 +553,7 @@ def serve_daemon(
     watcher_thread: Thread | None = None
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
     watcher_invalidations: SimpleQueue[str] = SimpleQueue()
+    dashboard = DashboardServerManager(database_path)
     try:
         _prepare_socket_path_for_bind(socket_path)
         database_lock_fd = _acquire_database_lock(database_path)
@@ -598,13 +608,19 @@ def serve_daemon(
             with client:
                 client.settimeout(_CLIENT_TIMEOUT_SECONDS)
                 try:
-                    _serve_client(client, database, scan_lock, watcher_invalidations)
+                    _serve_client(client, database, scan_lock, watcher_invalidations, dashboard)
                 except OSError:
                     continue
     finally:
+        active_error = sys.exception()
+        dashboard_error: DashboardError | None = None
         watcher_stop.set()
         if watcher_thread is not None:
             watcher_thread.join()
+        try:
+            dashboard.close()
+        except DashboardError as exc:
+            dashboard_error = exc
         if server is not None:
             server.close()
         if database is not None:
@@ -613,6 +629,10 @@ def serve_daemon(
         if database_lock_fd is not None:
             os.close(database_lock_fd)
         os.close(socket_lock_fd)
+        if dashboard_error is not None:
+            if active_error is None:
+                raise DaemonError("dashboard server did not stop cleanly") from dashboard_error
+            active_error.add_note("Harness dashboard server did not stop cleanly during cleanup")
 
 
 def _serve_client(
@@ -620,6 +640,7 @@ def _serve_client(
     database: sqlite3.Connection,
     scan_lock: Lock,
     watcher_invalidations: SimpleQueue[str],
+    dashboard: DashboardServerManager,
 ) -> None:
     try:
         request = receive_request(client)
@@ -632,6 +653,9 @@ def _serve_client(
 
     if request.method == "status":
         _serve_global_status(client, database, request.request_id)
+        return
+    if request.method == "dashboard_url":
+        _serve_dashboard_url(client, request.request_id, dashboard)
         return
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
@@ -686,6 +710,26 @@ def _serve_client(
         code="invalid_request",
         message="IPC request is invalid",
     )
+
+
+def _serve_dashboard_url(
+    client: socket.socket,
+    request_id: str,
+    dashboard: DashboardServerManager,
+) -> None:
+    from harness.dashboard import DashboardError
+
+    try:
+        url = dashboard.get_url()
+    except DashboardError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="dashboard_unavailable",
+            message="dashboard server is unavailable",
+        )
+        return
+    send_dashboard_url_response(client, request_id, DashboardUrlResult(url=url))
 
 
 def _serve_global_status(

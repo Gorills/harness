@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from harness.index import IndexedFileKind
@@ -84,6 +85,13 @@ class StatusResult:
     schema_version: int
     project_count: int
     workspace_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardUrlResult:
+    """Capability-bearing loopback URL for the daemon-owned read-only dashboard."""
+
+    url: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +272,21 @@ def request_status(
         timeout=timeout,
     )
     return _status_from_response(response, expected_request_id=request_id)
+
+
+def request_dashboard_url(
+    socket_path: Path,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> DashboardUrlResult:
+    """Ask harnessd to lazily start its loopback dashboard and return the private URL."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {"version": PROTOCOL_VERSION, "request_id": request_id, "method": "dashboard_url"},
+        timeout=timeout,
+    )
+    return _dashboard_url_from_response(response, expected_request_id=request_id)
 
 
 def request_workspace_status(
@@ -486,6 +509,11 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             raise IpcProtocolError("status request fields do not match the IPC schema")
         return IpcRequest(request_id=request_id, method=method)
 
+    if method == "dashboard_url":
+        if set(payload) != {"version", "request_id", "method"}:
+            raise IpcProtocolError("dashboard URL request fields do not match the IPC schema")
+        return IpcRequest(request_id=request_id, method=method)
+
     if method == "workspace_status":
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace status request fields do not match the IPC schema")
@@ -569,6 +597,22 @@ def send_status_response(peer: socket.socket, request_id: str, status: StatusRes
                     "project_count": status.project_count,
                     "workspace_count": status.workspace_count,
                 },
+            }
+        )
+    )
+
+
+def send_dashboard_url_response(
+    peer: socket.socket, request_id: str, dashboard: DashboardUrlResult
+) -> None:
+    """Send the exact success contract for daemon-owned dashboard discovery."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {"url": dashboard.url},
             }
         )
     )
@@ -1344,6 +1388,37 @@ def _status_from_response(response: dict[str, Any], *, expected_request_id: str)
         project_count=result["project_count"],
         workspace_count=result["workspace_count"],
     )
+
+
+def _dashboard_url_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> DashboardUrlResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    if set(result) != {"url"}:
+        raise IpcProtocolError("daemon dashboard URL result does not match the IPC schema")
+    url = result["url"]
+    if not isinstance(url, str) or len(url) > 512:
+        raise IpcProtocolError("daemon dashboard URL result has invalid field types")
+    parsed = urlsplit(url)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise IpcProtocolError("daemon dashboard URL has an invalid port") from exc
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+        or parsed.path == "/"
+        or not parsed.path.endswith("/")
+    ):
+        raise IpcProtocolError("daemon dashboard URL is not a private loopback capability URL")
+    return DashboardUrlResult(url=url)
 
 
 def _workspace_status_from_response(

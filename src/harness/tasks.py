@@ -207,6 +207,25 @@ def get_relevant_task(
     return None if row is None else _task_from_row(row)
 
 
+def get_latest_task(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> TaskRecord | None:
+    """Return the most recently updated Task for a Workspace, regardless of terminal state."""
+    get_workspace(connection, workspace_id)
+    row = connection.execute(
+        """
+        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        FROM tasks
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (workspace_id,),
+    ).fetchone()
+    return None if row is None else _task_from_row(row)
+
+
 def transition_task_state(
     connection: sqlite3.Connection,
     task_id: str,

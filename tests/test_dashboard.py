@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
+from threading import Event
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import urlopen
+
+import pytest
+
+from harness.daemon import DaemonError, serve_daemon
+from harness.dashboard import DashboardError, DashboardServerManager, read_dashboard_workspace_rows
+from harness.index import scan_workspace
+from harness.ipc import (
+    DashboardUrlResult,
+    IpcError,
+    IpcRemoteError,
+    request_dashboard_url,
+    request_status,
+)
+from harness.registry import create_project, register_workspace
+from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.task_checkpoints import checkpoint_task
+from harness.tasks import TaskState, TaskWaitReason, create_task_record
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="dashboard daemon discovery uses POSIX IPC")
+
+
+def _git(cwd: Path, *arguments: str) -> None:
+    subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
+
+
+def _make_repo(path: Path) -> None:
+    path.mkdir()
+    (path / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+    _git(path, "init")
+    _git(path, "add", "tracked.txt")
+    _git(
+        path,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-m",
+        "init",
+    )
+
+
+def _registered_database(tmp_path: Path) -> tuple[Path, Path, str]:
+    root = tmp_path / "repo"
+    _make_repo(root)
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+        return root, database, workspace.workspace_id
+    finally:
+        connection.close()
+
+
+def _start_server(
+    database: Path, socket_path: Path
+) -> tuple[Event, ThreadPoolExecutor, Future[None]]:
+    stop_event = Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(serve_daemon, database, socket_path, stop_event=stop_event)
+    deadline = time.monotonic() + 3
+    while True:
+        if future.done():
+            future.result()
+        try:
+            if request_status(socket_path).schema_version == SCHEMA_VERSION:
+                return stop_event, executor, future
+        except IpcError:
+            pass
+        if time.monotonic() >= deadline:
+            stop_event.set()
+            executor.shutdown(wait=True)
+            raise AssertionError("daemon did not become ready")
+        time.sleep(0.01)
+
+
+def _stop_server(stop_event: Event, executor: ThreadPoolExecutor, future: Future[None]) -> None:
+    stop_event.set()
+    executor.shutdown(wait=True)
+    future.result()
+
+
+def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
+    tmp_path: Path,
+) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    connection = connect_database(database)
+    try:
+        task = create_task_record(connection, workspace_id, "<script>alert('task')</script>")
+        checkpoint_task(
+            connection,
+            task.task_id,
+            expected_revision=task.revision,
+            expected_workspace_id=workspace_id,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Ready for review",
+            next_step='<img src=x onerror="alert(1)">',
+        )
+    finally:
+        connection.close()
+
+    manager = DashboardServerManager(database)
+    try:
+        url = manager.get_url()
+        assert manager.get_url() == url
+        parsed = urlsplit(url)
+        assert parsed.scheme == "http"
+        assert parsed.hostname == "127.0.0.1"
+        assert parsed.path != "/"
+        assert parsed.query == ""
+        assert parsed.fragment == ""
+
+        with pytest.raises(HTTPError) as denied:
+            urlopen(f"http://127.0.0.1:{parsed.port}/", timeout=2)
+        assert denied.value.code == 404
+
+        with urlopen(url, timeout=2) as response:
+            body = response.read().decode("utf-8")
+            assert response.status == 200
+            assert response.headers["Cache-Control"] == "no-store"
+            assert "default-src 'none'" in response.headers["Content-Security-Policy"]
+        assert "Harness Projects" in body
+        assert "waiting" in body
+        assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
+        assert "<script>alert('task')</script>" not in body
+        assert '<img src=x onerror="alert(1)">' not in body
+    finally:
+        manager.close()
+
+
+def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    connection = connect_database(database)
+    try:
+        task = create_task_record(connection, workspace_id, "Completed task")
+        checkpoint_task(
+            connection,
+            task.task_id,
+            expected_revision=task.revision,
+            expected_workspace_id=workspace_id,
+            state=TaskState.COMPLETED,
+            summary="Done",
+        )
+    finally:
+        connection.close()
+
+    root.rename(tmp_path / "repo-moved")
+    rows = read_dashboard_workspace_rows(database)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.workspace_id == workspace_id
+    assert row.task_title == "Completed task"
+    assert row.task_state == "completed"
+    assert row.branch is None
+    assert row.dirty_path_count is None
+    assert row.live_error == "Git status unavailable"
+    assert row.indexed_file_count == 1
+
+
+def test_daemon_lazily_reuses_dashboard_url_over_user_ipc(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        first = request_dashboard_url(socket_path)
+        second = request_dashboard_url(socket_path)
+        assert isinstance(first, DashboardUrlResult)
+        assert second == first
+        with urlopen(first.url, timeout=2) as response:
+            body = response.read().decode("utf-8")
+            assert response.status == 200
+        assert "No registered Workspaces." in body
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_dashboard_start_failure_is_bounded_and_daemon_keeps_serving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        monkeypatch.setattr(
+            DashboardServerManager,
+            "get_url",
+            lambda _self: (_ for _ in ()).throw(DashboardError("startup failed")),
+        )
+        with pytest.raises(IpcRemoteError) as raised:
+            request_dashboard_url(socket_path)
+        assert raised.value.code == "dashboard_unavailable"
+        assert request_status(socket_path).schema_version == SCHEMA_VERSION
+        assert not future.done()
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_dashboard_shutdown_failure_does_not_leak_daemon_socket_or_locks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    original_close = DashboardServerManager.close
+
+    def close_then_fail(manager: DashboardServerManager) -> None:
+        original_close(manager)
+        raise DashboardError("synthetic shutdown failure")
+
+    stop_event, executor, future = _start_server(database, socket_path)
+    request_dashboard_url(socket_path)
+    monkeypatch.setattr(DashboardServerManager, "close", close_then_fail)
+    stop_event.set()
+    executor.shutdown(wait=True)
+    with pytest.raises(DaemonError, match="dashboard server did not stop cleanly"):
+        future.result()
+    assert not socket_path.exists()
+
+    monkeypatch.setattr(DashboardServerManager, "close", original_close)
+    second_stop, second_executor, second_future = _start_server(database, socket_path)
+    _stop_server(second_stop, second_executor, second_future)
