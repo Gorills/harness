@@ -66,7 +66,11 @@ Treat the resulting `git write-tree` value as the expected feature tree SHA.
 
 For changed regular files and symlinks, use the staged index blob SHA from `git ls-files --stage` as the canonical local blob identity. This is preferable to hashing ad hoc transformed text because the index already reflects repository attributes and Git clean-filter behavior.
 
-Run the focused tests and the full offline quality gate against exactly the bytes represented by this staged tree. If the working tree changes afterward, regenerate the staged evidence and rerun checks proportionate to the change.
+Run focused tests and component checks against exactly the bytes represented by this staged tree, then perform the independent correctness review required by the bounded workflow. When the local full offline quality gate completes reliably, run it here as additional pre-publication evidence.
+
+If the execution wrapper repeatedly interrupts that long gate without a test/check failure, do not spend the task window retrying the same command with cosmetic timeout changes. Use a materially different strategy that covers the same local risk where practical (for example, non-overlapping pytest partitions plus lock/Ruff/mypy/wheel smoke), mark the single-process local full gate as NOT VERIFIED, and proceed to durable task-branch publication only after those replacement checks and review are green. An observed real failure is different: fix it before publication.
+
+The full repository quality gate must still pass in GitHub Actions on the exact PR head before merge. This ordering makes the reviewed candidate durable early enough to survive an execution interruption without weakening the merge gate. If the working tree changes after verification, regenerate the staged evidence and rerun checks proportionate to the change.
 
 ## 4. Publish exact Git objects when `git push` is unavailable
 
@@ -98,9 +102,11 @@ Fallback publication does not relax review or CI rules:
 
 - open one focused Draft PR for the bounded task;
 - state the exact base/head/tree evidence in the PR when fallback publication was used;
-- perform adversarial self-review before the first push/branch-ref move that exposes the feature commit;
+- perform the independent correctness review before the first push/branch-ref move that exposes the feature commit;
+- once the reviewed tree has enough focused/component verification to be safe to publish, prioritize making that exact tree durable as the task commit/PR instead of consuming the remaining execution window on repeated local full-suite retries;
 - use at most the workflow lookup cadence required by the active bounded-workflow instructions;
 - never poll an in-progress workflow;
+- require the complete repository quality gate to succeed on the exact PR head before Ready/merge;
 - do not mark a task verified merely because local and remote Git object SHAs matched — tests and CI are separate evidence.
 
 ## Failure rule
