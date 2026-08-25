@@ -7,7 +7,8 @@ import sqlite3
 import stat
 from collections.abc import Sequence
 from pathlib import Path
-from threading import Event
+from queue import Empty, SimpleQueue
+from threading import Event, Lock, Thread
 from time import monotonic
 
 from harness.git_workspace import (
@@ -84,6 +85,15 @@ from harness.tasks import (
     TaskValidationError,
     TaskWorkspaceConflictError,
     get_relevant_task,
+)
+from harness.watcher import (
+    DEFAULT_WATCH_DEBOUNCE_SECONDS,
+    DEFAULT_WATCH_FULL_RECONCILE_SECONDS,
+    DEFAULT_WATCH_POLL_SECONDS,
+    DEFAULT_WATCH_RETRY_SECONDS,
+    DEFAULT_WATCH_SCAN_DEADLINE_SECONDS,
+    DEFAULT_WATCH_TOKEN_DEADLINE_SECONDS,
+    run_workspace_watcher,
 )
 from harness.workspace_resolution import (
     WorkspaceCandidate,
@@ -479,14 +489,19 @@ def _resolve_task_workspace(
     return workspace
 
 
-def scan_workspace_path(connection: sqlite3.Connection, path: Path) -> WorkspaceScanResult:
+def scan_workspace_path(
+    connection: sqlite3.Connection,
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> WorkspaceScanResult:
     """Register/reuse one Git Workspace and run a bounded deterministic reconciliation."""
-    deadline = monotonic() + _SCAN_DEADLINE_SECONDS
+    effective_deadline = monotonic() + _SCAN_DEADLINE_SECONDS if deadline is None else deadline
     registration = register_workspace_for_scan(connection, path=path)
     scan = scan_workspace(
         connection,
         registration.workspace.workspace_id,
-        deadline=deadline,
+        deadline=effective_deadline,
     )
     return WorkspaceScanResult(
         schema_version=SCHEMA_VERSION,
@@ -508,8 +523,14 @@ def serve_daemon(
     socket_path: Path,
     *,
     stop_event: Event | None = None,
+    watcher_poll_seconds: float = DEFAULT_WATCH_POLL_SECONDS,
+    watcher_debounce_seconds: float = DEFAULT_WATCH_DEBOUNCE_SECONDS,
+    watcher_full_reconcile_seconds: float = DEFAULT_WATCH_FULL_RECONCILE_SECONDS,
+    watcher_retry_seconds: float = DEFAULT_WATCH_RETRY_SECONDS,
+    watcher_token_deadline_seconds: float = DEFAULT_WATCH_TOKEN_DEADLINE_SECONDS,
+    watcher_scan_deadline_seconds: float = DEFAULT_WATCH_SCAN_DEADLINE_SECONDS,
 ) -> None:
-    """Serve bounded local IPC status, search, and scan paths until asked to stop."""
+    """Serve local IPC while keeping registered Workspace indexes reconciled."""
     _require_posix_transport()
     _prepare_socket_parent(socket_path.parent)
     socket_lock_fd = _acquire_daemon_lock(socket_path)
@@ -518,6 +539,11 @@ def serve_daemon(
     database: sqlite3.Connection | None = None
     server: socket.socket | None = None
     socket_identity: tuple[int, int] | None = None
+    scan_lock = Lock()
+    watcher_stop = Event()
+    watcher_thread: Thread | None = None
+    watcher_failures: SimpleQueue[Exception] = SimpleQueue()
+    watcher_invalidations: SimpleQueue[str] = SimpleQueue()
     try:
         _prepare_socket_path_for_bind(socket_path)
         database_lock_fd = _acquire_database_lock(database_path)
@@ -531,7 +557,40 @@ def serve_daemon(
         socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
         server.listen()
         server.settimeout(_ACCEPT_POLL_SECONDS)
+
+        def watcher_target() -> None:
+            try:
+                run_workspace_watcher(
+                    database_path,
+                    watcher_stop,
+                    scan_lock,
+                    poll_seconds=watcher_poll_seconds,
+                    debounce_seconds=watcher_debounce_seconds,
+                    full_reconcile_seconds=watcher_full_reconcile_seconds,
+                    retry_seconds=watcher_retry_seconds,
+                    token_deadline_seconds=watcher_token_deadline_seconds,
+                    scan_deadline_seconds=watcher_scan_deadline_seconds,
+                    invalidations=watcher_invalidations,
+                )
+            except Exception as exc:
+                watcher_failures.put(exc)
+
+        thread = Thread(
+            target=watcher_target,
+            name="harness-workspace-watcher",
+            daemon=True,
+        )
+        thread.start()
+        watcher_thread = thread
         while stop_event is None or not stop_event.is_set():
+            if not watcher_thread.is_alive():
+                try:
+                    watcher_failure = watcher_failures.get_nowait()
+                except Empty:
+                    watcher_failure = None
+                if watcher_failure is not None:
+                    raise DaemonError("Workspace watcher stopped unexpectedly") from watcher_failure
+                raise DaemonError("Workspace watcher stopped unexpectedly")
             try:
                 client, _ = server.accept()
             except TimeoutError:
@@ -539,10 +598,13 @@ def serve_daemon(
             with client:
                 client.settimeout(_CLIENT_TIMEOUT_SECONDS)
                 try:
-                    _serve_client(client, database)
+                    _serve_client(client, database, scan_lock, watcher_invalidations)
                 except OSError:
                     continue
     finally:
+        watcher_stop.set()
+        if watcher_thread is not None:
+            watcher_thread.join()
         if server is not None:
             server.close()
         if database is not None:
@@ -553,7 +615,12 @@ def serve_daemon(
         os.close(socket_lock_fd)
 
 
-def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
+def _serve_client(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    scan_lock: Lock,
+    watcher_invalidations: SimpleQueue[str],
+) -> None:
     try:
         request = receive_request(client)
     except IpcMessageTooLargeError:
@@ -604,7 +671,14 @@ def _serve_client(client: socket.socket, database: sqlite3.Connection) -> None:
         _serve_task_checkpoint(client, database, request.request_id, request.task_checkpoint)
         return
     if request.method == "scan_workspace" and request.scan_path is not None:
-        _serve_workspace_scan(client, database, request.request_id, request.scan_path)
+        _serve_workspace_scan(
+            client,
+            database,
+            request.request_id,
+            request.scan_path,
+            scan_lock,
+            watcher_invalidations,
+        )
         return
     _try_send_error(
         client,
@@ -1046,9 +1120,19 @@ def _serve_workspace_scan(
     database: sqlite3.Connection,
     request_id: str,
     path: Path,
+    scan_lock: Lock,
+    watcher_invalidations: SimpleQueue[str],
 ) -> None:
+    deadline = monotonic() + _SCAN_DEADLINE_SECONDS
     try:
-        result = scan_workspace_path(database, path)
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
+            raise ScanDeadlineExceededError("Workspace scan deadline exceeded")
+        try:
+            result = scan_workspace_path(database, path, deadline=deadline)
+        finally:
+            scan_lock.release()
+        watcher_invalidations.put(result.workspace_id)
     except ScanDeadlineExceededError:
         _try_send_error(
             client,
