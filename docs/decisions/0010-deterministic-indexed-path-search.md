@@ -56,7 +56,7 @@ This still does not add MCP `project_search`. The eventual model-facing contract
 ### Costs and limits
 
 - This is not the full v1 search implementation and does not claim lexical source/content search.
-- Search reflects the current persisted Structural Index snapshot; without the future watcher, callers use `harness scan` to reconcile filesystem changes before relying on fresh results.
+- Search reflects the current persisted Structural Index snapshot. ADR-0018 now adds daemon-owned background reconciliation for registered Workspaces; callers may still use `harness scan` for explicit immediate registration/reconciliation and recovery.
 - FTS5, symbols/imports/exports, docs, Git metadata, structural proximity, Tasks, Knowledge, Working Sets, and rank fusion remain later bounded search channels.
 - Identifier token splitting is deliberately conservative and ASCII-oriented in this slice; exact and substring path matching still work for other Unicode path text.
 - The implementation currently scans the selected Workspace's indexed rows in process. A later FTS/schema slice may replace this internal mechanism without changing the bounded domain result contract.
