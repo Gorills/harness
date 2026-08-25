@@ -69,6 +69,8 @@ def test_cursor_skill_projection_surface_uses_documented_compatibility_roots() -
     assert surface.recursive_visible_roots == (
         PurePosixPath(".agents/skills"),
         PurePosixPath(".cursor/skills"),
+        PurePosixPath(".claude/skills"),
+        PurePosixPath(".codex/skills"),
     )
     assert surface.frontmatter_name_must_match_skill_id is True
     assert surface.frontmatter_name_pattern == r"[a-z0-9-]+"
@@ -171,6 +173,8 @@ def test_cursor_fails_closed_when_claude_and_codex_would_be_duplicate_visible(
         PurePosixPath("apps/web/.cursor/skills/fastapi"),
         PurePosixPath("apps/web/.agents/skills/fastapi"),
         PurePosixPath(".cursor/skills/team/fastapi"),
+        PurePosixPath(".claude/skills/team/fastapi"),
+        PurePosixPath(".codex/skills/team/fastapi"),
         PurePosixPath("apps/web/.cursor/skills/team/fastapi"),
     ),
 )
@@ -219,7 +223,7 @@ def test_cursor_projection_rechecks_nested_visibility_before_mutation(
     workspace.mkdir()
     _git(workspace, "init", "-b", "main")
     resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text())
-    duplicate = workspace / "apps" / "web" / ".cursor" / "skills" / "team" / "fastapi"
+    duplicate = workspace / ".claude" / "skills" / "team" / "fastapi"
     original_build = skills_module._build_projected_skill
 
     def build_with_race(parent: Path, definition: skills_module.SkillDefinition) -> Path:
