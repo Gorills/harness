@@ -61,6 +61,7 @@ class FakeApi:
         self.expected_tree_sha: str | None = None
         self.created_commit_sha = "c" * 40
         self.created_commit: RemoteCommit | None = None
+        self.existing_commits: dict[str, RemoteCommit] = {}
         self.branch_created_at: str | None = None
         self.updated_to: str | None = None
         self.move_base_on_read: int | None = None
@@ -79,6 +80,8 @@ class FakeApi:
             return RemoteCommit(self.base_sha, self.base_tree, ())
         if self.created_commit is not None and commit_sha == self.created_commit.sha:
             return self.created_commit
+        if commit_sha in self.existing_commits:
+            return self.existing_commits[commit_sha]
         raise AssertionError(f"unexpected commit lookup {commit_sha}")
 
     def create_blob(self, content: bytes) -> str:
@@ -143,6 +146,7 @@ def test_preflight_refuses_dirty_or_previously_moved_task_branch(
 
     (repo / "keep.txt").write_text("staged\n", encoding="utf-8")
     api.task_sha = "e" * 40
+    api.existing_commits[api.task_sha] = RemoteCommit(api.task_sha, "f" * 40, (base_sha,))
     with pytest.raises(PublicationError, match="already points"):
         preflight(api, base_branch="main", task_branch="feat/test")
 
@@ -242,3 +246,66 @@ def test_publish_fails_closed_before_ref_mutation_on_blob_or_base_mismatch(
     assert moved_base.created_commit is not None
     assert moved_base.branch_created_at is None
     assert moved_base.updated_to is None
+
+
+def test_publish_reconciles_ambiguous_branch_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, base_sha, base_tree = _make_repo(tmp_path)
+    (repo / "keep.txt").write_text("changed\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    monkeypatch.chdir(repo)
+    expected_tree = _git(repo, "write-tree")
+
+    class AmbiguousApi(FakeApi):
+        def create_branch(self, branch: str, sha: str) -> None:
+            super().create_branch(branch, sha)
+            raise PublicationError("simulated lost create-ref response")
+
+        def update_branch(self, branch: str, sha: str) -> None:
+            super().update_branch(branch, sha)
+            raise PublicationError("simulated lost update-ref response")
+
+    api = AmbiguousApi(base_sha=base_sha, base_tree=base_tree)
+    api.expected_tree_sha = expected_tree
+
+    result = publish(api, base_branch="main", task_branch="feat/test", message="feat: test")
+
+    assert api.branch_created_at == base_sha
+    assert api.updated_to == result.commit_sha
+    assert api.task_sha == result.commit_sha
+
+
+def test_publish_retry_accepts_already_published_exact_candidate_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, base_sha, base_tree = _make_repo(tmp_path)
+    (repo / "keep.txt").write_text("changed\n", encoding="utf-8")
+    _git(repo, "add", "--all")
+    monkeypatch.chdir(repo)
+    expected_tree = _git(repo, "write-tree")
+    published_sha = "d" * 40
+    api = FakeApi(base_sha=base_sha, base_tree=base_tree, task_sha=published_sha)
+    api.existing_commits[published_sha] = RemoteCommit(published_sha, expected_tree, (base_sha,))
+
+    result = publish(api, base_branch="main", task_branch="feat/test", message="feat: test")
+
+    assert result.commit_sha == published_sha
+    assert result.tree_sha == expected_tree
+    assert api.created_blobs == []
+    assert api.created_commit is None
+    assert api.updated_to is None
+
+
+def test_rest_client_normalizes_timeout_as_publication_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = GitHubRestGitDataApi("owner/repo", "token")
+
+    def timeout(*_: Any, **__: Any) -> Any:
+        raise TimeoutError("simulated timeout")
+
+    monkeypatch.setattr("publish_git_data.urlopen", timeout)
+
+    with pytest.raises(PublicationError, match="timed out"):
+        api.get_branch_commit_sha("main")

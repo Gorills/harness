@@ -114,8 +114,8 @@ The publisher performs this fail-closed sequence:
 6. Fresh-read `main` again after the unreferenced object writes. If it moved, stop before creating a durable task ref.
 7. Create one unreferenced commit whose tree is the verified feature tree and whose sole parent is the exact canonical base commit; re-read and verify both fields, then fresh-read the canonical base once more before any task-ref change.
 8. If the task branch does not exist, create it at the exact base commit. If it exists, require that it still points exactly at the base.
-9. Move the task branch to the feature commit with a non-force update.
-10. Re-fetch the branch and commit; require final commit/tree/parent identity to match the verified values.
+9. Move the task branch to the feature commit with a non-force update. If a create/update-ref request returns an ambiguous transport failure, re-read the ref: treat the mutation as successful only when the remote SHA already equals the exact expected SHA; otherwise fail closed.
+10. Re-fetch the branch and commit; require final commit/tree/parent identity to match the verified values. A repeated `publish` is idempotent when the task branch already points to a commit with the exact candidate tree and exact canonical-base parent, so an execution interruption immediately after a successful ref update can be resumed safely without publishing another commit.
 
 Git blob/tree/commit creation is content-addressed and safe to retry: failed or mismatched objects remain unreferenced. The branch ref is the durability boundary and moves only after the complete tree and parentage are proven.
 
