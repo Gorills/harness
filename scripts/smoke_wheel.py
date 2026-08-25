@@ -302,6 +302,57 @@ def main() -> int:
                 "installed Cursor-compatible skill projection was not ignored by Git"
             )
 
+        antigravity_project = workspace / "antigravity-skill-project"
+        antigravity_project.mkdir()
+        _run(("git", "init", "-b", "main"), cwd=antigravity_project, env=isolated_env)
+        antigravity_probe = _run(
+            (
+                str(python),
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from harness.host_adapters import antigravity_ide_skill_projection_surface; "
+                    "from harness.skills import "
+                    "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
+                    "plan_skill_projection,resolve_skills; "
+                    f"root=Path({str(antigravity_project)!r}); registry=Path({str(skill_registry)!r}); "
+                    "definitions=load_skill_registry(registry); "
+                    "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
+                    "surface=antigravity_ide_skill_projection_surface(); "
+                    "plan=plan_skill_projection(root,resolved,(surface,)); "
+                    "result=apply_skill_projection(plan); "
+                    "target=root/'.agents'/'skills'/'fastapi'; "
+                    "print(surface.profile); "
+                    "print(','.join(str(item.relative_root) for item in plan.targets)); "
+                    "print(result.materialized); "
+                    "print((target/'SKILL.md').is_file()); "
+                    "print((target/'.harness-skill.json').is_file()); "
+                    "print((target/'harness.yaml').exists())"
+                ),
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
+        if antigravity_probe.stdout.splitlines() != [
+            "antigravity-ide",
+            ".agents/skills",
+            "1",
+            "True",
+            "True",
+            "False",
+        ]:
+            raise RuntimeError(
+                "installed Antigravity IDE skill projection probe was unexpected: "
+                f"{antigravity_probe.stdout!r}"
+            )
+        ignored = _run(
+            ("git", "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md"),
+            cwd=antigravity_project,
+            env=isolated_env,
+        )
+        if ignored.returncode != 0:
+            raise RuntimeError("installed Antigravity IDE skill projection was not ignored by Git")
+
         if os.name != "nt":
             fake_bin = workspace / "fake-claude-bin"
             fake_bin.mkdir()

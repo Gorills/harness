@@ -4,6 +4,8 @@
 
 **Claude Code MCP evidence re-checked:** 2026-08-24.
 
+**Antigravity skill evidence re-checked:** 2026-08-25.
+
 This file is evidence for adapter design, not a promise that undocumented host internals remain stable. Re-check official docs when adapter behavior changes.
 
 ## Matrix
@@ -13,7 +15,7 @@ This file is evidence for adapter design, not a promise that undocumented host i
 | Claude Code | `~/.claude.json` user scope | `.mcp.json` | `CLAUDE_PROJECT_DIR` documented for stdio server | `.claude/skills/` | `~/.claude/skills/` | MCP registration/root adapter implemented; real-host acceptance still required. Reads `CLAUDE.md`, not `AGENTS.md`; use `CLAUDE.md` importing `@AGENTS.md`. |
 | Codex CLI / IDE / ChatGPT desktop local config | `~/.codex/config.toml` | `.codex/config.toml` in trusted project | No universal active-root guarantee established by docs reviewed here; requires acceptance | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | MCP server instructions are used; first 512 chars should be self-contained. |
 | Cursor | `~/.cursor/mcp.json` | `.cursor/mcp.json` | `${workspaceFolder}` documented for project config; global active-root semantics require acceptance | `.agents/skills/`, `.cursor/skills/`, plus compatibility roots | `~/.agents/skills/`, `~/.cursor/skills/`, plus compatibility roots | Cursor also scans Claude/Codex skill directories: duplication risk. |
-| Antigravity | `~/.gemini/config/mcp_config.json` | `.agents/mcp_config.json` | Needs real-host acceptance for global stdio current-root behavior | `.agents/skills/` | IDE docs: `~/.gemini/config/skills/`; Antigravity CLI migration docs: `~/.gemini/antigravity-cli/skills/` | Model skills follow progressive disclosure. Keep IDE/CLI skill profile differences explicit. |
+| Antigravity | `~/.gemini/config/mcp_config.json` | `.agents/mcp_config.json` | Needs real-host acceptance for global stdio current-root behavior | IDE: `.agents/skills/` with legacy `.agent/skills/`; CLI: flat `.agents/skills/*.md` | IDE: `~/.gemini/antigravity/skills/`; CLI: `~/.gemini/antigravity-cli/skills/` | IDE uses folder-based `SKILL.md`; CLI currently documents flat Markdown skills. Keep these as separate projection profiles. |
 
 ## Official evidence notes
 
@@ -58,10 +60,11 @@ Automated tests prove registry parsing, legacy and greenfield relevance, bounded
 ### Antigravity
 
 - Official MCP docs list `~/.gemini/config/mcp_config.json` globally and `.agents/mcp_config.json` per workspace.
-- Workspace skills use `.agents/skills`.
-- Antigravity IDE docs list global skills under `~/.gemini/config/skills`.
-- Antigravity CLI migration docs list global CLI skills under `~/.gemini/antigravity-cli/skills` while keeping workspace skills at `.agents/skills`.
-- Skills are discovered by name/description first and full `SKILL.md` is loaded on activation.
+- Antigravity IDE workspace skills use `.agents/skills/<skill>/SKILL.md` and retain legacy `.agent/skills` compatibility.
+- Antigravity IDE requires `description`; `name` is optional and defaults to the skill directory name.
+- Current IDE docs list global skills under `~/.gemini/antigravity/skills/`.
+- Antigravity CLI documents a separate flat workspace contract at `.agents/skills/*.md` and global CLI skills under `~/.gemini/antigravity-cli/skills/`.
+- IDE skills are discovered by name/description first and full `SKILL.md` is loaded on activation.
 
 ## Hidden-mode capability baseline
 
