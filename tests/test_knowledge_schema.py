@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 9
+        assert SCHEMA_VERSION == 10
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -125,7 +125,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 9
+    assert status.schema_version == SCHEMA_VERSION == 10
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id, revision FROM tasks").fetchall() == [("task", 2)]

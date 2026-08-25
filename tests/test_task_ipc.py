@@ -428,7 +428,14 @@ def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: P
         )
         raw_result = raw_status["result"]
         assert isinstance(raw_result, dict)
-        assert set(raw_result) == {"schema_version", "workspace_id", "task", "last_checkpoint"}
+        assert set(raw_result) == {
+            "schema_version",
+            "workspace_id",
+            "task",
+            "last_checkpoint",
+            "pending_operator_feedback",
+        }
+        assert raw_result["pending_operator_feedback"] is None
         assert "First checkpoint" not in json.dumps(raw_status, sort_keys=True)
         for forbidden in ("summary", "changed_paths", "baseline_head", "knowledge_ids"):
             assert forbidden not in json.dumps(raw_status, sort_keys=True)

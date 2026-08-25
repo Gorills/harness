@@ -70,6 +70,7 @@ from harness.task_baseline import TaskBaselineError
 from harness.task_checkpoints import (
     TaskCheckpointMechanicalError,
     get_latest_task_checkpoint_status,
+    get_operator_feedback_for_revision,
 )
 from harness.task_workflow import (
     task_checkpoint as domain_task_checkpoint,
@@ -85,6 +86,7 @@ from harness.tasks import (
     TaskError,
     TaskNotFoundError,
     TaskRevisionConflictError,
+    TaskState,
     TaskTransitionError,
     TaskValidationError,
     TaskWorkspaceConflictError,
@@ -245,6 +247,11 @@ def read_workspace_task_status(
             if task is not None
             else None
         )
+        pending_operator_feedback = (
+            get_operator_feedback_for_revision(connection, task.task_id, task.revision)
+            if task is not None and task.state is TaskState.WORKING
+            else None
+        )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
@@ -281,6 +288,7 @@ def read_workspace_task_status(
         workspace_id=workspace.workspace_id,
         task=task_summary,
         last_checkpoint=checkpoint_summary,
+        pending_operator_feedback=pending_operator_feedback,
     )
 
 
