@@ -7,6 +7,7 @@ import pytest
 
 from harness.host_adapters import (
     ClaudeCodeAdapter,
+    antigravity_cli_skill_projection_surface,
     antigravity_ide_skill_projection_surface,
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
@@ -185,3 +186,89 @@ def test_claude_antigravity_cursor_combination_fails_duplicate_free_planning(
                 cursor_skill_projection_surface(),
             ),
         )
+
+
+def test_antigravity_cli_skill_surface_uses_current_workspace_contract() -> None:
+    surface = antigravity_cli_skill_projection_surface()
+
+    assert surface.profile == "antigravity-cli"
+    assert surface.target_root == PurePosixPath(".agents/skills")
+    assert surface.visible_roots == (PurePosixPath(".agents/skills"),)
+    assert surface.required_frontmatter_fields == ("description",)
+    assert surface.recursive_visible_roots == ()
+
+
+def test_antigravity_cli_projection_allows_omitted_name(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text(include_name=False))
+
+    plan = plan_skill_projection(workspace, resolved, (antigravity_cli_skill_projection_surface(),))
+
+    assert tuple(target.relative_root for target in plan.targets) == (
+        PurePosixPath(".agents/skills"),
+    )
+
+
+def test_antigravity_cli_projection_rejects_missing_description(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(tmp_path / "registry", "---\nname: fastapi\n---\n")
+
+    with pytest.raises(SkillProjectionError, match=r"frontmatter.*description"):
+        plan_skill_projection(workspace, resolved, (antigravity_cli_skill_projection_surface(),))
+
+
+def test_antigravity_cli_only_projection_materializes_folder_skill(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "-b", "main")
+    skill_text = _valid_skill_text(include_name=False)
+    resolved = _resolved_skill(tmp_path / "registry", skill_text)
+
+    plan = plan_skill_projection(workspace, resolved, (antigravity_cli_skill_projection_surface(),))
+    result = apply_skill_projection(plan)
+
+    assert result.materialized == 1
+    target = workspace / ".agents" / "skills" / "fastapi"
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == skill_text
+    assert (target / ".harness-skill.json").is_file()
+    assert not (workspace / ".agents" / "skills" / "fastapi.md").exists()
+    assert _git(workspace, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
+
+
+def test_antigravity_cli_and_ide_reuse_one_agents_projection(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text(include_name=False))
+
+    plan = plan_skill_projection(
+        workspace,
+        resolved,
+        (
+            antigravity_cli_skill_projection_surface(),
+            antigravity_ide_skill_projection_surface(),
+        ),
+    )
+
+    assert tuple(target.relative_root for target in plan.targets) == (
+        PurePosixPath(".agents/skills"),
+    )
+
+
+def test_antigravity_cli_does_not_claim_ide_legacy_visibility(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _git(workspace, "init", "-b", "main")
+    resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text(include_name=False))
+    legacy = workspace / ".agent" / "skills" / "fastapi"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("# IDE legacy only\n", encoding="utf-8")
+
+    result = apply_skill_projection(
+        plan_skill_projection(workspace, resolved, (antigravity_cli_skill_projection_surface(),))
+    )
+
+    assert result.materialized == 1
+    assert (workspace / ".agents" / "skills" / "fastapi" / "SKILL.md").is_file()
+    assert (legacy / "SKILL.md").read_text(encoding="utf-8") == "# IDE legacy only\n"

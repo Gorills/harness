@@ -22,6 +22,7 @@ _CLAUDE_PROFILE = "claude-code"
 _CODEX_PROFILE = "codex"
 _CURSOR_PROFILE = "cursor"
 _ANTIGRAVITY_IDE_PROFILE = "antigravity-ide"
+_ANTIGRAVITY_CLI_PROFILE = "antigravity-cli"
 _CLAUDE_SERVER_NAME = "harness"
 _CLAUDE_COMMAND_TIMEOUT_SECONDS = 10.0
 
@@ -404,6 +405,17 @@ def antigravity_ide_skill_projection_surface() -> SkillProjectionSurface:
         profile=_ANTIGRAVITY_IDE_PROFILE,
         target_root=root,
         visible_roots=(root, PurePosixPath(".agent/skills")),
+        required_frontmatter_fields=("description",),
+    )
+
+
+def antigravity_cli_skill_projection_surface() -> SkillProjectionSurface:
+    """Return Antigravity CLI's current Workspace skill visibility surface."""
+    root = PurePosixPath(".agents/skills")
+    return SkillProjectionSurface(
+        profile=_ANTIGRAVITY_CLI_PROFILE,
+        target_root=root,
+        visible_roots=(root,),
         required_frontmatter_fields=("description",),
     )
 
