@@ -21,6 +21,7 @@ _CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 _CLAUDE_PROFILE = "claude-code"
 _CODEX_PROFILE = "codex"
 _CURSOR_PROFILE = "cursor"
+_ANTIGRAVITY_IDE_PROFILE = "antigravity-ide"
 _CLAUDE_SERVER_NAME = "harness"
 _CLAUDE_COMMAND_TIMEOUT_SECONDS = 10.0
 
@@ -393,6 +394,17 @@ def cursor_skill_projection_surface() -> SkillProjectionSurface:
         ),
         frontmatter_name_must_match_skill_id=True,
         frontmatter_name_pattern=r"[a-z0-9-]+",
+    )
+
+
+def antigravity_ide_skill_projection_surface() -> SkillProjectionSurface:
+    """Return Antigravity IDE's documented Workspace skill visibility surface."""
+    root = PurePosixPath(".agents/skills")
+    return SkillProjectionSurface(
+        profile=_ANTIGRAVITY_IDE_PROFILE,
+        target_root=root,
+        visible_roots=(root, PurePosixPath(".agent/skills")),
+        required_frontmatter_fields=("description",),
     )
 
 
