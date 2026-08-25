@@ -33,6 +33,12 @@ _MAX_METADATA_BYTES = 64 * 1024
 _MAX_SKILL_FRONTMATTER_BYTES = 16 * 1024
 _SKILL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _REQUIREMENT_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+_YAML_NON_TEXT_SCALAR_RE = re.compile(
+    r"(?ix)(?:null|true|false|~|[+-]?(?:\.inf|\.nan|0o[0-7_]+|0x[0-9a-f_]+|"
+    r"(?:[0-9][0-9_]*)?(?:\.[0-9_]+)(?:e[+-]?[0-9_]+)?|"
+    r"[0-9][0-9_]*(?:e[+-]?[0-9_]+)?))"
+)
+_YAML_BLOCK_SCALAR_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$")
 _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".c": "c",
     ".cc": "cpp",
@@ -560,7 +566,7 @@ def _load_skill_definition(directory: Path) -> SkillDefinition:
 
 
 def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
-    """Return conservatively valid non-empty top-level SKILL.md frontmatter fields."""
+    """Return top-level fields that are conservatively valid non-empty YAML text."""
     try:
         with skill_file.open("rb") as handle:
             payload = handle.read(_MAX_SKILL_FRONTMATTER_BYTES + 1)
@@ -581,15 +587,19 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
     fields: set[str] = set()
     seen_top_level: set[str] = set()
     allow_indented = False
-    for raw in lines[1:]:
+    index = 1
+    while index < len(lines):
+        raw = lines[index]
         stripped = raw.strip()
         if stripped == "---":
             return frozenset(fields)
         if not stripped or stripped.startswith("#"):
+            index += 1
             continue
         if raw[:1].isspace():
             if not allow_indented:
                 return frozenset()
+            index += 1
             continue
         if ":" not in raw:
             return frozenset()
@@ -599,22 +609,53 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
             return frozenset()
         seen_top_level.add(key)
         scalar = value.strip()
-        allow_indented = not scalar or scalar.startswith(("|", ">"))
-        if (
-            not scalar
-            or scalar.startswith("#")
-            or scalar in {"~", "null", "Null", "NULL", "''", '""', "|", ">", "|-", ">-", "|+", ">+"}
-        ):
+        allow_indented = not scalar
+
+        if _YAML_BLOCK_SCALAR_HEADER_RE.fullmatch(scalar):
+            allow_indented = True
+            block_has_text = False
+            index += 1
+            while index < len(lines):
+                body = lines[index]
+                if body.strip() == "---" and not body[:1].isspace():
+                    break
+                if body and not body[:1].isspace():
+                    break
+                if body.strip():
+                    block_has_text = True
+                index += 1
+            if block_has_text:
+                fields.add(key)
             continue
-        if scalar[:1] in {"'", '"'}:
-            try:
-                parsed = ast.literal_eval(scalar)
-            except (SyntaxError, ValueError):
-                continue
-            if not isinstance(parsed, str) or not parsed.strip():
-                continue
-        fields.add(key)
+
+        if _frontmatter_scalar_is_non_empty_text(scalar):
+            fields.add(key)
+        index += 1
     return frozenset()
+
+
+def _frontmatter_scalar_is_non_empty_text(scalar: str) -> bool:
+    if not scalar or scalar.startswith("#"):
+        return False
+    if scalar[:1] in {"[", "{", "!", "&", "*"}:
+        return False
+    if scalar[:1] in {"'", '"'}:
+        try:
+            parsed = ast.literal_eval(scalar)
+        except (SyntaxError, ValueError):
+            return False
+        return isinstance(parsed, str) and bool(parsed.strip())
+    plain = _strip_yaml_plain_scalar_comment(scalar)
+    if not plain or _YAML_NON_TEXT_SCALAR_RE.fullmatch(plain):
+        return False
+    return True
+
+
+def _strip_yaml_plain_scalar_comment(scalar: str) -> str:
+    for index, character in enumerate(scalar):
+        if character == "#" and index > 0 and scalar[index - 1].isspace():
+            return scalar[:index].rstrip()
+    return scalar.rstrip()
 
 
 def _parse_metadata(

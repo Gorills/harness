@@ -79,6 +79,39 @@ def test_codex_projection_rejects_duplicate_top_level_frontmatter_key(tmp_path: 
         plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
 
 
+@pytest.mark.parametrize(
+    "invalid_description",
+    ("[not, text]", "{kind: mapping}", "true", "123"),
+)
+def test_codex_projection_rejects_non_text_description_values(
+    tmp_path: Path, invalid_description: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        f"---\nname: fastapi\ndescription: {invalid_description}\n---\n",
+    )
+
+    with pytest.raises(SkillProjectionError, match=r"frontmatter.*description"):
+        plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
+
+
+def test_codex_projection_accepts_non_empty_block_scalar_description(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        "---\nname: fastapi\ndescription: |-\n  Apply the project FastAPI conventions.\n---\n",
+    )
+
+    plan = plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
+
+    assert tuple(target.relative_root for target in plan.targets) == (
+        PurePosixPath(".agents/skills"),
+    )
+
+
 def test_claude_projection_does_not_inherit_codex_frontmatter_requirement(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
