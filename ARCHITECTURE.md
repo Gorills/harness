@@ -400,7 +400,7 @@ Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-FastAPI/Starlette/Uvicorn + Jinja2/HTML/CSS/vanilla JS + SSE remains a sound v1 choice.
+The current bounded dashboard uses the Python stdlib loopback HTTP server plus HTML/CSS forms to minimize runtime surface. A later SSE/detail-page slice may introduce an async web stack only if that added complexity is justified by the realtime contract.
 
 Dashboard rules:
 

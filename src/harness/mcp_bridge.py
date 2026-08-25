@@ -50,12 +50,13 @@ from harness.workspace_resolution import WorkspaceHint
 _SERVER_INSTRUCTIONS = (
     "Use project_status before broad repository exploration. Use project_search to locate likely "
     "code, then read/edit files with native host tools. Start or resume a Harness task before "
-    "meaningful changes and checkpoint meaningful progress. Targeted native search remains allowed."
+    "meaningful changes and checkpoint meaningful progress. Address pending operator feedback before "
+    "continuing reviewed work. Targeted native search remains allowed."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
 _CONTEXT_HARD_LIMIT = 10
-_STATUS_MAX_BYTES = 4 * 1024
+_STATUS_MAX_BYTES = 10 * 1024
 _SEARCH_MAX_BYTES = 12 * 1024
 _CONTEXT_MAX_BYTES = 12 * 1024
 _TASK_MAX_BYTES = 4 * 1024
@@ -303,6 +304,7 @@ def build_mcp_server() -> MCPServer:
                     }
                 ),
                 "next_step": last_checkpoint.next_step if last_checkpoint is not None else None,
+                "pending_operator_feedback": task_status.pending_operator_feedback,
                 "schema_version": status.schema_version,
             },
             _STATUS_MAX_BYTES,
