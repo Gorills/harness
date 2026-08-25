@@ -193,6 +193,7 @@ class WorkspaceWatcher:
                 deadline=monotonic() + self._token_deadline_seconds,
             )
         except WorkspaceWatchError:
+            state.token = None
             if state.pending_since is None:
                 state.pending_since = sampled_at
             return

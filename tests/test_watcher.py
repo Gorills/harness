@@ -369,6 +369,47 @@ def test_watcher_reconciles_existing_workspace_after_restart(tmp_path: Path) -> 
         connection.close()
 
 
+def test_watcher_rescans_after_sampling_failure_invalidates_prior_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        calls = 0
+
+        def flaky_token(*_args: object, **_kwargs: object) -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise watcher_module.WorkspaceWatchError("transient token failure")
+            return "stable"
+
+        monkeypatch.setattr(watcher_module, "read_workspace_change_token", flaky_token)
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        (root / "tracked.txt").write_text("sampling failed\n", encoding="utf-8")
+        assert watcher.poll(now=0.11) == 1
+        assert watcher.poll(now=0.22) == 1
+
+        records = {
+            record.relative_path: record for record in list_indexed_files(connection, workspace_id)
+        }
+        assert (
+            records["tracked.txt"].content_sha256
+            == hashlib.sha256(b"sampling failed\n").hexdigest()
+        )
+    finally:
+        connection.close()
+
+
 def test_watcher_rescans_after_success_with_unknown_pre_scan_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
