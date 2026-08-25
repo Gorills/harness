@@ -101,6 +101,7 @@ class SkillDefinition:
     portable_files: tuple[PurePosixPath, ...]
     content_sha256: str
     frontmatter_fields: frozenset[str]
+    frontmatter_text_fields: tuple[tuple[str, str], ...]
     applies: SkillApplicability
     task_hints: tuple[str, ...]
 
@@ -137,6 +138,9 @@ class SkillProjectionSurface:
     target_root: PurePosixPath
     visible_roots: tuple[PurePosixPath, ...]
     required_frontmatter_fields: tuple[str, ...] = ()
+    recursive_visible_roots: tuple[PurePosixPath, ...] = ()
+    frontmatter_name_must_match_skill_id: bool = False
+    frontmatter_name_pattern: str | None = None
 
     def __post_init__(self) -> None:
         if not self.profile or "\x00" in self.profile:
@@ -158,6 +162,21 @@ class SkillProjectionSurface:
             raise SkillProjectionError(
                 "skill projection required frontmatter fields must be unique non-empty text"
             )
+        recursive = tuple(_validate_projection_root(root) for root in self.recursive_visible_roots)
+        if len(set(recursive)) != len(recursive) or any(root not in visible for root in recursive):
+            raise SkillProjectionError(
+                "recursive skill visibility roots must be unique visible roots"
+            )
+        if self.frontmatter_name_must_match_skill_id or self.frontmatter_name_pattern is not None:
+            if "name" not in required_fields:
+                raise SkillProjectionError("frontmatter name constraints require the name field")
+        if self.frontmatter_name_pattern is not None:
+            try:
+                re.compile(self.frontmatter_name_pattern)
+            except re.error as exc:
+                raise SkillProjectionError(
+                    "skill projection frontmatter name pattern is invalid"
+                ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +190,7 @@ class SkillProjectionPlan:
     workspace_root: Path
     targets: tuple[SkillProjectionTarget, ...]
     managed_roots: tuple[PurePosixPath, ...]
+    recursive_visible_roots: tuple[PurePosixPath, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,16 +407,31 @@ def plan_skill_projection(
         raise SkillProjectionError("skill projection profiles must be unique")
     for surface in surfaces:
         required = set(surface.required_frontmatter_fields)
-        if not required:
-            continue
         for resolved in resolved_skills:
-            missing = sorted(required - resolved.definition.frontmatter_fields)
+            definition = resolved.definition
+            missing = sorted(required - definition.frontmatter_fields)
             if missing:
                 raise SkillProjectionError(
-                    f"skill {resolved.definition.skill_id!r} is incompatible with "
+                    f"skill {definition.skill_id!r} is incompatible with "
                     f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing "
                     f"required fields: {', '.join(missing)}"
                 )
+            if surface.frontmatter_name_must_match_skill_id:
+                name = dict(definition.frontmatter_text_fields).get("name")
+                if name != definition.skill_id:
+                    raise SkillProjectionError(
+                        f"skill {definition.skill_id!r} is incompatible with "
+                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name must "
+                        "match the projected skill directory"
+                    )
+            if surface.frontmatter_name_pattern is not None:
+                name = dict(definition.frontmatter_text_fields).get("name")
+                if name is None or re.fullmatch(surface.frontmatter_name_pattern, name) is None:
+                    raise SkillProjectionError(
+                        f"skill {definition.skill_id!r} is incompatible with "
+                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name has "
+                        "an unsupported format"
+                    )
     candidates = tuple(sorted({surface.target_root for surface in surfaces}, key=str))
     valid: list[tuple[int, tuple[str, ...], tuple[PurePosixPath, ...]]] = []
     for count in range(1, len(candidates) + 1):
@@ -426,12 +461,19 @@ def plan_skill_projection(
     managed_roots = tuple(
         sorted({visible for surface in surfaces for visible in surface.visible_roots}, key=str)
     )
+    recursive_visible_roots = tuple(
+        sorted(
+            {visible for surface in surfaces for visible in surface.recursive_visible_roots},
+            key=str,
+        )
+    )
     return SkillProjectionPlan(
         workspace_root=root,
         targets=tuple(
             SkillProjectionTarget(relative_root=item, skills=definitions) for item in chosen
         ),
         managed_roots=managed_roots,
+        recursive_visible_roots=recursive_visible_roots,
     )
 
 
@@ -444,6 +486,13 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
     managed_roots = {_validate_projection_root(root) for root in plan.managed_roots}
     if not set(target_roots) <= managed_roots:
         raise SkillProjectionError("skill projection targets must be included in managed roots")
+    recursive_visible_roots = {
+        _validate_projection_root(root) for root in plan.recursive_visible_roots
+    }
+    if not recursive_visible_roots <= managed_roots:
+        raise SkillProjectionError(
+            "recursive skill visibility roots must be included in managed roots"
+        )
 
     desired_by_path: dict[PurePosixPath, SkillDefinition] = {}
     for target in plan.targets:
@@ -465,6 +514,7 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
     _preflight_visible_skill_collisions(
         workspace_root,
         managed_roots,
+        recursive_visible_roots,
         desired_by_path,
         existing_owned,
     )
@@ -513,6 +563,13 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
     exclude_changed = updated_exclude != original_exclude
 
     try:
+        _preflight_visible_skill_collisions(
+            workspace_root,
+            managed_roots,
+            recursive_visible_roots,
+            desired_by_path,
+            existing_owned,
+        )
         _commit_projection_changes(workspace_root, prepared)
         if exclude_changed:
             _replace_file_if_unchanged(exclude_path, original_exclude, updated_exclude)
@@ -553,20 +610,23 @@ def _load_skill_definition(directory: Path) -> SkillDefinition:
     if PurePosixPath(SKILL_FILE_NAME) not in portable_files:
         raise SkillRegistryError(f"skill is missing {SKILL_FILE_NAME}: {skill_id}")
     content_sha256 = _portable_tree_sha256(directory, portable_files)
-    frontmatter_fields = _portable_skill_frontmatter_fields(skill_file)
+    frontmatter_fields, frontmatter_text_fields = _portable_skill_frontmatter(skill_file)
     return SkillDefinition(
         skill_id=skill_id,
         source_directory=directory,
         portable_files=portable_files,
         content_sha256=content_sha256,
         frontmatter_fields=frontmatter_fields,
+        frontmatter_text_fields=frontmatter_text_fields,
         applies=applies,
         task_hints=task_hints,
     )
 
 
-def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
-    """Return top-level fields that are conservatively valid non-empty YAML text."""
+def _portable_skill_frontmatter(
+    skill_file: Path,
+) -> tuple[frozenset[str], tuple[tuple[str, str], ...]]:
+    """Return conservatively valid non-empty top-level YAML text fields and values."""
     try:
         with skill_file.open("rb") as handle:
             payload = handle.read(_MAX_SKILL_FRONTMATTER_BYTES + 1)
@@ -579,12 +639,13 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
-        return frozenset()
+        return frozenset(), ()
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
-        return frozenset()
+        return frozenset(), ()
 
     fields: set[str] = set()
+    text_fields: dict[str, str] = {}
     seen_top_level: set[str] = set()
     allow_indented = False
     index = 1
@@ -592,28 +653,28 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
         raw = lines[index]
         stripped = raw.strip()
         if stripped == "---":
-            return frozenset(fields)
+            return frozenset(fields), tuple(sorted(text_fields.items()))
         if not stripped or stripped.startswith("#"):
             index += 1
             continue
         if raw[:1].isspace():
             if not allow_indented:
-                return frozenset()
+                return frozenset(), ()
             index += 1
             continue
         if ":" not in raw:
-            return frozenset()
+            return frozenset(), ()
         key, value = raw.split(":", 1)
         key = key.strip()
         if not key or key in seen_top_level:
-            return frozenset()
+            return frozenset(), ()
         seen_top_level.add(key)
         scalar = value.strip()
         allow_indented = not scalar
 
         if _YAML_BLOCK_SCALAR_HEADER_RE.fullmatch(scalar):
             allow_indented = True
-            block_has_text = False
+            block_text: list[str] = []
             index += 1
             while index < len(lines):
                 body = lines[index]
@@ -622,33 +683,38 @@ def _portable_skill_frontmatter_fields(skill_file: Path) -> frozenset[str]:
                 if body and not body[:1].isspace():
                     break
                 if body.strip():
-                    block_has_text = True
+                    block_text.append(body.strip())
                 index += 1
-            if block_has_text:
+            if block_text:
                 fields.add(key)
+                text_fields[key] = " ".join(block_text)
             continue
 
-        if _frontmatter_scalar_is_non_empty_text(scalar):
+        text_value = _frontmatter_scalar_text_value(scalar)
+        if text_value is not None:
             fields.add(key)
+            text_fields[key] = text_value
         index += 1
-    return frozenset()
+    return frozenset(), ()
 
 
-def _frontmatter_scalar_is_non_empty_text(scalar: str) -> bool:
+def _frontmatter_scalar_text_value(scalar: str) -> str | None:
     if not scalar or scalar.startswith("#"):
-        return False
+        return None
     if scalar[:1] in {"[", "{", "!", "&", "*"}:
-        return False
+        return None
     if scalar[:1] in {"'", '"'}:
         try:
             parsed = ast.literal_eval(scalar)
         except (SyntaxError, ValueError):
-            return False
-        return isinstance(parsed, str) and bool(parsed.strip())
+            return None
+        if not isinstance(parsed, str) or not parsed.strip():
+            return None
+        return parsed.strip()
     plain = _strip_yaml_plain_scalar_comment(scalar)
     if not plain or _YAML_NON_TEXT_SCALAR_RE.fullmatch(plain):
-        return False
-    return True
+        return None
+    return plain
 
 
 def _strip_yaml_plain_scalar_comment(scalar: str) -> str:
@@ -993,6 +1059,7 @@ def _owned_projection_paths(
 def _preflight_visible_skill_collisions(
     workspace_root: Path,
     managed_roots: set[PurePosixPath],
+    recursive_visible_roots: set[PurePosixPath],
     desired: Mapping[PurePosixPath, SkillDefinition],
     existing_owned: set[PurePosixPath],
 ) -> None:
@@ -1004,18 +1071,51 @@ def _preflight_visible_skill_collisions(
             relative = relative_root / skill_id
             if relative in desired_paths or relative in existing_owned:
                 continue
-            target = _workspace_projection_path(workspace_root, relative)
-            try:
-                target.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise SkillProjectionError(
-                    f"skill visibility target cannot be inspected: {relative}"
-                ) from exc
-            raise SkillProjectionCollisionError(
-                f"user-owned skill would duplicate Harness projection visibility: {relative}"
-            )
+            _reject_visible_skill_path(workspace_root, relative)
+
+    if recursive_visible_roots:
+        try:
+            skill_files = workspace_root.glob(f"**/{SKILL_FILE_NAME}", recurse_symlinks=False)
+            for skill_file in skill_files:
+                relative = PurePosixPath(skill_file.parent.relative_to(workspace_root).as_posix())
+                if relative.name not in desired_ids:
+                    continue
+                if not _is_under_recursive_visible_root(relative, recursive_visible_roots):
+                    continue
+                if relative in desired_paths or relative in existing_owned:
+                    continue
+                raise SkillProjectionCollisionError(
+                    f"user-owned skill would duplicate Harness projection visibility: {relative}"
+                )
+        except (OSError, ValueError) as exc:
+            raise SkillProjectionError("recursive skill visibility cannot be inspected") from exc
+
+
+def _is_under_recursive_visible_root(
+    relative: PurePosixPath, recursive_visible_roots: set[PurePosixPath]
+) -> bool:
+    parts = relative.parts
+    for root in recursive_visible_roots:
+        root_parts = root.parts
+        for index in range(len(parts) - len(root_parts)):
+            if parts[index : index + len(root_parts)] == root_parts:
+                return True
+    return False
+
+
+def _reject_visible_skill_path(workspace_root: Path, relative: PurePosixPath) -> None:
+    target = _workspace_projection_path(workspace_root, relative)
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SkillProjectionError(
+            f"skill visibility target cannot be inspected: {relative}"
+        ) from exc
+    raise SkillProjectionCollisionError(
+        f"user-owned skill would duplicate Harness projection visibility: {relative}"
+    )
 
 
 def _preflight_projection_paths(

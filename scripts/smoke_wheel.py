@@ -251,6 +251,57 @@ def main() -> int:
                     f"installed skill projection was not ignored by Git: {projected_skill}"
                 )
 
+        cursor_project = workspace / "cursor-skill-project"
+        cursor_project.mkdir()
+        _run(("git", "init", "-b", "main"), cwd=cursor_project, env=isolated_env)
+        cursor_probe = _run(
+            (
+                str(python),
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "from harness.host_adapters import "
+                    "ClaudeCodeAdapter,cursor_skill_projection_surface; "
+                    "from harness.skills import "
+                    "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
+                    "plan_skill_projection,resolve_skills; "
+                    f"root=Path({str(cursor_project)!r}); registry=Path({str(skill_registry)!r}); "
+                    "definitions=load_skill_registry(registry); "
+                    "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
+                    "claude=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
+                    "cursor=cursor_skill_projection_surface(); "
+                    "plan=plan_skill_projection(root,resolved,(claude,cursor)); "
+                    "result=apply_skill_projection(plan); "
+                    "print(','.join(str(target.relative_root) for target in plan.targets)); "
+                    "print(result.materialized); "
+                    "print((root/'.claude'/'skills'/'fastapi'/'SKILL.md').is_file()); "
+                    "print((root/'.agents'/'skills'/'fastapi').exists()); "
+                    "print((root/'.cursor'/'skills'/'fastapi').exists())"
+                ),
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
+        if cursor_probe.stdout.splitlines() != [
+            ".claude/skills",
+            "1",
+            "True",
+            "False",
+            "False",
+        ]:
+            raise RuntimeError(
+                f"installed Cursor skill projection probe was unexpected: {cursor_probe.stdout!r}"
+            )
+        ignored = _run(
+            ("git", "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md"),
+            cwd=cursor_project,
+            env=isolated_env,
+        )
+        if ignored.returncode != 0:
+            raise RuntimeError(
+                "installed Cursor-compatible skill projection was not ignored by Git"
+            )
+
         if os.name != "nt":
             fake_bin = workspace / "fake-claude-bin"
             fake_bin.mkdir()
