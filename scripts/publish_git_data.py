@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -49,6 +50,7 @@ class Candidate:
     expected_tree_sha: str
     branch: str
     changes: tuple[Change, ...]
+    published_commit_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,9 +125,14 @@ class GitHubRestGitDataApi:
             ) from exc
         except URLError as exc:
             raise PublicationError(f"GitHub API {method} {path} failed: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise PublicationError(f"GitHub API {method} {path} timed out") from exc
         if not body:
             return {}
-        decoded = json.loads(body.decode("utf-8"))
+        try:
+            decoded = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PublicationError(f"GitHub API {method} {path} returned invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise PublicationError(f"GitHub API {method} {path} returned a non-object response")
         return decoded
@@ -337,6 +344,10 @@ def preflight(api: GitDataApi, *, base_branch: str, task_branch: str) -> Candida
     if base_commit_sha is None:
         raise PublicationError(f"remote base branch {base_branch!r} does not exist")
     base_commit = api.get_commit(base_commit_sha)
+    if base_commit.sha != base_commit_sha:
+        raise PublicationError(
+            f"remote base commit lookup returned {base_commit.sha}, expected {base_commit_sha}"
+        )
     candidate = build_candidate(
         base_commit_sha=base_commit_sha,
         base_tree_sha=base_commit.tree_sha,
@@ -344,8 +355,22 @@ def preflight(api: GitDataApi, *, base_branch: str, task_branch: str) -> Candida
     )
     current_task_sha = api.get_branch_commit_sha(task_branch)
     if current_task_sha not in {None, base_commit_sha}:
+        current_task = api.get_commit(current_task_sha)
+        if (
+            current_task.sha == current_task_sha
+            and current_task.tree_sha == candidate.expected_tree_sha
+            and current_task.parent_shas == (base_commit_sha,)
+        ):
+            return Candidate(
+                candidate.base_commit_sha,
+                candidate.base_tree_sha,
+                candidate.expected_tree_sha,
+                candidate.branch,
+                candidate.changes,
+                current_task_sha,
+            )
         raise PublicationError(
-            f"task branch {task_branch!r} already points to {current_task_sha}, expected absent or base {base_commit_sha}"
+            f"task branch {task_branch!r} already points to {current_task_sha}, expected absent, base {base_commit_sha}, or the exact candidate tree"
         )
 
     # Prove Git Data write permission and byte-preserving transport before feature bytes are sent.
@@ -359,6 +384,30 @@ def preflight(api: GitDataApi, *, base_branch: str, task_branch: str) -> Candida
     return candidate
 
 
+def _reconcile_branch_mutation(
+    api: GitDataApi,
+    *,
+    branch: str,
+    expected_sha: str,
+    description: str,
+    mutate: Callable[[], None],
+) -> None:
+    try:
+        mutate()
+    except PublicationError as exc:
+        try:
+            actual_sha = api.get_branch_commit_sha(branch)
+        except PublicationError as reconcile_exc:
+            raise PublicationError(
+                f"{description} failed and remote ref reconciliation also failed: {reconcile_exc}"
+            ) from exc
+        if actual_sha == expected_sha:
+            return
+        raise PublicationError(
+            f"{description} failed; remote branch is {actual_sha}, expected {expected_sha}: {exc}"
+        ) from exc
+
+
 def publish(
     api: GitDataApi,
     *,
@@ -367,6 +416,13 @@ def publish(
     message: str,
 ) -> PublicationResult:
     candidate = preflight(api, base_branch=base_branch, task_branch=task_branch)
+    if candidate.published_commit_sha is not None:
+        return PublicationResult(
+            candidate.published_commit_sha,
+            candidate.expected_tree_sha,
+            task_branch,
+            candidate.base_commit_sha,
+        )
 
     for change in candidate.changes:
         if change.new_sha is None or change.object_type != "blob":
@@ -398,6 +454,10 @@ def publish(
 
     commit_sha = api.create_commit(message, remote_tree_sha, candidate.base_commit_sha)
     commit = api.get_commit(commit_sha)
+    if commit.sha != commit_sha:
+        raise PublicationError(
+            f"created commit lookup returned {commit.sha}, expected {commit_sha}"
+        )
     if commit.tree_sha != candidate.expected_tree_sha or commit.parent_shas != (
         candidate.base_commit_sha,
     ):
@@ -412,18 +472,34 @@ def publish(
         )
 
     if current_task_sha is None:
-        api.create_branch(task_branch, candidate.base_commit_sha)
+        _reconcile_branch_mutation(
+            api,
+            branch=task_branch,
+            expected_sha=candidate.base_commit_sha,
+            description=f"creating task branch {task_branch!r} at the canonical base",
+            mutate=lambda: api.create_branch(task_branch, candidate.base_commit_sha),
+        )
         current_task_sha = api.get_branch_commit_sha(task_branch)
         if current_task_sha != candidate.base_commit_sha:
             raise PublicationError("new task branch did not resolve to the exact canonical base")
 
-    api.update_branch(task_branch, commit_sha)
+    _reconcile_branch_mutation(
+        api,
+        branch=task_branch,
+        expected_sha=commit_sha,
+        description=f"updating task branch {task_branch!r} to the verified commit",
+        mutate=lambda: api.update_branch(task_branch, commit_sha),
+    )
     final_sha = api.get_branch_commit_sha(task_branch)
     if final_sha != commit_sha:
         raise PublicationError(
             f"task branch resolved to {final_sha}, expected created commit {commit_sha}"
         )
     final_commit = api.get_commit(final_sha)
+    if final_commit.sha != final_sha:
+        raise PublicationError(
+            f"published branch commit lookup returned {final_commit.sha}, expected {final_sha}"
+        )
     if final_commit.tree_sha != candidate.expected_tree_sha:
         raise PublicationError("published branch tree differs from the verified expected tree")
     if final_commit.parent_shas != (candidate.base_commit_sha,):
@@ -450,6 +526,7 @@ def _candidate_json(candidate: Candidate) -> dict[str, Any]:
         "base_tree_sha": candidate.base_tree_sha,
         "expected_tree_sha": candidate.expected_tree_sha,
         "branch": candidate.branch,
+        "published_commit_sha": candidate.published_commit_sha,
         "changes": [
             {
                 "path": change.path,
