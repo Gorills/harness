@@ -77,10 +77,10 @@ The full repository quality gate must still pass in GitHub Actions on the exact 
 Do not discover transport limitations halfway through publication. Select and prove one transport before uploading feature bytes:
 
 1. If normal `git fetch` / `git push` works, use normal Git and skip the API fallback entirely.
-2. If normal Git transport is unavailable, require a machine-side Git Data API path that can read the staged Git object bytes directly. In this repository, use `scripts/publish_git_data.py`.
-3. Run its `preflight` action before the first **feature** object write. Preflight fresh-reads the canonical base branch, requires the local canonical base tree object to match that remote tree, requires a clean worktree with the exact candidate staged, rejects a task branch that has already moved away from the base, and prints the expected tree plus every changed object SHA/size.
-4. Preflight writes one constant, unreferenced, content-addressed probe blob and requires its exact known SHA. This proves Git Data write permission and byte-preserving API transport before any feature bytes are uploaded; repeated preflights address the same harmless object.
-5. If authentication, network/write access, local base identity, branch state, candidate identity, or the write probe cannot be established, stop here. Do not start a partial connector upload and do not improvise another encoding mid-publication.
+2. If normal Git transport is unavailable, prefer a machine-side Git Data API path that can read staged Git object bytes directly. In this repository, use `scripts/publish_git_data.py` whenever the execution environment can reach/authenticate to GitHub.
+3. If the execution shell cannot reach GitHub but an authenticated connected Git Data tool exposes `create_blob` with `utf-8` encoding, that connector is an allowed transport adapter only when every changed blob decodes as UTF-8. Read the exact staged blob text locally, send it unchanged as raw UTF-8, and require the returned remote blob SHA to equal the staged SHA. Never manually construct or splice base64. If any changed blob is binary/non-UTF-8, stop unless a byte-safe machine transport is available.
+4. Before the first **feature** object write, fresh-read the canonical base, prove the local base tree and staged candidate identity, verify task-branch state, enumerate every changed object SHA/size, and prove the chosen write path with the constant unreferenced probe `harness exact-tree publication preflight\n`. Its Git blob SHA must be `aa0e051fdac1e0590943347f86e2650dcd63fa9e`. The repo-owned `preflight` action performs these checks automatically; a connector adapter must establish the same evidence explicitly.
+5. If authentication, network/write access, local base identity, branch state, candidate identity, UTF-8 eligibility for connector mode, or the write probe cannot be established, stop here. Do not start a partial feature upload and do not switch encoding mid-publication.
 
 Example:
 
@@ -123,7 +123,7 @@ Git blob/tree/commit creation is content-addressed and safe to retry: failed or 
 
 GitHub's Git Data API supports `utf-8` and `base64` blob payloads, but the encoding itself is not the difficult part. The failure mode is transporting a large hand-built encoded string through a conversational/tool boundary: one missing, duplicated, or altered character produces different bytes and therefore a different Git blob SHA. The SHA check detects that corruption, but only after wasting a publication attempt.
 
-Always let machine code encode the exact bytes read from the staged Git object. If the environment has only an inline text connector and cannot run the repo-owned publisher (or another file/byte-safe equivalent), classify publication as unavailable during preflight rather than attempting manual chunk reconstruction.
+Prefer machine code that reads and encodes the exact staged bytes. A connected Git Data tool may also publish a staged blob directly as raw UTF-8 when that blob is valid UTF-8 and the returned Git SHA exactly matches the staged SHA. This is not manual reconstruction: the exact text is sent once with `encoding=utf-8`, and SHA identity is the acceptance condition. If the changed blob is binary/non-UTF-8, or the connector cannot preserve the complete text payload, classify publication as unavailable during preflight rather than attempting chunk reconstruction.
 
 Do not emulate the final feature commit with a sequence of Contents API updates. That produces intermediate commits and makes exact one-commit/tree evidence harder to reason about.
 
