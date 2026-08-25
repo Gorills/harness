@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
+
+import pytest
+
+from harness.dashboard import DashboardServerManager
+from harness.storage import initialize_database
+
+
+def _assert_hardened(error: HTTPError) -> None:
+    assert error.headers["Cache-Control"] == "no-store"
+    assert "default-src 'none'" in error.headers["Content-Security-Policy"]
+    assert error.headers["X-Content-Type-Options"] == "nosniff"
+    assert error.headers.get("Server") is None
+    assert error.headers.get("Date") is None
+
+
+def test_dashboard_hardens_unscoped_and_unsupported_http_responses(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    manager = DashboardServerManager(database)
+    try:
+        url = manager.get_url()
+        parsed = urlsplit(url)
+        root = f"http://127.0.0.1:{parsed.port}/"
+        with pytest.raises(HTTPError) as root_error:
+            urlopen(root, timeout=2)
+        assert root_error.value.code == 404
+        _assert_hardened(root_error.value)
+
+        for method in ("POST", "HEAD"):
+            request = Request(url, method=method)
+            with pytest.raises(HTTPError) as method_error:
+                urlopen(request, timeout=2)
+            assert method_error.value.code == 501
+            _assert_hardened(method_error.value)
+    finally:
+        manager.close()

@@ -6,7 +6,7 @@ import pytest
 import harness.entrypoints as entrypoints
 from harness.doctor import DoctorReport
 from harness.entrypoints import harness_main, harnessd_main
-from harness.ipc import IpcTransportError, WorkspaceStatusResult
+from harness.ipc import DashboardUrlResult, IpcTransportError, WorkspaceStatusResult
 from harness.runtime_paths import RuntimePaths
 from harness.storage import DatabaseStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -23,6 +23,7 @@ def test_harness_main_lists_status_and_doctor(
     assert "Product runtime is under implementation." in output
     assert "doctor" in output
     assert "status" in output
+    assert "dashboard" in output
 
 
 def test_harness_doctor_reports_runtime(
@@ -150,6 +151,77 @@ def test_harness_doctor_reports_database_error_without_traceback(
     assert harness_main() == 1
     output = capsys.readouterr().out
     assert f"Database: FAIL ({database_path}: unable to open database file)" in output
+
+
+def test_harness_dashboard_uses_canonical_daemon_and_prints_private_url(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    defaults = RuntimePaths(
+        database=tmp_path / "state" / "harness.db",
+        socket=tmp_path / "run" / "harness.sock",
+    )
+    autostarted: list[RuntimePaths] = []
+    requested: list[Path] = []
+    dashboard_url = "http://127.0.0.1:43123/private-token/"
+
+    def request_dashboard(ipc_socket: Path) -> DashboardUrlResult:
+        requested.append(ipc_socket)
+        return DashboardUrlResult(url=dashboard_url)
+
+    monkeypatch.setattr(sys, "argv", ["harness", "dashboard"])
+    monkeypatch.setattr(entrypoints, "default_runtime_paths", lambda: defaults)
+    monkeypatch.setattr(entrypoints, "ensure_canonical_daemon", autostarted.append)
+    monkeypatch.setattr(entrypoints, "request_dashboard_url", request_dashboard)
+
+    assert harness_main() == 0
+    assert autostarted == [defaults]
+    assert requested == [defaults.socket]
+    assert capsys.readouterr().out.strip() == f"Harness dashboard: {dashboard_url}"
+
+
+def test_harness_dashboard_explicit_socket_does_not_autostart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    socket_path = tmp_path / "manual.sock"
+
+    def unexpected_autostart(_paths: RuntimePaths) -> None:
+        raise AssertionError("explicit socket must not autostart the canonical daemon")
+
+    monkeypatch.setattr(sys, "argv", ["harness", "dashboard", "--socket", str(socket_path)])
+    monkeypatch.setattr(entrypoints, "ensure_canonical_daemon", unexpected_autostart)
+    monkeypatch.setattr(
+        entrypoints,
+        "request_dashboard_url",
+        lambda path: (
+            DashboardUrlResult(url="http://127.0.0.1:43123/private-token/")
+            if path == socket_path
+            else (_ for _ in ()).throw(AssertionError("unexpected socket"))
+        ),
+    )
+
+    assert harness_main() == 0
+
+
+def test_harness_dashboard_reports_ipc_error_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    socket_path = tmp_path / "missing.sock"
+
+    def fail(_socket: Path) -> DashboardUrlResult:
+        raise IpcTransportError("dashboard daemon unavailable")
+
+    monkeypatch.setattr(sys, "argv", ["harness", "dashboard", "--socket", str(socket_path)])
+    monkeypatch.setattr(entrypoints, "request_dashboard_url", fail)
+
+    assert harness_main() == 1
+    assert capsys.readouterr().out.strip() == (
+        "Harness dashboard: FAIL (dashboard daemon unavailable)"
+    )
 
 
 def test_harness_status_resolves_location_and_prints_bounded_status(

@@ -14,6 +14,7 @@ from harness.ipc import (
     WorkspaceScanResult,
     WorkspaceSearchResult,
     WorkspaceStatusResult,
+    request_dashboard_url,
     request_workspace_scan,
     request_workspace_search,
     request_workspace_status,
@@ -148,6 +149,10 @@ def _search_failure(detail: str) -> int:
     return _bounded_failure("Harness search", detail)
 
 
+def _dashboard_failure(detail: str) -> int:
+    return _bounded_failure("Harness dashboard", detail)
+
+
 def _canonical_socket() -> Path:
     defaults = default_runtime_paths()
     ensure_canonical_daemon(defaults)
@@ -206,6 +211,21 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return _scan_failure(str(exc))
 
     _print_workspace_scan(result)
+    return 0
+
+
+def _run_dashboard(socket_path: Path | None) -> int:
+    if socket_path is None:
+        try:
+            socket_path = _canonical_socket()
+        except (RuntimePathError, IpcError) as exc:
+            return _dashboard_failure(str(exc))
+
+    try:
+        dashboard = request_dashboard_url(socket_path)
+    except IpcError as exc:
+        return _dashboard_failure(str(exc))
+    print(f"Harness dashboard: {dashboard.url}")
     return 0
 
 
@@ -386,6 +406,20 @@ def harness_main() -> int:
         help="override the canonical per-user Unix-domain socket path",
     )
 
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="show the daemon-owned local read-only Projects dashboard",
+        description=(
+            "Lazily start the daemon-owned loopback Projects dashboard and print its private URL."
+        ),
+    )
+    dashboard_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Unix-domain socket path",
+    )
+
     subparsers.add_parser(
         "mcp",
         help="serve the five bounded Harness MCP tools over stdio",
@@ -401,6 +435,8 @@ def harness_main() -> int:
         return _run_scan(args.path, args.socket)
     if args.command == "search":
         return _run_search(args.query, args.path, args.socket, args.limit)
+    if args.command == "dashboard":
+        return _run_dashboard(args.socket)
 
     if args.command == "mcp":
         from harness.mcp_bridge import run_mcp_server
