@@ -385,7 +385,12 @@ def cursor_skill_projection_surface() -> SkillProjectionSurface:
             PurePosixPath(".codex/skills"),
         ),
         required_frontmatter_fields=("name", "description"),
-        recursive_visible_roots=(root, PurePosixPath(".cursor/skills")),
+        recursive_visible_roots=(
+            root,
+            PurePosixPath(".cursor/skills"),
+            PurePosixPath(".claude/skills"),
+            PurePosixPath(".codex/skills"),
+        ),
         frontmatter_name_must_match_skill_id=True,
         frontmatter_name_pattern=r"[a-z0-9-]+",
     )
