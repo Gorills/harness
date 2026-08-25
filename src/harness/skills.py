@@ -703,18 +703,102 @@ def _frontmatter_scalar_text_value(scalar: str) -> str | None:
         return None
     if scalar[:1] in {"[", "{", "!", "&", "*"}:
         return None
-    if scalar[:1] in {"'", '"'}:
-        try:
-            parsed = ast.literal_eval(scalar)
-        except (SyntaxError, ValueError):
-            return None
-        if not isinstance(parsed, str) or not parsed.strip():
-            return None
-        return parsed.strip()
+    if scalar.startswith("'"):
+        parsed = _yaml_single_quoted_text_scalar(scalar)
+        return None if parsed is None or not parsed.strip() else parsed.strip()
+    if scalar.startswith('"'):
+        parsed = _yaml_double_quoted_text_scalar(scalar)
+        return None if parsed is None or not parsed.strip() else parsed.strip()
     plain = _strip_yaml_plain_scalar_comment(scalar)
     if not plain or _YAML_NON_TEXT_SCALAR_RE.fullmatch(plain):
         return None
     return plain
+
+
+def _yaml_single_quoted_text_scalar(scalar: str) -> str | None:
+    value: list[str] = []
+    index = 1
+    while index < len(scalar):
+        character = scalar[index]
+        if character != "'":
+            value.append(character)
+            index += 1
+            continue
+        if index + 1 < len(scalar) and scalar[index + 1] == "'":
+            value.append("'")
+            index += 2
+            continue
+        if _yaml_quoted_scalar_suffix_is_valid(scalar[index + 1 :]):
+            return "".join(value)
+        return None
+    return None
+
+
+def _yaml_double_quoted_text_scalar(scalar: str) -> str | None:
+    simple_escapes = {
+        "0": "\x00",
+        "a": "\x07",
+        "b": "\x08",
+        "t": "\x09",
+        "n": "\x0a",
+        "v": "\x0b",
+        "f": "\x0c",
+        "r": "\x0d",
+        "e": "\x1b",
+        " ": " ",
+        '"': '"',
+        "/": "/",
+        "\\": "\\",
+        "N": "\x85",
+        "_": "\xa0",
+        "L": "\u2028",
+        "P": "\u2029",
+    }
+    value: list[str] = []
+    index = 1
+    while index < len(scalar):
+        character = scalar[index]
+        if character == '"':
+            if _yaml_quoted_scalar_suffix_is_valid(scalar[index + 1 :]):
+                return "".join(value)
+            return None
+        if character != "\\":
+            value.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(scalar):
+            return None
+        escape = scalar[index]
+        mapped = simple_escapes.get(escape)
+        if mapped is not None:
+            value.append(mapped)
+            index += 1
+            continue
+        widths = {"x": 2, "u": 4, "U": 8}
+        width = widths.get(escape)
+        if width is None:
+            return None
+        digits = scalar[index + 1 : index + 1 + width]
+        if len(digits) != width or any(
+            character not in "0123456789abcdefABCDEF" for character in digits
+        ):
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+            return None
+        value.append(chr(codepoint))
+        index += width + 1
+    return None
+
+
+def _yaml_quoted_scalar_suffix_is_valid(suffix: str) -> bool:
+    if not suffix:
+        return True
+    if not suffix[0].isspace():
+        return False
+    stripped = suffix.strip()
+    return not stripped or stripped.startswith("#")
 
 
 def _strip_yaml_plain_scalar_comment(scalar: str) -> str:

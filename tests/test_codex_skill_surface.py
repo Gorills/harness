@@ -97,6 +97,18 @@ def test_codex_projection_rejects_non_text_description_values(
         plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
 
 
+def test_codex_projection_rejects_python_only_double_quote_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        '---\nname: fastapi\ndescription: "f\\141stapi"\n---\n',
+    )
+
+    with pytest.raises(SkillProjectionError, match=r"frontmatter.*description"):
+        plan_skill_projection(workspace, resolved, (codex_skill_projection_surface(),))
+
+
 def test_codex_projection_accepts_non_empty_block_scalar_description(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
