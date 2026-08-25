@@ -20,6 +20,7 @@ _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 _CLAUDE_PROFILE = "claude-code"
 _CODEX_PROFILE = "codex"
+_CURSOR_PROFILE = "cursor"
 _CLAUDE_SERVER_NAME = "harness"
 _CLAUDE_COMMAND_TIMEOUT_SECONDS = 10.0
 
@@ -368,6 +369,25 @@ def codex_skill_projection_surface() -> SkillProjectionSurface:
         target_root=root,
         visible_roots=(root,),
         required_frontmatter_fields=("name", "description"),
+    )
+
+
+def cursor_skill_projection_surface() -> SkillProjectionSurface:
+    """Return Cursor's documented project and compatibility skill visibility surface."""
+    root = PurePosixPath(".agents/skills")
+    return SkillProjectionSurface(
+        profile=_CURSOR_PROFILE,
+        target_root=root,
+        visible_roots=(
+            root,
+            PurePosixPath(".cursor/skills"),
+            PurePosixPath(".claude/skills"),
+            PurePosixPath(".codex/skills"),
+        ),
+        required_frontmatter_fields=("name", "description"),
+        recursive_visible_roots=(root, PurePosixPath(".cursor/skills")),
+        frontmatter_name_must_match_skill_id=True,
+        frontmatter_name_pattern=r"[a-z0-9-]+",
     )
 
 
