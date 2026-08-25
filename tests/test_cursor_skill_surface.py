@@ -97,6 +97,33 @@ def test_cursor_projection_requires_name_to_match_projected_directory(tmp_path: 
         plan_skill_projection(workspace, resolved, (cursor_skill_projection_surface(),))
 
 
+def test_cursor_projection_uses_yaml_single_quote_semantics_for_name(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        "---\nname: 'fast''api'\ndescription: Apply FastAPI conventions.\n---\n",
+    )
+
+    with pytest.raises(SkillProjectionError, match="name must match"):
+        plan_skill_projection(workspace, resolved, (cursor_skill_projection_surface(),))
+
+
+def test_cursor_projection_accepts_valid_quoted_name(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    resolved = _resolved_skill(
+        tmp_path / "registry",
+        '---\nname: "fast\\x61pi"\ndescription: Apply FastAPI conventions.\n---\n',
+    )
+
+    plan = plan_skill_projection(workspace, resolved, (cursor_skill_projection_surface(),))
+
+    assert tuple(target.relative_root for target in plan.targets) == (
+        PurePosixPath(".agents/skills"),
+    )
+
+
 def test_cursor_projection_rejects_name_outside_documented_character_set(
     tmp_path: Path,
 ) -> None:
