@@ -36,7 +36,7 @@ scripts/dev stop
 
 See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Prefer `scripts/dev` over a global `harness` on `PATH`.
 
-If direct Git/network access is unavailable but repository Git objects remain accessible through an authenticated API or connector, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). The fallback preserves exact base/tree identity, uses the PR source/toolchain artifacts for offline work, verifies staged and remote blob/tree SHAs, and moves the feature branch away from the verified base only after the complete remote tree matches the locally verified expected tree.
+If direct Git/network access is unavailable but GitHub API access is available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Run `scripts/publish_git_data.py preflight` before any remote object write, then use its `publish` action so staged blob bytes are encoded machine-side rather than copied through an inline tool payload. The fallback preserves exact base/tree identity and moves the feature branch only after the complete remote tree matches the locally verified expected tree.
 
 ## Branches and pull requests
 

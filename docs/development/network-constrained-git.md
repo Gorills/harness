@@ -72,31 +72,62 @@ If the execution wrapper repeatedly interrupts that long gate without a test/che
 
 The full repository quality gate must still pass in GitHub Actions on the exact PR head before merge. This ordering makes the reviewed candidate durable early enough to survive an execution interruption without weakening the merge gate. If the working tree changes after verification, regenerate the staged evidence and rerun checks proportionate to the change.
 
-## 4. Publish exact Git objects when `git push` is unavailable
+## 4. Preflight the publication transport before any remote object write
 
-If direct Git transport is unavailable, publish through GitHub's Git data/object API or an equivalent authenticated connector. Do not emulate one clean commit with a sequence of Contents API file updates, because each update may create its own commit.
+Do not discover transport limitations halfway through publication. Select and prove one transport before uploading feature bytes:
 
-Use this order:
+1. If normal `git fetch` / `git push` works, use normal Git and skip the API fallback entirely.
+2. If normal Git transport is unavailable, require a machine-side Git Data API path that can read the staged Git object bytes directly. In this repository, use `scripts/publish_git_data.py`.
+3. Run its `preflight` action before the first **feature** object write. Preflight fresh-reads the canonical base branch, requires the local canonical base tree object to match that remote tree, requires a clean worktree with the exact candidate staged, rejects a task branch that has already moved away from the base, and prints the expected tree plus every changed object SHA/size.
+4. Preflight writes one constant, unreferenced, content-addressed probe blob and requires its exact known SHA. This proves Git Data write permission and byte-preserving API transport before any feature bytes are uploaded; repeated preflights address the same harmless object.
+5. If authentication, network/write access, local base identity, branch state, candidate identity, or the write probe cannot be established, stop here. Do not start a partial connector upload and do not improvise another encoding mid-publication.
 
-1. Create the feature branch from the exact canonical base commit SHA, or leave the branch ref at that SHA while staging objects.
-2. Create one remote blob for each added or modified staged path, preserving the bytes and Git mode represented by the local index.
-3. Compare every returned remote blob SHA with the corresponding staged blob SHA from `git ls-files --stage`.
-4. If any blob SHA differs, do not reference that blob from a tree. Correct the transport and upload again.
-5. Create a remote tree using the canonical base tree plus the exact changed path/mode/blob entries and deletions.
-6. Require the returned remote tree SHA to equal the local expected `git write-tree` SHA exactly.
-7. Only after the tree matches, create one commit whose parent is the exact canonical base commit and whose tree is that verified feature tree.
-8. Move the feature branch ref to that commit using a non-force fast-forward update.
-9. Re-fetch the remote branch head and confirm its commit/tree identities before opening the PR.
+Example:
 
-A blob object uploaded with the wrong bytes is harmless if it remains unreferenced. Never move the branch ref merely because an upload call succeeded.
+```text
+export GH_TOKEN=...  # or GITHUB_TOKEN; never print it
+python scripts/publish_git_data.py preflight \
+  --repo Gorills/harness \
+  --branch feat/example
+```
 
-### Large text payloads
+The fallback publisher uses only the Python standard library plus local `git`; it does not add a runtime dependency. Fine-grained GitHub credentials need repository Contents write permission for Git Data mutations. The probe intentionally tests that permission before feature objects are sent.
 
-When an API requires base64 for large text payloads, base64-encode the exact file bytes first. If the transport needs line wrapping, insert whitespace only into that single canonical base64 stream at valid 4-character boundaries. Do not manually reconstruct source text across message/tool boundaries.
+## 5. Publish one exact staged tree
 
-The returned Git blob SHA is still the final proof: it must equal the staged local blob SHA before the blob may be referenced by the remote tree.
+After focused/component verification and independent correctness review are green, publish the same staged tree:
 
-## 5. PR and CI discipline remains unchanged
+```text
+python scripts/publish_git_data.py publish \
+  --repo Gorills/harness \
+  --branch feat/example \
+  --message "feat: example"
+```
+
+The publisher performs this fail-closed sequence:
+
+1. Fresh-read the canonical base commit/tree and rebuild the candidate from the local Git index.
+2. Read every staged blob with `git cat-file blob <sha>` and independently recompute its Git blob SHA.
+3. Base64-encode those bytes **inside the publisher process** and send them to GitHub's Git Data `create blob` endpoint. The file contents are never manually copied, chunked, reassembled, or base64-spliced across an agent/tool boundary.
+4. Require every returned remote blob SHA to equal the staged blob SHA. A mismatch stops before tree/commit/ref publication.
+5. Create the remote tree from the canonical base tree and the exact changed path/mode/object entries. Require the returned tree SHA to equal local `git write-tree`.
+6. Fresh-read `main` again after the unreferenced object writes. If it moved, stop before creating a durable task ref.
+7. Create one unreferenced commit whose tree is the verified feature tree and whose sole parent is the exact canonical base commit; re-read and verify both fields, then fresh-read the canonical base once more before any task-ref change.
+8. If the task branch does not exist, create it at the exact base commit. If it exists, require that it still points exactly at the base.
+9. Move the task branch to the feature commit with a non-force update.
+10. Re-fetch the branch and commit; require final commit/tree/parent identity to match the verified values.
+
+Git blob/tree/commit creation is content-addressed and safe to retry: failed or mismatched objects remain unreferenced. The branch ref is the durability boundary and moves only after the complete tree and parentage are proven.
+
+### Why manual base64 is forbidden
+
+GitHub's Git Data API supports `utf-8` and `base64` blob payloads, but the encoding itself is not the difficult part. The failure mode is transporting a large hand-built encoded string through a conversational/tool boundary: one missing, duplicated, or altered character produces different bytes and therefore a different Git blob SHA. The SHA check detects that corruption, but only after wasting a publication attempt.
+
+Always let machine code encode the exact bytes read from the staged Git object. If the environment has only an inline text connector and cannot run the repo-owned publisher (or another file/byte-safe equivalent), classify publication as unavailable during preflight rather than attempting manual chunk reconstruction.
+
+Do not emulate the final feature commit with a sequence of Contents API updates. That produces intermediate commits and makes exact one-commit/tree evidence harder to reason about.
+
+## 6. PR and CI discipline remains unchanged
 
 Fallback publication does not relax review or CI rules:
 

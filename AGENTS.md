@@ -26,6 +26,7 @@ The audited architecture and accepted ADRs control implementation when the origi
 - Never report a check as verified unless it actually ran successfully.
 - If a task uncovers a larger follow-up, document it and stop at the current boundary rather than silently expanding scope.
 - If normal Git remote transport is unavailable but authenticated repository-object access still exists, follow `docs/development/network-constrained-git.md`; preserve exact base/tree identity and do not move a feature branch ref away from the verified base until the complete remote tree matches the locally verified expected tree.
+- For network-constrained publication, run the transport preflight before remote object writes. Never hand-build or manually splice base64 file payloads across an agent/tool boundary; use the repo-owned machine-side Git Data publisher when normal `git push` is unavailable, and fail before mutation if that publisher cannot reach/authenticate to GitHub.
 
 ## Correctness-review terminology
 
