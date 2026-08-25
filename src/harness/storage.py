@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -531,6 +531,101 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 PRIMARY KEY (task_id, position),
                 UNIQUE (task_id, hint)
             )
+            """
+        )
+        return
+    if target_version == 10:
+        connection.execute(
+            """
+            CREATE TABLE task_events_v10 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_revision INTEGER NOT NULL CHECK (task_revision > 0),
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'created', 'resumed', 'checkpoint',
+                        'accepted', 'operator_feedback', 'cancelled'
+                    )
+                ),
+                checkpoint_id TEXT UNIQUE,
+                operator_feedback TEXT CHECK (
+                    operator_feedback IS NULL
+                    OR (
+                        operator_feedback <> ''
+                        AND length(CAST(operator_feedback AS BLOB)) <= 1024
+                    )
+                ),
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                CHECK (
+                    (
+                        event_type = 'created'
+                        AND task_revision = 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                    )
+                    OR (
+                        event_type = 'resumed'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                    )
+                    OR (
+                        event_type = 'checkpoint'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NOT NULL
+                        AND operator_feedback IS NULL
+                    )
+                    OR (
+                        event_type IN ('accepted', 'cancelled')
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                    )
+                    OR (
+                        event_type = 'operator_feedback'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NOT NULL
+                    )
+                ),
+                FOREIGN KEY (checkpoint_id, task_id, task_revision)
+                    REFERENCES task_checkpoints(id, task_id, task_revision) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events_v10(
+                id, task_id, task_revision, event_type, checkpoint_id,
+                operator_feedback, created_at
+            )
+            SELECT id, task_id, task_revision, event_type, checkpoint_id, NULL, created_at
+            FROM task_events
+            ORDER BY id
+            """
+        )
+        connection.execute("DROP TABLE task_events")
+        connection.execute("ALTER TABLE task_events_v10 RENAME TO task_events")
+        connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_created_per_task_idx
+            ON task_events(task_id)
+            WHERE event_type = 'created'
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_resumed_per_revision_idx
+            ON task_events(task_id, task_revision)
+            WHERE event_type = 'resumed'
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_operator_action_per_revision_idx
+            ON task_events(task_id, task_revision)
+            WHERE event_type IN ('accepted', 'operator_feedback', 'cancelled')
             """
         )
         return

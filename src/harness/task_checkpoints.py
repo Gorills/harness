@@ -33,6 +33,7 @@ from harness.tasks import (
 
 MAX_CHECKPOINT_SUMMARY_BYTES = 4096
 MAX_CHECKPOINT_NEXT_STEP_BYTES = 2048
+MAX_OPERATOR_FEEDBACK_BYTES = 1024
 
 
 class TaskCheckpointError(TaskError):
@@ -49,6 +50,9 @@ class TaskEventType(StrEnum):
     CREATED = "created"
     RESUMED = "resumed"
     CHECKPOINT = "checkpoint"
+    ACCEPTED = "accepted"
+    OPERATOR_FEEDBACK = "operator_feedback"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +95,7 @@ class TaskEventRecord:
     task_revision: int
     event_type: TaskEventType
     checkpoint_id: str | None
+    operator_feedback: str | None
     created_at: str
 
 
@@ -344,7 +349,8 @@ def list_task_events(
     get_task(connection, task_id)
     rows = connection.execute(
         """
-        SELECT id, task_id, task_revision, event_type, checkpoint_id, created_at
+        SELECT
+            id, task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at
         FROM task_events
         WHERE task_id = ?
         ORDER BY id
@@ -352,6 +358,40 @@ def list_task_events(
         (task_id,),
     )
     return tuple(_event_from_row(row) for row in rows)
+
+
+def get_operator_feedback_for_revision(
+    connection: sqlite3.Connection,
+    task_id: str,
+    task_revision: int,
+) -> str | None:
+    """Return operator feedback attached exactly to one Task revision, if present."""
+    task = get_task(connection, task_id)
+    if isinstance(task_revision, bool) or not isinstance(task_revision, int) or task_revision <= 0:
+        raise TaskCheckpointError("operator feedback revision must be a positive integer")
+    if task_revision > task.revision:
+        raise TaskCheckpointError("operator feedback revision exceeds current Task revision")
+    row = connection.execute(
+        """
+        SELECT operator_feedback
+        FROM task_events
+        WHERE task_id = ? AND task_revision = ? AND event_type = 'operator_feedback'
+        """,
+        (task_id, task_revision),
+    ).fetchone()
+    if row is None:
+        return None
+    feedback = row[0]
+    if not isinstance(feedback, str):
+        raise TaskCheckpointError("operator feedback event has invalid persisted text")
+    normalized = _validate_text(
+        feedback,
+        label="operator feedback",
+        maximum_bytes=MAX_OPERATOR_FEEDBACK_BYTES,
+        required=True,
+    )
+    assert normalized is not None
+    return normalized
 
 
 def _calculate_mechanical_checkpoint(
@@ -447,8 +487,10 @@ def _insert_checkpoint_event(
 ) -> TaskEventRecord:
     cursor = connection.execute(
         """
-        INSERT INTO task_events(task_id, task_revision, event_type, checkpoint_id, created_at)
-        VALUES (?, ?, 'checkpoint', ?, ?)
+        INSERT INTO task_events(
+            task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at
+        )
+        VALUES (?, ?, 'checkpoint', ?, NULL, ?)
         """,
         (
             checkpoint.task_id,
@@ -466,6 +508,7 @@ def _insert_checkpoint_event(
         task_revision=checkpoint.task_revision,
         event_type=TaskEventType.CHECKPOINT,
         checkpoint_id=checkpoint.checkpoint_id,
+        operator_feedback=None,
         created_at=checkpoint.created_at,
     )
 
@@ -586,7 +629,15 @@ def _checkpoint_from_row(
 
 
 def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
-    event_id, task_id, task_revision, event_type, checkpoint_id, created_at = row
+    (
+        event_id,
+        task_id,
+        task_revision,
+        event_type,
+        checkpoint_id,
+        operator_feedback,
+        created_at,
+    ) = row
     if (
         isinstance(event_id, bool)
         or not isinstance(event_id, int)
@@ -598,6 +649,7 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         or task_revision <= 0
         or not isinstance(event_type, str)
         or (checkpoint_id is not None and (not isinstance(checkpoint_id, str) or not checkpoint_id))
+        or (operator_feedback is not None and not isinstance(operator_feedback, str))
         or not isinstance(created_at, str)
         or not created_at
     ):
@@ -607,19 +659,35 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
     except ValueError as exc:
         raise TaskCheckpointError(f"task event has unsupported type: {event_type!r}") from exc
     if parsed_event_type is TaskEventType.CREATED:
-        if task_revision != 1 or checkpoint_id is not None:
+        if task_revision != 1 or checkpoint_id is not None or operator_feedback is not None:
             raise TaskCheckpointError("created Task event has invalid persisted linkage")
     elif parsed_event_type is TaskEventType.RESUMED:
-        if task_revision <= 1 or checkpoint_id is not None:
+        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is not None:
             raise TaskCheckpointError("resumed Task event has invalid persisted linkage")
-    elif task_revision <= 1 or checkpoint_id is None:
-        raise TaskCheckpointError("checkpoint Task event has invalid persisted linkage")
+    elif parsed_event_type is TaskEventType.CHECKPOINT:
+        if task_revision <= 1 or checkpoint_id is None or operator_feedback is not None:
+            raise TaskCheckpointError("checkpoint Task event has invalid persisted linkage")
+    elif parsed_event_type in {TaskEventType.ACCEPTED, TaskEventType.CANCELLED}:
+        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is not None:
+            raise TaskCheckpointError("operator Task event has invalid persisted linkage")
+    else:
+        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is None:
+            raise TaskCheckpointError("operator feedback event has invalid persisted linkage")
+        normalized_feedback = _validate_text(
+            operator_feedback,
+            label="operator feedback",
+            maximum_bytes=MAX_OPERATOR_FEEDBACK_BYTES,
+            required=True,
+        )
+        assert normalized_feedback is not None
+        operator_feedback = normalized_feedback
     return TaskEventRecord(
         event_id=event_id,
         task_id=task_id,
         task_revision=task_revision,
         event_type=parsed_event_type,
         checkpoint_id=checkpoint_id,
+        operator_feedback=operator_feedback,
         created_at=created_at,
     )
 

@@ -26,7 +26,11 @@ from harness.search import (
     IndexedPathSearchScope,
     SearchMatchKind,
 )
-from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_CHECKPOINT_SUMMARY_BYTES
+from harness.task_checkpoints import (
+    MAX_CHECKPOINT_NEXT_STEP_BYTES,
+    MAX_CHECKPOINT_SUMMARY_BYTES,
+    MAX_OPERATOR_FEEDBACK_BYTES,
+)
 from harness.tasks import (
     MAX_TASK_STACK_HINT_BYTES,
     MAX_TASK_STACK_HINTS,
@@ -89,7 +93,7 @@ class StatusResult:
 
 @dataclass(frozen=True, slots=True)
 class DashboardUrlResult:
-    """Capability-bearing loopback URL for the daemon-owned read-only dashboard."""
+    """Capability-bearing loopback URL for the daemon-owned local dashboard."""
 
     url: str
 
@@ -139,6 +143,7 @@ class WorkspaceTaskStatusResult:
     workspace_id: str
     task: WorkspaceTaskSummary | None
     last_checkpoint: WorkspaceTaskCheckpointSummary | None
+    pending_operator_feedback: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -691,6 +696,7 @@ def send_workspace_task_status_response(
                             "next_step": checkpoint.next_step,
                         }
                     ),
+                    "pending_operator_feedback": status.pending_operator_feedback,
                 },
             }
         )
@@ -1494,7 +1500,13 @@ def _workspace_task_status_from_response(
     expected_request_id: str,
 ) -> WorkspaceTaskStatusResult:
     result = _success_result(response, expected_request_id=expected_request_id)
-    if set(result) != {"schema_version", "workspace_id", "task", "last_checkpoint"}:
+    if set(result) != {
+        "schema_version",
+        "workspace_id",
+        "task",
+        "last_checkpoint",
+        "pending_operator_feedback",
+    }:
         raise IpcProtocolError("daemon workspace task status result does not match the IPC schema")
     schema_version = result["schema_version"]
     if (
@@ -1575,7 +1587,24 @@ def _workspace_task_status_from_response(
             wait_reason,
             cast(str | None, next_step),
         )
-    return WorkspaceTaskStatusResult(schema_version, workspace_id, task, checkpoint)
+    pending_operator_feedback = result["pending_operator_feedback"]
+    if pending_operator_feedback is not None:
+        if task is None or task.state is not TaskState.WORKING:
+            raise IpcProtocolError(
+                "daemon workspace task status feedback requires a current working Task"
+            )
+        pending_operator_feedback = _bounded_response_string(
+            pending_operator_feedback,
+            "pending_operator_feedback",
+            MAX_OPERATOR_FEEDBACK_BYTES,
+        )
+    return WorkspaceTaskStatusResult(
+        schema_version,
+        workspace_id,
+        task,
+        checkpoint,
+        cast(str | None, pending_operator_feedback),
+    )
 
 
 def _workspace_scan_from_response(

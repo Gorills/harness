@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import select
@@ -10,6 +11,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
 from typing import cast
+from urllib.parse import urlencode, urlsplit
 
 import pytest
 from mcp import Client, StdioServerParameters
@@ -18,9 +20,16 @@ from mcp.shared.exceptions import MCPError
 
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
+from harness.ipc import request_dashboard_url
 from harness.registry import create_project, register_workspace
 from harness.storage import connect_database, initialize_database
-from harness.tasks import get_task_stack_hints
+from harness.task_checkpoints import (
+    MAX_CHECKPOINT_NEXT_STEP_BYTES,
+    MAX_OPERATOR_FEEDBACK_BYTES,
+    TaskEventType,
+    list_task_events,
+)
+from harness.tasks import TaskState, get_task, get_task_stack_hints
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
@@ -65,6 +74,28 @@ def _start_daemon(
             raise AssertionError("daemon did not start")
         time.sleep(0.01)
     return stop, executor, future
+
+
+def _dashboard_post(url: str, fields: dict[str, str | int]) -> int:
+    parsed = urlsplit(url)
+    assert parsed.hostname is not None and parsed.port is not None
+    origin = f"http://{parsed.hostname}:{parsed.port}"
+    body = urlencode(fields).encode("ascii")
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+    connection.request(
+        "POST",
+        parsed.path,
+        body=body,
+        headers={
+            "Origin": origin,
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    response = connection.getresponse()
+    response.read()
+    status = response.status
+    connection.close()
+    return status
 
 
 @pytest.mark.anyio
@@ -134,8 +165,10 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                 "relevant_waiting_task",
                 "last_checkpoint",
                 "next_step",
+                "pending_operator_feedback",
                 "schema_version",
             }
+            assert status.structured_content["pending_operator_feedback"] is None
             started = await client.call_tool(
                 "task_start",
                 {"title": "MCP continuity", "stack_hints": [" FastAPI ", "POSTGRES"]},
@@ -222,6 +255,152 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
         assert get_task_stack_hints(connection, task_id) == ("fastapi", "postgres")
     finally:
         connection.close()
+
+
+@pytest.mark.anyio
+async def test_human_review_feedback_survives_new_mcp_session_and_accept_completes_task(
+    tmp_path: Path,
+) -> None:
+    root, database = _repo(tmp_path)
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "harness.mcp_process"],
+        env=env,
+        cwd=str(root),
+    )
+    maximum_next_step = "N" * MAX_CHECKPOINT_NEXT_STEP_BYTES
+    maximum_feedback = "F" * MAX_OPERATOR_FEEDBACK_BYTES
+    try:
+        async with Client(stdio_client(params)) as first_client:
+            started = await first_client.call_tool("task_start", {"title": "Human review loop"})
+            assert started.is_error is False
+            assert started.structured_content is not None
+            task_id = started.structured_content["task_id"]
+            workspace_id = started.structured_content["workspace_id"]
+            waiting = await first_client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 1,
+                    "state": "waiting",
+                    "wait_reason": "operator_review",
+                    "summary": "Implementation ready for review",
+                    "next_step": maximum_next_step,
+                },
+            )
+            assert waiting.is_error is False
+            assert waiting.structured_content is not None
+            assert waiting.structured_content["revision"] == 2
+
+        dashboard = request_dashboard_url(socket_path)
+        assert (
+            _dashboard_post(
+                dashboard.url,
+                {
+                    "action": "feedback",
+                    "workspace_id": workspace_id,
+                    "task_id": task_id,
+                    "expected_revision": 2,
+                    "feedback": maximum_feedback,
+                },
+            )
+            == 303
+        )
+
+        # A fresh model-facing bridge process sees the same durable Task and the feedback that
+        # caused its waiting -> working transition. No dashboard-only side channel is required.
+        async with Client(stdio_client(params)) as second_client:
+            status = await second_client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            current = status.structured_content["current_task"]
+            assert current is not None
+            assert current["task_id"] == task_id
+            assert current["state"] == "working"
+            assert current["revision"] == 3
+            assert status.structured_content["pending_operator_feedback"] == maximum_feedback
+
+            resumed = await second_client.call_tool(
+                "task_start", {"task_id": task_id, "expected_revision": 3}
+            )
+            assert resumed.is_error is False
+            assert resumed.structured_content is not None
+            assert resumed.structured_content["revision"] == 3
+
+            applied = await second_client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 3,
+                    "state": "working",
+                    "summary": "Applied mobile spacing feedback",
+                },
+            )
+            assert applied.is_error is False
+            assert applied.structured_content is not None
+            assert applied.structured_content["revision"] == 4
+            after_checkpoint = await second_client.call_tool("project_status")
+            assert after_checkpoint.is_error is False
+            assert after_checkpoint.structured_content is not None
+            assert after_checkpoint.structured_content["pending_operator_feedback"] is None
+
+            review_again = await second_client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 4,
+                    "state": "waiting",
+                    "wait_reason": "operator_review",
+                    "summary": "Feedback applied; ready again",
+                    "next_step": "Final operator review",
+                },
+            )
+            assert review_again.is_error is False
+            assert review_again.structured_content is not None
+            assert review_again.structured_content["revision"] == 5
+
+        assert (
+            _dashboard_post(
+                dashboard.url,
+                {
+                    "action": "accept",
+                    "workspace_id": workspace_id,
+                    "task_id": task_id,
+                    "expected_revision": 5,
+                },
+            )
+            == 303
+        )
+
+        connection = connect_database(database)
+        try:
+            completed = get_task(connection, task_id)
+            assert completed.state is TaskState.COMPLETED
+            assert completed.revision == 6
+            assert tuple(event.event_type for event in list_task_events(connection, task_id)) == (
+                TaskEventType.CREATED,
+                TaskEventType.CHECKPOINT,
+                TaskEventType.OPERATOR_FEEDBACK,
+                TaskEventType.CHECKPOINT,
+                TaskEventType.CHECKPOINT,
+                TaskEventType.ACCEPTED,
+            )
+        finally:
+            connection.close()
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
 
 @pytest.mark.anyio
