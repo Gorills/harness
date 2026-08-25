@@ -36,7 +36,7 @@ scripts/dev stop
 
 See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Prefer `scripts/dev` over a global `harness` on `PATH`.
 
-If direct Git/network access is unavailable but GitHub API access is available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Run `scripts/publish_git_data.py preflight` before feature bytes are uploaded, then use its `publish` action so staged blob bytes are encoded machine-side rather than copied through an inline tool payload. The fallback preserves exact base/tree identity and moves the feature branch only after the complete remote tree matches the locally verified expected tree.
+If direct Git/network access is unavailable but authenticated GitHub object access remains available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Prefer `scripts/publish_git_data.py preflight` plus `publish`. When the execution shell cannot reach GitHub but a connected Git Data tool can create blobs, raw UTF-8 blob publication is also allowed for staged files that are valid UTF-8, with the returned remote blob SHA required to match the staged SHA before any tree/commit/ref publication. Never manually assemble base64; binary or non-UTF-8 changes require a byte-safe machine transport.
 
 ## Branches and pull requests
 
