@@ -1,0 +1,199 @@
++            task_id="selected-task",
++            workspace_id=workspace_id,
++            title="Selected task",
++            summary="Selected checkpoint semantic detail",
++            feedback="Selected operator feedback",
++        )
++        _task_history(
++            connection,
++            task_id="other-task",
++            workspace_id=other_workspace_id,
++            title="Other task",
++            summary="Other secret summary",
++            feedback="Other secret feedback",
++        )
++
++        items = read_project_context(
++            connection,
++            workspace_id,
++            (
++                "knowledge:selected-card",
++                f"task:selected-task#checkpoint:{checkpoint_id}",
++                f"task:selected-task#event:{feedback_event_id}",
++                "doc:docs/refresh-rotation.md",
++            ),
++        )
++        serialized = str(items)
++        assert "Selected semantic body" in serialized
++        assert "historical_clue': True" in serialized
++        assert "Selected checkpoint semantic detail" in serialized
++        assert "Selected operator feedback" in serialized
++        assert "Unrelated invariant" not in serialized
++        assert "Cross Project secret" not in serialized
++        assert "Other secret" not in serialized
++
++        with pytest.raises(ProjectRetrievalRefError, match="another Project"):
++            read_project_context(connection, workspace_id, ("knowledge:other-card",))
++        with pytest.raises(ProjectRetrievalRefError, match="another Project"):
++            read_project_context(connection, workspace_id, ("task:other-task",))
++        with pytest.raises(ProjectRetrievalRefError, match="kind does not match"):
++            read_project_context(connection, workspace_id, ("code:docs/refresh-rotation.md",))
++    finally:
++        connection.close()
++
++
++def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> None:
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        project_id, workspace_id = _workspace(connection, tmp_path / "repo")
++        connection.execute(
++            """
++            INSERT INTO knowledge_cards(
++                id, project_id, kind, title, body, source_type,
++                created_at, updated_at, freshness
++            ) VALUES (?, ?, 'invariant', ?, ?, 'operator', 'created', 'updated', 'fresh')
++            """,
++            ("large-card", project_id, "T" * 256, "B" * 8192),
++        )
++        for index in range(8):
++            connection.execute(
++                """
++                INSERT INTO knowledge_anchors(
++                    knowledge_id, workspace_id, relative_path, symbol,
++                    fingerprint_kind, content_sha256
++                ) VALUES (?, ?, ?, ?, 'file', ?)
++                """,
++                (
++                    "large-card",
++                    workspace_id,
++                    f"deep/{index}/" + ("p" * 1800),
++                    f"symbol-{index}",
++                    f"{index:x}" * 64,
++                ),
++            )
++
++        checkpoint_id, _ = _task_history(
++            connection,
++            task_id="large-task",
++            workspace_id=workspace_id,
++            title="Large context task",
++            summary="initial",
++            feedback="feedback",
++        )
++        connection.execute(
++            "UPDATE task_checkpoints SET summary = ?, next_step = ? WHERE id = ?",
++            ("S" * 4096, "N" * 2048, checkpoint_id),
++        )
++        for index in range(12):
++            connection.execute(
++                """
++                INSERT INTO task_checkpoint_changed_paths(checkpoint_id, relative_path)
++                VALUES (?, ?)
++                """,
++                (checkpoint_id, f"src/{index}/" + ("x" * 500)),
++            )
++
++        knowledge_item = read_project_context(connection, workspace_id, ("knowledge:large-card",))[
++            0
++        ]
++        task_item = read_project_context(
++            connection, workspace_id, (f"task:large-task#checkpoint:{checkpoint_id}",)
++        )[0]
++
++        assert knowledge_item.data["body_truncated"] is True
++        assert knowledge_item.data["anchor_count"] == 8
++        assert knowledge_item.data["anchors_truncated"] is True
++        assert len(json.dumps(knowledge_item.data, ensure_ascii=False).encode("utf-8")) < 4096
++
++        selected = task_item.data["selected_checkpoint"]
++        assert isinstance(selected, dict)
++        assert selected["summary_truncated"] is True
++        assert selected["next_step_truncated"] is True
++        assert selected["changed_path_count"] == 12
++        assert selected["changed_paths_truncated"] is True
++        assert len(json.dumps(task_item.data, ensure_ascii=False).encode("utf-8")) < 8192
++    finally:
++        connection.close()
+diff --git a/tests/test_project_retrieval_ipc.py b/tests/test_project_retrieval_ipc.py
+new file mode 100644
+index 0000000..31ace91
+--- /dev/null
++++ b/tests/test_project_retrieval_ipc.py
+@@ -0,0 +1,112 @@
++from __future__ import annotations
++
++import subprocess
++import time
++from concurrent.futures import Future, ThreadPoolExecutor
++from pathlib import Path
++from threading import Event
++
++import pytest
++
++from harness.daemon import serve_daemon
++from harness.index import scan_workspace
++from harness.ipc import (
++    IpcProtocolError,
++    IpcRemoteError,
++    request_project_context,
++    request_project_search,
++)
++from harness.registry import create_project, register_workspace
++from harness.retrieval import ProjectSearchKind, ProjectSearchScope
++from harness.storage import connect_database, initialize_database
++from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
++
++
++def _git(cwd: Path, *args: str) -> None:
++    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
++
++
++def _seed(tmp_path: Path) -> tuple[Path, Path, str, str]:
++    root = tmp_path / "repo"
++    root.mkdir()
++    (root / "docs").mkdir()
++    (root / "docs" / "rotation.md").write_text("rotation\n", encoding="utf-8")
++    _git(root, "init", "-b", "main")
++    _git(root, "add", ".")
++    _git(root, "-c", "user.name=Test", "-c", "user.email=t@example.invalid", "commit", "-m", "init")
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        project = create_project(connection)
++        workspace = register_workspace(connection, project_id=project.project_id, path=root)
++        scan_workspace(connection, workspace.workspace_id)
++        connection.execute(
++            """
++            INSERT INTO knowledge_cards(
++                id, project_id, kind, title, body, source_type, created_at, updated_at, freshness
++            ) VALUES ('card', ?, 'invariant', 'Refresh rotation invariant',
++                      'Previous token becomes invalid', 'operator', 'c', 'u', 'fresh')
++            """,
++            (project.project_id,),
++        )
++        connection.execute(
++            """
++            INSERT INTO tasks(id, workspace_id, title, state, wait_reason, revision, created_at, updated_at)
++            VALUES ('task', ?, 'Rotate refresh tokens', 'completed', NULL, 1, 'c', 'u')
++            """,
++            (workspace.workspace_id,),
++        )
++        return root, database, project.project_id, workspace.workspace_id
++    finally:
++        connection.close()
++
++
++def _start(database: Path, socket_path: Path) -> tuple[Event, ThreadPoolExecutor, Future[None]]:
++    stop = Event()
++    executor = ThreadPoolExecutor(max_workers=1)
++    future = executor.submit(serve_daemon, database, socket_path, stop_event=stop)
++    deadline = time.monotonic() + 3
++    while not socket_path.exists():
++        if future.done():
++            future.result()
++        if time.monotonic() >= deadline:
++            raise AssertionError("daemon did not start")
++        time.sleep(0.01)
