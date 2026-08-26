@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -19,7 +20,11 @@ class DaemonAutostartError(IpcTransportError):
     """Raised when the canonical per-user daemon cannot be started or become ready."""
 
 
-def ensure_canonical_daemon(paths: RuntimePaths) -> None:
+def ensure_canonical_daemon(
+    paths: RuntimePaths,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> None:
     """Ensure the canonical POSIX daemon is reachable, starting it lazily if needed."""
     runtime_directory = paths.socket.parent
     try:
@@ -27,7 +32,7 @@ def ensure_canonical_daemon(paths: RuntimePaths) -> None:
     except RuntimePathError:
         if not _runtime_directory_is_missing(runtime_directory):
             raise
-        _start_canonical_daemon()
+        _start_canonical_daemon(environment=environment)
         _wait_for_canonical_daemon(paths)
         return
 
@@ -38,7 +43,7 @@ def ensure_canonical_daemon(paths: RuntimePaths) -> None:
             return
         if not _transport_error_proves_daemon_absent(exc):
             raise
-        _start_canonical_daemon()
+        _start_canonical_daemon(environment=environment)
         _wait_for_canonical_daemon(paths)
 
 
@@ -61,16 +66,28 @@ def _transport_error_is_timeout(error: IpcTransportError) -> bool:
     return isinstance(error.__cause__, TimeoutError)
 
 
-def _start_canonical_daemon() -> None:
+def _start_canonical_daemon(*, environment: Mapping[str, str] | None = None) -> None:
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "harness.daemon_process"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-        )
+        command = [sys.executable, "-m", "harness.daemon_process"]
+        if environment is None:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+                env=dict(environment),
+            )
     except OSError as exc:
         raise DaemonAutostartError("Harness daemon could not be started") from exc
 

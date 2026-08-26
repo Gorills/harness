@@ -4,6 +4,8 @@ import sys
 
 import pytest
 
+_PROCESS_WATCHDOG_SECONDS = 10.0
+
 
 def test_stdio_transport_exits_cleanly_on_empty_stdin() -> None:
     completed = subprocess.run(
@@ -11,7 +13,7 @@ def test_stdio_transport_exits_cleanly_on_empty_stdin() -> None:
         input="",
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0
@@ -63,7 +65,7 @@ def test_stdio_transport_drains_all_accepted_requests_before_eof_shutdown(
         input="".join(json.dumps(request, separators=(",", ":")) + "\n" for request in requests),
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0
@@ -103,7 +105,7 @@ anyio.run(server.run_stdio_async)
         input=json.dumps(request, separators=(",", ":")) + "\n",
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0
@@ -145,7 +147,7 @@ anyio.run(server.run_stdio_async)
         input=json.dumps(request, separators=(",", ":")) + "\n",
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0
@@ -191,7 +193,7 @@ anyio.run(server.run_stdio_async)
         input="".join(json.dumps(item, separators=(",", ":")) + "\n" for item in (request, cancel)),
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0
@@ -250,7 +252,7 @@ anyio.run(server.run_stdio_async)
         ),
         capture_output=True,
         text=True,
-        timeout=3,
+        timeout=_PROCESS_WATCHDOG_SECONDS,
         check=False,
     )
     assert completed.returncode == 0

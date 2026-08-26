@@ -401,3 +401,41 @@ def test_claude_command_execution_errors_are_bounded(
         adapter.register_mcp()
     assert str(raised.value) == "Claude Code integration command could not be executed"
     assert "secret" not in str(raised.value)
+
+
+def test_claude_registration_state_distinguishes_absent_current_stale_and_foreign(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from harness.host_adapters import HostRegistrationState
+
+    adapter = ClaudeCodeAdapter(tmp_path / "claude", tmp_path / "python")
+    outputs = iter(
+        [
+            _completed([], 1, 'No MCP server found with name: "harness"'),
+            _completed([], 0, _claude_get_output(adapter.python_executable)),
+            _completed([], 0, _claude_get_output(tmp_path / "old-python")),
+            _completed(
+                [],
+                0,
+                "\n".join(
+                    [
+                        "Scope: User config (available in all your projects)",
+                        "Type: stdio",
+                        "Command: /foreign/tool",
+                        "Args: serve",
+                    ]
+                ),
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        ClaudeCodeAdapter,
+        "_run",
+        staticmethod(lambda command, cwd=None: next(outputs)),
+    )
+
+    assert adapter.registration_state() is HostRegistrationState.ABSENT
+    assert adapter.registration_state() is HostRegistrationState.CURRENT
+    assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
+    assert adapter.registration_state() is HostRegistrationState.FOREIGN

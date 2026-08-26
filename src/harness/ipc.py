@@ -60,6 +60,8 @@ _TASK_ID_MAX_LENGTH = 128
 _INDEX_RELATIVE_PATH_MAX_BYTES = 4096
 _PROJECT_CONTEXT_REF_MAX_BYTES = MAX_PROJECT_CONTEXT_REF_BYTES
 _PROJECT_CONTEXT_MAX_REFS = 10
+_HOST_PROFILE_MAX_BYTES = 64
+_HOST_PROFILE_MAX_ITEMS = 8
 
 
 class IpcError(RuntimeError):
@@ -170,6 +172,38 @@ class WorkspaceScanResult:
     added: int
     updated: int
     removed: int
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSkillsResult:
+    """Bounded project-skill reconciliation result returned by the daemon."""
+
+    schema_version: int
+    workspace_id: str
+    selected_skill_ids: tuple[str, ...]
+    materialized: int
+    removed: int
+    unchanged: int
+    exclude_changed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SkillCleanupResult:
+    """Bounded global generated-skill cleanup result returned by the daemon."""
+
+    schema_version: int
+    workspace_count: int
+    cleaned_workspace_count: int
+    skipped_workspace_count: int
+    removed: int
+    exclude_changed_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ShutdownResult:
+    """Acknowledgement that the daemon accepted a local shutdown request."""
+
+    accepted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +327,7 @@ class IpcRequest:
     context_refs: tuple[str, ...] | None = None
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
+    host_profiles: tuple[str, ...] | None = None
 
 
 def request_status(
@@ -388,6 +423,67 @@ def request_workspace_scan(
         timeout=timeout,
     )
     return _workspace_scan_from_response(response, expected_request_id=request_id)
+
+
+def request_workspace_skills_reconcile(
+    socket_path: Path,
+    hints: Sequence[WorkspaceHint],
+    profiles: Sequence[str],
+    *,
+    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+) -> WorkspaceSkillsResult:
+    """Resolve and reconcile project skills for one Workspace through daemon-owned state."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "workspace_skills_reconcile",
+            "params": {
+                "hints": _workspace_hints_to_wire(hints),
+                "profiles": _host_profiles_to_wire(profiles),
+            },
+        },
+        timeout=timeout,
+    )
+    return _workspace_skills_from_response(response, expected_request_id=request_id)
+
+
+def request_skill_cleanup(
+    socket_path: Path,
+    profiles: Sequence[str],
+    *,
+    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+) -> SkillCleanupResult:
+    """Remove Harness-owned generated skills from safely identifiable registered Workspaces."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "skill_cleanup",
+            "params": {"profiles": _host_profiles_to_wire(profiles)},
+        },
+        timeout=timeout,
+    )
+    return _skill_cleanup_from_response(response, expected_request_id=request_id)
+
+
+def request_shutdown(
+    socket_path: Path,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> ShutdownResult:
+    """Request a clean shutdown from the current-user Harness daemon."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {"version": PROTOCOL_VERSION, "request_id": request_id, "method": "shutdown"},
+        timeout=timeout,
+    )
+    return _shutdown_from_response(response, expected_request_id=request_id)
 
 
 def request_workspace_search(
@@ -606,6 +702,11 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             raise IpcProtocolError("dashboard URL request fields do not match the IPC schema")
         return IpcRequest(request_id=request_id, method=method)
 
+    if method == "shutdown":
+        if set(payload) != {"version", "request_id", "method"}:
+            raise IpcProtocolError("shutdown request fields do not match the IPC schema")
+        return IpcRequest(request_id=request_id, method=method)
+
     if method == "workspace_status":
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace status request fields do not match the IPC schema")
@@ -633,6 +734,26 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             request_id=request_id,
             method=method,
             scan_path=_scan_path_from_params(payload["params"]),
+        )
+
+    if method == "workspace_skills_reconcile":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("workspace skills request fields do not match the IPC schema")
+        hints, profiles = _workspace_skills_from_params(payload["params"])
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            workspace_hints=hints,
+            host_profiles=profiles,
+        )
+
+    if method == "skill_cleanup":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("skill cleanup request fields do not match the IPC schema")
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            host_profiles=_host_profiles_from_params(payload["params"]),
         )
 
     if method == "workspace_search":
@@ -729,6 +850,20 @@ def send_dashboard_url_response(
                 "request_id": request_id,
                 "ok": True,
                 "result": {"url": dashboard.url},
+            }
+        )
+    )
+
+
+def send_shutdown_response(peer: socket.socket, request_id: str) -> None:
+    """Acknowledge a clean local daemon shutdown request."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {"accepted": True},
             }
         )
     )
@@ -838,6 +973,57 @@ def send_workspace_scan_response(
                     "added": result.added,
                     "updated": result.updated,
                     "removed": result.removed,
+                },
+            }
+        )
+    )
+
+
+def send_workspace_skills_response(
+    peer: socket.socket,
+    request_id: str,
+    result: WorkspaceSkillsResult,
+) -> None:
+    """Send the exact bounded project-skill reconciliation contract."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_id": result.workspace_id,
+                    "selected_skill_ids": list(result.selected_skill_ids),
+                    "materialized": result.materialized,
+                    "removed": result.removed,
+                    "unchanged": result.unchanged,
+                    "exclude_changed": result.exclude_changed,
+                },
+            }
+        )
+    )
+
+
+def send_skill_cleanup_response(
+    peer: socket.socket,
+    request_id: str,
+    result: SkillCleanupResult,
+) -> None:
+    """Send the exact bounded generated-skill cleanup contract."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "workspace_count": result.workspace_count,
+                    "cleaned_workspace_count": result.cleaned_workspace_count,
+                    "skipped_workspace_count": result.skipped_workspace_count,
+                    "removed": result.removed,
+                    "exclude_changed_count": result.exclude_changed_count,
                 },
             }
         )
@@ -1095,6 +1281,49 @@ def _workspace_hints_from_params(value: object) -> tuple[WorkspaceHint, ...]:
         _validate_hint_fields(path, source, match_mode)
         hints.append(WorkspaceHint(path=Path(path), source=source, match_mode=match_mode))
     return tuple(hints)
+
+
+def _host_profiles_to_wire(profiles: Sequence[str]) -> list[str]:
+    return list(_validate_host_profiles(list(profiles)))
+
+
+def _host_profiles_from_params(value: object) -> tuple[str, ...]:
+    if not isinstance(value, dict) or set(value) != {"profiles"}:
+        raise IpcProtocolError("host profile params do not match the IPC schema")
+    profiles = value["profiles"]
+    if not isinstance(profiles, list):
+        raise IpcProtocolError("host profiles must be a list")
+    return _validate_host_profiles(profiles)
+
+
+def _workspace_skills_from_params(
+    value: object,
+) -> tuple[tuple[WorkspaceHint, ...], tuple[str, ...]]:
+    if not isinstance(value, dict) or set(value) != {"hints", "profiles"}:
+        raise IpcProtocolError("workspace skills params do not match the IPC schema")
+    hints = _workspace_hints_from_params({"hints": value["hints"]})
+    profiles = value["profiles"]
+    if not isinstance(profiles, list):
+        raise IpcProtocolError("host profiles must be a list")
+    return hints, _validate_host_profiles(profiles)
+
+
+def _validate_host_profiles(values: list[object]) -> tuple[str, ...]:
+    if not 1 <= len(values) <= _HOST_PROFILE_MAX_ITEMS:
+        raise IpcProtocolError("host profiles must contain between 1 and 8 items")
+    profiles: list[str] = []
+    for value in values:
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            or len(value.encode("utf-8")) > _HOST_PROFILE_MAX_BYTES
+        ):
+            raise IpcProtocolError("host profile must be bounded non-empty text")
+        profiles.append(value)
+    if len(set(profiles)) != len(profiles):
+        raise IpcProtocolError("host profiles must be unique")
+    return tuple(profiles)
 
 
 def _workspace_search_from_params(
@@ -1617,6 +1846,91 @@ def _dashboard_url_from_response(
     ):
         raise IpcProtocolError("daemon dashboard URL is not a private loopback capability URL")
     return DashboardUrlResult(url=url)
+
+
+def _shutdown_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> ShutdownResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    if set(result) != {"accepted"} or result["accepted"] is not True:
+        raise IpcProtocolError("daemon shutdown result does not match the IPC schema")
+    return ShutdownResult(accepted=True)
+
+
+def _workspace_skills_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> WorkspaceSkillsResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected = {
+        "schema_version",
+        "workspace_id",
+        "selected_skill_ids",
+        "materialized",
+        "removed",
+        "unchanged",
+        "exclude_changed",
+    }
+    if set(result) != expected:
+        raise IpcProtocolError("daemon workspace skills result does not match the IPC schema")
+    counts = (
+        result["schema_version"],
+        result["materialized"],
+        result["removed"],
+        result["unchanged"],
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        raise IpcProtocolError("daemon workspace skills result has invalid counts")
+    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+    raw_ids = result["selected_skill_ids"]
+    if not isinstance(raw_ids, list) or len(raw_ids) > 64:
+        raise IpcProtocolError("daemon workspace skills result has invalid selected skills")
+    selected = tuple(_bounded_response_string(value, "skill_id", 128) for value in raw_ids)
+    if len(set(selected)) != len(selected):
+        raise IpcProtocolError("daemon workspace skills result contains duplicate skill ids")
+    exclude_changed = result["exclude_changed"]
+    if not isinstance(exclude_changed, bool):
+        raise IpcProtocolError("daemon workspace skills result has invalid exclude_changed")
+    return WorkspaceSkillsResult(
+        schema_version=result["schema_version"],
+        workspace_id=workspace_id,
+        selected_skill_ids=selected,
+        materialized=result["materialized"],
+        removed=result["removed"],
+        unchanged=result["unchanged"],
+        exclude_changed=exclude_changed,
+    )
+
+
+def _skill_cleanup_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> SkillCleanupResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected = {
+        "schema_version",
+        "workspace_count",
+        "cleaned_workspace_count",
+        "skipped_workspace_count",
+        "removed",
+        "exclude_changed_count",
+    }
+    if set(result) != expected:
+        raise IpcProtocolError("daemon skill cleanup result does not match the IPC schema")
+    values = tuple(result[field] for field in expected)
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+        raise IpcProtocolError("daemon skill cleanup result has invalid counts")
+    if (
+        result["cleaned_workspace_count"] + result["skipped_workspace_count"]
+        != result["workspace_count"]
+    ):
+        raise IpcProtocolError("daemon skill cleanup workspace counts are inconsistent")
+    return SkillCleanupResult(
+        schema_version=result["schema_version"],
+        workspace_count=result["workspace_count"],
+        cleaned_workspace_count=result["cleaned_workspace_count"],
+        skipped_workspace_count=result["skipped_workspace_count"],
+        removed=result["removed"],
+        exclude_changed_count=result["exclude_changed_count"],
+    )
 
 
 def _workspace_status_from_response(

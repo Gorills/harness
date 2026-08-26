@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -28,8 +29,8 @@ def _write_fake_claude(tmp_path: Path) -> tuple[Path, Path, Path]:
     log_path = tmp_path / "commands.jsonl"
     executable = tmp_path / "claude"
     executable.write_text(
-        """#!/usr/bin/env python3
-import json
+        f"#!{sys.executable}\n"
+        + """import json
 import os
 import sys
 from pathlib import Path
