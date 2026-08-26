@@ -1,0 +1,184 @@
++        raise IpcProtocolError("project context refs must be a list")
++    return hints, _validate_project_context_refs(refs)
++
++
+ def _workspace_index_entry_from_params(
+     value: object,
+ ) -> tuple[tuple[WorkspaceHint, ...], str]:
+@@ -1761,6 +1953,154 @@ def _workspace_search_from_response(
+     )
+ 
+ 
++def _project_search_hit_to_wire(hit: ProjectSearchHit) -> dict[str, object]:
++    return {
++        "ref": hit.ref,
++        "kind": hit.kind.value,
++        "title": hit.title,
++        "location": hit.location,
++        "short_summary": hit.short_summary,
++        "match_reason": hit.match_reason,
++        "freshness": hit.freshness,
++        "path": hit.path,
++    }
++
++
++def _project_search_hit_from_wire(value: object) -> ProjectSearchHit:
++    fields = {
++        "ref",
++        "kind",
++        "title",
++        "location",
++        "short_summary",
++        "match_reason",
++        "freshness",
++        "path",
++    }
++    if not isinstance(value, dict) or set(value) != fields:
++        raise IpcProtocolError("daemon project search hit does not match the IPC schema")
++    ref = _bounded_response_string(value["ref"], "ref", _PROJECT_CONTEXT_REF_MAX_BYTES)
++    try:
++        kind = ProjectSearchKind(_bounded_response_string(value["kind"], "kind", 16))
++    except ValueError as exc:
++        raise IpcProtocolError("daemon project search hit has unsupported kind") from exc
++    title = _bounded_response_string(value["title"], "title", 512)
++    location = _bounded_response_string(value["location"], "location", 4096)
++    reason = _bounded_response_string(value["match_reason"], "match_reason", 128)
++    freshness = _bounded_response_string(value["freshness"], "freshness", 64)
++    summary = value["short_summary"]
++    if summary is not None:
++        summary = _bounded_response_string(summary, "short_summary", 1024)
++    path = value["path"]
++    if path is not None:
++        path = _bounded_response_string(path, "path", _INDEX_RELATIVE_PATH_MAX_BYTES)
++    return ProjectSearchHit(
++        ref,
++        kind,
++        title,
++        location,
++        cast(str | None, summary),
++        reason,
++        freshness,
++        cast(str | None, path),
++    )
++
++
++def _validate_project_context_refs(refs: Sequence[object]) -> tuple[str, ...]:
++    if not 1 <= len(refs) <= _PROJECT_CONTEXT_MAX_REFS:
++        raise IpcProtocolError(
++            f"project context refs must contain between 1 and {_PROJECT_CONTEXT_MAX_REFS} items"
++        )
++    normalized: list[str] = []
++    seen: set[str] = set()
++    for ref in refs:
++        if not isinstance(ref, str) or not ref or "\x00" in ref:
++            raise IpcProtocolError("project context ref must be non-empty text")
++        if len(ref.encode("utf-8")) > _PROJECT_CONTEXT_REF_MAX_BYTES:
++            raise IpcProtocolError("project context ref exceeds byte limit")
++        if ref in seen:
++            raise IpcProtocolError("project context refs must be unique")
++        seen.add(ref)
++        normalized.append(ref)
++    return tuple(normalized)
++
++
++def _bounded_nonnegative_int(value: object, label: str) -> int:
++    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
++        raise IpcProtocolError(f"daemon project retrieval {label} has invalid type")
++    return value
++
++
++def _validate_json_value(value: object, *, depth: int) -> None:
++    if depth > 5:
++        raise IpcProtocolError("daemon project context data nesting is too deep")
++    if value is None or isinstance(value, (str, bool)):
++        return
++    if isinstance(value, int) and not isinstance(value, bool):
++        return
++    if isinstance(value, list):
++        if len(value) > 32:
++            raise IpcProtocolError("daemon project context data list exceeds item limit")
++        for item in value:
++            _validate_json_value(item, depth=depth + 1)
++        return
++    if isinstance(value, dict):
++        if len(value) > 24 or any(not isinstance(key, str) or len(key) > 64 for key in value):
++            raise IpcProtocolError("daemon project context data object is invalid")
++        for item in value.values():
++            _validate_json_value(item, depth=depth + 1)
++        return
++    raise IpcProtocolError("daemon project context data contains unsupported value")
++
++
++def _project_search_from_response(
++    response: dict[str, Any],
++    *,
++    expected_request_id: str,
++) -> ProjectSearchResult:
++    result = _success_result(response, expected_request_id=expected_request_id)
++    if set(result) != {"schema_version", "workspace_id", "project_id", "results"}:
++        raise IpcProtocolError("daemon project search result does not match the IPC schema")
++    schema_version = _bounded_nonnegative_int(result["schema_version"], "schema_version")
++    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
++    project_id = _bounded_response_string(result["project_id"], "project_id", 128)
++    raw_results = result["results"]
++    if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
++        raise IpcProtocolError("daemon project search results exceed the item limit")
++    hits = tuple(_project_search_hit_from_wire(raw) for raw in raw_results)
++    return ProjectSearchResult(schema_version, workspace_id, project_id, hits)
++
++
++def _project_context_from_response(
++    response: dict[str, Any],
++    *,
++    expected_request_id: str,
++) -> ProjectContextResult:
++    result = _success_result(response, expected_request_id=expected_request_id)
++    if set(result) != {"schema_version", "workspace_id", "project_id", "items"}:
++        raise IpcProtocolError("daemon project context result does not match the IPC schema")
++    schema_version = _bounded_nonnegative_int(result["schema_version"], "schema_version")
++    workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
++    project_id = _bounded_response_string(result["project_id"], "project_id", 128)
++    raw_items = result["items"]
++    if not isinstance(raw_items, list) or len(raw_items) > _PROJECT_CONTEXT_MAX_REFS:
++        raise IpcProtocolError("daemon project context items exceed the item limit")
++    items: list[ProjectContextItem] = []
++    for raw in raw_items:
++        if not isinstance(raw, dict) or set(raw) != {"ref", "kind", "data"}:
++            raise IpcProtocolError("daemon project context item does not match the IPC schema")
++        ref = _bounded_response_string(raw["ref"], "ref", _PROJECT_CONTEXT_REF_MAX_BYTES)
++        try:
++            kind = ProjectSearchKind(_bounded_response_string(raw["kind"], "kind", 16))
++        except ValueError as exc:
++            raise IpcProtocolError("daemon project context item has unsupported kind") from exc
++        data = raw["data"]
++        _validate_json_value(data, depth=0)
++        assert isinstance(data, dict)
++        items.append(ProjectContextItem(ref=ref, kind=kind, data=cast(dict[str, object], data)))
++    return ProjectContextResult(schema_version, workspace_id, project_id, tuple(items))
++
++
+ def _workspace_index_entry_from_response(
+     response: dict[str, Any],
+     *,
+diff --git a/src/harness/mcp_bridge.py b/src/harness/mcp_bridge.py
+index b763995..b569a0a 100644
+--- a/src/harness/mcp_bridge.py
++++ b/src/harness/mcp_bridge.py
+@@ -34,22 +34,23 @@ from harness.ipc import (
+     TaskCheckpointResult,
+     TaskStartResult,
+     WorkspaceTaskSummary,
++    request_project_context,
++    request_project_search,
+     request_task_checkpoint,
+     request_task_start,
+-    request_workspace_index_entry,
+-    request_workspace_search,
+     request_workspace_status,
+     request_workspace_task_status,
+ )
+ from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
++from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchScope
+ from harness.runtime_paths import default_runtime_paths
+-from harness.search import IndexedPathSearchScope
+ from harness.tasks import TaskState, TaskWaitReason
