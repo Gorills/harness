@@ -6,7 +6,8 @@ import socket
 import sqlite3
 import stat
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Event, Lock, Thread
@@ -31,6 +32,7 @@ from harness.ipc import (
     IpcProtocolError,
     ProjectContextResult,
     ProjectSearchResult,
+    SkillCleanupResult,
     StatusResult,
     TaskCheckpointRequestData,
     TaskCheckpointResult,
@@ -41,6 +43,7 @@ from harness.ipc import (
     WorkspaceScanResult,
     WorkspaceSearchHit,
     WorkspaceSearchResult,
+    WorkspaceSkillsResult,
     WorkspaceStatusResult,
     WorkspaceTaskCheckpointSummary,
     WorkspaceTaskStatusResult,
@@ -50,12 +53,15 @@ from harness.ipc import (
     send_error_response,
     send_project_context_response,
     send_project_search_response,
+    send_shutdown_response,
+    send_skill_cleanup_response,
     send_status_response,
     send_task_checkpoint_response,
     send_task_start_response,
     send_workspace_index_entry_response,
     send_workspace_scan_response,
     send_workspace_search_response,
+    send_workspace_skills_response,
     send_workspace_status_response,
     send_workspace_task_status_response,
 )
@@ -76,6 +82,11 @@ from harness.retrieval import (
     search_project,
 )
 from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    cleanup_projected_skills,
+    reconcile_workspace_skills,
+)
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.task_baseline import TaskBaselineError
 from harness.task_checkpoints import (
@@ -665,6 +676,7 @@ def serve_daemon(
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
     watcher_invalidations: SimpleQueue[str] = SimpleQueue()
     dashboard = DashboardServerManager(database_path)
+    effective_stop_event = Event() if stop_event is None else stop_event
     try:
         _prepare_socket_path_for_bind(socket_path)
         database_lock_fd = _acquire_database_lock(database_path)
@@ -703,7 +715,7 @@ def serve_daemon(
         )
         thread.start()
         watcher_thread = thread
-        while stop_event is None or not stop_event.is_set():
+        while not effective_stop_event.is_set():
             if not watcher_thread.is_alive():
                 try:
                     watcher_failure = watcher_failures.get_nowait()
@@ -719,7 +731,14 @@ def serve_daemon(
             with client:
                 client.settimeout(_CLIENT_TIMEOUT_SECONDS)
                 try:
-                    _serve_client(client, database, scan_lock, watcher_invalidations, dashboard)
+                    _serve_client(
+                        client,
+                        database,
+                        scan_lock,
+                        watcher_invalidations,
+                        dashboard,
+                        effective_stop_event,
+                    )
                 except OSError:
                     continue
     finally:
@@ -736,9 +755,9 @@ def serve_daemon(
             server.close()
         if database is not None:
             database.close()
-        _unlink_owned_socket(socket_path, socket_identity)
         if database_lock_fd is not None:
             os.close(database_lock_fd)
+        _unlink_owned_socket(socket_path, socket_identity)
         os.close(socket_lock_fd)
         if dashboard_error is not None:
             if active_error is None:
@@ -752,6 +771,7 @@ def _serve_client(
     scan_lock: Lock,
     watcher_invalidations: SimpleQueue[str],
     dashboard: DashboardServerManager,
+    stop_event: Event,
 ) -> None:
     try:
         request = receive_request(client)
@@ -768,11 +788,34 @@ def _serve_client(
     if request.method == "dashboard_url":
         _serve_dashboard_url(client, request.request_id, dashboard)
         return
+    if request.method == "shutdown":
+        send_shutdown_response(client, request.request_id)
+        stop_event.set()
+        return
     if request.method == "workspace_status":
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
         return
     if request.method == "workspace_task_status":
         _serve_workspace_task_status(client, database, request.request_id, request.workspace_hints)
+        return
+    if request.method == "workspace_skills_reconcile" and request.host_profiles is not None:
+        _serve_workspace_skills(
+            client,
+            database,
+            request.request_id,
+            request.workspace_hints,
+            request.host_profiles,
+            scan_lock,
+        )
+        return
+    if request.method == "skill_cleanup" and request.host_profiles is not None:
+        _serve_skill_cleanup(
+            client,
+            database,
+            request.request_id,
+            request.host_profiles,
+            scan_lock,
+        )
         return
     if (
         request.method == "workspace_search"
@@ -1477,6 +1520,122 @@ def _serve_workspace_scan(
         )
 
 
+def _serve_workspace_skills(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    hints: Sequence[WorkspaceHint],
+    profiles: tuple[str, ...],
+    scan_lock: Lock,
+) -> None:
+    try:
+        deadline = monotonic() + _SCAN_DEADLINE_SECONDS
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
+            raise ScanDeadlineExceededError("Workspace skill reconciliation deadline exceeded")
+        try:
+            workspace = _resolve_task_workspace(database, hints)
+            result = reconcile_workspace_skills(database, workspace.workspace_id, profiles)
+        finally:
+            scan_lock.release()
+        response = WorkspaceSkillsResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id=result.workspace_id,
+            selected_skill_ids=result.selected_skill_ids,
+            materialized=result.projection.materialized,
+            removed=result.projection.removed,
+            unchanged=result.projection.unchanged,
+            exclude_changed=result.projection.exclude_changed,
+        )
+    except ScanDeadlineExceededError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_timeout",
+            message="Workspace skill reconciliation exceeded the daemon execution deadline",
+        )
+        return
+    except WorkspaceResolutionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_resolution_error",
+            message=str(exc),
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
+        return
+    except (RegistryError, SkillRuntimeError):
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message="daemon could not reconcile Workspace skills",
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not resolve Workspace skills",
+        )
+        return
+    send_workspace_skills_response(client, request_id, response)
+
+
+def _serve_skill_cleanup(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    request_id: str,
+    profiles: tuple[str, ...],
+    scan_lock: Lock,
+) -> None:
+    try:
+        deadline = monotonic() + _SCAN_DEADLINE_SECONDS
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
+            raise ScanDeadlineExceededError("Project skill cleanup deadline exceeded")
+        try:
+            result = cleanup_projected_skills(database, profiles)
+        finally:
+            scan_lock.release()
+        response = SkillCleanupResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_count=result.workspace_count,
+            cleaned_workspace_count=result.cleaned_workspace_count,
+            skipped_workspace_count=result.skipped_workspace_count,
+            removed=result.removed,
+            exclude_changed_count=result.exclude_changed_count,
+        )
+    except ScanDeadlineExceededError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_timeout",
+            message="Project skill cleanup exceeded the daemon execution deadline",
+        )
+        return
+    except (SkillRuntimeError, RegistryError):
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message="daemon could not remove generated Project skills",
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not enumerate registered Workspaces",
+        )
+        return
+    send_skill_cleanup_response(client, request_id, response)
+
+
 def _try_send_error(
     client: socket.socket,
     *,
@@ -1542,6 +1701,16 @@ def _database_lock_path(database_path: Path) -> Path:
             f"daemon database path could not be resolved: {database_path}"
         ) from exc
     return resolved.with_name(f"{resolved.name}.lock")
+
+
+@contextmanager
+def hold_database_maintenance_lock(database_path: Path) -> Iterator[None]:
+    """Hold the daemon's canonical database singleton lock for offline maintenance."""
+    lock_fd = _acquire_database_lock(database_path)
+    try:
+        yield
+    finally:
+        os.close(lock_fd)
 
 
 def _acquire_daemon_lock(socket_path: Path) -> int:

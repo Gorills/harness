@@ -1,3 +1,4 @@
+import json
 import os
 import shlex
 import shutil
@@ -99,7 +100,7 @@ def main() -> int:
         harness = scripts_dir / f"harness{suffix}"
         harnessd = scripts_dir / f"harnessd{suffix}"
         help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("doctor", "status", "scan", "search", "mcp"):
+        for expected in ("install", "uninstall", "doctor", "status", "scan", "search", "mcp"):
             if expected not in help_result.stdout:
                 raise RuntimeError(
                     f"installed harness --help did not contain {expected!r}: {help_result.stdout!r}"
@@ -454,36 +455,101 @@ raise SystemExit(2)
             )
             fake_claude.chmod(0o755)
             fake_env = isolated_env.copy()
-            fake_env["PATH"] = str(fake_bin)
+            fake_env["PATH"] = str(fake_bin) + os.pathsep + isolated_env.get("PATH", "")
             fake_env["HARNESS_FAKE_CLAUDE_STATE"] = str(fake_state)
-            registration_probe = _run(
+            fake_home = workspace / "fake-home"
+            fake_home.mkdir()
+            canonical_skill = fake_home / ".harness" / "skills" / "python-helper"
+            canonical_skill.mkdir(parents=True)
+            (canonical_skill / "SKILL.md").write_text(
+                "# Python helper\n\nUse Python conventions.\n",
+                encoding="utf-8",
+            )
+            (canonical_skill / "harness.yaml").write_text(
+                "id: python-helper\napplies:\n  languages:\n    - python\n",
+                encoding="utf-8",
+            )
+            fake_env["HOME"] = str(fake_home)
+            fake_env["XDG_STATE_HOME"] = str(workspace / "fake-state-home")
+            fake_env["XDG_RUNTIME_DIR"] = str(workspace / "fake-runtime-home")
+
+            install = _run((str(harness), "install"), cwd=workspace, env=fake_env)
+            if (
+                "MCP registration: changed" not in install.stdout
+                or "Harness install: OK" not in install.stdout
+            ):
+                raise RuntimeError(
+                    f"installed harness install lifecycle was unexpected: {install.stdout!r}"
+                )
+            install_again = _run((str(harness), "install"), cwd=workspace, env=fake_env)
+            if "MCP registration: unchanged" not in install_again.stdout:
+                raise RuntimeError(
+                    f"installed harness install was not idempotent: {install_again.stdout!r}"
+                )
+            installed_registration = json.loads(fake_state.read_text(encoding="utf-8"))
+            if installed_registration.get("command") != str(python.absolute()):
+                raise RuntimeError(
+                    "harness install registered an unexpected Python executable: "
+                    f"{installed_registration!r}"
+                )
+
+            lifecycle_project = workspace / "installed-lifecycle-project"
+            lifecycle_project.mkdir()
+            (lifecycle_project / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _run(("git", "init", "-b", "main"), cwd=lifecycle_project, env=fake_env)
+            _run(("git", "add", "."), cwd=lifecycle_project, env=fake_env)
+            _run(
                 (
-                    str(python),
+                    "git",
                     "-c",
-                    (
-                        "from harness.host_adapters import "
-                        "IntegrationChange, discover_claude_code_adapter; "
-                        "a=discover_claude_code_adapter(); assert a is not None; "
-                        "print(a.python_executable); "
-                        "print(a.register_mcp().value); "
-                        "print(a.register_mcp().value); "
-                        "print(a.unregister_mcp().value); "
-                        "print(a.unregister_mcp().value)"
-                    ),
+                    "user.name=Harness Smoke",
+                    "-c",
+                    "user.email=harness@example.invalid",
+                    "commit",
+                    "-m",
+                    "init",
                 ),
+                cwd=lifecycle_project,
+                env=fake_env,
+            )
+            scan = _run(
+                (str(harness), "scan", str(lifecycle_project)),
                 cwd=workspace,
                 env=fake_env,
             )
-            if registration_probe.stdout.splitlines() != [
-                str(python.absolute()),
-                "changed",
-                "unchanged",
-                "changed",
-                "unchanged",
-            ]:
+            lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
+            if (
+                "Relevant skills: 1" not in scan.stdout
+                or not (lifecycle_projected_skill / "SKILL.md").is_file()
+            ):
                 raise RuntimeError(
-                    "installed Claude host adapter registration round-trip was unexpected: "
-                    f"{registration_probe.stdout!r}"
+                    "installed harness scan did not reconcile relevant Claude skills: "
+                    f"{scan.stdout!r}"
+                )
+
+            uninstall = _run((str(harness), "uninstall"), cwd=workspace, env=fake_env)
+            if (
+                "Project Intelligence: preserved" not in uninstall.stdout
+                or fake_state.exists()
+                or lifecycle_projected_skill.exists()
+            ):
+                raise RuntimeError(
+                    f"installed harness uninstall lifecycle was unexpected: {uninstall.stdout!r}"
+                )
+            database = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "harness.db"
+            if not database.is_file():
+                raise RuntimeError("harness uninstall did not preserve Project Intelligence")
+
+            _run((str(harness), "install"), cwd=workspace, env=fake_env)
+            purge = _run((str(harness), "uninstall", "--purge"), cwd=workspace, env=fake_env)
+            if (
+                "Project Intelligence: purged" not in purge.stdout
+                or database.exists()
+                or (fake_home / ".harness" / "skills").exists()
+            ):
+                raise RuntimeError(
+                    "installed harness uninstall --purge lifecycle was unexpected: "
+                    f"{purge.stdout!r}"
                 )
 
     return 0

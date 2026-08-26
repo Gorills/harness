@@ -391,6 +391,8 @@ Responsibilities:
 
 Adapters must be idempotent and preserve unknown user configuration.
 
+The implemented Linux/POSIX installation slice currently supports Claude Code only. `harness install` performs runtime and registration-ownership preflight, prepares the canonical daemon/database, and delegates the user-scope MCP mutation to the Claude adapter. `harness scan` may request daemon-owned relevant-skill reconciliation only when that adapter reports the exact current Harness registration. `harness uninstall` first reconciles Harness-owned Claude skill projections to an empty set, then removes the owned MCP registration and requests clean daemon shutdown; the canonical database survives unless the operator explicitly passes `--purge`. Cleanup never edits proprietary host configuration directly and never recursively deletes unknown project or registry content. This is installation mechanics proof, not proprietary-host acceptance.
+
 Current target profiles:
 
 - Claude Code

@@ -42,6 +42,15 @@ class IntegrationChange(StrEnum):
     UNCHANGED = "unchanged"
 
 
+class HostRegistrationState(StrEnum):
+    """Observed ownership state for one host's Harness MCP registration."""
+
+    ABSENT = "absent"
+    CURRENT = "current"
+    STALE_OWNED = "stale_owned"
+    FOREIGN = "foreign"
+
+
 class HostAdapter(Protocol):
     """Narrow host-specific integration boundary used by Harness infrastructure."""
 
@@ -49,6 +58,8 @@ class HostAdapter(Protocol):
     def profile(self) -> str: ...
 
     def workspace_hints(self, environment: Mapping[str, str]) -> tuple[WorkspaceHint, ...]: ...
+
+    def registration_state(self) -> HostRegistrationState: ...
 
     def register_mcp(self) -> IntegrationChange: ...
 
@@ -70,12 +81,18 @@ class ClaudeCodeAdapter:
 
     def skill_projection_surface(self) -> SkillProjectionSurface:
         """Return Claude Code's documented project skill visibility surface."""
-        root = PurePosixPath(".claude/skills")
-        return SkillProjectionSurface(
-            profile=self.profile,
-            target_root=root,
-            visible_roots=(root,),
-        )
+        return claude_code_skill_projection_surface()
+
+    def registration_state(self) -> HostRegistrationState:
+        """Inspect the user-scope Harness MCP registration without mutating Claude Code."""
+        observed = self._inspect_registration()
+        if observed is None:
+            return HostRegistrationState.ABSENT
+        if not self._is_owned_registration(observed):
+            return HostRegistrationState.FOREIGN
+        if self._is_desired_registration(observed):
+            return HostRegistrationState.CURRENT
+        return HostRegistrationState.STALE_OWNED
 
     def workspace_hints(self, environment: Mapping[str, str]) -> tuple[WorkspaceHint, ...]:
         configured = environment.get(_CLAUDE_PROJECT_DIR_ENV)
@@ -343,6 +360,16 @@ class ClaudeCodeAdapter:
             raise HostIntegrationError(
                 "Claude Code integration command could not be executed"
             ) from exc
+
+
+def claude_code_skill_projection_surface() -> SkillProjectionSurface:
+    """Return Claude Code's documented project skill visibility surface."""
+    root = PurePosixPath(".claude/skills")
+    return SkillProjectionSurface(
+        profile=_CLAUDE_PROFILE,
+        target_root=root,
+        visible_roots=(root,),
+    )
 
 
 def discover_claude_code_adapter(
