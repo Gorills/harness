@@ -1,0 +1,58 @@
++    if not isinstance(ref, str) or not ref or "\x00" in ref:
++        raise ProjectRetrievalRefError("Project context ref must be non-empty text")
++    try:
++        size = len(ref.encode("utf-8"))
++    except UnicodeEncodeError as exc:
++        raise ProjectRetrievalRefError("Project context ref must be valid UTF-8") from exc
++    if size > MAX_PROJECT_CONTEXT_REF_BYTES:
++        raise ProjectRetrievalRefError("Project context ref exceeds byte limit")
++
++
++def _require_text(value: object, label: str) -> str:
++    if not isinstance(value, str) or not value:
++        raise ProjectRetrievalError(f"{label} has invalid persisted text")
++    return value
++
++
++def _parse_positive_int(value: str, label: str) -> int:
++    try:
++        parsed = int(value)
++    except ValueError as exc:
++        raise ProjectRetrievalRefError(f"{label} is invalid") from exc
++    if parsed <= 0:
++        raise ProjectRetrievalRefError(f"{label} is invalid")
++    return parsed
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index 22c09f0..1b359fb 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -314,6 +314,8 @@ Use a simple fusion strategy such as Reciprocal Rank Fusion before introducing m
+ 
+ Search must explain why a result matched and must penalize stale semantic evidence.
+ 
++The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace, the daemon validates its live Git identity before and after the read, and one read transaction fixes the corresponding Project identity. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge.
++
+ ## 13. Knowledge and staleness
+ 
+ Knowledge is deliberately sparse. A card is created only when it can plausibly prevent future re-investigation.
+diff --git a/README.md b/README.md
+index ec61b2d..ed89bc2 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+ 
+ Harness is a local-first control plane for coding agents. It preserves project intelligence across agent sessions and hosts while keeping source editing, shell access, Git, and browsing in the native host.
+ 
+-> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, Project/Workspace registry primitives, read-only runtime doctor checks, Workspace status, deterministic scan, bounded indexed-path search, POSIX daemon lifecycle/autostart, durable Task/CAS with mechanical baselines/checkpoints, provenance-bearing Knowledge staleness, daemon Task IPC, the first daemon-owned incremental Workspace watcher, and the official MCP v2 stdio bridge exist. Adapters for hosts other than Claude Code, real-host acceptance, richer semantic search/context channels, and final install/uninstall orchestration are not implemented yet. A daemon-owned Projects dashboard now includes Project/Workspace/Task drill-down, bounded indexed-path search, revision-CAS human review actions, and capability-scoped SSE freshness hints. Deterministic skill registry loading/resolution and collision-safe project projection mechanics now exist, including Task stack hints and Git-local generated-skill exclusion; real-host skill visibility remains acceptance-gated. The first Claude Code adapter now owns user-scope MCP registration mechanics and documented project-root hint construction, but it is not yet wired into the final multi-host `harness install`/`uninstall` orchestration.
++> **Repository status:** implementation foundation. Packaging/tooling, SQLite persistence, Project/Workspace registry primitives, read-only runtime doctor checks, Workspace status, deterministic scan, bounded indexed-path search, Project-scoped lexical Knowledge/Task retrieval with selective context expansion, POSIX daemon lifecycle/autostart, durable Task/CAS with mechanical baselines/checkpoints, provenance-bearing Knowledge staleness, daemon Task IPC, the first daemon-owned incremental Workspace watcher, and the official MCP v2 stdio bridge exist. Adapters for hosts other than Claude Code, real-host acceptance, richer structural/symbol retrieval, Working Sets, optional embeddings, and final install/uninstall orchestration are not implemented yet. A daemon-owned Projects dashboard now includes Project/Workspace/Task drill-down, bounded indexed-path search, revision-CAS human review actions, and capability-scoped SSE freshness hints. Deterministic skill registry loading/resolution and collision-safe project projection mechanics now exist, including Task stack hints and Git-local generated-skill exclusion; real-host skill visibility remains acceptance-gated. The first Claude Code adapter now owns user-scope MCP registration mechanics and documented project-root hint construction, but it is not yet wired into the final multi-host `harness install`/`uninstall` orchestration.
+ 
+ ## Product principles
+ 
+@@ -44,9 +44,9 @@ Harness is a local-first control plane for coding agents. It preserves project i
+ 
+ ## Development state
+ 
+-The repository now has a Python 3.13 package, a locked development toolchain, and SQLite schema version 10. Database initialization creates ordered migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, probes FTS5 as a runtime capability, and migrates the bootstrap schemas forward without discarding unrelated existing data.
++The repository now has a Python 3.13 package, a locked development toolchain, and SQLite schema version 11. Database initialization creates ordered migration metadata, requires WAL mode, enables foreign-key enforcement for Harness connections, probes FTS5 as a runtime capability, and migrates the bootstrap schemas forward without discarding unrelated existing data.
+ 
+-Schema v10 contains the durable Project/Workspace registry, the rebuildable `indexed_files` Structural Index slice, durable Task/CAS state, one-to-one mechanical Task baseline storage, immutable Task checkpoint/event history, and bounded operator feedback attached to immutable Task events. Task rows remain Workspace-owned, use the minimal `working`/`waiting`/`completed`/`cancelled` states, require an allowed reason only while waiting, and carry a positive monotonic revision. A partial unique SQLite index enforces at most one distinct `working` Task per Workspace even if a caller bypasses normal domain checks. Existing-Task state transitions still require explicit `task_id` plus `expected_revision`; successful transitions increment revision exactly once, stale revisions are non-mutating, and completed/cancelled Tasks are terminal. Human review uses the same contract: Accept completes only a Task waiting for `operator_review`, feedback atomically persists bounded operator text and resumes that same Task, and cancel terminates an explicit non-terminal Task. Pending feedback is surfaced through `project_status` only while it is attached to the current working revision, then clears after the next checkpoint.
