@@ -1,0 +1,232 @@
++    return ProjectSearchResult(
++        schema_version=SCHEMA_VERSION,
++        workspace_id=workspace.workspace_id,
++        project_id=project.project_id,
++        results=hits,
++    )
++
++
++def read_project_context_result(
++    connection: sqlite3.Connection,
++    hints: Sequence[WorkspaceHint],
++    refs: tuple[str, ...],
++) -> ProjectContextResult:
++    """Resolve one Workspace and expand only selected refs from one consistent Project snapshot."""
++    workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
++    connection.execute("BEGIN")
++    try:
++        current_workspace = get_workspace(connection, workspace.workspace_id)
++        if current_workspace != workspace:
++            raise WorkspaceResolutionError(
++                "workspace registry identity changed during Project context"
++            )
++        project = get_project(connection, workspace.project_id)
++        items = read_project_context(connection, workspace.workspace_id, refs)
++        connection.execute("COMMIT")
++    except Exception:
++        if connection.in_transaction:
++            connection.execute("ROLLBACK")
++        raise
++    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
++        raise WorkspaceResolutionError("workspace Git identity changed during Project context")
++    return ProjectContextResult(
++        schema_version=SCHEMA_VERSION,
++        workspace_id=workspace.workspace_id,
++        project_id=project.project_id,
++        items=items,
++    )
++
++
++def _resolve_retrieval_workspace(
++    connection: sqlite3.Connection, hints: Sequence[WorkspaceHint]
++) -> tuple[WorkspaceRecord, object]:
++    registered = list_workspaces(connection)
++    resolution = WorkspaceResolver(
++        [
++            WorkspaceCandidate(workspace_id=item.workspace_id, root=item.workspace_root)
++            for item in registered
++        ]
++    ).resolve(hints)
++    workspace = get_workspace(connection, resolution.workspace_id)
++    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
++    if (
++        runtime_identity.layout.workspace_root != workspace.workspace_root
++        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
++    ):
++        raise WorkspaceResolutionError(
++            f"registered workspace Git identity changed: {workspace.workspace_root}"
++        )
++    return workspace, runtime_identity
++
++
+ def read_workspace_index_entry(
+     connection: sqlite3.Connection,
+     hints: Sequence[WorkspaceHint],
+@@ -687,6 +790,31 @@ def _serve_client(
+             request.search_scope,
+         )
+         return
++    if (
++        request.method == "project_search"
++        and request.search_query is not None
++        and request.search_limit is not None
++        and request.project_search_scope is not None
++    ):
++        _serve_project_search(
++            client,
++            database,
++            request.request_id,
++            request.workspace_hints,
++            request.search_query,
++            request.search_limit,
++            request.project_search_scope,
++        )
++        return
++    if request.method == "project_context" and request.context_refs is not None:
++        _serve_project_context(
++            client,
++            database,
++            request.request_id,
++            request.workspace_hints,
++            request.context_refs,
++        )
++        return
+     if request.method == "workspace_index_entry" and request.index_relative_path is not None:
+         _serve_workspace_index_entry(
+             client,
+@@ -939,6 +1067,118 @@ def _serve_workspace_search(
+         )
+ 
+ 
++def _serve_project_search(
++    client: socket.socket,
++    database: sqlite3.Connection,
++    request_id: str,
++    hints: Sequence[WorkspaceHint],
++    query: str,
++    limit: int,
++    scope: ProjectSearchScope,
++) -> None:
++    try:
++        result = read_project_search(database, hints, query, limit, scope)
++    except WorkspaceResolutionError as exc:
++        _try_send_error(
++            client, request_id=request_id, code="workspace_resolution_error", message=str(exc)
++        )
++        return
++    except GitWorkspaceError as exc:
++        _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
++        return
++    except RegistryError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="registry_error",
++            message="daemon could not read Workspace registry state",
++        )
++        return
++    except SearchError as exc:
++        _try_send_error(client, request_id=request_id, code="search_error", message=str(exc))
++        return
++    except (ProjectRetrievalError, KnowledgeError, TaskError):
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="retrieval_error",
++            message="daemon could not read Project Intelligence",
++        )
++        return
++    except sqlite3.DatabaseError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="database_error",
++            message="daemon could not search Project Intelligence",
++        )
++        return
++    try:
++        send_project_search_response(client, request_id, result)
++    except IpcMessageTooLargeError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="response_too_large",
++            message="Project search result exceeds IPC byte limit",
++        )
++
++
++def _serve_project_context(
++    client: socket.socket,
++    database: sqlite3.Connection,
++    request_id: str,
++    hints: Sequence[WorkspaceHint],
++    refs: tuple[str, ...],
++) -> None:
++    try:
++        result = read_project_context_result(database, hints, refs)
++    except WorkspaceResolutionError as exc:
++        _try_send_error(
++            client, request_id=request_id, code="workspace_resolution_error", message=str(exc)
++        )
++        return
++    except GitWorkspaceError as exc:
++        _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
++        return
++    except ProjectRetrievalRefError as exc:
++        _try_send_error(client, request_id=request_id, code="context_ref_error", message=str(exc))
++        return
++    except RegistryError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="registry_error",
++            message="daemon could not read Workspace registry state",
++        )
++        return
++    except (ProjectRetrievalError, KnowledgeError, TaskError):
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="retrieval_error",
++            message="daemon could not read Project Intelligence context",
++        )
++        return
++    except sqlite3.DatabaseError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="database_error",
++            message="daemon could not read Project Intelligence context",
++        )
++        return
++    try:
++        send_project_context_response(client, request_id, result)
++    except IpcMessageTooLargeError:
++        _try_send_error(
++            client,
++            request_id=request_id,
++            code="response_too_large",
++            message="Project context result exceeds IPC byte limit",
++        )
++
++
+ def _serve_workspace_index_entry(
+     client: socket.socket,
+     database: sqlite3.Connection,
+diff --git a/src/harness/ipc.py b/src/harness/ipc.py
+index 034f009..ffa8c16 100644
+--- a/src/harness/ipc.py
++++ b/src/harness/ipc.py
+@@ -19,6 +19,13 @@ from harness.knowledge import (
+     KnowledgeDraft,
+     KnowledgeKind,
+ )
++from harness.retrieval import (
++    MAX_PROJECT_CONTEXT_REF_BYTES,
++    ProjectContextItem,
++    ProjectSearchHit,
++    ProjectSearchKind,
++    ProjectSearchScope,
++)
+ from harness.search import (
+     DEFAULT_SEARCH_LIMIT,
