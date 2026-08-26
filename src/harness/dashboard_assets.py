@@ -338,15 +338,9 @@ DASHBOARD_JS = r"""
     return;
   }
 
-  let hasUnsavedInput = false;
-  const markDirty = (event) => {
-    const target = event.target;
-    if (target instanceof HTMLTextAreaElement || (target instanceof HTMLInputElement && target.type === 'search')) {
-      hasUnsavedInput = target.value.length > 0;
-    }
-  };
-  document.addEventListener('input', markDirty, { passive: true });
-  document.addEventListener('submit', () => { hasUnsavedInput = false; });
+  const hasUnsavedInput = () => Array.from(
+    document.querySelectorAll('textarea, input[type="search"]')
+  ).some((field) => field.value !== field.defaultValue);
 
   const setState = (state, text) => {
     indicator.dataset.state = state;
@@ -358,7 +352,7 @@ DASHBOARD_JS = r"""
   const source = new EventSource(eventsUrl);
   source.addEventListener('ready', () => setState('live', 'Live'));
   source.addEventListener('refresh', () => {
-    if (hasUnsavedInput) {
+    if (hasUnsavedInput()) {
       setState('update', 'Update available');
       return;
     }
