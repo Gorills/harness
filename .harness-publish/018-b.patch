@@ -1,0 +1,75 @@
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
+         for table in (
+             "indexed_files",
+             "tasks",
+@@ -327,7 +327,7 @@ def test_initialize_database_migrates_existing_version_three_database(tmp_path:
+         ]
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
+         for table in (
+             "tasks",
+             "task_baselines",
+@@ -449,7 +449,7 @@ def test_initialize_database_migrates_existing_version_four_database(tmp_path: P
+         ]
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
+         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (0,)
+         assert connection.execute("SELECT COUNT(*) FROM task_baseline_dirty_paths").fetchone() == (
+             0,
+@@ -466,7 +466,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
+     try:
+         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+         connection.execute(
+-            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11)"
++            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12)"
+         )
+         connection.commit()
+         before = connection.execute("PRAGMA journal_mode").fetchone()
+@@ -480,7 +480,20 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
+     try:
+         assert connection.execute("PRAGMA journal_mode").fetchone() == before
+         versions = connection.execute("SELECT version FROM schema_migrations").fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+     finally:
+         connection.close()
+ 
+@@ -538,6 +551,12 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
+         connection.execute("DROP TABLE task_events")
+         connection.execute("DROP TABLE task_checkpoint_changed_paths")
+         connection.execute("DROP TABLE task_checkpoints")
++        for (trigger_name,) in connection.execute(
++            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
++        ).fetchall():
++            connection.execute(f'DROP TRIGGER "{trigger_name}"')
++        connection.execute("DROP TABLE task_search")
++        connection.execute("DROP TABLE knowledge_search")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 6")
+         connection.commit()
+     finally:
+@@ -556,7 +575,7 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
+         ).fetchone() == ("task-v5", "main")
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
+         assert connection.execute("SELECT COUNT(*) FROM task_checkpoints").fetchone() == (0,)
+         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+     finally:
