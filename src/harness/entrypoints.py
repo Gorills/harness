@@ -6,6 +6,7 @@ from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
 
+from harness.cursor_adapter import discover_cursor_adapter
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
@@ -257,32 +258,52 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
     except IpcError as exc:
         return _scan_failure(str(exc))
 
-    adapter = discover_claude_code_adapter()
-    skills = None
-    if adapter is not None:
+    active_profiles: list[str] = []
+    claude = discover_claude_code_adapter()
+    if claude is not None:
         try:
-            registration_state = adapter.registration_state()
+            registration_state = claude.registration_state()
         except HostIntegrationError as exc:
             return _scan_failure(
-                f"index reconciliation succeeded but host integration could not be inspected: {exc}"
+                f"index reconciliation succeeded but Claude integration could not be inspected: {exc}"
             )
         if registration_state is HostRegistrationState.CURRENT:
-            try:
-                skills = request_workspace_skills_reconcile(
-                    socket_path,
-                    [
-                        WorkspaceHint(
-                            path=result.workspace_root,
-                            source="scan-result-root",
-                            match_mode=WorkspaceHintMatchMode.ROOT,
-                        )
-                    ],
-                    (adapter.profile,),
-                )
-            except IpcError as exc:
-                return _scan_failure(
-                    f"index reconciliation succeeded but skill projection failed: {exc}"
-                )
+            active_profiles.append(claude.profile)
+
+    cursor = discover_cursor_adapter()
+    try:
+        cursor_state = cursor.registration_state()
+    except HostIntegrationError as exc:
+        return _scan_failure(
+            f"index reconciliation succeeded but Cursor integration could not be inspected: {exc}"
+        )
+    if cursor_state is HostRegistrationState.CURRENT:
+        try:
+            cursor.reconcile_project(result.workspace_root)
+        except HostIntegrationError as exc:
+            return _scan_failure(
+                f"index reconciliation succeeded but Cursor project override failed: {exc}"
+            )
+        active_profiles.append(cursor.profile)
+
+    skills = None
+    if active_profiles:
+        try:
+            skills = request_workspace_skills_reconcile(
+                socket_path,
+                [
+                    WorkspaceHint(
+                        path=result.workspace_root,
+                        source="scan-result-root",
+                        match_mode=WorkspaceHintMatchMode.ROOT,
+                    )
+                ],
+                tuple(active_profiles),
+            )
+        except IpcError as exc:
+            return _scan_failure(
+                f"index reconciliation succeeded but skill projection failed: {exc}"
+            )
 
     _print_workspace_scan(result)
     if skills is not None:
@@ -293,13 +314,19 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
     return 0
 
 
-def _run_install() -> int:
+def _run_install(*, host: str) -> int:
     try:
-        result = install_harness()
+        result = install_harness(host=host)
     except (InstallationError, HostIntegrationError) as exc:
         return _install_failure(str(exc))
     print(f"Harness host: {result.host_profile}")
     print(f"MCP registration: {result.registration_change.value}")
+    if len(result.hosts) > 1:
+        for item in result.hosts:
+            print(
+                f"Host {item.host_profile}: {item.registration_change.value}; "
+                f"project overrides changed: {item.project_change_count}"
+            )
     print(f"Daemon schema: {result.daemon_status.schema_version}")
     print(f"Daemon runtime: {result.daemon_status.package_version}")
     print(f"Daemon Python: {result.daemon_status.python_executable}")
@@ -310,13 +337,19 @@ def _run_install() -> int:
     return 0
 
 
-def _run_uninstall(*, purge: bool) -> int:
+def _run_uninstall(*, host: str, purge: bool) -> int:
     try:
-        result = uninstall_harness(purge=purge)
+        result = uninstall_harness(host=host, purge=purge)
     except (InstallationError, HostIntegrationError) as exc:
         return _uninstall_failure(str(exc))
     print(f"Harness host: {result.host_profile}")
     print(f"MCP registration removal: {result.registration_change.value}")
+    if len(result.hosts) > 1:
+        for item in result.hosts:
+            print(
+                f"Host {item.host_profile}: {item.registration_change.value}; "
+                f"project overrides changed: {item.project_change_count}"
+            )
     print(f"Generated skills removed: {result.skill_cleanup.removed}")
     print(f"Workspaces cleaned: {result.skill_cleanup.cleaned_workspace_count}")
     print(f"Workspaces skipped safely: {result.skill_cleanup.skipped_workspace_count}")
@@ -427,13 +460,19 @@ def harness_main() -> int:
     """Run the Harness CLI."""
     parser = _parser("harness", "Harness CLI. Product runtime is under implementation.")
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser(
+    install_parser = subparsers.add_parser(
         "install",
-        help="install the supported per-user Harness integration",
+        help="install one or all supported per-user Harness integrations",
         description=(
-            "Prepare the canonical local daemon and idempotently register Harness with the "
-            "supported Claude Code user profile."
+            "Prepare the canonical local daemon and idempotently register Harness with Claude "
+            "Code, Cursor, or both local host profiles."
         ),
+    )
+    install_parser.add_argument(
+        "--host",
+        choices=("claude-code", "cursor", "all"),
+        default="claude-code",
+        help="host integration to install (default: claude-code)",
     )
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -442,6 +481,12 @@ def harness_main() -> int:
             "Remove Harness-owned Claude Code registration and generated project skills while "
             "preserving Project Intelligence by default."
         ),
+    )
+    uninstall_parser.add_argument(
+        "--host",
+        choices=("claude-code", "cursor", "all"),
+        default="claude-code",
+        help="host integration to remove (default: claude-code)",
     )
     uninstall_parser.add_argument(
         "--purge",
@@ -578,9 +623,9 @@ def harness_main() -> int:
 
     args = parser.parse_args()
     if args.command == "install":
-        return _run_install()
+        return _run_install(host=args.host)
     if args.command == "uninstall":
-        return _run_uninstall(purge=args.purge)
+        return _run_uninstall(host=args.host, purge=args.purge)
     if args.command == "doctor":
         return _run_doctor(args.database, runtime_only=args.runtime_only)
     if args.command == "status":

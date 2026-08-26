@@ -11,6 +11,7 @@ from enum import StrEnum
 from pathlib import Path
 from time import monotonic
 
+from harness.cursor_adapter import CursorAdapter, discover_cursor_adapter
 from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
 from harness.host_adapters import (
     HostIntegrationError,
@@ -183,51 +184,108 @@ def run_system_doctor(
         environment=environment,
         python_executable=python_executable,
     )
-    registration_state: HostRegistrationState | None = None
+    claude_registration_state: HostRegistrationState | None = None
     if adapter is None:
         checks.append(
             _check("Claude Code adapter", DoctorSeverity.WARN, "Claude CLI not found on PATH")
         )
         checks.append(
-            _check("MCP registration", DoctorSeverity.WARN, "not inspectable without Claude CLI")
+            _check(
+                "Claude Code MCP registration",
+                DoctorSeverity.WARN,
+                "not inspectable without Claude CLI",
+            )
         )
     else:
         checks.append(
             _check("Claude Code adapter", DoctorSeverity.OK, f"discovered at {adapter.executable}")
         )
         try:
-            registration_state = adapter.registration_state()
+            claude_registration_state = adapter.registration_state()
         except HostIntegrationError as exc:
-            checks.append(_check("MCP registration", DoctorSeverity.FAIL, _bounded_detail(exc)))
+            checks.append(
+                _check("Claude Code MCP registration", DoctorSeverity.FAIL, _bounded_detail(exc))
+            )
         else:
-            if registration_state is HostRegistrationState.CURRENT:
+            if claude_registration_state is HostRegistrationState.CURRENT:
                 checks.append(
                     _check(
-                        "MCP registration", DoctorSeverity.OK, "current Harness user registration"
+                        "Claude Code MCP registration",
+                        DoctorSeverity.OK,
+                        "current Harness user registration",
                     )
                 )
-            elif registration_state is HostRegistrationState.ABSENT:
-                checks.append(
-                    _check("MCP registration", DoctorSeverity.WARN, "Harness registration absent")
-                )
-            elif registration_state is HostRegistrationState.STALE_OWNED:
-                stale_notes.append("stale Harness MCP registration")
+            elif claude_registration_state is HostRegistrationState.ABSENT:
                 checks.append(
                     _check(
-                        "MCP registration",
+                        "Claude Code MCP registration",
+                        DoctorSeverity.WARN,
+                        "Harness registration absent",
+                    )
+                )
+            elif claude_registration_state is HostRegistrationState.STALE_OWNED:
+                stale_notes.append("stale Claude Harness MCP registration")
+                checks.append(
+                    _check(
+                        "Claude Code MCP registration",
                         DoctorSeverity.FAIL,
                         "Harness-owned registration points at a different installed runtime",
                     )
                 )
             else:
-                stale_notes.append("foreign MCP name collision")
+                stale_notes.append("Claude MCP name collision")
                 checks.append(
                     _check(
-                        "MCP registration",
+                        "Claude Code MCP registration",
                         DoctorSeverity.FAIL,
                         "non-Harness user registration already owns the name 'harness'",
                     )
                 )
+
+    cursor_adapter = discover_cursor_adapter(
+        environment=environment,
+        python_executable=python_executable,
+    )
+    cursor_registration_state: HostRegistrationState | None = None
+    try:
+        cursor_registration_state = cursor_adapter.registration_state()
+    except HostIntegrationError as exc:
+        checks.append(_check("Cursor MCP registration", DoctorSeverity.FAIL, _bounded_detail(exc)))
+    else:
+        if cursor_registration_state is HostRegistrationState.CURRENT:
+            checks.append(
+                _check(
+                    "Cursor MCP registration",
+                    DoctorSeverity.OK,
+                    f"current Harness global registration at {cursor_adapter.global_config_path}",
+                )
+            )
+        elif cursor_registration_state is HostRegistrationState.ABSENT:
+            checks.append(
+                _check(
+                    "Cursor MCP registration",
+                    DoctorSeverity.OK,
+                    "Harness Cursor integration is not configured",
+                )
+            )
+        elif cursor_registration_state is HostRegistrationState.STALE_OWNED:
+            stale_notes.append("stale Cursor Harness MCP registration")
+            checks.append(
+                _check(
+                    "Cursor MCP registration",
+                    DoctorSeverity.FAIL,
+                    "Harness-owned global registration points at a different installed runtime",
+                )
+            )
+        else:
+            stale_notes.append("Cursor MCP name collision")
+            checks.append(
+                _check(
+                    "Cursor MCP registration",
+                    DoctorSeverity.FAIL,
+                    "non-Harness global registration already owns the name 'harness'",
+                )
+            )
 
     diagnostics = _inspect_daemon(
         paths.socket,
@@ -322,7 +380,16 @@ def run_system_doctor(
                 database_connection.execute("BEGIN")
                 _inspect_projects_and_workspaces(
                     database_connection,
-                    registration_state=registration_state,
+                    active_profiles=tuple(
+                        profile
+                        for profile, state in (
+                            ("claude-code", claude_registration_state),
+                            ("cursor", cursor_registration_state),
+                        )
+                        if state is HostRegistrationState.CURRENT
+                    ),
+                    cursor_adapter=cursor_adapter,
+                    cursor_registration_state=cursor_registration_state,
                     registry_root=registry_root,
                     registry_ok=registry_ok,
                     checks=checks,
@@ -544,7 +611,9 @@ def _inspect_daemon(
 def _inspect_projects_and_workspaces(
     connection: sqlite3.Connection,
     *,
-    registration_state: HostRegistrationState | None,
+    active_profiles: tuple[str, ...],
+    cursor_adapter: CursorAdapter,
+    cursor_registration_state: HostRegistrationState | None,
     registry_root: Path | None,
     registry_ok: bool,
     checks: list[DoctorCheck],
@@ -575,6 +644,8 @@ def _inspect_projects_and_workspaces(
     current_skills = 0
     stale_skills = 0
     skill_unknown = 0
+    cursor_projects_current = 0
+    cursor_projects_bad = 0
 
     for position, workspace in enumerate(inspectable):
         if monotonic() >= overall_deadline:
@@ -613,7 +684,25 @@ def _inspect_projects_and_workspaces(
                 stale_indexes += 1
                 stale_notes.append(f"stale index {workspace.workspace_id}")
 
-        if registration_state is not HostRegistrationState.CURRENT or not registry_ok:
+        try:
+            cursor_project_state = cursor_adapter.project_registration_state(
+                workspace.workspace_root
+            )
+        except HostIntegrationError:
+            cursor_projects_bad += 1
+            stale_notes.append(f"Cursor project override unreadable {workspace.workspace_id}")
+        else:
+            if cursor_registration_state is HostRegistrationState.CURRENT:
+                if cursor_project_state is HostRegistrationState.CURRENT:
+                    cursor_projects_current += 1
+                else:
+                    cursor_projects_bad += 1
+                    stale_notes.append(f"stale Cursor project override {workspace.workspace_id}")
+            elif cursor_project_state is not HostRegistrationState.ABSENT:
+                cursor_projects_bad += 1
+                stale_notes.append(f"orphaned Cursor project override {workspace.workspace_id}")
+
+        if not active_profiles or not registry_ok:
             skill_unknown += 1
             continue
         if registry_root is None:
@@ -623,7 +712,7 @@ def _inspect_projects_and_workspaces(
             skill = inspect_workspace_skills(
                 connection,
                 workspace.workspace_id,
-                ("claude-code",),
+                active_profiles,
                 registry_root=registry_root,
                 deadline=workspace_deadline,
             )
@@ -668,12 +757,40 @@ def _inspect_projects_and_workspaces(
         )
     )
 
-    if registration_state is not HostRegistrationState.CURRENT:
+    if cursor_projects_bad:
+        checks.append(
+            _check(
+                "Cursor project MCP overrides",
+                DoctorSeverity.FAIL,
+                f"{cursor_projects_current} current, {cursor_projects_bad} missing/stale/foreign/orphaned; "
+                "required root contract is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+            )
+        )
+    elif cursor_registration_state is HostRegistrationState.CURRENT:
+        cursor_severity = DoctorSeverity.WARN if unavailable or truncated else DoctorSeverity.OK
+        checks.append(
+            _check(
+                "Cursor project MCP overrides",
+                cursor_severity,
+                f"{cursor_projects_current} current, 0 missing/stale/foreign; required root contract "
+                "is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "Cursor project MCP overrides",
+                DoctorSeverity.OK,
+                "Cursor global Harness integration is inactive and no project overrides were found",
+            )
+        )
+
+    if not active_profiles:
         checks.append(
             _check(
                 "Generated skills",
                 DoctorSeverity.WARN,
-                "expected projection cannot be established until Claude MCP registration is current",
+                "expected projection cannot be established without a current supported host",
             )
         )
     elif not registry_ok:

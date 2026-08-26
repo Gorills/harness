@@ -8,6 +8,11 @@ import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import anyio
+import mcp as mcp_package
+from mcp import Client, StdioServerParameters
+from mcp.client.stdio import stdio_client
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "0.1.0.dev0"
 
@@ -35,6 +40,149 @@ def _run(
 
 def _venv_scripts_dir(venv: Path) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin")
+
+
+async def _cross_host_mcp_async(
+    harness: Path,
+    environment: dict[str, str],
+    repo_a: Path,
+    repo_b: Path,
+) -> None:
+    def host_env(profile: str, workspace: Path) -> dict[str, str]:
+        values = dict(environment)
+        values["HARNESS_HOST_PROFILE"] = profile
+        if profile == "claude-code":
+            values["CLAUDE_PROJECT_DIR"] = str(workspace)
+            values.pop("HARNESS_WORKSPACE_ROOT", None)
+        else:
+            values["HARNESS_WORKSPACE_ROOT"] = str(workspace)
+            values.pop("CLAUDE_PROJECT_DIR", None)
+        return values
+
+    async def open_client(profile: str, workspace: Path) -> Client:
+        parameters = StdioServerParameters(
+            command=str(harness),
+            args=["mcp"],
+            env=host_env(profile, workspace),
+            cwd=str(workspace),
+        )
+        return Client(stdio_client(parameters))
+
+    parameters = StdioServerParameters(
+        command=str(harness),
+        args=["mcp"],
+        env=host_env("claude-code", repo_a),
+        cwd=str(repo_a),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        listed = await client.list_tools()
+        names = [tool.name for tool in listed.tools]
+        expected = [
+            "project_status",
+            "project_search",
+            "project_context",
+            "task_start",
+            "task_checkpoint",
+        ]
+        if names != expected:
+            raise RuntimeError(f"installed MCP five-tool surface changed: {names!r}")
+        status = await client.call_tool("project_status")
+        if status.is_error or status.structured_content is None:
+            raise RuntimeError("installed Claude-profile project_status failed")
+        workspace_a = status.structured_content["workspace_id"]
+        started = await client.call_tool("task_start", {"title": "Wheel cross-host continuity"})
+        if started.is_error or started.structured_content is None:
+            raise RuntimeError("installed Claude-profile task_start failed")
+        task_id = started.structured_content["task_id"]
+        checkpoint = await client.call_tool(
+            "task_checkpoint",
+            {
+                "task_id": task_id,
+                "expected_revision": 1,
+                "state": "working",
+                "summary": "Persist wheel cross-host Knowledge",
+                "knowledge": [
+                    {
+                        "kind": "behavior",
+                        "title": "Wheel host continuity",
+                        "body": "Installed wheel preserves Harness domain state across hosts.",
+                        "anchors": [{"path": "main.py"}],
+                    }
+                ],
+            },
+        )
+        if checkpoint.is_error:
+            raise RuntimeError("installed Claude-profile task_checkpoint failed")
+
+    parameters = StdioServerParameters(
+        command=str(harness),
+        args=["mcp"],
+        env=host_env("cursor", repo_a),
+        cwd=str(repo_b),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        status = await client.call_tool("project_status")
+        if status.is_error or status.structured_content is None:
+            raise RuntimeError("installed Cursor-profile project_status failed")
+        if status.structured_content["workspace_id"] != workspace_a:
+            raise RuntimeError("Cursor did not resolve repo A by exact configured root")
+        current = status.structured_content["current_task"]
+        if current is None or current["task_id"] != task_id:
+            raise RuntimeError("Cursor did not continue the Claude-started Task")
+        knowledge = await client.call_tool(
+            "project_search",
+            {"query": "wheel host continuity", "scope": "knowledge", "limit": 5},
+        )
+        if knowledge.is_error or knowledge.structured_content is None:
+            raise RuntimeError("Cursor could not retrieve cross-host Knowledge")
+        if not any(
+            item["ref"].startswith("knowledge:") for item in knowledge.structured_content["results"]
+        ):
+            raise RuntimeError("Cursor Knowledge search did not return the persisted card")
+
+    parameters = StdioServerParameters(
+        command=str(harness),
+        args=["mcp"],
+        env=host_env("cursor", repo_b),
+        cwd=str(repo_a),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        status = await client.call_tool("project_status")
+        if status.is_error or status.structured_content is None:
+            raise RuntimeError("installed Cursor repo-B project_status failed")
+        if status.structured_content["workspace_id"] == workspace_a:
+            raise RuntimeError("two registered Workspaces were mixed by Cursor root resolution")
+        if status.structured_content["current_task"] is not None:
+            raise RuntimeError("Workspace-local current Task leaked into linked worktree B")
+
+    parameters = StdioServerParameters(
+        command=str(harness),
+        args=["mcp"],
+        env=host_env("claude-code", repo_a),
+        cwd=str(repo_b),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        status = await client.call_tool("project_status")
+        if status.is_error or status.structured_content is None:
+            raise RuntimeError("installed Claude return project_status failed")
+        current = status.structured_content["current_task"]
+        if current is None or current["task_id"] != task_id:
+            raise RuntimeError("Task continuity failed after Cursor -> Claude switch")
+
+
+def _cross_host_mcp(
+    harness: Path,
+    environment: Mapping[str, str],
+    repo_a: Path,
+    repo_b: Path,
+) -> None:
+    values = dict(environment)
+    dependency_root = str(Path(mcp_package.__file__).resolve().parents[1])
+    existing = values.get("PYTHONPATH")
+    values["PYTHONPATH"] = (
+        dependency_root if not existing else dependency_root + os.pathsep + existing
+    )
+    anyio.run(_cross_host_mcp_async, harness, values, repo_a, repo_b)
 
 
 def main() -> int:
@@ -481,7 +629,8 @@ raise SystemExit(2)
             canonical_skill = fake_home / ".harness" / "skills" / "python-helper"
             canonical_skill.mkdir(parents=True)
             (canonical_skill / "SKILL.md").write_text(
-                "# Python helper\n\nUse Python conventions.\n",
+                "---\nname: python-helper\ndescription: Python conventions\n---\n\n"
+                "# Python helper\n",
                 encoding="utf-8",
             )
             (canonical_skill / "harness.yaml").write_text(
@@ -519,6 +668,68 @@ raise SystemExit(2)
                     f"{installed_registration!r}"
                 )
 
+            lifecycle_project = workspace / "installed-lifecycle-project"
+            lifecycle_project.mkdir()
+            (lifecycle_project / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+            _run(("git", "init", "-b", "main"), cwd=lifecycle_project, env=fake_env)
+            _run(("git", "add", "."), cwd=lifecycle_project, env=fake_env)
+            _run(
+                (
+                    "git",
+                    "-c",
+                    "user.name=Harness Smoke",
+                    "-c",
+                    "user.email=harness@example.invalid",
+                    "commit",
+                    "-m",
+                    "init",
+                ),
+                cwd=lifecycle_project,
+                env=fake_env,
+            )
+            scan_a = _run(
+                (str(harness), "scan", str(lifecycle_project)),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if "Relevant skills: 1" not in scan_a.stdout:
+                raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
+
+            cursor_install = _run(
+                (str(harness), "install", "--host", "cursor"), cwd=workspace, env=fake_env
+            )
+            if "MCP registration: changed" not in cursor_install.stdout:
+                raise RuntimeError(
+                    f"installed Cursor registration failed: {cursor_install.stdout!r}"
+                )
+            cursor_global = fake_home / ".cursor" / "mcp.json"
+            cursor_project_a = lifecycle_project / ".cursor" / "mcp.json"
+            if not cursor_global.is_file() or not cursor_project_a.is_file():
+                raise RuntimeError("installed Cursor global/project configs were not materialized")
+
+            lifecycle_worktree = workspace / "installed-lifecycle-worktree"
+            _run(
+                ("git", "worktree", "add", "-b", "wheel-linked", str(lifecycle_worktree)),
+                cwd=lifecycle_project,
+                env=fake_env,
+            )
+            (lifecycle_worktree / "linked.py").write_text("LINKED = 1\n", encoding="utf-8")
+            scan_b = _run(
+                (str(harness), "scan", str(lifecycle_worktree)),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if "Relevant skills: 1" not in scan_b.stdout:
+                raise RuntimeError(f"installed worktree-B scan was unexpected: {scan_b.stdout!r}")
+            cursor_project_b = lifecycle_worktree / ".cursor" / "mcp.json"
+            if not cursor_project_b.is_file():
+                raise RuntimeError("Cursor project override was not created for linked worktree B")
+            lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
+            if not (lifecycle_projected_skill / "SKILL.md").is_file():
+                raise RuntimeError("shared Claude/Cursor skill projection is missing")
+            if (lifecycle_project / ".agents" / "skills" / "python-helper").exists():
+                raise RuntimeError("Claude+Cursor produced a duplicate Harness skill projection")
+
             upgrade_venv = workspace / "upgrade-venv"
             _run(
                 (uv, "venv", "--python", "3.13", "--no-project", str(upgrade_venv)),
@@ -539,65 +750,47 @@ raise SystemExit(2)
                 cwd=workspace,
             )
             upgraded_harness = upgrade_scripts / "harness"
-            upgrade_install = _run((str(upgraded_harness), "install"), cwd=workspace, env=fake_env)
+            upgrade_install = _run(
+                (str(upgraded_harness), "install", "--host", "all"),
+                cwd=workspace,
+                env=fake_env,
+            )
             if (
                 "MCP registration: changed" not in upgrade_install.stdout
                 or f"Daemon Python: {upgrade_python.absolute()}" not in upgrade_install.stdout
             ):
                 raise RuntimeError(
-                    "reinstall from a second isolated interpreter did not replace the stale "
-                    f"daemon/registration: {upgrade_install.stdout!r}"
+                    "multi-host reinstall from a second interpreter did not replace stale runtime: "
+                    f"{upgrade_install.stdout!r}"
                 )
             upgraded_registration = json.loads(fake_state.read_text(encoding="utf-8"))
             if upgraded_registration.get("command") != str(upgrade_python.absolute()):
-                raise RuntimeError(
-                    "upgrade-safe reinstall did not point Claude at the new interpreter: "
-                    f"{upgraded_registration!r}"
-                )
+                raise RuntimeError("upgrade-safe reinstall did not update Claude Python")
+            for path in (cursor_global, cursor_project_a, cursor_project_b):
+                value = json.loads(path.read_text(encoding="utf-8"))
+                command = value["mcpServers"]["harness"]["command"]
+                if command != str(upgrade_python.absolute()):
+                    raise RuntimeError(
+                        f"upgrade-safe reinstall did not update Cursor config: {path}"
+                    )
             lifecycle_harness = upgraded_harness
 
-            lifecycle_project = workspace / "installed-lifecycle-project"
-            lifecycle_project.mkdir()
-            (lifecycle_project / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
-            _run(("git", "init", "-b", "main"), cwd=lifecycle_project, env=fake_env)
-            _run(("git", "add", "."), cwd=lifecycle_project, env=fake_env)
-            _run(
-                (
-                    "git",
-                    "-c",
-                    "user.name=Harness Smoke",
-                    "-c",
-                    "user.email=harness@example.invalid",
-                    "commit",
-                    "-m",
-                    "init",
-                ),
-                cwd=lifecycle_project,
-                env=fake_env,
+            _cross_host_mcp(
+                lifecycle_harness,
+                fake_env,
+                lifecycle_project,
+                lifecycle_worktree,
             )
-            scan = _run(
-                (str(lifecycle_harness), "scan", str(lifecycle_project)),
-                cwd=workspace,
-                env=fake_env,
-            )
-            lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
-            if (
-                "Relevant skills: 1" not in scan.stdout
-                or not (lifecycle_projected_skill / "SKILL.md").is_file()
-            ):
-                raise RuntimeError(
-                    "installed harness scan did not reconcile relevant Claude skills: "
-                    f"{scan.stdout!r}"
-                )
 
             full_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
             for expected in (
                 "Daemon: OK",
-                "MCP registration: OK",
+                "Claude Code MCP registration: OK",
+                "Cursor MCP registration: OK",
+                "Cursor project MCP overrides: OK",
                 "Projects: OK",
                 "Index state: OK",
                 "Generated skills: OK",
-                "Dashboard: OK",
                 "Stale integrations: OK",
                 "0 FAIL",
             ):
@@ -607,22 +800,51 @@ raise SystemExit(2)
                         f"{full_doctor.stdout!r}"
                     )
 
-            uninstall = _run((str(lifecycle_harness), "uninstall"), cwd=workspace, env=fake_env)
-            if (
-                "Project Intelligence: preserved" not in uninstall.stdout
-                or fake_state.exists()
-                or lifecycle_projected_skill.exists()
-            ):
-                raise RuntimeError(
-                    f"installed harness uninstall lifecycle was unexpected: {uninstall.stdout!r}"
-                )
+            uninstall_cursor = _run(
+                (str(lifecycle_harness), "uninstall", "--host", "cursor"),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if "Project Intelligence: preserved" not in uninstall_cursor.stdout:
+                raise RuntimeError(f"Cursor uninstall was unexpected: {uninstall_cursor.stdout!r}")
+            if not fake_state.is_file() or not lifecycle_projected_skill.is_dir():
+                raise RuntimeError("Cursor uninstall damaged the remaining Claude integration")
+            if cursor_project_a.exists() or cursor_project_b.exists():
+                raise RuntimeError("Cursor uninstall left Harness-owned project overrides")
+
+            claude_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
+            if "Claude Code MCP registration: OK" not in claude_doctor.stdout:
+                raise RuntimeError("Claude was not healthy after Cursor uninstall")
+            if "Generated skills: OK" not in claude_doctor.stdout:
+                raise RuntimeError("Claude skills were not healthy after Cursor uninstall")
+
+            _run(
+                (str(lifecycle_harness), "install", "--host", "cursor"),
+                cwd=workspace,
+                env=fake_env,
+            )
+            uninstall_all = _run(
+                (str(lifecycle_harness), "uninstall", "--host", "all"),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if "Project Intelligence: preserved" not in uninstall_all.stdout:
+                raise RuntimeError(f"multi-host uninstall was unexpected: {uninstall_all.stdout!r}")
             database = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "harness.db"
             if not database.is_file():
-                raise RuntimeError("harness uninstall did not preserve Project Intelligence")
+                raise RuntimeError("multi-host uninstall did not preserve Project Intelligence")
+            if fake_state.exists() or cursor_project_a.exists() or cursor_project_b.exists():
+                raise RuntimeError("multi-host uninstall left Harness-owned host registrations")
 
-            _run((str(lifecycle_harness), "install"), cwd=workspace, env=fake_env)
+            _run(
+                (str(lifecycle_harness), "install", "--host", "all"),
+                cwd=workspace,
+                env=fake_env,
+            )
             purge = _run(
-                (str(lifecycle_harness), "uninstall", "--purge"), cwd=workspace, env=fake_env
+                (str(lifecycle_harness), "uninstall", "--host", "all", "--purge"),
+                cwd=workspace,
+                env=fake_env,
             )
             if (
                 "Project Intelligence: purged" not in purge.stdout
@@ -630,7 +852,7 @@ raise SystemExit(2)
                 or (fake_home / ".harness" / "skills").exists()
             ):
                 raise RuntimeError(
-                    "installed harness uninstall --purge lifecycle was unexpected: "
+                    "installed multi-host uninstall --purge lifecycle was unexpected: "
                     f"{purge.stdout!r}"
                 )
 

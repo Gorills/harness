@@ -91,7 +91,7 @@ def test_run_system_doctor_on_clean_machine_is_read_only_and_warning_only(tmp_pa
     by_name = {check.name: check for check in report.checks}
     assert by_name["Database"].severity is doctor.DoctorSeverity.WARN
     assert by_name["Daemon"].severity is doctor.DoctorSeverity.WARN
-    assert by_name["MCP registration"].severity is doctor.DoctorSeverity.WARN
+    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.WARN
 
 
 def test_run_system_doctor_refuses_database_symlink_without_following_target(

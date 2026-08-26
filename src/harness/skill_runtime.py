@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Final
 
 from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
-from harness.host_adapters import claude_code_skill_projection_surface
+from harness.host_adapters import (
+    claude_code_skill_projection_surface,
+    cursor_skill_projection_surface,
+)
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
 from harness.skills import (
     SkillError,
@@ -22,7 +25,7 @@ from harness.skills import (
     resolve_workspace_skills,
 )
 
-_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code"})
+_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "cursor"})
 
 
 class SkillRuntimeError(RuntimeError):
@@ -165,6 +168,8 @@ def _surfaces_for_profiles(profiles: Sequence[str]) -> tuple[SkillProjectionSurf
     for profile in normalized:
         if profile == "claude-code":
             surfaces.append(claude_code_skill_projection_surface())
+        elif profile == "cursor":
+            surfaces.append(cursor_skill_projection_surface())
     return tuple(surfaces)
 
 

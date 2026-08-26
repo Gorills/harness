@@ -21,7 +21,7 @@ from mcp.shared.exceptions import MCPError
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import request_dashboard_url
-from harness.registry import create_project, register_workspace
+from harness.registry import create_project, list_workspaces, register_workspace
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
@@ -1063,6 +1063,157 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
             assert resumed.is_error is False
             assert resumed.structured_content is not None
             assert resumed.structured_content["revision"] == 2
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+@pytest.mark.anyio
+async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
+    tmp_path: Path,
+) -> None:
+    root, database = _repo(tmp_path)
+    linked = tmp_path / "linked"
+    _git(root, "worktree", "add", "-b", "linked", str(linked))
+    linked = linked.resolve()
+    (linked / "src" / "linked_only.py").write_text("LINKED = 2\n", encoding="utf-8")
+
+    connection = connect_database(database)
+    try:
+        first = list_workspaces(connection)[0]
+        linked_workspace = register_workspace(
+            connection,
+            project_id=first.project_id,
+            path=linked,
+        )
+        scan_workspace(connection, linked_workspace.workspace_id)
+        root_workspace_id = first.workspace_id
+    finally:
+        connection.close()
+
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+
+    def host_env(profile: str, workspace: Path) -> dict[str, str]:
+        env = dict(os.environ)
+        env["XDG_RUNTIME_DIR"] = str(runtime)
+        env["HARNESS_HOST_PROFILE"] = profile
+        if profile == "claude-code":
+            env["CLAUDE_PROJECT_DIR"] = str(workspace)
+            env.pop("HARNESS_WORKSPACE_ROOT", None)
+        else:
+            env["HARNESS_WORKSPACE_ROOT"] = str(workspace)
+            env.pop("CLAUDE_PROJECT_DIR", None)
+        return env
+
+    try:
+        claude_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=host_env("claude-code", root),
+            cwd=str(tmp_path),
+        )
+        async with Client(stdio_client(claude_params)) as client:
+            listed = await client.list_tools()
+            assert [tool.name for tool in listed.tools] == [
+                "project_status",
+                "project_search",
+                "project_context",
+                "task_start",
+                "task_checkpoint",
+            ]
+            started = await client.call_tool("task_start", {"title": "Cross host continuity"})
+            assert started.is_error is False
+            assert started.structured_content is not None
+            task_id = started.structured_content["task_id"]
+            checkpoint = await client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 1,
+                    "state": "working",
+                    "summary": "Persist host-neutral knowledge",
+                    "knowledge": [
+                        {
+                            "kind": "behavior",
+                            "title": "Cross host invariant",
+                            "body": "Task continuity is owned by Harness domain state.",
+                            "anchors": [{"path": "src/token_service.py"}],
+                        }
+                    ],
+                },
+            )
+            assert checkpoint.is_error is False
+
+        cursor_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=host_env("cursor", root),
+            cwd=str(tmp_path),
+        )
+        async with Client(stdio_client(cursor_params)) as client:
+            status = await client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            assert status.structured_content["workspace_id"] == root_workspace_id
+            assert status.structured_content["current_task"]["task_id"] == task_id
+
+            knowledge = await client.call_tool(
+                "project_search",
+                {"query": "cross host invariant", "scope": "knowledge", "limit": 5},
+            )
+            assert knowledge.is_error is False
+            assert knowledge.structured_content is not None
+            assert any(
+                item["ref"].startswith("knowledge:")
+                for item in knowledge.structured_content["results"]
+            )
+            tasks = await client.call_tool(
+                "project_search",
+                {"query": "cross host continuity", "scope": "tasks", "limit": 5},
+            )
+            assert tasks.is_error is False
+            assert tasks.structured_content is not None
+            assert any(
+                item["ref"] == f"task:{task_id}" for item in tasks.structured_content["results"]
+            )
+
+        linked_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=host_env("cursor", linked),
+            cwd=str(root),
+        )
+        async with Client(stdio_client(linked_params)) as client:
+            status = await client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            assert status.structured_content["workspace_id"] == linked_workspace.workspace_id
+            assert status.structured_content["workspace_id"] != root_workspace_id
+            assert status.structured_content["current_task"] is None
+            linked_search = await client.call_tool(
+                "project_search", {"query": "linked only", "scope": "code", "limit": 5}
+            )
+            assert linked_search.is_error is False
+            assert linked_search.structured_content is not None
+            assert (
+                linked_search.structured_content["results"][0]["ref"] == "code:src/linked_only.py"
+            )
+
+        claude_again = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=host_env("claude-code", root),
+            cwd=str(linked),
+        )
+        async with Client(stdio_client(claude_again)) as client:
+            status = await client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            assert status.structured_content["workspace_id"] == root_workspace_id
+            assert status.structured_content["current_task"]["task_id"] == task_id
     finally:
         stop.set()
         executor.shutdown(wait=True)

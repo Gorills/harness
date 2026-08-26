@@ -456,12 +456,25 @@ def workspace_hints_from_environment(
     values = os.environ if environment is None else environment
     profile = values.get(_HOST_PROFILE_ENV)
     if profile is not None:
-        if profile != _CLAUDE_PROFILE:
-            raise HostIntegrationError(f"unsupported Harness host profile: {profile}")
-        adapter = ClaudeCodeAdapter(
-            executable=Path("claude"), python_executable=Path(sys.executable)
-        )
-        return adapter.workspace_hints(values)
+        if profile == _CLAUDE_PROFILE:
+            adapter = ClaudeCodeAdapter(
+                executable=Path("claude"), python_executable=Path(sys.executable)
+            )
+            return adapter.workspace_hints(values)
+        if profile == _CURSOR_PROFILE:
+            configured = values.get(_WORKSPACE_ROOT_ENV)
+            if not configured:
+                raise HostIntegrationError(
+                    "Cursor integration did not provide HARNESS_WORKSPACE_ROOT from ${workspaceFolder}"
+                )
+            return (
+                _directory_hint(
+                    configured,
+                    source="cursor-workspace-folder",
+                    match_mode=WorkspaceHintMatchMode.ROOT,
+                ),
+            )
+        raise HostIntegrationError(f"unsupported Harness host profile: {profile}")
 
     configured = values.get(_WORKSPACE_ROOT_ENV)
     if configured:

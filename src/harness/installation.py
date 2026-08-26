@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 
+from harness.cursor_adapter import CursorAdapter, discover_cursor_adapter
 from harness.daemon import DaemonError, hold_database_maintenance_lock
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import run_doctor_checks
 from harness.host_adapters import (
-    HostIntegrationError,
+    ClaudeCodeAdapter,
     HostRegistrationCollisionError,
     HostRegistrationState,
     IntegrationChange,
@@ -27,7 +29,9 @@ from harness.ipc import (
     request_shutdown,
     request_skill_cleanup,
     request_status,
+    request_workspace_skills_reconcile,
 )
+from harness.registry import WorkspaceRecord, list_workspaces
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.runtime_paths import (
     RuntimePathError,
@@ -42,10 +46,12 @@ from harness.runtime_state import (
     preflight_canonical_database_state,
 )
 from harness.skills import SkillRegistryError, default_skill_registry
-from harness.storage import SCHEMA_VERSION
+from harness.storage import SCHEMA_VERSION, DatabaseError, connect_database_read_only
+from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _SHUTDOWN_TIMEOUT_SECONDS = 3.0
 _SHUTDOWN_POLL_SECONDS = 0.05
+_SUPPORTED_HOSTS = ("claude-code", "cursor")
 
 
 class InstallationError(RuntimeError):
@@ -53,10 +59,25 @@ class InstallationError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class HostInstallResult:
+    host_profile: str
+    registration_change: IntegrationChange
+    project_change_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class InstallResult:
     host_profile: str
     registration_change: IntegrationChange
     daemon_status: RuntimeDiagnosticsResult
+    hosts: tuple[HostInstallResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class HostUninstallResult:
+    host_profile: str
+    registration_change: IntegrationChange
+    project_change_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,116 +86,345 @@ class UninstallResult:
     registration_change: IntegrationChange
     skill_cleanup: SkillCleanupResult
     purged: bool
+    hosts: tuple[HostUninstallResult, ...] = ()
 
 
 def install_harness(
     *,
+    host: str = "claude-code",
     environment: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
 ) -> InstallResult:
-    """Install the currently supported Linux/Claude Code Harness integration idempotently."""
+    """Install one or all supported local Harness host integrations idempotently."""
     _require_runtime_prerequisites()
-    adapter = discover_claude_code_adapter(
-        environment=environment,
-        python_executable=python_executable,
+    selected = _selected_adapters(
+        host, environment=environment, python_executable=python_executable
     )
-    if adapter is None:
-        raise InstallationError("Claude Code CLI was not found on PATH")
-    state = adapter.registration_state()
-    if state is HostRegistrationState.FOREIGN:
-        raise HostRegistrationCollisionError(
-            "Claude Code already has a non-Harness MCP server named 'harness'"
-        )
+    for adapter in selected:
+        state = adapter.registration_state()
+        if state is HostRegistrationState.FOREIGN:
+            raise HostRegistrationCollisionError(
+                f"{_host_label(adapter)} already has a non-Harness MCP server named 'harness'"
+            )
 
     paths = _runtime_paths(environment)
     _require_safe_database_state(paths)
+    preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
+    for adapter in selected:
+        if isinstance(adapter, CursorAdapter):
+            for workspace in preflight_workspaces:
+                adapter.preflight_project_reconcile(workspace.workspace_root)
+
     try:
         daemon_status = _ensure_current_daemon(paths, environment)
     except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError("Harness daemon could not be prepared") from exc
 
-    try:
+    workspaces = _registered_workspaces(paths)
+    for adapter in selected:
+        if isinstance(adapter, CursorAdapter):
+            for workspace in workspaces:
+                adapter.preflight_project_reconcile(workspace.workspace_root)
+
+    results: list[HostInstallResult] = []
+    for adapter in selected:
         change = adapter.register_mcp()
-    except HostIntegrationError:
-        raise
+        project_changes = 0
+        if isinstance(adapter, CursorAdapter):
+            for workspace in workspaces:
+                project_changes += int(
+                    adapter.reconcile_project(workspace.workspace_root) is IntegrationChange.CHANGED
+                )
+        results.append(
+            HostInstallResult(
+                host_profile=adapter.profile,
+                registration_change=change,
+                project_change_count=project_changes,
+            )
+        )
+    overall = (
+        IntegrationChange.CHANGED
+        if any(
+            item.registration_change is IntegrationChange.CHANGED or item.project_change_count
+            for item in results
+        )
+        else IntegrationChange.UNCHANGED
+    )
     return InstallResult(
-        host_profile=adapter.profile,
-        registration_change=change,
+        host_profile=host,
+        registration_change=overall,
         daemon_status=daemon_status,
+        hosts=tuple(results),
     )
 
 
 def uninstall_harness(
     *,
+    host: str = "claude-code",
     purge: bool = False,
     environment: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
 ) -> UninstallResult:
-    """Remove Harness-owned Claude integration artifacts while preserving Project Intelligence."""
-    adapter = discover_claude_code_adapter(
-        environment=environment,
-        python_executable=python_executable,
+    """Remove selected Harness-owned host artifacts while preserving other active hosts."""
+    selected = _selected_adapters(
+        host, environment=environment, python_executable=python_executable
     )
-    if adapter is None:
-        raise InstallationError(
-            "Claude Code CLI was not found; Harness cannot safely verify/remove its registration"
-        )
-    state = adapter.registration_state()
-    if state is HostRegistrationState.FOREIGN:
-        raise HostRegistrationCollisionError(
-            "Claude Code MCP server named 'harness' is not owned by Harness"
-        )
+    selected_profiles = {adapter.profile for adapter in selected}
+    observed_selected: dict[str, HostRegistrationState] = {}
+    for adapter in selected:
+        state = adapter.registration_state()
+        observed_selected[adapter.profile] = state
+        if state is HostRegistrationState.FOREIGN:
+            raise HostRegistrationCollisionError(
+                f"{_host_label(adapter)} MCP server named 'harness' is not owned by Harness"
+            )
 
     paths = _runtime_paths(environment)
     _require_safe_database_state(paths)
     if purge:
         _preflight_skill_registry_purge(environment)
-    if state is HostRegistrationState.ABSENT and not (
-        paths.database.exists() or paths.socket.exists()
-    ):
+
+    workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
+    for adapter in selected:
+        if isinstance(adapter, CursorAdapter):
+            for workspace in workspaces:
+                adapter.preflight_project_remove(workspace.workspace_root)
+
+    active = _active_profiles(
+        environment=environment,
+        python_executable=python_executable,
+        selected=selected,
+        selected_states=observed_selected,
+    )
+    remaining = tuple(
+        profile for profile in _SUPPORTED_HOSTS if profile in active - selected_profiles
+    )
+    if purge and remaining:
+        raise InstallationError(
+            "Harness --purge refused while another supported host integration remains active"
+        )
+
+    if "cursor" in remaining:
+        remaining_cursor = discover_cursor_adapter(
+            environment=environment,
+            python_executable=python_executable,
+        )
+        for workspace in workspaces:
+            state = remaining_cursor.project_registration_state(workspace.workspace_root)
+            if state is not HostRegistrationState.CURRENT:
+                raise InstallationError(
+                    "remaining Cursor host is not healthy for all registered Workspaces; "
+                    "run harness install --host cursor before removing another host"
+                )
+
+    any_selected_owned = any(
+        state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
+        for state in observed_selected.values()
+    )
+    has_state = paths.database.exists() or paths.socket.exists()
+    if not any_selected_owned and not has_state:
         if purge:
             try:
                 _purge_without_running_daemon(paths, environment)
             except (DaemonError, OSError) as exc:
                 raise InstallationError("Harness state cleanup could not be completed") from exc
         return UninstallResult(
-            host_profile=adapter.profile,
+            host_profile=host,
             registration_change=IntegrationChange.UNCHANGED,
-            skill_cleanup=SkillCleanupResult(
-                schema_version=SCHEMA_VERSION,
-                workspace_count=0,
-                cleaned_workspace_count=0,
-                skipped_workspace_count=0,
-                removed=0,
-                exclude_changed_count=0,
-            ),
+            skill_cleanup=_empty_cleanup(),
             purged=purge,
+            hosts=tuple(
+                HostUninstallResult(adapter.profile, IntegrationChange.UNCHANGED)
+                for adapter in selected
+            ),
         )
+
     try:
         _ensure_current_daemon(paths, environment)
-        cleanup = request_skill_cleanup(paths.socket, (adapter.profile,))
+        cleanup = (
+            _reconcile_remaining_profiles(paths, workspaces, remaining)
+            if remaining
+            else request_skill_cleanup(paths.socket, tuple(sorted(active or selected_profiles)))
+        )
     except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError(
             "Harness project integration cleanup could not be completed"
         ) from exc
 
-    change = adapter.unregister_mcp()
-    try:
-        shutdown = request_shutdown(paths.socket)
-        if not shutdown.accepted:
-            raise InstallationError("Harness daemon rejected shutdown")
-        _wait_for_daemon_shutdown(paths.socket)
-        if purge:
-            _purge_after_daemon_shutdown(paths, environment)
-    except (RuntimePathError, IpcError, DaemonError, OSError) as exc:
-        raise InstallationError("Harness daemon/state cleanup could not be completed") from exc
+    project_changes_by_profile: dict[str, int] = {}
+    for adapter in selected:
+        if not isinstance(adapter, CursorAdapter):
+            continue
+        project_changes = 0
+        for workspace in workspaces:
+            project_changes += int(
+                adapter.remove_project(workspace.workspace_root) is IntegrationChange.CHANGED
+            )
+        project_changes_by_profile[adapter.profile] = project_changes
 
+    results: list[HostUninstallResult] = []
+    for adapter in selected:
+        change = adapter.unregister_mcp()
+        results.append(
+            HostUninstallResult(
+                host_profile=adapter.profile,
+                registration_change=change,
+                project_change_count=project_changes_by_profile.get(adapter.profile, 0),
+            )
+        )
+
+    if not remaining:
+        try:
+            shutdown = request_shutdown(paths.socket)
+            if not shutdown.accepted:
+                raise InstallationError("Harness daemon rejected shutdown")
+            _wait_for_daemon_shutdown(paths.socket)
+            if purge:
+                _purge_after_daemon_shutdown(paths, environment)
+        except (RuntimePathError, IpcError, DaemonError, OSError) as exc:
+            raise InstallationError("Harness daemon/state cleanup could not be completed") from exc
+
+    overall = (
+        IntegrationChange.CHANGED
+        if any(
+            item.registration_change is IntegrationChange.CHANGED or item.project_change_count
+            for item in results
+        )
+        else IntegrationChange.UNCHANGED
+    )
     return UninstallResult(
-        host_profile=adapter.profile,
-        registration_change=change,
+        host_profile=host,
+        registration_change=overall,
         skill_cleanup=cleanup,
         purged=purge,
+        hosts=tuple(results),
     )
+
+
+def _selected_adapters(
+    host: str,
+    *,
+    environment: Mapping[str, str] | None,
+    python_executable: Path | None,
+) -> tuple[ClaudeCodeAdapter | CursorAdapter, ...]:
+    profiles = _SUPPORTED_HOSTS if host == "all" else (host,)
+    if any(profile not in _SUPPORTED_HOSTS for profile in profiles):
+        raise InstallationError(f"unsupported Harness host selection: {host}")
+    adapters: list[ClaudeCodeAdapter | CursorAdapter] = []
+    for profile in profiles:
+        if profile == "claude-code":
+            adapter = discover_claude_code_adapter(
+                environment=environment,
+                python_executable=python_executable,
+            )
+            if adapter is None:
+                raise InstallationError("Claude Code CLI was not found on PATH")
+            adapters.append(adapter)
+        else:
+            adapters.append(
+                discover_cursor_adapter(
+                    environment=environment,
+                    python_executable=python_executable,
+                )
+            )
+    return tuple(adapters)
+
+
+def _active_profiles(
+    *,
+    environment: Mapping[str, str] | None,
+    python_executable: Path | None,
+    selected: tuple[ClaudeCodeAdapter | CursorAdapter, ...],
+    selected_states: Mapping[str, HostRegistrationState],
+) -> set[str]:
+    states = dict(selected_states)
+    selected_by_profile = {adapter.profile: adapter for adapter in selected}
+    if "claude-code" not in states:
+        claude = discover_claude_code_adapter(
+            environment=environment,
+            python_executable=python_executable,
+        )
+        if claude is not None:
+            states["claude-code"] = claude.registration_state()
+    if "cursor" not in states:
+        cursor = selected_by_profile.get("cursor")
+        if cursor is None:
+            cursor = discover_cursor_adapter(
+                environment=environment,
+                python_executable=python_executable,
+            )
+        states["cursor"] = cursor.registration_state()
+    for profile, state in states.items():
+        if profile not in selected_states and state is HostRegistrationState.FOREIGN:
+            continue
+        if profile not in selected_states and state is HostRegistrationState.STALE_OWNED:
+            raise InstallationError(
+                f"other Harness host profile is stale: {profile}; run harness install --host {profile}"
+            )
+    return {
+        profile
+        for profile, state in states.items()
+        if state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
+    }
+
+
+def _registered_workspaces(paths: RuntimePaths) -> tuple[WorkspaceRecord, ...]:
+    if not paths.database.exists():
+        return ()
+    try:
+        connection = connect_database_read_only(paths.database)
+        try:
+            return list_workspaces(connection)
+        finally:
+            connection.close()
+    except (DatabaseError, sqlite3.DatabaseError, OSError) as exc:
+        raise InstallationError("registered Workspaces could not be enumerated") from exc
+
+
+def _reconcile_remaining_profiles(
+    paths: RuntimePaths,
+    workspaces: tuple[WorkspaceRecord, ...],
+    profiles: tuple[str, ...],
+) -> SkillCleanupResult:
+    removed = 0
+    exclude_changed = 0
+    for workspace in workspaces:
+        result = request_workspace_skills_reconcile(
+            paths.socket,
+            (
+                WorkspaceHint(
+                    path=workspace.workspace_root,
+                    source="uninstall-workspace-root",
+                    match_mode=WorkspaceHintMatchMode.ROOT,
+                ),
+            ),
+            profiles,
+        )
+        removed += result.removed
+        exclude_changed += int(result.exclude_changed)
+    return SkillCleanupResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_count=len(workspaces),
+        cleaned_workspace_count=len(workspaces),
+        skipped_workspace_count=0,
+        removed=removed,
+        exclude_changed_count=exclude_changed,
+    )
+
+
+def _empty_cleanup() -> SkillCleanupResult:
+    return SkillCleanupResult(
+        schema_version=SCHEMA_VERSION,
+        workspace_count=0,
+        cleaned_workspace_count=0,
+        skipped_workspace_count=0,
+        removed=0,
+        exclude_changed_count=0,
+    )
+
+
+def _host_label(adapter: ClaudeCodeAdapter | CursorAdapter) -> str:
+    return "Claude Code" if adapter.profile == "claude-code" else "Cursor"
 
 
 def _ensure_current_daemon(

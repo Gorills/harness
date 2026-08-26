@@ -40,7 +40,8 @@ def _skill_registry(home: Path) -> None:
     skill = home / ".harness" / "skills" / "python-helper"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
-        "# Python helper\n\nUse Python conventions.\n", encoding="utf-8"
+        "---\nname: python-helper\ndescription: Python conventions\n---\n\n# Python helper\n",
+        encoding="utf-8",
     )
     (skill / "harness.yaml").write_text(
         "id: python-helper\napplies:\n  languages:\n    - python\n",
@@ -441,3 +442,192 @@ def test_purge_preflight_refuses_database_symlink_without_unlinking_target(
     assert "unsafe database state" in capsys.readouterr().out
     assert paths.database.is_symlink()
     assert outside.read_bytes() == b"user-data"
+
+
+def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude_state = tmp_path / "claude-state.json"
+    _fake_claude(fake_bin, claude_state)
+    _skill_registry(home)
+    repo = tmp_path / "repo"
+    _repo(repo)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    cursor_install = capsys.readouterr().out
+    assert "Harness host: cursor" in cursor_install
+    cursor_global = home / ".cursor" / "mcp.json"
+    global_value = json.loads(cursor_global.read_text(encoding="utf-8"))
+    assert global_value["mcpServers"]["harness"]["env"] == {"HARNESS_HOST_PROFILE": "cursor"}
+    project_config = repo / ".cursor" / "mcp.json"
+    project_value = json.loads(project_config.read_text(encoding="utf-8"))
+    assert project_value["mcpServers"]["harness"]["env"] == {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+    }
+
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    assert harness_main() == 0
+    capsys.readouterr()
+    assert (repo / ".claude" / "skills" / "python-helper" / "SKILL.md").is_file()
+    assert not (repo / ".agents" / "skills" / "python-helper").exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "Claude Code MCP registration: OK" in doctor_output
+    assert "Cursor MCP registration: OK" in doctor_output
+    assert "Cursor project MCP overrides: OK" in doctor_output
+    assert "Generated skills: OK" in doctor_output
+
+    broken_project = json.loads(project_config.read_text(encoding="utf-8"))
+    broken_project["mcpServers"]["harness"]["command"] = "/stale/cursor/python"
+    project_config.write_text(json.dumps(broken_project), encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 1
+    broken_doctor = capsys.readouterr().out
+    assert "Claude Code MCP registration: OK" in broken_doctor
+    assert "Cursor project MCP overrides: FAIL" in broken_doctor
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+    paths = default_runtime_paths()
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "cursor"])
+    assert harness_main() == 0
+    uninstall_output = capsys.readouterr().out
+    assert "Project Intelligence: preserved" in uninstall_output
+    assert project_config.exists() is False
+    assert claude_state.is_file()
+    assert paths.socket.exists()
+    assert (repo / ".claude" / "skills" / "python-helper" / "SKILL.md").is_file()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    after = capsys.readouterr().out
+    assert "Claude Code MCP registration: OK" in after
+    assert "Cursor MCP registration: OK (Harness Cursor integration is not configured)" in after
+    assert "Generated skills: OK" in after
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "all"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    assert not claude_state.exists()
+    assert not project_config.exists()
+    assert not paths.socket.exists()
+
+
+def test_uninstall_claude_reprojects_skills_for_remaining_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude_state = tmp_path / "claude-state.json"
+    _fake_claude(fake_bin, claude_state)
+    _skill_registry(home)
+    repo = tmp_path / "repo"
+    _repo(repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    assert harness_main() == 0
+    capsys.readouterr()
+    assert (repo / ".claude" / "skills" / "python-helper").is_dir()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "claude-code"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    assert not claude_state.exists()
+    assert (home / ".cursor" / "mcp.json").is_file()
+    assert (repo / ".cursor" / "mcp.json").is_file()
+    assert not (repo / ".claude" / "skills" / "python-helper").exists()
+    assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
+    assert default_runtime_paths().socket.exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    output = capsys.readouterr().out
+    assert "Cursor MCP registration: OK" in output
+    assert "Cursor project MCP overrides: OK" in output
+    assert "Generated skills: OK" in output
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+
+def test_purge_is_refused_while_another_host_remains_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude_state = tmp_path / "claude-state.json"
+    _fake_claude(fake_bin, claude_state)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
+    monkeypatch.setenv("PATH", str(fake_bin) + os.pathsep + os.environ["PATH"])
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    cursor_global = home / ".cursor" / "mcp.json"
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "uninstall", "--host", "cursor", "--purge"],
+    )
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "--purge refused" in output
+    assert claude_state.is_file()
+    assert cursor_global.is_file()
+    assert default_runtime_paths().socket.exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "all", "--purge"])
+    assert harness_main() == 0
+    capsys.readouterr()
