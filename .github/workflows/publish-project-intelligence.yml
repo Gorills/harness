@@ -1,0 +1,35 @@
+name: Publish Project Intelligence candidate
+
+on:
+  push:
+    branches:
+      - feat/project-intelligence-retrieval
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply exact reviewed candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .harness-publish/*.patch > /tmp/candidate.patch
+          echo "de24703824f38e63cd22c86ebb5ad21182a8dc7c67412de502e9a7a24498add5  /tmp/candidate.patch" | sha256sum -c -
+          git apply --check /tmp/candidate.patch
+          git apply /tmp/candidate.patch
+          rm -rf .harness-publish
+          rm -f .github/workflows/publish-project-intelligence.yml
+          git add -A
+          tree_sha="$(git write-tree)"
+          test "$tree_sha" = "bfe79ed049f15c21dd6cb8a309d96fbfd178bcd0"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Implement Project Intelligence retrieval"
+          git push origin HEAD:feat/project-intelligence-retrieval
