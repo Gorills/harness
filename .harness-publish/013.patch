@@ -1,0 +1,216 @@
++                    fragment_ref, task_id, workspace_id, project_id, title, body
++                )
++                SELECT
++                    'event:' || task_events.id,
++                    NEW.id,
++                    NEW.workspace_id,
++                    workspaces.project_id,
++                    '',
++                    task_events.operator_feedback
++                FROM task_events
++                JOIN workspaces ON workspaces.id = NEW.workspace_id
++                WHERE task_events.task_id = NEW.id
++                    AND task_events.event_type = 'operator_feedback';
++            END;
++
++            CREATE TRIGGER task_search_checkpoint_insert
++            AFTER INSERT ON task_checkpoints
++            BEGIN
++                INSERT INTO task_search(
++                    fragment_ref, task_id, workspace_id, project_id, title, body
++                )
++                SELECT
++                    'checkpoint:' || NEW.id,
++                    tasks.id,
++                    tasks.workspace_id,
++                    workspaces.project_id,
++                    '',
++                    NEW.summary || ' ' || COALESCE(NEW.next_step, '')
++                FROM tasks
++                JOIN workspaces ON workspaces.id = tasks.workspace_id
++                WHERE tasks.id = NEW.task_id;
++            END;
++
++            CREATE TRIGGER task_search_checkpoint_delete
++            AFTER DELETE ON task_checkpoints
++            BEGIN
++                DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
++            END;
++
++            CREATE TRIGGER task_search_checkpoint_update
++            AFTER UPDATE OF summary, next_step, task_id ON task_checkpoints
++            BEGIN
++                DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
++                INSERT INTO task_search(
++                    fragment_ref, task_id, workspace_id, project_id, title, body
++                )
++                SELECT
++                    'checkpoint:' || NEW.id,
++                    tasks.id,
++                    tasks.workspace_id,
++                    workspaces.project_id,
++                    '',
++                    NEW.summary || ' ' || COALESCE(NEW.next_step, '')
++                FROM tasks
++                JOIN workspaces ON workspaces.id = tasks.workspace_id
++                WHERE tasks.id = NEW.task_id;
++            END;
++
++            CREATE TRIGGER task_search_event_insert
++            AFTER INSERT ON task_events
++            WHEN NEW.event_type = 'operator_feedback'
++            BEGIN
++                INSERT INTO task_search(
++                    fragment_ref, task_id, workspace_id, project_id, title, body
++                )
++                SELECT
++                    'event:' || NEW.id,
++                    tasks.id,
++                    tasks.workspace_id,
++                    workspaces.project_id,
++                    '',
++                    NEW.operator_feedback
++                FROM tasks
++                JOIN workspaces ON workspaces.id = tasks.workspace_id
++                WHERE tasks.id = NEW.task_id;
++            END;
++
++            CREATE TRIGGER task_search_event_delete
++            AFTER DELETE ON task_events
++            WHEN OLD.event_type = 'operator_feedback'
++            BEGIN
++                DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
++            END;
++
++            CREATE TRIGGER task_search_event_update
++            AFTER UPDATE OF event_type, operator_feedback, task_id ON task_events
++            BEGIN
++                DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
++                INSERT INTO task_search(
++                    fragment_ref, task_id, workspace_id, project_id, title, body
++                )
++                SELECT
++                    'event:' || NEW.id,
++                    tasks.id,
++                    tasks.workspace_id,
++                    workspaces.project_id,
++                    '',
++                    NEW.operator_feedback
++                FROM tasks
++                JOIN workspaces ON workspaces.id = tasks.workspace_id
++                WHERE tasks.id = NEW.task_id
++                    AND NEW.event_type = 'operator_feedback';
++            END;
++            """,
++        )
++        return
+     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
+ 
+ 
+diff --git a/tests/test_mcp_project_intelligence.py b/tests/test_mcp_project_intelligence.py
+new file mode 100644
+index 0000000..d205bcc
+--- /dev/null
++++ b/tests/test_mcp_project_intelligence.py
+@@ -0,0 +1,272 @@
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++import time
++from concurrent.futures import Future, ThreadPoolExecutor
++from pathlib import Path
++from threading import Event
++
++import pytest
++from mcp import Client, StdioServerParameters
++from mcp.client.stdio import stdio_client
++
++from harness.daemon import serve_daemon
++from harness.index import scan_workspace
++from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
++from harness.registry import create_project, register_workspace
++from harness.storage import connect_database, initialize_database
++from harness.task_workflow import task_checkpoint, task_start
++from harness.tasks import TaskState
++
++pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
++
++
++def _git(cwd: Path, *arguments: str) -> None:
++    subprocess.run(["git", *arguments], cwd=cwd, check=True, capture_output=True)
++
++
++def _init_repo(root: Path) -> None:
++    root.mkdir()
++    (root / "src").mkdir()
++    (root / "src" / "token_service.py").write_text("VERSION = 1\n", encoding="utf-8")
++    (root / "docs").mkdir()
++    (root / "docs" / "rotation.md").write_text("Repository rotation notes\n", encoding="utf-8")
++    _git(root, "init", "-b", "main")
++    _git(root, "add", ".")
++    _git(
++        root,
++        "-c",
++        "user.name=Harness Test",
++        "-c",
++        "user.email=h@example.invalid",
++        "commit",
++        "-m",
++        "init",
++    )
++
++
++def _start_daemon(
++    database: Path, socket_path: Path
++) -> tuple[Event, ThreadPoolExecutor, Future[None]]:
++    stop = Event()
++    executor = ThreadPoolExecutor(max_workers=1)
++    future = executor.submit(serve_daemon, database, socket_path, stop_event=stop)
++    deadline = time.monotonic() + 3
++    while not socket_path.exists():
++        if future.done():
++            future.result()
++        if time.monotonic() >= deadline:
++            raise AssertionError("daemon did not start")
++        time.sleep(0.01)
++    return stop, executor, future
++
++
++def _knowledge(title: str, body: str) -> KnowledgeDraft:
++    return KnowledgeDraft(
++        kind=KnowledgeKind.INVARIANT,
++        title=title,
++        body=body,
++        anchors=(KnowledgeAnchorDraft(path="src/token_service.py"),),
++    )
++
++
++def _seed_project_intelligence(tmp_path: Path) -> tuple[Path, Path, str, str, str, str]:
++    active_root = tmp_path / "active"
++    other_root = tmp_path / "other"
++    _init_repo(active_root)
++    _init_repo(other_root)
++    database = tmp_path / "harness.db"
++    initialize_database(database)
++    connection = connect_database(database)
++    try:
++        active_project = create_project(connection)
++        active_workspace = register_workspace(
++            connection, project_id=active_project.project_id, path=active_root
++        )
++        scan_workspace(connection, active_workspace.workspace_id)
++
++        task = task_start(connection, active_workspace.workspace_id, "Token hardening")
++        legacy = task_checkpoint(
++            connection,
++            active_workspace.workspace_id,
++            task.task_id,
++            expected_revision=task.revision,
++            state=TaskState.WORKING,
++            summary="Mapped the legacy rotation path",
++            knowledge=(
++                _knowledge(
++                    "Refresh rotation legacy invariant",
