@@ -210,22 +210,28 @@ def list_workspaces(
     connection: sqlite3.Connection,
     *,
     project_id: str | None = None,
+    limit: int | None = None,
 ) -> tuple[WorkspaceRecord, ...]:
     """Return registered Workspaces in stable identity order."""
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+        raise RegistryError("Workspace list limit must be a positive integer")
     if project_id is None:
-        rows = connection.execute(
+        statement = (
             "SELECT id, project_id, workspace_root, git_common_dir FROM workspaces ORDER BY id"
-        ).fetchall()
+        )
+        parameters: tuple[object, ...] = ()
     else:
-        rows = connection.execute(
-            """
+        statement = """
             SELECT id, project_id, workspace_root, git_common_dir
             FROM workspaces
             WHERE project_id = ?
             ORDER BY id
-            """,
-            (project_id,),
-        ).fetchall()
+            """
+        parameters = (project_id,)
+    if limit is not None:
+        statement += " LIMIT ?"
+        parameters += (limit,)
+    rows = connection.execute(statement, parameters).fetchall()
     return tuple(_workspace_from_row(row) for row in rows)
 
 

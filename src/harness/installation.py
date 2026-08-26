@@ -20,17 +20,26 @@ from harness.host_adapters import (
 )
 from harness.ipc import (
     IpcError,
+    IpcRemoteError,
+    RuntimeDiagnosticsResult,
     SkillCleanupResult,
-    StatusResult,
+    request_runtime_diagnostics,
     request_shutdown,
     request_skill_cleanup,
     request_status,
 )
+from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.runtime_paths import (
     RuntimePathError,
     RuntimePaths,
     default_runtime_paths,
     ensure_private_state_directory,
+)
+from harness.runtime_state import (
+    RuntimeStateError,
+    canonical_database_lock_path,
+    canonical_database_purge_candidates,
+    preflight_canonical_database_state,
 )
 from harness.skills import SkillRegistryError, default_skill_registry
 from harness.storage import SCHEMA_VERSION
@@ -47,7 +56,7 @@ class InstallationError(RuntimeError):
 class InstallResult:
     host_profile: str
     registration_change: IntegrationChange
-    daemon_status: StatusResult
+    daemon_status: RuntimeDiagnosticsResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,11 +87,10 @@ def install_harness(
         )
 
     paths = _runtime_paths(environment)
-    _preflight_canonical_database_state(paths)
+    _require_safe_database_state(paths)
     try:
-        ensure_canonical_daemon(paths, environment=environment)
-        daemon_status = request_status(paths.socket)
-    except (RuntimePathError, IpcError) as exc:
+        daemon_status = _ensure_current_daemon(paths, environment)
+    except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError("Harness daemon could not be prepared") from exc
 
     try:
@@ -118,7 +126,7 @@ def uninstall_harness(
         )
 
     paths = _runtime_paths(environment)
-    _preflight_canonical_database_state(paths)
+    _require_safe_database_state(paths)
     if purge:
         _preflight_skill_registry_purge(environment)
     if state is HostRegistrationState.ABSENT and not (
@@ -143,9 +151,9 @@ def uninstall_harness(
             purged=purge,
         )
     try:
-        ensure_canonical_daemon(paths, environment=environment)
+        _ensure_current_daemon(paths, environment)
         cleanup = request_skill_cleanup(paths.socket, (adapter.profile,))
-    except (RuntimePathError, IpcError) as exc:
+    except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError(
             "Harness project integration cleanup could not be completed"
         ) from exc
@@ -167,6 +175,64 @@ def uninstall_harness(
         skill_cleanup=cleanup,
         purged=purge,
     )
+
+
+def _ensure_current_daemon(
+    paths: RuntimePaths,
+    environment: Mapping[str, str] | None,
+) -> RuntimeDiagnosticsResult:
+    """Reuse a current daemon or replace one owned by an older installed runtime."""
+    expected = current_runtime_identity()
+    ensure_canonical_daemon(paths, environment=environment)
+    try:
+        diagnostics = request_runtime_diagnostics(paths.socket)
+    except IpcRemoteError as exc:
+        if exc.code != "invalid_request":
+            raise
+        # The immediately preceding supported Linux release used protocol v1 and
+        # clean shutdown, but did not yet expose runtime_diagnostics. Verify that
+        # bounded legacy status is readable before treating this as an upgrade.
+        legacy_status = request_status(paths.socket)
+        if legacy_status.schema_version > SCHEMA_VERSION:
+            raise InstallationError(
+                "running Harness daemon uses a database schema newer than this installation supports"
+            ) from exc
+        return _restart_daemon_under_current_runtime(paths, environment, expected)
+
+    if diagnostics.schema_version > SCHEMA_VERSION:
+        raise InstallationError(
+            "running Harness daemon uses a database schema newer than this installation supports"
+        )
+    if _daemon_matches_runtime(diagnostics, expected):
+        return diagnostics
+    return _restart_daemon_under_current_runtime(paths, environment, expected)
+
+
+def _daemon_matches_runtime(
+    diagnostics: RuntimeDiagnosticsResult, expected: RuntimeIdentity
+) -> bool:
+    return (
+        diagnostics.schema_version == SCHEMA_VERSION
+        and diagnostics.package_version == expected.package_version
+        and diagnostics.python_executable == expected.python_executable
+        and diagnostics.code_sha256 == expected.code_sha256
+    )
+
+
+def _restart_daemon_under_current_runtime(
+    paths: RuntimePaths,
+    environment: Mapping[str, str] | None,
+    expected: RuntimeIdentity,
+) -> RuntimeDiagnosticsResult:
+    shutdown = request_shutdown(paths.socket)
+    if not shutdown.accepted:
+        raise InstallationError("stale Harness daemon rejected upgrade shutdown")
+    _wait_for_daemon_shutdown(paths.socket)
+    ensure_canonical_daemon(paths, environment=environment)
+    refreshed = request_runtime_diagnostics(paths.socket)
+    if not _daemon_matches_runtime(refreshed, expected):
+        raise InstallationError("Harness daemon did not restart under the current installation")
+    return refreshed
 
 
 def _require_runtime_prerequisites() -> None:
@@ -202,56 +268,15 @@ def _wait_for_daemon_shutdown(socket_path: Path) -> None:
 
 
 def _preflight_purge_targets(paths: RuntimePaths, environment: Mapping[str, str] | None) -> None:
-    _preflight_canonical_database_state(paths)
+    _require_safe_database_state(paths)
     _preflight_skill_registry_purge(environment)
 
 
-def _canonical_database_purge_candidates(paths: RuntimePaths) -> tuple[Path, ...]:
-    return (
-        paths.database,
-        paths.database.with_name(f"{paths.database.name}-wal"),
-        paths.database.with_name(f"{paths.database.name}-shm"),
-        paths.database.with_name(f"{paths.database.name}-journal"),
-    )
-
-
-def _canonical_database_lock_path(paths: RuntimePaths) -> Path:
-    return paths.database.with_name(f"{paths.database.name}.lock")
-
-
-def _preflight_canonical_database_state(paths: RuntimePaths) -> None:
-    state_directory = paths.database.parent
+def _require_safe_database_state(paths: RuntimePaths) -> None:
     try:
-        directory_metadata = state_directory.lstat()
-    except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise InstallationError("Harness state directory could not be inspected") from exc
-    if (
-        not stat.S_ISDIR(directory_metadata.st_mode)
-        or stat.S_ISLNK(directory_metadata.st_mode)
-        or directory_metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(directory_metadata.st_mode) & 0o077
-    ):
-        raise InstallationError("Harness refused an unsafe state directory")
-
-    for candidate in (
-        *_canonical_database_purge_candidates(paths),
-        _canonical_database_lock_path(paths),
-    ):
-        try:
-            metadata = candidate.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise InstallationError("Harness database state could not be inspected") from exc
-        if (
-            stat.S_ISLNK(metadata.st_mode)
-            or not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.geteuid()
-            or metadata.st_nlink != 1
-        ):
-            raise InstallationError("Harness refused unsafe database state")
+        preflight_canonical_database_state(paths)
+    except RuntimeStateError as exc:
+        raise InstallationError(str(exc)) from exc
 
 
 def _purge_canonical_database(paths: RuntimePaths) -> None:
@@ -259,8 +284,8 @@ def _purge_canonical_database(paths: RuntimePaths) -> None:
     if not state_directory.exists():
         return
     ensure_private_state_directory(state_directory)
-    _preflight_canonical_database_state(paths)
-    for candidate in _canonical_database_purge_candidates(paths):
+    _require_safe_database_state(paths)
+    for candidate in canonical_database_purge_candidates(paths):
         try:
             candidate.unlink()
         except FileNotFoundError:
@@ -287,8 +312,8 @@ def _purge_without_running_daemon(
     candidates_exist = any(
         _path_exists_without_following(path)
         for path in (
-            *_canonical_database_purge_candidates(paths),
-            _canonical_database_lock_path(paths),
+            *canonical_database_purge_candidates(paths),
+            canonical_database_lock_path(paths),
         )
     )
     if candidates_exist:

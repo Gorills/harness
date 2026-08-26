@@ -100,7 +100,16 @@ def main() -> int:
         harness = scripts_dir / f"harness{suffix}"
         harnessd = scripts_dir / f"harnessd{suffix}"
         help_result = _run((str(harness), "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("install", "uninstall", "doctor", "status", "scan", "search", "mcp"):
+        for expected in (
+            "install",
+            "uninstall",
+            "doctor",
+            "status",
+            "scan",
+            "search",
+            "skills",
+            "mcp",
+        ):
             if expected not in help_result.stdout:
                 raise RuntimeError(
                     f"installed harness --help did not contain {expected!r}: {help_result.stdout!r}"
@@ -146,12 +155,22 @@ def main() -> int:
                     f"{serve_help.stdout!r}"
                 )
 
-        doctor = _run((str(harness), "doctor"), cwd=workspace, env=isolated_env)
-        for expected in ("SQLite runtime: OK", "FTS5: OK"):
+        doctor_env = isolated_env.copy()
+        doctor_home = workspace / "doctor-home"
+        doctor_home.mkdir()
+        doctor_state = workspace / "doctor-state"
+        doctor_runtime = workspace / "doctor-runtime"
+        doctor_env["HOME"] = str(doctor_home)
+        doctor_env["XDG_STATE_HOME"] = str(doctor_state)
+        doctor_env["XDG_RUNTIME_DIR"] = str(doctor_runtime)
+        doctor = _run((str(harness), "doctor"), cwd=workspace, env=doctor_env)
+        for expected in ("SQLite runtime: OK", "FTS5: OK", "0 FAIL"):
             if expected not in doctor.stdout:
                 raise RuntimeError(
                     f"installed harness doctor output did not contain {expected!r}: {doctor.stdout!r}"
                 )
+        if doctor_state.exists() or doctor_runtime.exists() or (doctor_home / ".harness").exists():
+            raise RuntimeError("installed clean-machine doctor mutated canonical Harness state")
 
         claude_project = workspace / "claude-project"
         claude_project.mkdir()
@@ -473,9 +492,16 @@ raise SystemExit(2)
             fake_env["XDG_STATE_HOME"] = str(workspace / "fake-state-home")
             fake_env["XDG_RUNTIME_DIR"] = str(workspace / "fake-runtime-home")
 
+            skills_list = _run((str(harness), "skills", "list"), cwd=workspace, env=fake_env)
+            if "python-helper" not in skills_list.stdout or "Skills: 1" not in skills_list.stdout:
+                raise RuntimeError(
+                    f"installed harness skills list was unexpected: {skills_list.stdout!r}"
+                )
+
             install = _run((str(harness), "install"), cwd=workspace, env=fake_env)
             if (
                 "MCP registration: changed" not in install.stdout
+                or "Diagnostics: harness doctor" not in install.stdout
                 or "Harness install: OK" not in install.stdout
             ):
                 raise RuntimeError(
@@ -492,6 +518,43 @@ raise SystemExit(2)
                     "harness install registered an unexpected Python executable: "
                     f"{installed_registration!r}"
                 )
+
+            upgrade_venv = workspace / "upgrade-venv"
+            _run(
+                (uv, "venv", "--python", "3.13", "--no-project", str(upgrade_venv)),
+                cwd=workspace,
+            )
+            upgrade_scripts = _venv_scripts_dir(upgrade_venv)
+            upgrade_python = upgrade_scripts / "python"
+            _run(
+                (
+                    uv,
+                    "pip",
+                    "install",
+                    "--python",
+                    str(upgrade_python),
+                    "--no-deps",
+                    str(wheel),
+                ),
+                cwd=workspace,
+            )
+            upgraded_harness = upgrade_scripts / "harness"
+            upgrade_install = _run((str(upgraded_harness), "install"), cwd=workspace, env=fake_env)
+            if (
+                "MCP registration: changed" not in upgrade_install.stdout
+                or f"Daemon Python: {upgrade_python.absolute()}" not in upgrade_install.stdout
+            ):
+                raise RuntimeError(
+                    "reinstall from a second isolated interpreter did not replace the stale "
+                    f"daemon/registration: {upgrade_install.stdout!r}"
+                )
+            upgraded_registration = json.loads(fake_state.read_text(encoding="utf-8"))
+            if upgraded_registration.get("command") != str(upgrade_python.absolute()):
+                raise RuntimeError(
+                    "upgrade-safe reinstall did not point Claude at the new interpreter: "
+                    f"{upgraded_registration!r}"
+                )
+            lifecycle_harness = upgraded_harness
 
             lifecycle_project = workspace / "installed-lifecycle-project"
             lifecycle_project.mkdir()
@@ -513,7 +576,7 @@ raise SystemExit(2)
                 env=fake_env,
             )
             scan = _run(
-                (str(harness), "scan", str(lifecycle_project)),
+                (str(lifecycle_harness), "scan", str(lifecycle_project)),
                 cwd=workspace,
                 env=fake_env,
             )
@@ -527,7 +590,24 @@ raise SystemExit(2)
                     f"{scan.stdout!r}"
                 )
 
-            uninstall = _run((str(harness), "uninstall"), cwd=workspace, env=fake_env)
+            full_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
+            for expected in (
+                "Daemon: OK",
+                "MCP registration: OK",
+                "Projects: OK",
+                "Index state: OK",
+                "Generated skills: OK",
+                "Dashboard: OK",
+                "Stale integrations: OK",
+                "0 FAIL",
+            ):
+                if expected not in full_doctor.stdout:
+                    raise RuntimeError(
+                        f"installed full doctor did not contain {expected!r}: "
+                        f"{full_doctor.stdout!r}"
+                    )
+
+            uninstall = _run((str(lifecycle_harness), "uninstall"), cwd=workspace, env=fake_env)
             if (
                 "Project Intelligence: preserved" not in uninstall.stdout
                 or fake_state.exists()
@@ -540,8 +620,10 @@ raise SystemExit(2)
             if not database.is_file():
                 raise RuntimeError("harness uninstall did not preserve Project Intelligence")
 
-            _run((str(harness), "install"), cwd=workspace, env=fake_env)
-            purge = _run((str(harness), "uninstall", "--purge"), cwd=workspace, env=fake_env)
+            _run((str(lifecycle_harness), "install"), cwd=workspace, env=fake_env)
+            purge = _run(
+                (str(lifecycle_harness), "uninstall", "--purge"), cwd=workspace, env=fake_env
+            )
             if (
                 "Project Intelligence: purged" not in purge.stdout
                 or database.exists()

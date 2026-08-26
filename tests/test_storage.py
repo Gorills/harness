@@ -11,8 +11,111 @@ from harness.storage import (
     InvalidSchemaStateError,
     UnsupportedSchemaVersionError,
     connect_database,
+    connect_database_read_only,
     initialize_database,
 )
+
+
+def test_connect_database_read_only_rejects_writes(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+
+    connection = connect_database_read_only(database)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            connection.execute("INSERT INTO projects(id) VALUES ('should-not-write')")
+    finally:
+        connection.close()
+
+
+def test_connect_database_read_only_does_not_create_sidecars_for_quiescent_wal_database(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+
+    connection = connect_database_read_only(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+    finally:
+        connection.close()
+
+    status = storage.inspect_database(database)
+    assert status.schema_version == SCHEMA_VERSION
+    after = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    assert after == before
+    assert not database.with_name(f"{database.name}-wal").exists()
+    assert not database.with_name(f"{database.name}-shm").exists()
+
+
+def test_connect_database_read_only_observes_uncheckpointed_live_wal_frames(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    writer = connect_database(database)
+    try:
+        writer.execute("INSERT INTO projects(id) VALUES ('live-project')")
+        assert database.with_name(f"{database.name}-wal").exists()
+        reader = connect_database_read_only(database)
+        try:
+            assert reader.execute("SELECT COUNT(*) FROM projects").fetchone() == (1,)
+        finally:
+            reader.close()
+    finally:
+        writer.close()
+
+
+def test_connect_database_read_only_refuses_live_wal_without_existing_shm(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    writer = connect_database(database)
+    shm = database.with_name(f"{database.name}-shm")
+    try:
+        writer.execute("INSERT INTO projects(id) VALUES ('live-project')")
+        assert database.with_name(f"{database.name}-wal").exists()
+        shm.unlink()
+
+        with pytest.raises(storage.DatabaseError, match="existing SHM sidecar"):
+            connect_database_read_only(database)
+        assert not shm.exists()
+    finally:
+        writer.close()
+
+
+def test_connect_database_read_only_refuses_symlinked_live_shm_without_touching_target(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    writer = connect_database(database)
+    shm = database.with_name(f"{database.name}-shm")
+    target = tmp_path / "outside-shm"
+    try:
+        writer.execute("INSERT INTO projects(id) VALUES ('live-project')")
+        shm.unlink()
+        target.write_bytes(b"user-data")
+        shm.symlink_to(target)
+
+        with pytest.raises(storage.DatabaseError, match="SHM sidecar is unsafe"):
+            connect_database_read_only(database)
+        assert target.read_bytes() == b"user-data"
+    finally:
+        shm.unlink(missing_ok=True)
+        writer.close()
+
+
+def test_connect_database_read_only_refuses_symlinked_database(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    link = tmp_path / "linked.db"
+    link.symlink_to(database)
+
+    with pytest.raises(storage.DatabaseError, match="real regular file"):
+        connect_database_read_only(link)
 
 
 def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_path: Path) -> None:

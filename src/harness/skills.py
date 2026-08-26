@@ -17,6 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
 from pathlib import Path, PurePosixPath
+from time import monotonic
 
 from harness.git_workspace import _git_environment
 from harness.index import IndexedFileKind, IndexedFileRecord, list_indexed_files
@@ -201,6 +202,26 @@ class SkillProjectionResult:
     exclude_changed: bool
 
 
+@dataclass(frozen=True, slots=True)
+class SkillProjectionInspection:
+    """Read-only comparison of desired and current Harness-owned projection state."""
+
+    desired: int
+    matching: int
+    missing_or_changed: int
+    stale_owned: int
+    exclude_current: bool
+
+    @property
+    def is_current(self) -> bool:
+        return (
+            self.matching == self.desired
+            and self.missing_or_changed == 0
+            and self.stale_owned == 0
+            and self.exclude_current
+        )
+
+
 @dataclass(slots=True)
 class _PreparedProjection:
     target: Path
@@ -256,8 +277,11 @@ def load_skill_registry(registry_root: Path) -> tuple[SkillDefinition, ...]:
 def detect_workspace_stack(
     connection: sqlite3.Connection,
     workspace_id: str,
+    *,
+    deadline: float | None = None,
 ) -> DetectedProjectStack:
     """Derive a bounded deterministic stack from the current Structural Index and manifests."""
+    _require_resolution_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
     records = list_indexed_files(connection, workspace_id)
     languages: set[str] = set()
@@ -265,6 +289,7 @@ def detect_workspace_stack(
     manifests: set[str] = set()
 
     for record in records:
+        _require_resolution_deadline(deadline)
         path = PurePosixPath(record.relative_path)
         suffix = path.suffix.casefold()
         language = _LANGUAGE_SUFFIXES.get(suffix)
@@ -276,15 +301,15 @@ def detect_workspace_stack(
             continue
         name = path.name.casefold()
         if name == "package.json":
-            dependencies.update(_package_json_dependencies(workspace, record))
+            dependencies.update(_package_json_dependencies(workspace, record, deadline=deadline))
         elif name == "pyproject.toml":
-            dependencies.update(_pyproject_dependencies(workspace, record))
+            dependencies.update(_pyproject_dependencies(workspace, record, deadline=deadline))
         elif name.startswith("requirements") and name.endswith(".txt"):
-            dependencies.update(_requirements_dependencies(workspace, record))
+            dependencies.update(_requirements_dependencies(workspace, record, deadline=deadline))
         elif name == "cargo.toml":
-            dependencies.update(_cargo_dependencies(workspace, record))
+            dependencies.update(_cargo_dependencies(workspace, record, deadline=deadline))
         elif name == "go.mod":
-            dependencies.update(_go_mod_dependencies(workspace, record))
+            dependencies.update(_go_mod_dependencies(workspace, record, deadline=deadline))
 
     return DetectedProjectStack(
         languages=frozenset(languages),
@@ -302,9 +327,12 @@ def resolve_workspace_skills(
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
     policy: SkillResolutionPolicy | None = None,
+    deadline: float | None = None,
 ) -> tuple[ResolvedSkill, ...]:
     """Resolve relevant skills from indexed stack, Task hints, and explicit project policy."""
-    stack = detect_workspace_stack(connection, workspace_id)
+    _require_resolution_deadline(deadline)
+    stack = detect_workspace_stack(connection, workspace_id, deadline=deadline)
+    _require_resolution_deadline(deadline)
     if task_id is None:
         task = get_relevant_task(connection, workspace_id)
     else:
@@ -312,6 +340,7 @@ def resolve_workspace_skills(
         if task.workspace_id != workspace_id:
             raise SkillResolutionError("skill Task does not belong to the selected Workspace")
     task_hints = () if task is None else get_task_stack_hints(connection, task.task_id)
+    _require_resolution_deadline(deadline)
     return resolve_skills(
         definitions,
         stack,
@@ -474,6 +503,73 @@ def plan_skill_projection(
         ),
         managed_roots=managed_roots,
         recursive_visible_roots=recursive_visible_roots,
+    )
+
+
+def inspect_skill_projection(
+    plan: SkillProjectionPlan, *, deadline: float | None = None
+) -> SkillProjectionInspection:
+    """Inspect whether current generated skills and Git-local exclusions match a plan."""
+    _require_projection_deadline(deadline)
+    workspace_root = _require_real_directory(plan.workspace_root, "Workspace root")
+    target_roots = tuple(_validate_projection_root(target.relative_root) for target in plan.targets)
+    if len(set(target_roots)) != len(target_roots):
+        raise SkillProjectionError("skill projection plan contains duplicate target roots")
+    managed_roots = {_validate_projection_root(root) for root in plan.managed_roots}
+    if not set(target_roots) <= managed_roots:
+        raise SkillProjectionError("skill projection targets must be included in managed roots")
+    recursive_visible_roots = {
+        _validate_projection_root(root) for root in plan.recursive_visible_roots
+    }
+    if not recursive_visible_roots <= managed_roots:
+        raise SkillProjectionError(
+            "recursive skill visibility roots must be included in managed roots"
+        )
+
+    desired_by_path: dict[PurePosixPath, SkillDefinition] = {}
+    for target in plan.targets:
+        root_relative = _validate_projection_root(target.relative_root)
+        for definition in target.skills:
+            relative = root_relative / definition.skill_id
+            existing = desired_by_path.get(relative)
+            if existing is not None and existing != definition:
+                raise SkillProjectionError(
+                    "skill projection plan maps one path to different skills"
+                )
+            desired_by_path[relative] = definition
+
+    existing_owned = _owned_projection_paths(workspace_root, managed_roots, deadline=deadline)
+    _preflight_visible_skill_collisions(
+        workspace_root,
+        managed_roots,
+        recursive_visible_roots,
+        desired_by_path,
+        existing_owned,
+        deadline=deadline,
+    )
+    _preflight_projection_paths(workspace_root, desired_by_path, existing_owned, deadline=deadline)
+    matching = 0
+    for relative, definition in desired_by_path.items():
+        _require_projection_deadline(deadline)
+        matching += int(
+            _projection_matches(_workspace_projection_path(workspace_root, relative), definition)
+        )
+    desired_paths = set(desired_by_path)
+    stale_owned = len(existing_owned - desired_paths)
+    _require_projection_deadline(deadline)
+    exclude_path = _git_info_exclude_path(workspace_root, deadline=deadline)
+    original_exclude = _read_optional_bytes(exclude_path)
+    updated_exclude = _reconcile_exclude_bytes(
+        original_exclude,
+        managed_roots=managed_roots,
+        desired_paths=desired_paths,
+    )
+    return SkillProjectionInspection(
+        desired=len(desired_by_path),
+        matching=matching,
+        missing_or_changed=len(desired_by_path) - matching,
+        stale_owned=stale_owned,
+        exclude_current=updated_exclude == original_exclude,
     )
 
 
@@ -942,8 +1038,13 @@ def _portable_tree_sha256(directory: Path, files: Sequence[PurePosixPath]) -> st
     return digest.hexdigest()
 
 
-def _package_json_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -> set[str]:
-    payload = _read_indexed_manifest(workspace, record)
+def _package_json_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
     try:
         value = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -970,8 +1071,13 @@ def _package_json_dependencies(workspace: WorkspaceRecord, record: IndexedFileRe
     return dependencies
 
 
-def _pyproject_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -> set[str]:
-    payload = _read_indexed_manifest(workspace, record)
+def _pyproject_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
     try:
         value = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -1019,8 +1125,13 @@ def _pyproject_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecor
     return dependencies
 
 
-def _requirements_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -> set[str]:
-    payload = _read_indexed_manifest(workspace, record)
+def _requirements_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1042,8 +1153,13 @@ def _requirements_dependencies(workspace: WorkspaceRecord, record: IndexedFileRe
     return dependencies
 
 
-def _cargo_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -> set[str]:
-    payload = _read_indexed_manifest(workspace, record)
+def _cargo_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
     try:
         value = tomllib.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
@@ -1058,8 +1174,13 @@ def _cargo_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -
     return dependencies
 
 
-def _go_mod_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) -> set[str]:
-    payload = _read_indexed_manifest(workspace, record)
+def _go_mod_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -1089,7 +1210,13 @@ def _go_mod_dependencies(workspace: WorkspaceRecord, record: IndexedFileRecord) 
     return dependencies
 
 
-def _read_indexed_manifest(workspace: WorkspaceRecord, record: IndexedFileRecord) -> bytes:
+def _read_indexed_manifest(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> bytes:
+    _require_resolution_deadline(deadline)
     path = workspace.workspace_root / Path(*PurePosixPath(record.relative_path).parts)
     try:
         path_stat = path.lstat()
@@ -1102,7 +1229,15 @@ def _read_indexed_manifest(workspace: WorkspaceRecord, record: IndexedFileRecord
             f"indexed manifest is no longer a regular file: {record.relative_path}"
         )
     try:
-        payload = path.read_bytes()
+        payload_parts: list[bytes] = []
+        with path.open("rb") as handle:
+            while True:
+                _require_resolution_deadline(deadline)
+                chunk = handle.read(64 * 1024)
+                if not chunk:
+                    break
+                payload_parts.append(chunk)
+        payload = b"".join(payload_parts)
     except OSError as exc:
         raise SkillResolutionError(
             f"indexed manifest cannot be read: {record.relative_path}"
@@ -1117,12 +1252,20 @@ def _read_indexed_manifest(workspace: WorkspaceRecord, record: IndexedFileRecord
     return payload
 
 
+def _require_resolution_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise SkillResolutionError("skill resolution deadline exceeded")
+
+
 def _owned_projection_paths(
     workspace_root: Path,
     managed_roots: set[PurePosixPath],
+    *,
+    deadline: float | None = None,
 ) -> set[PurePosixPath]:
     owned: set[PurePosixPath] = set()
     for relative_root in managed_roots:
+        _require_projection_deadline(deadline)
         root = _workspace_projection_path(workspace_root, relative_root)
         if not root.exists():
             continue
@@ -1132,6 +1275,7 @@ def _owned_projection_paths(
                 f"skill projection root is not a real directory: {relative_root}"
             )
         for child in sorted(root.iterdir(), key=lambda item: item.name):
+            _require_projection_deadline(deadline)
             if not child.is_dir() or child.is_symlink():
                 continue
             marker = _read_projection_marker(child)
@@ -1146,10 +1290,13 @@ def _preflight_visible_skill_collisions(
     recursive_visible_roots: set[PurePosixPath],
     desired: Mapping[PurePosixPath, SkillDefinition],
     existing_owned: set[PurePosixPath],
+    *,
+    deadline: float | None = None,
 ) -> None:
     desired_paths = set(desired)
     desired_ids = {definition.skill_id for definition in desired.values()}
     for relative_root in managed_roots:
+        _require_projection_deadline(deadline)
         _require_projection_parents_safe(workspace_root, relative_root)
         for skill_id in desired_ids:
             relative = relative_root / skill_id
@@ -1161,6 +1308,7 @@ def _preflight_visible_skill_collisions(
         try:
             skill_files = workspace_root.glob(f"**/{SKILL_FILE_NAME}", recurse_symlinks=False)
             for skill_file in skill_files:
+                _require_projection_deadline(deadline)
                 relative = PurePosixPath(skill_file.parent.relative_to(workspace_root).as_posix())
                 if relative.name not in desired_ids:
                     continue
@@ -1206,11 +1354,14 @@ def _preflight_projection_paths(
     workspace_root: Path,
     desired: Mapping[PurePosixPath, SkillDefinition],
     existing_owned: set[PurePosixPath],
+    *,
+    deadline: float | None = None,
 ) -> None:
     for relative, definition in desired.items():
+        _require_projection_deadline(deadline)
         target = _workspace_projection_path(workspace_root, relative)
         _require_projection_parents_safe(workspace_root, relative.parent)
-        tracked = _git_tracked_paths(workspace_root, relative)
+        tracked = _git_tracked_paths(workspace_root, relative, deadline=deadline)
         if tracked:
             raise SkillProjectionCollisionError(
                 f"skill projection target is tracked by Git: {relative}"
@@ -1223,7 +1374,8 @@ def _preflight_projection_paths(
                 f"skill projection target is user-owned or has invalid ownership: {relative}"
             )
     for relative in existing_owned - set(desired):
-        if _git_tracked_paths(workspace_root, relative):
+        _require_projection_deadline(deadline)
+        if _git_tracked_paths(workspace_root, relative, deadline=deadline):
             raise SkillProjectionCollisionError(
                 f"stale Harness skill projection became tracked by Git: {relative}"
             )
@@ -1596,8 +1748,10 @@ def _projected_files(target: Path) -> tuple[PurePosixPath, ...]:
     return tuple(sorted(files, key=str))
 
 
-def _git_info_exclude_path(workspace_root: Path) -> Path:
-    result = _run_git(workspace_root, ["rev-parse", "--git-path", "info/exclude"])
+def _git_info_exclude_path(workspace_root: Path, *, deadline: float | None = None) -> Path:
+    result = _run_git(
+        workspace_root, ["rev-parse", "--git-path", "info/exclude"], deadline=deadline
+    )
     raw = result.stdout.decode("utf-8", errors="strict").strip()
     if not raw or "\x00" in raw:
         raise SkillProjectionError("Git returned an invalid info/exclude path")
@@ -1611,15 +1765,24 @@ def _git_info_exclude_path(workspace_root: Path) -> Path:
     return parent / path.name
 
 
-def _git_tracked_paths(workspace_root: Path, relative: PurePosixPath) -> tuple[str, ...]:
+def _git_tracked_paths(
+    workspace_root: Path, relative: PurePosixPath, *, deadline: float | None = None
+) -> tuple[str, ...]:
     result = _run_git(
         workspace_root,
         ["ls-files", "-z", "--", relative.as_posix(), f"{relative.as_posix()}/"],
+        deadline=deadline,
     )
     return tuple(os.fsdecode(item) for item in result.stdout.split(b"\x00") if item)
 
 
-def _run_git(workspace_root: Path, arguments: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
+def _run_git(
+    workspace_root: Path,
+    arguments: Sequence[str],
+    *,
+    deadline: float | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    timeout = _projection_git_timeout(deadline)
     try:
         result = subprocess.run(
             ["git", *arguments],
@@ -1627,7 +1790,7 @@ def _run_git(workspace_root: Path, arguments: Sequence[str]) -> subprocess.Compl
             check=False,
             capture_output=True,
             env=_git_environment(),
-            timeout=_GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SkillProjectionError(
@@ -1636,6 +1799,20 @@ def _run_git(workspace_root: Path, arguments: Sequence[str]) -> subprocess.Compl
     if result.returncode != 0:
         raise SkillProjectionError("Git command for skill projection failed")
     return result
+
+
+def _require_projection_deadline(deadline: float | None) -> None:
+    if deadline is not None and monotonic() >= deadline:
+        raise SkillProjectionError("skill projection inspection deadline exceeded")
+
+
+def _projection_git_timeout(deadline: float | None) -> float:
+    if deadline is None:
+        return _GIT_TIMEOUT_SECONDS
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        raise SkillProjectionError("skill projection inspection deadline exceeded")
+    return min(_GIT_TIMEOUT_SECONDS, remaining)
 
 
 def _reconcile_exclude_bytes(

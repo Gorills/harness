@@ -8,7 +8,7 @@ from types import FrameType
 
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import ensure_canonical_daemon
-from harness.doctor import DoctorReport, run_doctor_checks
+from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
@@ -32,17 +32,12 @@ from harness.runtime_paths import (
     ensure_private_state_directory,
 )
 from harness.search import DEFAULT_SEARCH_LIMIT
+from harness.skills import SkillError, default_skill_registry, load_skill_registry
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
-_DOCTOR_RUNTIME_SCOPE = (
-    "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
-    "Harness database."
-)
-_DOCTOR_DATABASE_SCOPE = (
-    "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
-    "implemented yet."
-)
+_DOCTOR_RUNTIME_SCOPE = "Doctor scope: SQLite runtime only."
+_DOCTOR_DATABASE_SCOPE = "Doctor scope: SQLite runtime + selected initialized database."
 _FAILURE_DETAIL_MAX_LENGTH = 1024
 
 
@@ -74,7 +69,23 @@ def _print_database_report(report: DoctorReport, database_path: Path) -> int:
     return 0 if status.foreign_keys and status.fts5_available else 1
 
 
-def _run_doctor(database_path: Path | None = None) -> int:
+def _run_doctor(
+    database_path: Path | None = None,
+    *,
+    runtime_only: bool = False,
+) -> int:
+    if database_path is None and not runtime_only:
+        system_report = run_system_doctor()
+        for check in system_report.checks:
+            print(f"{check.name}: {check.severity.value} ({check.detail})")
+        print(
+            "Doctor summary: "
+            f"{system_report.ok_count} OK, "
+            f"{system_report.warning_count} WARN, "
+            f"{system_report.failure_count} FAIL"
+        )
+        return 1 if system_report.failure_count else 0
+
     report = run_doctor_checks() if database_path is None else run_doctor_checks(database_path)
     result = 0
     if report.sqlite_error is not None:
@@ -166,6 +177,27 @@ def _search_failure(detail: str) -> int:
 
 def _dashboard_failure(detail: str) -> int:
     return _bounded_failure("Harness dashboard", detail)
+
+
+def _skills_failure(detail: str) -> int:
+    return _bounded_failure("Harness skills", detail)
+
+
+def _run_skills_list() -> int:
+    try:
+        registry = default_skill_registry()
+        definitions = load_skill_registry(registry)
+    except SkillError as exc:
+        return _skills_failure(str(exc))
+    print(f"Skill registry: {registry}")
+    print(f"Skills: {len(definitions)}")
+    for definition in definitions:
+        description = dict(definition.frontmatter_text_fields).get("description", "")
+        if description:
+            print(f"{definition.skill_id}	{description}")
+        else:
+            print(definition.skill_id)
+    return 0
 
 
 def _canonical_socket() -> Path:
@@ -269,8 +301,11 @@ def _run_install() -> int:
     print(f"Harness host: {result.host_profile}")
     print(f"MCP registration: {result.registration_change.value}")
     print(f"Daemon schema: {result.daemon_status.schema_version}")
+    print(f"Daemon runtime: {result.daemon_status.package_version}")
+    print(f"Daemon Python: {result.daemon_status.python_executable}")
     print(f"Registered projects: {result.daemon_status.project_count}")
     print(f"Registered workspaces: {result.daemon_status.workspace_count}")
+    print("Diagnostics: harness doctor")
     print("Harness install: OK")
     return 0
 
@@ -415,14 +450,20 @@ def harness_main() -> int:
     )
     doctor_parser = subparsers.add_parser(
         "doctor",
-        help="check implemented Harness runtime prerequisites",
-        description="Check implemented Harness prerequisites without changing durable state.",
+        help="run read-only Harness operational diagnostics",
+        description="Inspect Linux Harness runtime, integration, Project, index, skill, and dashboard state without durable mutation.",
     )
-    doctor_parser.add_argument(
+    doctor_scope = doctor_parser.add_mutually_exclusive_group()
+    doctor_scope.add_argument(
         "--database",
         type=Path,
         metavar="PATH",
-        help="inspect an existing initialized Harness database without creating or migrating it",
+        help="inspect only an existing initialized database plus SQLite runtime prerequisites",
+    )
+    doctor_scope.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="check only the ephemeral SQLite/FTS5 runtime without inspecting Harness state",
     )
     status_parser = subparsers.add_parser(
         "status",
@@ -503,6 +544,18 @@ def harness_main() -> int:
         help="override the canonical per-user Unix-domain socket path",
     )
 
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="inspect the canonical Harness skill registry",
+        description="Read canonical Harness skills without mutating projects or host state.",
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command")
+    skills_subparsers.add_parser(
+        "list",
+        help="list canonical Harness skills",
+        description="List canonical skill ids and portable descriptions in stable order.",
+    )
+
     dashboard_parser = subparsers.add_parser(
         "dashboard",
         help="show the daemon-owned local Projects dashboard",
@@ -529,13 +582,18 @@ def harness_main() -> int:
     if args.command == "uninstall":
         return _run_uninstall(purge=args.purge)
     if args.command == "doctor":
-        return _run_doctor(args.database)
+        return _run_doctor(args.database, runtime_only=args.runtime_only)
     if args.command == "status":
         return _run_status(args.path, args.socket)
     if args.command == "scan":
         return _run_scan(args.path, args.socket)
     if args.command == "search":
         return _run_search(args.query, args.path, args.socket, args.limit)
+    if args.command == "skills":
+        if args.skills_command == "list":
+            return _run_skills_list()
+        skills_parser.print_help()
+        return 0
     if args.command == "dashboard":
         return _run_dashboard(args.socket)
 

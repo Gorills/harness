@@ -160,3 +160,28 @@ def test_registration_rejects_conflicting_visibility_for_shared_common_dir(
         assert list_workspaces(connection) == (registered,)
     finally:
         connection.close()
+
+
+def test_list_workspaces_supports_stable_positive_limit(tmp_path: Path) -> None:
+    connection = _open_database(tmp_path / "harness.db")
+    try:
+        project = create_project(connection)
+        roots: list[Path] = []
+        for index in range(3):
+            root = tmp_path / f"repo-{index}"
+            root.mkdir()
+            _git(root, "init")
+            roots.append(root)
+        registered = tuple(
+            register_workspace(connection, project_id=project.project_id, path=root)
+            for root in roots
+        )
+
+        expected = tuple(sorted(registered, key=lambda item: item.workspace_id))[:2]
+        assert list_workspaces(connection, limit=2) == expected
+        assert list_workspaces(connection, project_id=project.project_id, limit=2) == expected
+        for invalid in (0, -1, True):
+            with pytest.raises(Exception, match="positive integer"):
+                list_workspaces(connection, limit=invalid)
+    finally:
+        connection.close()

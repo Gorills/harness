@@ -68,13 +68,27 @@ def ensure_private_state_directory(
 ) -> None:
     """Create/validate the canonical state directory as a real current-user-only directory."""
     _require_posix_runtime()
-    uid = _effective_uid(effective_uid)
     try:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        directory_stat = directory.lstat()
     except OSError as exc:
         raise RuntimePathError("Harness state directory could not be prepared") from exc
+    require_private_state_directory(directory, effective_uid=effective_uid)
 
+
+def require_private_state_directory(
+    directory: Path,
+    *,
+    effective_uid: int | None = None,
+) -> None:
+    """Validate an existing canonical state directory without creating or changing it."""
+    _require_posix_runtime()
+    uid = _effective_uid(effective_uid)
+    try:
+        directory_stat = directory.lstat()
+    except FileNotFoundError as exc:
+        raise RuntimePathError("Harness state directory does not exist") from exc
+    except OSError as exc:
+        raise RuntimePathError("Harness state directory could not be inspected") from exc
     if (
         not stat.S_ISDIR(directory_stat.st_mode)
         or directory_stat.st_uid != uid
