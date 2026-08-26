@@ -246,11 +246,17 @@ def get_task_checkpoint(
 def list_task_checkpoints(
     connection: sqlite3.Connection,
     task_id: str,
+    *,
+    limit: int | None = None,
 ) -> tuple[TaskCheckpointRecord, ...]:
-    """Load all checkpoints for one Task in monotonic Task-revision order."""
+    """Load checkpoints in monotonic Task-revision order, optionally bounded to the latest rows."""
     get_task(connection, task_id)
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+        raise TaskCheckpointError("Task checkpoint list limit must be a positive integer")
+    order = "ORDER BY task_revision" if limit is None else "ORDER BY task_revision DESC LIMIT ?"
+    parameters: tuple[object, ...] = (task_id,) if limit is None else (task_id, limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             id,
             task_id,
@@ -266,9 +272,9 @@ def list_task_checkpoints(
             current_dirty_path_count
         FROM task_checkpoints
         WHERE task_id = ?
-        ORDER BY task_revision
+        {order}
         """,
-        (task_id,),
+        parameters,
     )
     records: list[TaskCheckpointRecord] = []
     for row in rows:
@@ -276,6 +282,8 @@ def list_task_checkpoints(
         if not isinstance(checkpoint_id, str) or not checkpoint_id:
             raise TaskCheckpointError("task checkpoint row has invalid persisted identity")
         records.append(_checkpoint_from_row(row, _load_changed_paths(connection, checkpoint_id)))
+    if limit is not None:
+        records.reverse()
     return tuple(records)
 
 
@@ -344,20 +352,29 @@ def get_latest_task_checkpoint_status(
 def list_task_events(
     connection: sqlite3.Connection,
     task_id: str,
+    *,
+    limit: int | None = None,
 ) -> tuple[TaskEventRecord, ...]:
-    """Load the durable Task timeline in database event order."""
+    """Load durable Task events in database order, optionally bounded to the latest rows."""
     get_task(connection, task_id)
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+        raise TaskCheckpointError("Task event list limit must be a positive integer")
+    order = "ORDER BY id" if limit is None else "ORDER BY id DESC LIMIT ?"
+    parameters: tuple[object, ...] = (task_id,) if limit is None else (task_id, limit)
     rows = connection.execute(
-        """
+        f"""
         SELECT
             id, task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at
         FROM task_events
         WHERE task_id = ?
-        ORDER BY id
+        {order}
         """,
-        (task_id,),
+        parameters,
     )
-    return tuple(_event_from_row(row) for row in rows)
+    records = [_event_from_row(row) for row in rows]
+    if limit is not None:
+        records.reverse()
+    return tuple(records)
 
 
 def get_operator_feedback_for_revision(

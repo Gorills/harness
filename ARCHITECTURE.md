@@ -400,7 +400,7 @@ Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-The current bounded dashboard uses the Python stdlib loopback HTTP server plus HTML/CSS forms to minimize runtime surface. A later SSE/detail-page slice may introduce an async web stack only if that added complexity is justified by the realtime contract.
+The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth.
 
 Dashboard rules:
 
@@ -408,7 +408,9 @@ Dashboard rules:
 - same daemon/domain state as MCP;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (`Accept`, feedback, cancel) call the same domain services used by other interfaces;
-- SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport.
+- SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
+- dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
+- dashboard assets stay capability-scoped and same-origin so CSP can forbid inline script/style.
 
 ## 18. Security and privacy boundaries
 

@@ -15,6 +15,7 @@ from harness.storage import connect_database, initialize_database
 from harness.task_changes import TaskChangedFilesError
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_SUMMARY_BYTES,
+    TaskCheckpointError,
     TaskCheckpointMechanicalError,
     checkpoint_task,
     get_task_checkpoint,
@@ -142,6 +143,14 @@ def test_sequential_working_checkpoints_increment_revision_and_preserve_event_or
         events = list_task_events(connection, created.task.task_id)
         assert tuple(item.task_revision for item in events) == (2, 3)
         assert events[0].event_id < events[1].event_id
+        assert list_task_checkpoints(connection, created.task.task_id, limit=1) == (
+            second.checkpoint,
+        )
+        assert list_task_events(connection, created.task.task_id, limit=1) == (second.event,)
+        with pytest.raises(TaskCheckpointError, match="positive integer"):
+            list_task_events(connection, created.task.task_id, limit=0)
+        with pytest.raises(TaskCheckpointError, match="positive integer"):
+            list_task_checkpoints(connection, created.task.task_id, limit=True)
     finally:
         connection.close()
 
