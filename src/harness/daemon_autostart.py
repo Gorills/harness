@@ -11,7 +11,7 @@ from harness.ipc import IpcTransportError, request_status
 from harness.runtime_paths import RuntimePathError, RuntimePaths, require_private_runtime_directory
 
 _DAEMON_PROBE_TIMEOUT_SECONDS = 0.2
-_DAEMON_START_TIMEOUT_SECONDS = 3.0
+_DAEMON_START_TIMEOUT_SECONDS = 10.0
 _DAEMON_START_POLL_SECONDS = 0.05
 _DAEMON_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 

@@ -24,14 +24,17 @@ from harness.ipc import (
     PROTOCOL_VERSION,
     IpcProtocolError,
     IpcRemoteError,
+    RuntimeDiagnosticsResult,
     StatusResult,
     WorkspaceStatusResult,
     _receive_frame,
     _status_from_response,
+    request_runtime_diagnostics,
     request_status,
     request_workspace_status,
 )
 from harness.registry import create_project, register_workspace
+from harness.runtime_identity import current_runtime_identity
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -165,6 +168,29 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
         _stop_server(stop_event, executor, future)
 
     assert not socket_path.exists()
+
+
+def test_runtime_diagnostics_report_exact_daemon_identity_without_starting_dashboard(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        diagnostics = request_runtime_diagnostics(socket_path)
+        runtime_identity = current_runtime_identity()
+        assert diagnostics == RuntimeDiagnosticsResult(
+            schema_version=SCHEMA_VERSION,
+            package_version=runtime_identity.package_version,
+            python_executable=runtime_identity.python_executable,
+            code_sha256=runtime_identity.code_sha256,
+            project_count=0,
+            workspace_count=0,
+            dashboard_running=False,
+        )
+    finally:
+        _stop_server(stop_event, executor, future)
 
 
 def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state(

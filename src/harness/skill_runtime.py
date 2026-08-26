@@ -11,10 +11,12 @@ from harness.host_adapters import claude_code_skill_projection_surface
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
 from harness.skills import (
     SkillError,
+    SkillProjectionInspection,
     SkillProjectionResult,
     SkillProjectionSurface,
     apply_skill_projection,
     default_skill_registry,
+    inspect_skill_projection,
     load_skill_registry,
     plan_skill_projection,
     resolve_workspace_skills,
@@ -32,6 +34,15 @@ class WorkspaceSkillReconcileResult:
     workspace_id: str
     selected_skill_ids: tuple[str, ...]
     projection: SkillProjectionResult
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceSkillInspectionResult:
+    """Read-only expected/current generated-skill state for one Workspace."""
+
+    workspace_id: str
+    selected_skill_ids: tuple[str, ...]
+    projection: SkillProjectionInspection
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +81,41 @@ def reconcile_workspace_skills(
         raise SkillRuntimeError("Workspace skill integration could not be reconciled") from exc
     _validate_workspace_identity(workspace)
     return WorkspaceSkillReconcileResult(
+        workspace_id=workspace.workspace_id,
+        selected_skill_ids=tuple(item.definition.skill_id for item in resolved),
+        projection=projection,
+    )
+
+
+def inspect_workspace_skills(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    profiles: Sequence[str],
+    *,
+    registry_root: Path | None = None,
+    deadline: float | None = None,
+) -> WorkspaceSkillInspectionResult:
+    """Inspect relevant generated skills for one live registered Workspace without mutation."""
+    workspace = get_workspace(connection, workspace_id)
+    _validate_workspace_identity(workspace, deadline=deadline)
+    surfaces = _surfaces_for_profiles(profiles)
+    root = default_skill_registry() if registry_root is None else registry_root
+    try:
+        definitions = load_skill_registry(root)
+        resolved = resolve_workspace_skills(
+            connection,
+            workspace.workspace_id,
+            definitions,
+            deadline=deadline,
+        )
+        projection = inspect_skill_projection(
+            plan_skill_projection(workspace.workspace_root, resolved, surfaces),
+            deadline=deadline,
+        )
+    except SkillError as exc:
+        raise SkillRuntimeError("Workspace skill integration could not be inspected") from exc
+    _validate_workspace_identity(workspace, deadline=deadline)
+    return WorkspaceSkillInspectionResult(
         workspace_id=workspace.workspace_id,
         selected_skill_ids=tuple(item.definition.skill_id for item in resolved),
         projection=projection,
@@ -122,9 +168,13 @@ def _surfaces_for_profiles(profiles: Sequence[str]) -> tuple[SkillProjectionSurf
     return tuple(surfaces)
 
 
-def _validate_workspace_identity(workspace: WorkspaceRecord) -> None:
+def _validate_workspace_identity(
+    workspace: WorkspaceRecord, *, deadline: float | None = None
+) -> None:
     try:
-        identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
+        identity = inspect_git_workspace_runtime_identity(
+            workspace.workspace_root, deadline=deadline
+        )
     except GitWorkspaceError:
         raise
     if (

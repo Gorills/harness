@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
+from time import monotonic
 
 import pytest
 
@@ -27,6 +28,7 @@ from harness.skills import (
     apply_skill_projection,
     default_skill_registry,
     detect_workspace_stack,
+    inspect_skill_projection,
     load_skill_registry,
     plan_skill_projection,
     resolve_skills,
@@ -242,6 +244,18 @@ def test_manifest_detection_fails_closed_when_index_is_stale(tmp_path: Path) -> 
         connection.close()
 
 
+def test_workspace_stack_resolution_honors_expired_deadline(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"package.json": json.dumps({"dependencies": {"next": "1"}})},
+    )
+    try:
+        with pytest.raises(SkillResolutionError, match="deadline exceeded"):
+            detect_workspace_stack(connection, workspace_id, deadline=monotonic() - 1.0)
+    finally:
+        connection.close()
+
+
 def test_resolver_budget_is_bounded_deterministic_and_explicit_wins(tmp_path: Path) -> None:
     registry = tmp_path / "registry"
     for skill_id in ("alpha", "beta", "gamma"):
@@ -366,6 +380,20 @@ def test_projection_reconciles_stale_compatibility_roots_and_refuses_user_duplic
         apply_skill_projection(plan_skill_projection(root, resolved, (claude, cursor)))
     assert (user_duplicate / "SKILL.md").read_text(encoding="utf-8") == "# user duplicate\n"
     assert not (root / ".claude" / "skills" / "shared").exists()
+
+
+def test_projection_inspection_honors_expired_deadline_before_git_or_mutation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root, {"README.md": "repo\n"})
+    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    plan = plan_skill_projection(root, (), (surface,))
+
+    with pytest.raises(SkillProjectionError, match="inspection deadline exceeded"):
+        inspect_skill_projection(plan, deadline=0.0)
+
+    assert not (root / ".claude").exists()
 
 
 def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> None:

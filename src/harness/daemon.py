@@ -32,6 +32,7 @@ from harness.ipc import (
     IpcProtocolError,
     ProjectContextResult,
     ProjectSearchResult,
+    RuntimeDiagnosticsResult,
     SkillCleanupResult,
     StatusResult,
     TaskCheckpointRequestData,
@@ -53,6 +54,7 @@ from harness.ipc import (
     send_error_response,
     send_project_context_response,
     send_project_search_response,
+    send_runtime_diagnostics_response,
     send_shutdown_response,
     send_skill_cleanup_response,
     send_status_response,
@@ -81,6 +83,7 @@ from harness.retrieval import (
     read_project_context,
     search_project,
 )
+from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
 from harness.skill_runtime import (
     SkillRuntimeError,
@@ -129,6 +132,14 @@ from harness.workspace_resolution import (
     WorkspaceResolutionError,
     WorkspaceResolver,
 )
+
+try:
+    _DAEMON_RUNTIME_IDENTITY: RuntimeIdentity | None = current_runtime_identity()
+    _DAEMON_RUNTIME_IDENTITY_ERROR: RuntimeIdentityError | None = None
+except RuntimeIdentityError as exc:
+    _DAEMON_RUNTIME_IDENTITY = None
+    _DAEMON_RUNTIME_IDENTITY_ERROR = exc
+
 
 if TYPE_CHECKING:
     from harness.dashboard import DashboardServerManager
@@ -181,6 +192,34 @@ def read_daemon_status(connection: sqlite3.Connection) -> StatusResult:
         schema_version=SCHEMA_VERSION,
         project_count=project_count,
         workspace_count=workspace_count,
+    )
+
+
+def _require_daemon_runtime_identity() -> RuntimeIdentity:
+    identity = _DAEMON_RUNTIME_IDENTITY
+    if identity is not None:
+        return identity
+    raise DaemonError(
+        "Harness runtime identity could not be established"
+    ) from _DAEMON_RUNTIME_IDENTITY_ERROR
+
+
+def read_runtime_diagnostics(
+    connection: sqlite3.Connection,
+    *,
+    dashboard_running: bool,
+) -> RuntimeDiagnosticsResult:
+    """Read bounded runtime identity and subsystem state without durable mutation."""
+    status = read_daemon_status(connection)
+    identity = _require_daemon_runtime_identity()
+    return RuntimeDiagnosticsResult(
+        schema_version=status.schema_version,
+        package_version=identity.package_version,
+        python_executable=identity.python_executable,
+        code_sha256=identity.code_sha256,
+        project_count=status.project_count,
+        workspace_count=status.workspace_count,
+        dashboard_running=dashboard_running,
     )
 
 
@@ -663,6 +702,7 @@ def serve_daemon(
     from harness.dashboard import DashboardError, DashboardServerManager
 
     _require_posix_transport()
+    _require_daemon_runtime_identity()
     _prepare_socket_parent(socket_path.parent)
     socket_lock_fd = _acquire_daemon_lock(socket_path)
 
@@ -784,6 +824,13 @@ def _serve_client(
 
     if request.method == "status":
         _serve_global_status(client, database, request.request_id)
+        return
+    if request.method == "runtime_diagnostics":
+        send_runtime_diagnostics_response(
+            client,
+            request.request_id,
+            read_runtime_diagnostics(database, dashboard_running=dashboard.is_running()),
+        )
         return
     if request.method == "dashboard_url":
         _serve_dashboard_url(client, request.request_id, dashboard)

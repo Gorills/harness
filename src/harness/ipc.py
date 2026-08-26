@@ -103,6 +103,19 @@ class StatusResult:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeDiagnosticsResult:
+    """Read-only daemon runtime identity and subsystem diagnostics."""
+
+    schema_version: int
+    package_version: str
+    python_executable: str
+    code_sha256: str
+    project_count: int
+    workspace_count: int
+    dashboard_running: bool
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardUrlResult:
     """Capability-bearing loopback URL for the daemon-owned local dashboard."""
 
@@ -343,6 +356,21 @@ def request_status(
         timeout=timeout,
     )
     return _status_from_response(response, expected_request_id=request_id)
+
+
+def request_runtime_diagnostics(
+    socket_path: Path,
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+) -> RuntimeDiagnosticsResult:
+    """Request read-only daemon runtime identity and subsystem diagnostics."""
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {"version": PROTOCOL_VERSION, "request_id": request_id, "method": "runtime_diagnostics"},
+        timeout=timeout,
+    )
+    return _runtime_diagnostics_from_response(response, expected_request_id=request_id)
 
 
 def request_dashboard_url(
@@ -697,6 +725,11 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             raise IpcProtocolError("status request fields do not match the IPC schema")
         return IpcRequest(request_id=request_id, method=method)
 
+    if method == "runtime_diagnostics":
+        if set(payload) != {"version", "request_id", "method"}:
+            raise IpcProtocolError("runtime diagnostics request fields do not match the IPC schema")
+        return IpcRequest(request_id=request_id, method=method)
+
     if method == "dashboard_url":
         if set(payload) != {"version", "request_id", "method"}:
             raise IpcProtocolError("dashboard URL request fields do not match the IPC schema")
@@ -833,6 +866,30 @@ def send_status_response(peer: socket.socket, request_id: str, status: StatusRes
                     "schema_version": status.schema_version,
                     "project_count": status.project_count,
                     "workspace_count": status.workspace_count,
+                },
+            }
+        )
+    )
+
+
+def send_runtime_diagnostics_response(
+    peer: socket.socket, request_id: str, diagnostics: RuntimeDiagnosticsResult
+) -> None:
+    """Send bounded read-only daemon runtime diagnostics."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": diagnostics.schema_version,
+                    "package_version": diagnostics.package_version,
+                    "python_executable": diagnostics.python_executable,
+                    "code_sha256": diagnostics.code_sha256,
+                    "project_count": diagnostics.project_count,
+                    "workspace_count": diagnostics.workspace_count,
+                    "dashboard_running": diagnostics.dashboard_running,
                 },
             }
         )
@@ -1814,6 +1871,47 @@ def _status_from_response(response: dict[str, Any], *, expected_request_id: str)
         schema_version=result["schema_version"],
         project_count=result["project_count"],
         workspace_count=result["workspace_count"],
+    )
+
+
+def _runtime_diagnostics_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> RuntimeDiagnosticsResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected = {
+        "schema_version",
+        "package_version",
+        "python_executable",
+        "code_sha256",
+        "project_count",
+        "workspace_count",
+        "dashboard_running",
+    }
+    if set(result) != expected:
+        raise IpcProtocolError("daemon runtime diagnostics result does not match the IPC schema")
+    counts = (result["schema_version"], result["project_count"], result["workspace_count"])
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        raise IpcProtocolError("daemon runtime diagnostics result has invalid counts")
+    package_version = _bounded_response_string(result["package_version"], "package_version", 128)
+    python_executable = _bounded_response_string(
+        result["python_executable"], "python_executable", 4096
+    )
+    code_sha256 = _bounded_response_string(result["code_sha256"], "code_sha256", 64)
+    if len(code_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in code_sha256
+    ):
+        raise IpcProtocolError("daemon runtime diagnostics has invalid code fingerprint")
+    dashboard_running = result["dashboard_running"]
+    if not isinstance(dashboard_running, bool):
+        raise IpcProtocolError("daemon runtime diagnostics has invalid dashboard state")
+    return RuntimeDiagnosticsResult(
+        schema_version=result["schema_version"],
+        package_version=package_version,
+        python_executable=python_executable,
+        code_sha256=code_sha256,
+        project_count=result["project_count"],
+        workspace_count=result["workspace_count"],
+        dashboard_running=dashboard_running,
     )
 
 

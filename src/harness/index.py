@@ -64,6 +64,16 @@ class IndexedFileRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexFreshnessInspection:
+    """Read-only comparison of persisted and live deterministic Workspace inventory."""
+
+    workspace_id: str
+    persisted_file_count: int
+    live_file_count: int
+    is_fresh: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ScanResult:
     """Compact reconciliation result for one deterministic Workspace scan."""
 
@@ -72,6 +82,32 @@ class ScanResult:
     added: int
     updated: int
     removed: int
+
+
+def inspect_workspace_index_freshness(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    deadline: float | None = None,
+) -> IndexFreshnessInspection:
+    """Compare persisted and live deterministic inventory without mutating derived state."""
+    _require_scan_deadline(deadline)
+    workspace = get_workspace(connection, workspace_id)
+    _require_registered_layout(workspace, deadline=deadline)
+    persisted = list_indexed_files(connection, workspace_id)
+    live_by_path = _build_snapshot(workspace, deadline=deadline)
+    live = tuple(live_by_path[path] for path in sorted(live_by_path))
+    _require_registered_layout(workspace, deadline=deadline)
+    if get_workspace(connection, workspace_id) != workspace:
+        raise IndexingError("Workspace registry identity changed during index inspection")
+    if list_indexed_files(connection, workspace_id) != persisted:
+        raise IndexingError("Workspace Structural Index changed during freshness inspection")
+    return IndexFreshnessInspection(
+        workspace_id=workspace_id,
+        persisted_file_count=len(persisted),
+        live_file_count=len(live),
+        is_fresh=live == persisted,
+    )
 
 
 def scan_workspace(
@@ -83,11 +119,11 @@ def scan_workspace(
     """Reconcile the rebuildable file inventory for one registered Workspace."""
     _require_scan_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
-    _require_registered_layout(workspace)
+    _require_registered_layout(workspace, deadline=deadline)
     eligible_knowledge_ids = snapshot_fresh_anchored_knowledge_ids(connection, workspace_id)
     snapshot = _build_snapshot(workspace, deadline=deadline)
     _require_scan_deadline(deadline)
-    _require_registered_layout(workspace)
+    _require_registered_layout(workspace, deadline=deadline)
 
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -195,8 +231,10 @@ def get_indexed_file(
     return None if row is None else _record_from_row(row)
 
 
-def _require_registered_layout(workspace: WorkspaceRecord) -> None:
-    layout = inspect_git_workspace(workspace.workspace_root)
+def _require_registered_layout(
+    workspace: WorkspaceRecord, *, deadline: float | None = None
+) -> None:
+    layout = inspect_git_workspace(workspace.workspace_root, deadline=deadline)
     if (
         layout.workspace_root != workspace.workspace_root
         or layout.git_common_dir != workspace.git_common_dir

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import harness.entrypoints as entrypoints
-from harness.doctor import DoctorReport
+from harness.doctor import DoctorCheck, DoctorReport, DoctorSeverity, SystemDoctorReport
 from harness.entrypoints import harness_main, harnessd_main
 from harness.ipc import DashboardUrlResult, IpcTransportError, WorkspaceStatusResult
 from harness.runtime_paths import RuntimePaths
@@ -33,15 +33,14 @@ def test_harness_doctor_reports_runtime(
     def successful_checks() -> DoctorReport:
         return DoctorReport(sqlite_version="3.50.4", fts5_available=True)
 
-    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor", "--runtime-only"])
     monkeypatch.setattr(entrypoints, "run_doctor_checks", successful_checks)
 
     assert harness_main() == 0
     assert capsys.readouterr().out.splitlines() == [
         "SQLite runtime: OK (version 3.50.4)",
         "FTS5: OK",
-        "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
-        "Harness database.",
+        "Doctor scope: SQLite runtime only.",
     ]
 
 
@@ -52,7 +51,7 @@ def test_harness_doctor_fails_when_fts5_is_unavailable(
     def missing_fts5() -> DoctorReport:
         return DoctorReport(sqlite_version="3.50.4", fts5_available=False)
 
-    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor", "--runtime-only"])
     monkeypatch.setattr(entrypoints, "run_doctor_checks", missing_fts5)
 
     assert harness_main() == 1
@@ -72,15 +71,37 @@ def test_harness_doctor_reports_sqlite_errors_without_traceback(
             sqlite_error="probe failed",
         )
 
-    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor", "--runtime-only"])
     monkeypatch.setattr(entrypoints, "run_doctor_checks", failed_checks)
 
     assert harness_main() == 1
     assert capsys.readouterr().out.splitlines() == [
         "SQLite runtime: FAIL (probe failed)",
         "FTS5: UNKNOWN",
-        "Doctor scope: SQLite runtime only; pass --database PATH to inspect an initialized "
-        "Harness database.",
+        "Doctor scope: SQLite runtime only.",
+    ]
+
+
+def test_harness_doctor_reports_full_system_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    report = SystemDoctorReport(
+        checks=(
+            DoctorCheck("Platform", DoctorSeverity.OK, "Linux/POSIX runtime supported"),
+            DoctorCheck("Daemon", DoctorSeverity.WARN, "not running"),
+            DoctorCheck("MCP registration", DoctorSeverity.FAIL, "foreign registration"),
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    monkeypatch.setattr(entrypoints, "run_system_doctor", lambda: report)
+
+    assert harness_main() == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "Platform: OK (Linux/POSIX runtime supported)",
+        "Daemon: WARN (not running)",
+        "MCP registration: FAIL (foreign registration)",
+        "Doctor summary: 1 OK, 1 WARN, 1 FAIL",
     ]
 
 
@@ -121,8 +142,7 @@ def test_harness_doctor_inspects_selected_database(
         "Database journal mode: wal",
         "Database foreign keys: OK",
         "Database FTS5: OK",
-        "Doctor scope: SQLite runtime + selected initialized database; other checks are not "
-        "implemented yet.",
+        "Doctor scope: SQLite runtime + selected initialized database.",
     ]
 
 
@@ -544,3 +564,29 @@ def test_harnessd_serve_uses_canonical_paths_and_prepares_default_state(
     assert harnessd_main() == 0
     assert prepared == [defaults.database.parent]
     assert seen == [(defaults.database, defaults.socket)]
+
+
+def test_harness_skills_list_reads_canonical_registry_without_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    registry = tmp_path / "skills"
+    skill = registry / "python-helper"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\ndescription: Use Python conventions.\n---\n\n# Python helper\n",
+        encoding="utf-8",
+    )
+    (skill / "harness.yaml").write_text("id: python-helper\n", encoding="utf-8")
+    before = (skill / "SKILL.md").read_bytes()
+    monkeypatch.setattr(entrypoints, "default_skill_registry", lambda: registry)
+    monkeypatch.setattr(sys, "argv", ["harness", "skills", "list"])
+
+    assert harness_main() == 0
+    assert capsys.readouterr().out.splitlines() == [
+        f"Skill registry: {registry}",
+        "Skills: 1",
+        "python-helper\tUse Python conventions.",
+    ]
+    assert (skill / "SKILL.md").read_bytes() == before

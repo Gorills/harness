@@ -1406,6 +1406,15 @@ class DashboardServerManager:
         self._url: str | None = None
         self._failure: BaseException | None = None
 
+    def is_running(self) -> bool:
+        """Return whether the daemon-owned dashboard listener is currently healthy and running."""
+        return (
+            self._server is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+            and self._failure is None
+        )
+
     def get_url(self) -> str:
         """Start the dashboard on first use and return its capability-bearing loopback URL."""
         if self._server is not None and self._thread is not None and self._thread.is_alive():

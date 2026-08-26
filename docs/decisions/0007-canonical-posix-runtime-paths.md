@@ -60,7 +60,7 @@ The final Harness socket directory must be a real directory (not a symlink), own
 
 `harnessd serve` uses both canonical defaults automatically. `--database PATH` and `--socket PATH` remain optional overrides and may be supplied independently. Isolated concurrent daemon instances require distinct selected Harness databases; changing only the socket does not create a second writer for one store.
 
-`harness doctor` keeps its current contract: with no `--database`, it checks only the SQLite runtime/FTS5 and does not create or inspect durable state implicitly.
+ADR-0023 supersedes the original no-argument doctor behavior: bare `harness doctor` now performs read-only canonical operational diagnostics without creating or reconciling state. The original SQLite/FTS5-only behavior remains available explicitly as `harness doctor --runtime-only`; `--database PATH` remains selected-database read-only inspection.
 
 Path selection itself performs no daemon autostart, registration, scan, MCP setup, or host configuration.
 

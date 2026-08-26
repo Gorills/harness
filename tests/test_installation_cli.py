@@ -132,6 +132,18 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "Relevant skills: 1" in scan_output
     assert (repo / ".claude" / "skills" / "python-helper" / "SKILL.md").exists()
 
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "Daemon: OK" in doctor_output
+    assert "MCP registration: OK" in doctor_output
+    assert "Projects: OK" in doctor_output
+    assert "Index state: OK" in doctor_output
+    assert "Generated skills: OK" in doctor_output
+    assert "Dashboard: OK" in doctor_output
+    assert "Stale integrations: OK" in doctor_output
+    assert "0 FAIL" in doctor_output
+
     paths = default_runtime_paths()
     assert paths.database.exists()
     assert paths.socket.exists()

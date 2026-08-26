@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
@@ -10,6 +12,8 @@ _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
 _WAL_LOCK_RETRY_DELAY_SECONDS = 0.02
+_SQLITE_HEADER_MIN_BYTES = 20
+_SQLITE_HEADER_PREFIX = b"SQLite format 3\x00"
 
 
 class DatabaseError(RuntimeError):
@@ -70,14 +74,91 @@ def connect_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def connect_database_read_only(path: Path) -> sqlite3.Connection:
+    """Open an initialized Harness database read-only without creating quiescent WAL sidecars."""
+    _require_read_only_database_file(path)
+    query = "mode=ro" if _live_wal_sidecars_are_safe(path) else "mode=ro&immutable=1"
+    database = f"{path.absolute().as_uri()}?{query}"
+    connection = sqlite3.connect(database, uri=True, autocommit=True)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        foreign_keys_row = connection.execute("PRAGMA foreign_keys").fetchone()
+        if foreign_keys_row != (1,):
+            raise DatabaseError("SQLite foreign key enforcement could not be enabled")
+        current_version = _read_schema_version(connection)
+        _ensure_supported_schema(current_version)
+        if current_version != SCHEMA_VERSION:
+            raise InvalidSchemaStateError(
+                f"database schema is {current_version}; initialize it before opening"
+            )
+        _require_wal_file_header(path)
+    except Exception:
+        connection.close()
+        raise
+    return connection
+
+
 def inspect_database(path: Path) -> DatabaseStatus:
     """Inspect an initialized Harness database without creating or migrating it."""
-    connection = connect_database(path)
+    connection = connect_database_read_only(path)
     try:
-        journal_mode = _journal_mode_from_row(connection.execute("PRAGMA journal_mode").fetchone())
-        return _status(connection, journal_mode=journal_mode)
+        return _status(connection, journal_mode="wal")
     finally:
         connection.close()
+
+
+def _require_wal_file_header(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(_SQLITE_HEADER_MIN_BYTES)
+    except OSError as exc:
+        raise DatabaseError("SQLite database header could not be read") from exc
+    if (
+        len(header) < _SQLITE_HEADER_MIN_BYTES
+        or not header.startswith(_SQLITE_HEADER_PREFIX)
+        or header[18] != 2
+        or header[19] != 2
+    ):
+        raise WalModeUnavailableError("SQLite database is not persisted in WAL mode")
+
+
+def _require_read_only_database_file(path: Path) -> None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise sqlite3.OperationalError("unable to open database file") from exc
+    except OSError as exc:
+        raise DatabaseError("SQLite database could not be inspected") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise DatabaseError("SQLite database must be a real regular file")
+
+
+def _live_wal_sidecars_are_safe(path: Path) -> bool:
+    wal = path.with_name(f"{path.name}-wal")
+    try:
+        wal_metadata = wal.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise DatabaseError("SQLite WAL sidecar could not be inspected") from exc
+    if stat.S_ISLNK(wal_metadata.st_mode) or not stat.S_ISREG(wal_metadata.st_mode):
+        raise DatabaseError("SQLite WAL sidecar must be a real regular file")
+
+    shm = path.with_name(f"{path.name}-shm")
+    try:
+        shm_metadata = shm.lstat()
+    except FileNotFoundError as exc:
+        raise DatabaseError("SQLite live WAL inspection requires an existing SHM sidecar") from exc
+    except OSError as exc:
+        raise DatabaseError("SQLite SHM sidecar could not be inspected") from exc
+    if (
+        stat.S_ISLNK(shm_metadata.st_mode)
+        or not stat.S_ISREG(shm_metadata.st_mode)
+        or shm_metadata.st_uid != os.geteuid()
+        or shm_metadata.st_nlink != 1
+    ):
+        raise DatabaseError("SQLite SHM sidecar is unsafe for read-only WAL inspection")
+    return True
 
 
 def fts5_available(connection: sqlite3.Connection) -> bool:
