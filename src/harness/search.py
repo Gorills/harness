@@ -4,6 +4,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
 
 from harness.index import IndexedFileKind, list_indexed_files
 from harness.registry import get_workspace
@@ -68,7 +69,7 @@ def search_indexed_paths(
     ranked: list[tuple[int, str, IndexedPathSearchResult]] = []
 
     for record in list_indexed_files(connection, workspace_id):
-        is_document = _is_document_path(record.relative_path)
+        is_document = is_document_path(record.relative_path)
         if scope is IndexedPathSearchScope.DOCS and not is_document:
             continue
         if scope is IndexedPathSearchScope.CODE and is_document:
@@ -137,6 +138,14 @@ def _identifier_tokens(value: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _is_document_path(path: str) -> bool:
+def is_document_path(path: str) -> bool:
+    """Return whether an indexed path belongs to the repository documentation corpus."""
     lowered = path.casefold()
-    return lowered.endswith((".md", ".mdx", ".rst", ".txt")) or "/docs/" in f"/{lowered}"
+    name = lowered.rsplit("/", 1)[-1]
+    suffix = Path(name).suffix
+    return (
+        lowered.endswith((".md", ".mdx", ".rst", ".txt", ".adoc"))
+        or lowered.startswith("docs/")
+        or "/docs/" in lowered
+        or (not suffix and name.startswith(("readme", "adr")))
+    )

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -207,6 +207,19 @@ def _apply_migrations(connection: sqlite3.Connection) -> None:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")
             raise
+
+
+def _execute_sql_script_in_transaction(connection: sqlite3.Connection, script: str) -> None:
+    """Execute complete SQL statements without ``executescript`` transaction side effects."""
+    pending: list[str] = []
+    for line in script.splitlines():
+        pending.append(line)
+        candidate = "\n".join(pending).strip()
+        if candidate and sqlite3.complete_statement(candidate):
+            connection.execute(candidate)
+            pending.clear()
+    if "".join(pending).strip():
+        raise InvalidSchemaStateError("migration SQL script ended with an incomplete statement")
 
 
 def _apply_migration(connection: sqlite3.Connection, target_version: int) -> None:
@@ -627,6 +640,276 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             ON task_events(task_id, task_revision)
             WHERE event_type IN ('accepted', 'operator_feedback', 'cancelled')
             """
+        )
+        return
+    if target_version == 11:
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE knowledge_search USING fts5(
+                knowledge_id UNINDEXED,
+                project_id UNINDEXED,
+                title,
+                body,
+                tokenize = 'unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE task_search USING fts5(
+                fragment_ref UNINDEXED,
+                task_id UNINDEXED,
+                workspace_id UNINDEXED,
+                project_id UNINDEXED,
+                title,
+                body,
+                tokenize = 'unicode61'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO knowledge_search(knowledge_id, project_id, title, body)
+            SELECT id, project_id, title, body
+            FROM knowledge_cards
+            ORDER BY id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(
+                fragment_ref, task_id, workspace_id, project_id, title, body
+            )
+            SELECT
+                'task:' || tasks.id,
+                tasks.id,
+                tasks.workspace_id,
+                workspaces.project_id,
+                tasks.title,
+                ''
+            FROM tasks
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY tasks.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(
+                fragment_ref, task_id, workspace_id, project_id, title, body
+            )
+            SELECT
+                'checkpoint:' || task_checkpoints.id,
+                tasks.id,
+                tasks.workspace_id,
+                workspaces.project_id,
+                '',
+                task_checkpoints.summary || ' ' || COALESCE(task_checkpoints.next_step, '')
+            FROM task_checkpoints
+            JOIN tasks ON tasks.id = task_checkpoints.task_id
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY task_checkpoints.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(
+                fragment_ref, task_id, workspace_id, project_id, title, body
+            )
+            SELECT
+                'event:' || task_events.id,
+                tasks.id,
+                tasks.workspace_id,
+                workspaces.project_id,
+                '',
+                task_events.operator_feedback
+            FROM task_events
+            JOIN tasks ON tasks.id = task_events.task_id
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            WHERE task_events.event_type = 'operator_feedback'
+            ORDER BY task_events.id
+            """
+        )
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TRIGGER knowledge_search_insert
+            AFTER INSERT ON knowledge_cards
+            BEGIN
+                INSERT INTO knowledge_search(knowledge_id, project_id, title, body)
+                VALUES (NEW.id, NEW.project_id, NEW.title, NEW.body);
+            END;
+
+            CREATE TRIGGER knowledge_search_delete
+            AFTER DELETE ON knowledge_cards
+            BEGIN
+                DELETE FROM knowledge_search WHERE knowledge_id = OLD.id;
+            END;
+
+            CREATE TRIGGER knowledge_search_update
+            AFTER UPDATE OF project_id, title, body ON knowledge_cards
+            BEGIN
+                DELETE FROM knowledge_search WHERE knowledge_id = OLD.id;
+                INSERT INTO knowledge_search(knowledge_id, project_id, title, body)
+                VALUES (NEW.id, NEW.project_id, NEW.title, NEW.body);
+            END;
+
+            CREATE TRIGGER task_search_task_insert
+            AFTER INSERT ON tasks
+            BEGIN
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'task:' || NEW.id,
+                    NEW.id,
+                    NEW.workspace_id,
+                    workspaces.project_id,
+                    NEW.title,
+                    ''
+                FROM workspaces
+                WHERE workspaces.id = NEW.workspace_id;
+            END;
+
+            CREATE TRIGGER task_search_task_delete
+            AFTER DELETE ON tasks
+            BEGIN
+                DELETE FROM task_search WHERE task_id = OLD.id;
+            END;
+
+            CREATE TRIGGER task_search_task_update
+            AFTER UPDATE OF workspace_id, title ON tasks
+            BEGIN
+                DELETE FROM task_search WHERE task_id = OLD.id;
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'task:' || NEW.id,
+                    NEW.id,
+                    NEW.workspace_id,
+                    workspaces.project_id,
+                    NEW.title,
+                    ''
+                FROM workspaces
+                WHERE workspaces.id = NEW.workspace_id;
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'checkpoint:' || task_checkpoints.id,
+                    NEW.id,
+                    NEW.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    task_checkpoints.summary || ' ' || COALESCE(task_checkpoints.next_step, '')
+                FROM task_checkpoints
+                JOIN workspaces ON workspaces.id = NEW.workspace_id
+                WHERE task_checkpoints.task_id = NEW.id;
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'event:' || task_events.id,
+                    NEW.id,
+                    NEW.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    task_events.operator_feedback
+                FROM task_events
+                JOIN workspaces ON workspaces.id = NEW.workspace_id
+                WHERE task_events.task_id = NEW.id
+                    AND task_events.event_type = 'operator_feedback';
+            END;
+
+            CREATE TRIGGER task_search_checkpoint_insert
+            AFTER INSERT ON task_checkpoints
+            BEGIN
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'checkpoint:' || NEW.id,
+                    tasks.id,
+                    tasks.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    NEW.summary || ' ' || COALESCE(NEW.next_step, '')
+                FROM tasks
+                JOIN workspaces ON workspaces.id = tasks.workspace_id
+                WHERE tasks.id = NEW.task_id;
+            END;
+
+            CREATE TRIGGER task_search_checkpoint_delete
+            AFTER DELETE ON task_checkpoints
+            BEGIN
+                DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
+            END;
+
+            CREATE TRIGGER task_search_checkpoint_update
+            AFTER UPDATE OF summary, next_step, task_id ON task_checkpoints
+            BEGIN
+                DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'checkpoint:' || NEW.id,
+                    tasks.id,
+                    tasks.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    NEW.summary || ' ' || COALESCE(NEW.next_step, '')
+                FROM tasks
+                JOIN workspaces ON workspaces.id = tasks.workspace_id
+                WHERE tasks.id = NEW.task_id;
+            END;
+
+            CREATE TRIGGER task_search_event_insert
+            AFTER INSERT ON task_events
+            WHEN NEW.event_type = 'operator_feedback'
+            BEGIN
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'event:' || NEW.id,
+                    tasks.id,
+                    tasks.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    NEW.operator_feedback
+                FROM tasks
+                JOIN workspaces ON workspaces.id = tasks.workspace_id
+                WHERE tasks.id = NEW.task_id;
+            END;
+
+            CREATE TRIGGER task_search_event_delete
+            AFTER DELETE ON task_events
+            WHEN OLD.event_type = 'operator_feedback'
+            BEGIN
+                DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
+            END;
+
+            CREATE TRIGGER task_search_event_update
+            AFTER UPDATE OF event_type, operator_feedback, task_id ON task_events
+            BEGIN
+                DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
+                INSERT INTO task_search(
+                    fragment_ref, task_id, workspace_id, project_id, title, body
+                )
+                SELECT
+                    'event:' || NEW.id,
+                    tasks.id,
+                    tasks.workspace_id,
+                    workspaces.project_id,
+                    '',
+                    NEW.operator_feedback
+                FROM tasks
+                JOIN workspaces ON workspaces.id = tasks.workspace_id
+                WHERE tasks.id = NEW.task_id
+                    AND NEW.event_type = 'operator_feedback';
+            END;
+            """,
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

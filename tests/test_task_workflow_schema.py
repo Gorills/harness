@@ -159,6 +159,12 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
         connection.execute("DROP TABLE task_stack_hints")
         connection.execute("DROP TABLE knowledge_anchors")
         connection.execute("DROP TABLE knowledge_cards")
+        for (trigger_name,) in connection.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
+        ).fetchall():
+            connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        connection.execute("DROP TABLE task_search")
+        connection.execute("DROP TABLE knowledge_search")
         connection.execute("DELETE FROM schema_migrations WHERE version >= 7")
         connection.commit()
     finally:
@@ -166,7 +172,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 10
+    assert status.schema_version == SCHEMA_VERSION == 11
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(
