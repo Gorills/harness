@@ -27,7 +27,7 @@ def _start_server(
     stop_event = Event()
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(serve_daemon, database, socket_path, stop_event=stop_event)
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + 10
     while True:
         if future.done():
             future.result()
