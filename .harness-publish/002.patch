@@ -1,0 +1,191 @@
++        SELECT knowledge_id, bm25(knowledge_search, 0.0, 0.0, 5.0, 1.0) AS score
++        FROM knowledge_search
++        WHERE knowledge_search MATCH ? AND project_id = ?
++        ORDER BY score, knowledge_id
++        LIMIT ?
++        """,
++        (match_query, project_id, candidate_limit),
++    ).fetchall()
++    ranked: list[tuple[int, float, str, ProjectSearchHit]] = []
++    seen: set[str] = set()
++    for knowledge_id, raw_score in rows:
++        if not isinstance(knowledge_id, str) or not isinstance(raw_score, (int, float)):
++            raise ProjectRetrievalError("Knowledge search index returned invalid persisted types")
++        if knowledge_id in seen:
++            continue
++        seen.add(knowledge_id)
++        card = get_knowledge_card(connection, knowledge_id)
++        if card.project_id != project_id:
++            raise ProjectRetrievalError("Knowledge search index crossed Project ownership")
++        stale = card.freshness is KnowledgeFreshness.NEEDS_REVALIDATION
++        location = card.anchors[0].relative_path if card.anchors else f"project:{project_id[:12]}"
++        ranked.append(
++            (
++                1 if stale else 0,
++                float(raw_score),
++                card.knowledge_id,
++                ProjectSearchHit(
++                    ref=f"knowledge:{card.knowledge_id}",
++                    kind=ProjectSearchKind.KNOWLEDGE,
++                    title=card.title,
++                    location=location,
++                    short_summary=_truncate_utf8(card.body, _SUMMARY_MAX_BYTES),
++                    match_reason="semantic Knowledge title/body",
++                    freshness=card.freshness.value,
++                ),
++            )
++        )
++    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
++    return tuple(item[3] for item in ranked[:limit])
++
++
++def _task_hits(
++    connection: sqlite3.Connection,
++    project_id: str,
++    active_workspace_id: str,
++    query: str,
++    limit: int,
++) -> tuple[ProjectSearchHit, ...]:
++    match_query = _fts_query(query)
++    rows = connection.execute(
++        """
++        SELECT
++            fragment_ref,
++            task_id,
++            workspace_id,
++            bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
++        FROM task_search
++        WHERE task_search MATCH ? AND project_id = ?
++        ORDER BY score, rowid
++        LIMIT ?
++        """,
++        (match_query, project_id, _candidate_limit(limit)),
++    ).fetchall()
++    current = get_relevant_task(connection, active_workspace_id)
++    best: dict[str, tuple[str, str, float]] = {}
++    for fragment_ref, task_id, workspace_id, raw_score in rows:
++        if (
++            not isinstance(fragment_ref, str)
++            or not isinstance(task_id, str)
++            or not isinstance(workspace_id, str)
++            or not isinstance(raw_score, (int, float))
++        ):
++            raise ProjectRetrievalError("Task search index returned invalid persisted types")
++        best.setdefault(task_id, (fragment_ref, workspace_id, float(raw_score)))
++
++    ranked: list[tuple[int, float, str, ProjectSearchHit]] = []
++    for task_id, (fragment_ref, workspace_id, score) in best.items():
++        task = get_task(connection, task_id)
++        owner = get_workspace(connection, task.workspace_id)
++        if owner.project_id != project_id or workspace_id != task.workspace_id:
++            raise ProjectRetrievalError("Task search index crossed Project ownership")
++        result_ref, reason, summary, location = _task_fragment_projection(
++            connection, task_id, fragment_ref
++        )
++        ranked.append(
++            (
++                0 if current is not None and current.task_id == task_id else 1,
++                score,
++                task_id,
++                ProjectSearchHit(
++                    ref=result_ref,
++                    kind=ProjectSearchKind.TASK,
++                    title=task.title,
++                    location=location,
++                    short_summary=summary,
++                    match_reason=reason,
++                    freshness="durable_history",
++                ),
++            )
++        )
++    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
++    return tuple(item[3] for item in ranked[:limit])
++
++
++def _task_fragment_projection(
++    connection: sqlite3.Connection,
++    task_id: str,
++    fragment_ref: str,
++) -> tuple[str, str, str | None, str]:
++    if fragment_ref == f"task:{task_id}":
++        row = connection.execute(
++            """
++            SELECT summary
++            FROM task_checkpoints
++            WHERE task_id = ?
++            ORDER BY task_revision DESC
++            LIMIT 1
++            """,
++            (task_id,),
++        ).fetchone()
++        summary = None if row is None else _require_text(row[0], "Task checkpoint summary")
++        return (
++            f"task:{task_id}",
++            "Task title",
++            None if summary is None else _truncate_utf8(summary, _SUMMARY_MAX_BYTES),
++            f"task:{task_id}",
++        )
++    if fragment_ref.startswith("checkpoint:"):
++        checkpoint_id = fragment_ref.removeprefix("checkpoint:")
++        checkpoint = get_task_checkpoint(connection, checkpoint_id)
++        if checkpoint.task_id != task_id:
++            raise ProjectRetrievalError("Task search checkpoint ownership mismatch")
++        return (
++            f"task:{task_id}#checkpoint:{checkpoint_id}",
++            "Task checkpoint summary/next step",
++            _truncate_utf8(checkpoint.summary, _SUMMARY_MAX_BYTES),
++            f"task:{task_id} · revision {checkpoint.task_revision}",
++        )
++    if fragment_ref.startswith("event:"):
++        event_id = _parse_positive_int(fragment_ref.removeprefix("event:"), "Task event id")
++        row = connection.execute(
++            """
++            SELECT task_id, task_revision, event_type, operator_feedback
++            FROM task_events
++            WHERE id = ?
++            """,
++            (event_id,),
++        ).fetchone()
++        if row is None or row[0] != task_id or row[2] != "operator_feedback":
++            raise ProjectRetrievalError("Task search event ownership mismatch")
++        feedback = _require_text(row[3], "operator feedback")
++        revision = row[1]
++        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
++            raise ProjectRetrievalError("Task search event revision is invalid")
++        return (
++            f"task:{task_id}#event:{event_id}",
++            "operator feedback",
++            _truncate_utf8(feedback, _SUMMARY_MAX_BYTES),
++            f"task:{task_id} · revision {revision}",
++        )
++    raise ProjectRetrievalError("Task search fragment ref is invalid")
++
++
++def _task_context(
++    connection: sqlite3.Connection,
++    project_id: str,
++    ref: str,
++) -> ProjectContextItem:
++    task_part, separator, fragment = ref.partition("#")
++    task_id = task_part.removeprefix("task:")
++    try:
++        task = get_task(connection, task_id)
++    except TaskNotFoundError as exc:
++        raise ProjectRetrievalRefError("selected Task ref does not exist") from exc
++    workspace = get_workspace(connection, task.workspace_id)
++    if workspace.project_id != project_id:
++        raise ProjectRetrievalRefError("selected Task ref belongs to another Project")
++
++    stack_hints = get_task_stack_hints(connection, task.task_id)
++    data: dict[str, object] = {
++        "task_id": task.task_id,
++        "workspace_id": task.workspace_id,
++        "title": task.title,
++        "state": task.state.value,
++        "wait_reason": None if task.wait_reason is None else task.wait_reason.value,
++        "revision": task.revision,
++        "created_at": task.created_at,
++        "updated_at": task.updated_at,
++        "stack_hints": list(stack_hints[:_CONTEXT_STACK_HINT_LIMIT]),
++        "stack_hint_count": len(stack_hints),
++        "stack_hints_truncated": len(stack_hints) > _CONTEXT_STACK_HINT_LIMIT,
