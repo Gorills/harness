@@ -215,6 +215,57 @@ def test_search_scope_filters_before_limit(tmp_path: Path) -> None:
         connection.close()
 
 
+def test_search_scope_classifies_readme_adr_and_asciidoc_as_docs(tmp_path: Path) -> None:
+    root = _repo(
+        tmp_path / "documentation-corpus",
+        {
+            "README": "project overview\n",
+            "ADR-auth": "authentication decision\n",
+            "guide.adoc": "= Operator guide\n",
+            "src/readme_parser.py": "VALUE = 1\n",
+        },
+    )
+    database = tmp_path / "documentation.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        workspace = register_workspace(connection, project_id=project.project_id, path=root)
+        scan_workspace(connection, workspace.workspace_id)
+
+        docs = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "readme",
+            scope=IndexedPathSearchScope.DOCS,
+        )
+        code = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "readme",
+            scope=IndexedPathSearchScope.CODE,
+        )
+        adr = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "ADR-auth",
+            scope=IndexedPathSearchScope.DOCS,
+        )
+        asciidoc = search_indexed_paths(
+            connection,
+            workspace.workspace_id,
+            "guide.adoc",
+            scope=IndexedPathSearchScope.DOCS,
+        )
+
+        assert [item.relative_path for item in docs] == ["README"]
+        assert [item.relative_path for item in code] == ["src/readme_parser.py"]
+        assert [item.relative_path for item in adr] == ["ADR-auth"]
+        assert [item.relative_path for item in asciidoc] == ["guide.adoc"]
+    finally:
+        connection.close()
+
+
 def test_search_result_does_not_expose_source_or_internal_index_fields(
     tmp_path: Path,
 ) -> None:

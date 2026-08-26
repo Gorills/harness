@@ -314,6 +314,8 @@ Use a simple fusion strategy such as Reciprocal Rank Fusion before introducing m
 
 Search must explain why a result matched and must penalize stale semantic evidence.
 
+The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace, the daemon validates its live Git identity before and after the read, and one read transaction fixes the corresponding Project identity. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge.
+
 ## 13. Knowledge and staleness
 
 Knowledge is deliberately sparse. A card is created only when it can plausibly prevent future re-investigation.
