@@ -130,7 +130,7 @@ scripts/dev harness status
 scripts/dev stop
 ```
 
-`scripts/dev` exports XDG state/runtime paths under `.harness/` and runs this checkout through `uv run`. Tracked `.cursor/mcp.json` and `.mcp.json` shadow a global `harness` MCP server with that wrapper so agents in this repository do not use a system install. A production MCP process with `HARNESS_HOST_PROFILE` also refuses tools when launched against this overlay checkout. Do not run `uv run --frozen harness` here without sourcing `scripts/dev-env.sh`; that mix uses checkout code against the global daemon. See [`docs/development/isolated-development.md`](docs/development/isolated-development.md).
+`scripts/dev` exports XDG state/runtime paths under `.harness/` and runs this checkout through `uv run`. Tracked `.cursor/mcp.json` and `.mcp.json` shadow a global `harness` MCP server with that wrapper so agents in this repository do not use a system install. A production MCP process with `HARNESS_HOST_PROFILE` also refuses tools when launched against this overlay checkout. Do not run `uv run --frozen harness` here without sourcing `scripts/dev-env.sh`; that mix uses checkout code against the global daemon. Operators refresh the user-global install with `make install-global` (see [`docs/development/isolated-development.md`](docs/development/isolated-development.md)); checkout agents must not run that target.
 
 The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, verifies that installed CLI help exposes the implemented commands/runtime-path override contract including search, and runs the installed `harness doctor` command.
 

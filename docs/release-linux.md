@@ -51,6 +51,8 @@ agent mcp list
 agent mcp list-tools harness
 ```
 
+From a Harness source checkout the same refresh is `make install-global` or `make install-global HOST=all`. That helper leaves isolated-development overlay environment first and uses `--force --reinstall` because the development version stays `0.1.0.dev0`. Do not run it through `scripts/dev`.
+
 The post-upgrade `harness install` is required. It compares the running daemon's frozen schema/version/Python/code identity with the newly installed runtime and cleanly replaces a stale daemon before updating selected host registrations. Cursor global and every registered Workspace override are updated to the new interpreter together with Claude when `--host all` is selected. This covers both a changed virtual-environment path and an in-place reinstall at the same path. Upgrading from the previous Linux release is also explicit: that protocol-v1 daemon does not implement `runtime_diagnostics`, so Harness accepts only its structured unknown-method response, validates legacy `status`, requests the existing clean `shutdown`, then starts and verifies the current runtime. Other IPC/diagnostics failures are not treated as permission to kill or replace a daemon.
 
 ## Uninstall

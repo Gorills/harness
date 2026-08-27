@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Refresh the user-global Harness install from this checkout.
+#
+# This is the human-operated counterpart to isolated `scripts/dev`. It must not
+# source scripts/dev-env.sh. It unsets HARNESS_DEV_ROOT, restores pre-overlay
+# XDG saved by that file, and drops checkout `.venv/bin` so `harness install`
+# mutates the canonical per-user daemon and host MCP.
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+# shellcheck source=scripts/dev-uv.sh
+source "$script_dir/dev-uv.sh"
+
+HOST="cursor"
+DRY_RUN=0
+RUN_DOCTOR=1
+DOCTOR_ONLY=0
+
+usage() {
+    cat <<'EOF'
+Refresh the user-global Harness install from this checkout.
+
+Usage:
+  scripts/install-global [--host cursor|claude-code|all] [--no-doctor]
+  scripts/install-global --doctor-only
+  scripts/install-global --dry-run [--host ...]
+
+This command:
+  1. leaves isolated-development overlay environment (HARNESS_DEV_ROOT / .harness XDG)
+  2. reinstalls the current tree with `uv tool install --force --reinstall --python 3.13 .`
+  3. runs that tool-installed `harness install --host <host>` (default: cursor)
+  4. runs that same `harness doctor` unless --no-doctor
+
+It never uses scripts/dev, checkout `.venv/bin/harness`, or overlay XDG paths.
+Checkout agents must not run this; operators use `make install-global`.
+
+The tracked `.cursor/mcp.json` overlay in this repository still shadows the
+global Cursor server. Test the global install from another Git worktree, then
+fully quit and reopen Cursor if MCP config changed.
+EOF
+}
+
+path_is_under() {
+    local value="$1"
+    local prefix="$2"
+    local resolved_value resolved_prefix
+    if [[ -z "$value" ]]; then
+        return 1
+    fi
+    if [[ -d "$prefix" ]]; then
+        resolved_prefix="$(cd -- "$prefix" && pwd)"
+    else
+        resolved_prefix="$prefix"
+    fi
+    if [[ -d "$value" ]]; then
+        resolved_value="$(cd -- "$value" && pwd)"
+    else
+        resolved_value="$value"
+    fi
+    case "$resolved_value" in
+        "$resolved_prefix" | "$resolved_prefix"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+strip_path_entry() {
+    local remove="$1"
+    local result=""
+    local entry resolved remaining
+    remaining="${PATH}:"
+    while [[ -n "$remaining" ]]; do
+        entry="${remaining%%:*}"
+        remaining="${remaining#*:}"
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == "$remove" ]]; then
+            continue
+        fi
+        if [[ -d "$entry" && -d "$remove" ]]; then
+            resolved="$(cd -- "$entry" && pwd)"
+            if [[ "$resolved" == "$remove" ]]; then
+                continue
+            fi
+        fi
+        result="${result:+$result:}$entry"
+    done
+    PATH="$result"
+}
+
+restore_canonical_xdg() {
+    local current="$1"
+    local overlay="$2"
+    local saved="$3"
+    if ! path_is_under "$current" "$overlay"; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    if [[ -n "$saved" ]] && ! path_is_under "$saved" "$overlay"; then
+        printf '%s\n' "$saved"
+        return 0
+    fi
+    return 0
+}
+
+leave_isolated_overlay() {
+    local overlay="$repo_root/.harness"
+    local venv_bin="$repo_root/.venv/bin"
+    local restored
+    unset HARNESS_DEV_ROOT
+    restored="$(restore_canonical_xdg "${XDG_STATE_HOME:-}" "$overlay" "${HARNESS_DEV_SAVED_XDG_STATE_HOME-}")"
+    if [[ -n "$restored" ]]; then
+        export XDG_STATE_HOME="$restored"
+    else
+        unset XDG_STATE_HOME
+    fi
+    restored="$(restore_canonical_xdg "${XDG_RUNTIME_DIR:-}" "$overlay" "${HARNESS_DEV_SAVED_XDG_RUNTIME_DIR-}")"
+    if [[ -n "$restored" ]]; then
+        export XDG_RUNTIME_DIR="$restored"
+    else
+        unset XDG_RUNTIME_DIR
+    fi
+    unset HARNESS_DEV_SAVED_XDG_STATE_HOME
+    unset HARNESS_DEV_SAVED_XDG_RUNTIME_DIR
+    if [[ -d "$venv_bin" ]]; then
+        venv_bin="$(cd -- "$venv_bin" && pwd)"
+    fi
+    strip_path_entry "$repo_root/.venv/bin"
+    strip_path_entry "$venv_bin"
+    if [[ -n "${VIRTUAL_ENV:-}" ]] && path_is_under "$VIRTUAL_ENV" "$repo_root/.venv"; then
+        unset VIRTUAL_ENV
+    fi
+}
+
+validate_host() {
+    case "$HOST" in
+        cursor | claude-code | all) return 0 ;;
+        *)
+            echo "scripts/install-global: --host must be cursor, claude-code, or all (got: $HOST)" >&2
+            return 1
+            ;;
+    esac
+}
+
+print_plan() {
+    local uv_bin="$1"
+    local harness_bin="$2"
+    local mode
+    if [[ "$DOCTOR_ONLY" -eq 1 ]]; then
+        mode="doctor-only"
+    else
+        mode="install"
+    fi
+    cat <<EOF
+mode=$mode
+repo_root=$repo_root
+uv=$uv_bin
+python=$REQUIRED_PYTHON
+package_command=$uv_bin tool install --force --reinstall --python $REQUIRED_PYTHON .
+harness=$harness_bin
+host=$HOST
+lifecycle_command=$harness_bin install --host $HOST
+doctor_command=$harness_bin doctor
+HARNESS_DEV_ROOT=${HARNESS_DEV_ROOT-}
+XDG_STATE_HOME=${XDG_STATE_HOME-}
+XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR-}
+VIRTUAL_ENV=${VIRTUAL_ENV-}
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --host)
+            if [[ $# -lt 2 ]]; then
+                echo "scripts/install-global: --host requires cursor, claude-code, or all" >&2
+                exit 1
+            fi
+            HOST="$2"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --no-doctor)
+            RUN_DOCTOR=0
+            shift
+            ;;
+        --doctor-only)
+            DOCTOR_ONLY=1
+            shift
+            ;;
+        *)
+            echo "scripts/install-global: unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ "$DOCTOR_ONLY" -eq 1 && "$RUN_DOCTOR" -eq 0 ]]; then
+    echo "scripts/install-global: --doctor-only cannot be combined with --no-doctor" >&2
+    exit 1
+fi
+
+validate_host
+leave_isolated_overlay
+
+UV_BIN=""
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    UV_BIN="$(resolve_uv || true)"
+else
+    UV_BIN="$(ensure_uv)"
+fi
+if [[ -z "$UV_BIN" ]]; then
+    UV_BIN="uv"
+fi
+
+HARNESS_BIN=""
+if [[ -x "$UV_BIN" ]]; then
+    HARNESS_BIN="$("$UV_BIN" tool dir --bin)/harness"
+else
+    HARNESS_BIN="harness"
+fi
+
+print_plan "$UV_BIN" "$HARNESS_BIN"
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "dry-run: no package or host MCP mutation"
+    exit 0
+fi
+
+if [[ "$DOCTOR_ONLY" -eq 0 ]]; then
+    echo "Reinstalling user-global Harness from $repo_root" >&2
+    "$UV_BIN" python install "$REQUIRED_PYTHON"
+    (
+        cd -- "$repo_root"
+        "$UV_BIN" tool install --force --reinstall --python "$REQUIRED_PYTHON" .
+    )
+    if [[ ! -x "$HARNESS_BIN" ]]; then
+        echo "scripts/install-global: tool-installed harness is missing at $HARNESS_BIN" >&2
+        echo "Check that uv tool dir --bin is on this account and retry." >&2
+        exit 1
+    fi
+    echo "Updating user-global host registration (--host $HOST)" >&2
+    "$HARNESS_BIN" install --host "$HOST"
+fi
+
+if [[ "$RUN_DOCTOR" -eq 1 || "$DOCTOR_ONLY" -eq 1 ]]; then
+    if [[ ! -x "$HARNESS_BIN" ]]; then
+        echo "scripts/install-global: tool-installed harness is missing at $HARNESS_BIN" >&2
+        echo "Run make install-global first." >&2
+        exit 1
+    fi
+    "$HARNESS_BIN" doctor
+fi
+
+cat <<EOF
+Global Harness now uses $HARNESS_BIN from this checkout.
+This repository still shadows that server with scripts/dev harness mcp.
+Test the global install from another Git worktree. If Cursor MCP config changed, fully quit and reopen Cursor.
+EOF

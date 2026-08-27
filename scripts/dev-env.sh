@@ -2,7 +2,8 @@
 #
 # Redirects canonical POSIX path selection (ADR-0007) into this checkout's
 # `.harness/` tree so development does not share database or IPC state with a
-# separately installed Harness build.
+# separately installed Harness build. The caller's XDG bases are saved as
+# HARNESS_DEV_SAVED_XDG_* so `make install-global` can restore them.
 #
 # Usage:
 #   . scripts/dev-env.sh
@@ -28,6 +29,12 @@ _harness_dev_prepare_directory() {
 harness_dev_activate() {
     local root
     root="$(_harness_dev_repo_root)"
+    if [[ -z "${HARNESS_DEV_ROOT:-}" ]]; then
+        # Preserve the caller's canonical XDG so `make install-global` can leave
+        # this overlay without moving the user-global daemon onto a different socket.
+        export HARNESS_DEV_SAVED_XDG_STATE_HOME="${XDG_STATE_HOME-}"
+        export HARNESS_DEV_SAVED_XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR-}"
+    fi
     export HARNESS_DEV_ROOT="$root"
     export XDG_STATE_HOME="$root/.harness/state"
     export XDG_RUNTIME_DIR="$root/.harness/runtime"

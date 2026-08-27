@@ -30,6 +30,9 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX isolated-developm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEV_SCRIPT = REPO_ROOT / "scripts" / "dev"
 DEV_ENV_SCRIPT = REPO_ROOT / "scripts" / "dev-env.sh"
+DEV_UV_SCRIPT = REPO_ROOT / "scripts" / "dev-uv.sh"
+INSTALL_GLOBAL_SCRIPT = REPO_ROOT / "scripts" / "install-global"
+MAKEFILE = REPO_ROOT / "Makefile"
 ISOLATED_DOC = REPO_ROOT / "docs" / "development" / "isolated-development.md"
 
 
@@ -152,8 +155,19 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "HARNESS_DEV_ROOT",
         "refused",
         "uv run --frozen harness",
+        "make install-global",
+        "scripts/install-global",
+        "uv tool install --force --reinstall",
+        "pre-overlay",
+        "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
     ):
         assert needle in text
+
+
+def test_dev_uv_script_must_be_sourced() -> None:
+    result = _run(["bash", str(DEV_UV_SCRIPT)], cwd=REPO_ROOT)
+    assert result.returncode == 1
+    assert "Source this file" in result.stderr
 
 
 def test_dev_env_script_must_be_sourced() -> None:
@@ -192,11 +206,45 @@ def test_dev_env_script_keeps_caller_cwd_and_resolves_from_script_location(
     assert stat.S_IMODE((REPO_ROOT / ".harness" / "runtime").stat().st_mode) & 0o077 == 0
 
 
+def test_dev_env_script_saves_caller_xdg_once_before_overlay(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    original_state = tmp_path / "orig-state"
+    original_runtime = tmp_path / "orig-runtime"
+    original_state.mkdir()
+    original_runtime.mkdir()
+    result = _run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && source "$1" && printf "%s\\n" '
+            '"$HARNESS_DEV_SAVED_XDG_STATE_HOME" "$HARNESS_DEV_SAVED_XDG_RUNTIME_DIR" '
+            '"$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"',
+            "bash",
+            str(DEV_ENV_SCRIPT),
+        ],
+        cwd=elsewhere,
+        env={
+            "HOME": str(tmp_path / "home"),
+            "PATH": os.environ.get("PATH", ""),
+            "XDG_STATE_HOME": str(original_state),
+            "XDG_RUNTIME_DIR": str(original_runtime),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[0] == str(original_state)
+    assert lines[1] == str(original_runtime)
+    assert lines[2] == str(REPO_ROOT / ".harness" / "state")
+    assert lines[3] == str(REPO_ROOT / ".harness" / "runtime")
+
+
 def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     help_result = _run([str(DEV_SCRIPT), "help"], cwd=REPO_ROOT)
     assert help_result.returncode == 0
     assert "scripts/dev harness doctor" in help_result.stdout
     assert "install/uninstall are refused" in help_result.stdout
+    assert "make install-global" in help_result.stdout
 
     empty = _run([str(DEV_SCRIPT)], cwd=REPO_ROOT)
     assert empty.returncode == 1
@@ -458,6 +506,229 @@ def test_dev_env_prepends_checkout_venv_when_present(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[0].split(":")[0] == str(venv_bin)
+
+
+def _fake_uv(path: Path, *, bin_dir: Path, log: Path) -> Path:
+    path.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$UV_LOG"\n'
+        'if [ "$1" = "--version" ]; then\n'
+        '  printf "%s\\n" "uv 0.12.5"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then\n'
+        '  printf "%s\\n" "$FAKE_UV_BIN_DIR"\n'
+        "  exit 0\n"
+        "fi\n"
+        'printf "%s\\n" "unexpected uv invocation: $*" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    log.write_text("", encoding="utf-8")
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _install_global_env(
+    tmp_path: Path,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    fake_bin = tmp_path / "uv-bin"
+    log = tmp_path / "uv.log"
+    fake_uv = _fake_uv(tmp_path / "uv", bin_dir=fake_bin, log=log)
+    overlay_state = REPO_ROOT / ".harness" / "state"
+    overlay_runtime = REPO_ROOT / ".harness" / "runtime"
+    venv_bin = REPO_ROOT / ".venv" / "bin"
+    env = {
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{venv_bin}:/usr/bin:/bin",
+        "HARNESS_DEV_UV": str(fake_uv),
+        "HARNESS_DEV_ROOT": str(REPO_ROOT),
+        "XDG_STATE_HOME": str(overlay_state),
+        "XDG_RUNTIME_DIR": str(overlay_runtime),
+        "VIRTUAL_ENV": str(REPO_ROOT / ".venv"),
+        "UV_LOG": str(log),
+        "FAKE_UV_BIN_DIR": str(fake_bin),
+    }
+    if extra:
+        env.update(extra)
+    return env
+
+
+def _plan_fields(stdout: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if "=" not in line or line.startswith("dry-run:"):
+            continue
+        key, value = line.split("=", 1)
+        fields[key] = value
+    return fields
+
+
+def test_makefile_routes_global_install_through_the_helper() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    assert "HOST ?= cursor" in text
+    assert "INSTALL_GLOBAL := ./scripts/install-global" in text
+    assert "$(INSTALL_GLOBAL) --host $(HOST)" in text
+    assert "$(INSTALL_GLOBAL) --doctor-only" in text
+    assert ".DEFAULT_GOAL := help" in text
+    help_result = _run(["make", "-C", str(REPO_ROOT), "help"], cwd=REPO_ROOT)
+    assert help_result.returncode == 0, help_result.stderr
+    assert "make install-global" in help_result.stdout
+    dry = _run(["make", "-C", str(REPO_ROOT), "-n", "install-global", "HOST=all"], cwd=REPO_ROOT)
+    assert dry.returncode == 0, dry.stderr
+    assert "./scripts/install-global --host all" in dry.stdout
+
+
+def test_install_global_script_does_not_source_overlay_env() -> None:
+    text = INSTALL_GLOBAL_SCRIPT.read_text(encoding="utf-8")
+    assert "dev-uv.sh" in text
+    assert 'source "$script_dir/dev-env.sh"' not in text
+    assert "source ./scripts/dev-env.sh" not in text
+    assert "--force --reinstall --python" in text
+
+
+def test_install_global_help_does_not_require_uv() -> None:
+    result = _run([str(INSTALL_GLOBAL_SCRIPT), "--help"], cwd=REPO_ROOT)
+    assert result.returncode == 0, result.stderr
+    assert "uv tool install --force --reinstall --python 3.13" in result.stdout
+    assert "make install-global" in result.stdout
+    assert "scripts/dev" in result.stdout
+
+
+def test_install_global_rejects_unknown_host() -> None:
+    result = _run([str(INSTALL_GLOBAL_SCRIPT), "--host", "vscode"], cwd=REPO_ROOT)
+    assert result.returncode == 1
+    assert "cursor, claude-code, or all" in result.stderr
+
+
+def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "cursor"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    fake_bin = Path(env["FAKE_UV_BIN_DIR"])
+    assert fields["mode"] == "install"
+    assert fields["repo_root"] == str(REPO_ROOT)
+    assert fields["uv"] == env["HARNESS_DEV_UV"]
+    assert fields["host"] == "cursor"
+    assert fields["package_command"] == (
+        f"{env['HARNESS_DEV_UV']} tool install --force --reinstall --python 3.13 ."
+    )
+    assert fields["harness"] == str(fake_bin / "harness")
+    assert fields["lifecycle_command"] == f"{fake_bin / 'harness'} install --host cursor"
+    assert fields["HARNESS_DEV_ROOT"] == ""
+    assert fields["XDG_STATE_HOME"] == ""
+    assert fields["XDG_RUNTIME_DIR"] == ""
+    assert fields["VIRTUAL_ENV"] == ""
+    assert "dry-run: no package or host MCP mutation" in result.stdout
+    log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
+    assert "tool install" not in log
+    assert "python install" not in log
+
+
+def test_install_global_dry_run_keeps_non_overlay_xdg(tmp_path: Path) -> None:
+    custom_state = tmp_path / "xdg-state"
+    custom_runtime = tmp_path / "xdg-runtime"
+    custom_state.mkdir()
+    custom_runtime.mkdir()
+    env = _install_global_env(
+        tmp_path,
+        extra={
+            "XDG_STATE_HOME": str(custom_state),
+            "XDG_RUNTIME_DIR": str(custom_runtime),
+        },
+    )
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "all"],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    assert fields["host"] == "all"
+    assert fields["XDG_STATE_HOME"] == str(custom_state)
+    assert fields["XDG_RUNTIME_DIR"] == str(custom_runtime)
+    assert fields["HARNESS_DEV_ROOT"] == ""
+    assert fields["lifecycle_command"].endswith(" install --host all")
+
+
+def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> None:
+    original_state = tmp_path / "canonical-state"
+    original_runtime = tmp_path / "canonical-runtime"
+    original_state.mkdir()
+    original_runtime.mkdir()
+    env = _install_global_env(
+        tmp_path,
+        extra={
+            "HARNESS_DEV_SAVED_XDG_STATE_HOME": str(original_state),
+            "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR": str(original_runtime),
+        },
+    )
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run"],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    assert fields["HARNESS_DEV_ROOT"] == ""
+    assert fields["XDG_STATE_HOME"] == str(original_state)
+    assert fields["XDG_RUNTIME_DIR"] == str(original_runtime)
+
+
+def test_install_global_dry_run_after_dev_env_restores_session_xdg(tmp_path: Path) -> None:
+    original_state = tmp_path / "session-state"
+    original_runtime = tmp_path / "session-runtime"
+    original_state.mkdir()
+    original_runtime.mkdir()
+    env = _install_global_env(
+        tmp_path,
+        extra={
+            "XDG_STATE_HOME": str(original_state),
+            "XDG_RUNTIME_DIR": str(original_runtime),
+        },
+    )
+    env.pop("HARNESS_DEV_ROOT", None)
+    env.pop("VIRTUAL_ENV", None)
+    result = _run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && "$2" --dry-run --host cursor',
+            "bash",
+            str(DEV_ENV_SCRIPT),
+            str(INSTALL_GLOBAL_SCRIPT),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    assert fields["HARNESS_DEV_ROOT"] == ""
+    assert fields["XDG_STATE_HOME"] == str(original_state)
+    assert fields["XDG_RUNTIME_DIR"] == str(original_runtime)
+    assert str(REPO_ROOT / ".harness" / "state") not in fields["XDG_STATE_HOME"]
+
+
+def test_install_global_doctor_only_dry_run_does_not_reinstall(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--doctor-only"],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    assert fields["mode"] == "doctor-only"
+    log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
+    assert "tool install" not in log
 
 
 def _write_overlay(root: Path) -> None:

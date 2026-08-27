@@ -96,6 +96,20 @@ uv run --frozen python scripts/quality.py
 
 `scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. `uv run --frozen harness` from this checkout without sourcing `scripts/dev-env.sh` is the same mix: checkout code plus the global daemon, and must not be used here. A system `harness scan` of this source checkout is refused because the tracked overlay marks it as isolated-development only. Overlay detection requires `scripts/dev harness mcp` plus `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and no `HARNESS_HOST_PROFILE`; extra host JSON keys do not drop that isolation.
 
+## 6. Refresh the user-global install (human-only)
+
+Isolated `scripts/dev harness install` is refused on purpose. To copy this checkout into the user-global `uv tool` install and update host MCP, operators run:
+
+```bash
+make install-global
+make install-global HOST=all
+make doctor-global
+```
+
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, fully quit and reopen Cursor.
+
+This repository's tracked `.cursor/mcp.json` still shadows the global Cursor server with `scripts/dev harness mcp`. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
+
 ## Optional: source the environment
 
 If you need `uv run` directly:

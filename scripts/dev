@@ -5,9 +5,8 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
 # shellcheck source=scripts/dev-env.sh
 source "$script_dir/dev-env.sh"
-
-REQUIRED_UV_VERSION="0.12.5"
-REQUIRED_PYTHON="3.13"
+# shellcheck source=scripts/dev-uv.sh
+source "$script_dir/dev-uv.sh"
 
 usage() {
     cat <<'EOF'
@@ -38,74 +37,9 @@ XDG_STATE_HOME and XDG_RUNTIME_DIR are exported under .harness/ so this
 checkout does not use the canonical per-user paths of a system install.
 Lazy daemon autostart inherits the same environment and launches this checkout.
 install/uninstall are refused while this wrapper is active; they would mutate
-the user-global host MCP.
+the user-global host MCP. Operators refresh the user-global install with
+make install-global instead.
 EOF
-}
-
-uv_version() {
-    local executable="$1"
-    "$executable" --version 2>/dev/null | awk '{print $2}'
-}
-
-resolve_uv() {
-    local candidate version
-    if [[ -n "${HARNESS_DEV_UV:-}" && -x "${HARNESS_DEV_UV}" ]]; then
-        candidate="$HARNESS_DEV_UV"
-        version="$(uv_version "$candidate")"
-        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    fi
-
-    candidate="$repo_root/.harness/tools/uv"
-    if [[ -x "$candidate" ]]; then
-        version="$(uv_version "$candidate")"
-        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    fi
-
-    if command -v uv >/dev/null 2>&1; then
-        candidate="$(command -v uv)"
-        version="$(uv_version "$candidate")"
-        if [[ "$version" == "$REQUIRED_UV_VERSION" ]]; then
-            printf '%s\n' "$candidate"
-            return 0
-        fi
-    fi
-    return 1
-}
-
-bootstrap_uv() {
-    local install_dir="$repo_root/.harness/tools"
-    mkdir -p -- "$install_dir"
-    chmod 700 -- "$repo_root/.harness" "$install_dir" 2>/dev/null || true
-
-    if ! command -v curl >/dev/null 2>&1; then
-        echo "Harness development requires uv $REQUIRED_UV_VERSION (curl is needed to bootstrap it)." >&2
-        echo "Install uv $REQUIRED_UV_VERSION and retry, or set HARNESS_DEV_UV to that executable." >&2
-        return 1
-    fi
-
-    echo "Bootstrapping uv $REQUIRED_UV_VERSION into $install_dir" >&2
-    curl -LsSf "https://astral.sh/uv/${REQUIRED_UV_VERSION}/install.sh" \
-        | env UV_INSTALL_DIR="$install_dir" UV_NO_MODIFY_PATH=1 sh
-}
-
-ensure_uv() {
-    local executable
-    if executable="$(resolve_uv)"; then
-        printf '%s\n' "$executable"
-        return 0
-    fi
-    bootstrap_uv
-    if ! executable="$(resolve_uv)"; then
-        echo "uv $REQUIRED_UV_VERSION is required for Harness development." >&2
-        return 1
-    fi
-    printf '%s\n' "$executable"
 }
 
 ensure_project() {

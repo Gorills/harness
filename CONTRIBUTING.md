@@ -34,7 +34,17 @@ scripts/dev harness scan
 scripts/dev stop
 ```
 
-See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Always use `scripts/dev` instead of a global `harness` on `PATH`. Do not run `harness install`/`uninstall` from this checkout.
+See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Always use `scripts/dev` instead of a global `harness` on `PATH`. Do not run `harness install`/`uninstall` through `scripts/dev` or a direnv'd checkout shell.
+
+To refresh a separately installed user-global Harness from this checkout, operators run:
+
+```text
+make install-global
+make install-global HOST=all
+make doctor-global
+```
+
+That helper leaves overlay XDG/`HARNESS_DEV_ROOT`, reinstalls with `uv tool install --force --reinstall --python 3.13 .`, then runs the tool-installed `harness install`. Checkout agents must not invoke it.
 
 If direct Git/network access is unavailable but authenticated GitHub object access remains available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Prefer `scripts/publish_git_data.py preflight` plus `publish`. When the execution shell cannot reach GitHub but a connected Git Data tool can create blobs, raw UTF-8 blob publication is also allowed for staged files that are valid UTF-8, with the returned remote blob SHA required to match the staged SHA before any tree/commit/ref publication. Never manually assemble base64; binary or non-UTF-8 changes require a byte-safe machine transport.
 
