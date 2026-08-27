@@ -53,6 +53,7 @@ from harness.dashboard_i18n import (
     NO_TASK,
     NO_TASKS_TITLE,
     PAGE_PROJECTS,
+    PAGE_PROJECTS_LEAD,
     PROJECT,
     PROJECT_PREFIX,
     RECENT_TASKS,
@@ -772,7 +773,8 @@ def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: 
         )
     content = (
         '<section class="hero compact"><div>'
-        f"<h1>{escape(PAGE_PROJECTS)}</h1></div></section>"
+        f"<h1>{escape(PAGE_PROJECTS)}</h1>"
+        f'<p class="hero-copy">{escape(PAGE_PROJECTS_LEAD)}</p></div></section>'
         + _render_metrics(rows)
         + '<section class="section"><div class="section-head"><div>'
         f'<h2 class="section-title">{escape(SECTION_WORKSPACES)}</h2></div></div>'

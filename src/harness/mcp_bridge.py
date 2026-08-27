@@ -52,26 +52,30 @@ from harness.runtime_paths import default_runtime_paths
 from harness.tasks import TaskState, TaskWaitReason
 from harness.workspace_resolution import WorkspaceHint
 
+_OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
-    "Use project_status before broad repository exploration. Use project_search across code, docs, "
-    "Knowledge, and Task history; expand only selected refs with project_context, then read/edit "
-    "repository files with native host tools. Start or resume a Harness task before "
-    "meaningful changes and checkpoint meaningful progress. Address pending operator feedback before "
-    "continuing reviewed work. Targeted native search remains allowed."
+    "Write every operator-facing Task title, summary, next_step, and Knowledge title/body in "
+    f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
+    "project_search across code, docs, Knowledge, and Task history; expand only selected refs "
+    "with project_context, then read/edit repository files with native host tools. Start or "
+    "resume a Harness task before meaningful changes and checkpoint meaningful progress. Address "
+    "pending operator feedback before continuing reviewed work. Targeted native search remains "
+    "allowed."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
-    "Production Harness MCP is refused in the Harness source checkout. Do not call Harness MCP "
-    "tools. Read this repository with native host tools. Checkout-local MCP is scripts/dev "
-    "harness mcp without HARNESS_HOST_PROFILE."
+    "Production Harness MCP is refused against the Harness source checkout overlay. "
+    "Do not call Harness MCP tools. Isolated checkout MCP is the project server "
+    "harness-dev: scripts/dev harness mcp without HARNESS_HOST_PROFILE."
 )
 _ISOLATED_CHECKOUT_REFUSAL_MESSAGE = (
     "production Harness MCP is refused in the Harness source checkout; "
-    "use the tracked isolated overlay or native host tools"
+    "use the tracked harness-dev overlay or native host tools"
 )
 _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS = (
-    "Cursor launched user-level Harness MCP without an interpolated HARNESS_WORKSPACE_ROOT from "
-    "${workspaceFolder}. Do not call these tools. Run harness install --host cursor and fully "
-    "quit/reopen Cursor. Do not hardcode a path."
+    "Cursor user-level Harness MCP does not bind a Workspace. Do not call these tools. "
+    "Enable the project harness MCP in Cursor Customize for this workspace. Isolated "
+    "Harness source checkout uses harness-dev. Fully quit/reopen Cursor after enabling. "
+    "Do not hardcode a path."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
@@ -278,13 +282,13 @@ class HarnessMCPServer(MCPServer):
 
 def _mcp_tool_refusal() -> tuple[str, str] | None:
     """Return model-facing instructions and call error when tools must not be exposed."""
-    if production_mcp_isolated_checkout_root() is not None:
-        return (_ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS, _ISOLATED_CHECKOUT_REFUSAL_MESSAGE)
     if cursor_user_mcp_missing_workspace_root():
         return (
             _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS,
             CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
         )
+    if production_mcp_isolated_checkout_root() is not None:
+        return (_ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS, _ISOLATED_CHECKOUT_REFUSAL_MESSAGE)
     return None
 
 
@@ -448,8 +452,9 @@ def build_mcp_server() -> MCPServer:
 
     @server.tool(
         description=(
-            "Create a new durable Harness task, or explicitly resume an existing task. Existing "
-            "task mutations use revision compare-and-set when required."
+            "Create a new durable Harness task, or explicitly resume an existing task. A new "
+            f"title is operator-facing {_OPERATOR_LANGUAGE}. Existing task mutations use "
+            "revision compare-and-set when required."
         )
     )
     def task_start(
@@ -473,7 +478,8 @@ def build_mcp_server() -> MCPServer:
     @server.tool(
         description=(
             "Persist meaningful progress for one explicit working Harness task. Requires task_id "
-            "and expected_revision; may include bounded semantic Knowledge learned during work."
+            "and expected_revision. Write summary, next_step, and Knowledge title/body in "
+            f"{_OPERATOR_LANGUAGE}."
         )
     )
     def task_checkpoint(

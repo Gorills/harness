@@ -127,10 +127,11 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
 def _print_cursor_reload_guidance(*, expect_harness: bool) -> None:
     print("Cursor restart required: fully quit and reopen Cursor after MCP config changes.")
     if expect_harness:
-        print("Cursor verification: agent mcp list; agent mcp list-tools harness")
+        print("Cursor verification: agent mcp list")
         print(
-            "Cursor chat uses user-harness; ${workspaceFolder} is interpolated from the current "
-            "window after a full quit/reopen."
+            "Cursor IDE: user-harness is not a Workspace server. Enable the project harness MCP "
+            "in Customize for each working repository. Isolated Harness source checkout uses "
+            "harness-dev."
         )
     else:
         print("Cursor verification: agent mcp list (confirm Harness is absent)")

@@ -46,7 +46,7 @@ def _repo(path: Path) -> Path:
     return path.resolve()
 
 
-def _entry(command: Path) -> dict[str, object]:
+def _project_entry(command: Path) -> dict[str, object]:
     return {
         "type": "stdio",
         "command": str(command),
@@ -56,6 +56,21 @@ def _entry(command: Path) -> dict[str, object]:
             "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
         },
     }
+
+
+def _global_entry(command: Path) -> dict[str, object]:
+    return {
+        "type": "stdio",
+        "command": str(command),
+        "args": ["-m", "harness.mcp_process"],
+        "env": {
+            "HARNESS_HOST_PROFILE": "cursor",
+        },
+    }
+
+
+def _entry(command: Path) -> dict[str, object]:
+    return _project_entry(command)
 
 
 def test_cursor_global_registration_preserves_user_config_and_file_on_uninstall(
@@ -75,7 +90,7 @@ def test_cursor_global_registration_preserves_user_config_and_file_on_uninstall(
     value = json.loads(config.read_text(encoding="utf-8"))
     assert value["theme"] == "user"
     assert value["mcpServers"]["other"] == {"url": "https://example.invalid"}
-    assert value["mcpServers"]["harness"] == _entry(Path("/venv/bin/python"))
+    assert value["mcpServers"]["harness"] == _global_entry(Path("/venv/bin/python"))
     assert adapter.register_mcp() is IntegrationChange.UNCHANGED
 
     assert adapter.unregister_mcp() is IntegrationChange.CHANGED
@@ -116,11 +131,11 @@ def test_cursor_global_registration_replaces_only_stale_owned_entry(tmp_path: Pa
     assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
     assert adapter.register_mcp() is IntegrationChange.CHANGED
     value = json.loads(config.read_text(encoding="utf-8"))
-    assert value["mcpServers"]["harness"] == _entry(Path("/new/python"))
+    assert value["mcpServers"]["harness"] == _global_entry(Path("/new/python"))
     assert value["mcpServers"]["other"] == {"command": "other"}
 
 
-def test_cursor_global_registration_adds_workspace_folder_to_stale_owned_entry(
+def test_cursor_global_registration_removes_workspace_folder_from_stale_owned_entry(
     tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
@@ -130,14 +145,17 @@ def test_cursor_global_registration_adds_workspace_folder_to_stale_owned_entry(
         "type": "stdio",
         "command": "/python",
         "args": ["-m", "harness.mcp_process"],
-        "env": {"HARNESS_HOST_PROFILE": "cursor"},
+        "env": {
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+        },
     }
     config.write_text(json.dumps({"mcpServers": {"harness": stale}}), encoding="utf-8")
     adapter = CursorAdapter(home=home, python_executable=Path("/python"))
 
     assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
     assert adapter.register_mcp() is IntegrationChange.CHANGED
-    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["harness"] == _entry(
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["harness"] == _global_entry(
         Path("/python")
     )
 
@@ -492,7 +510,7 @@ def test_cursor_isolated_development_overlay_is_left_unchanged(tmp_path: Path) -
     config = root / ".cursor" / "mcp.json"
     config.parent.mkdir()
     config.write_text(
-        json.dumps({"mcpServers": {"harness": _isolated_entry()}}) + "\n", encoding="utf-8"
+        json.dumps({"mcpServers": {"harness-dev": _isolated_entry()}}) + "\n", encoding="utf-8"
     )
     _git(root, "add", ".cursor/mcp.json")
     _git(
@@ -543,7 +561,7 @@ def test_cursor_isolated_overlay_still_matches_when_host_adds_extra_keys(tmp_pat
     entry["disabled"] = False
     assert isinstance(entry["env"], dict)
     entry["env"]["CURSOR_EXTRA"] = "1"
-    config.write_text(json.dumps({"mcpServers": {"harness": entry}}) + "\n", encoding="utf-8")
+    config.write_text(json.dumps({"mcpServers": {"harness-dev": entry}}) + "\n", encoding="utf-8")
     adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
 
     diagnostic = adapter.project_registration_diagnostic(root)
@@ -557,3 +575,18 @@ def test_cursor_isolated_overlay_rejects_host_profile_marker() -> None:
     assert isinstance(entry["env"], dict)
     entry["env"]["HARNESS_HOST_PROFILE"] = "cursor"
     assert is_isolated_development_overlay_entry(entry) is False
+
+
+def test_cursor_legacy_harness_overlay_name_is_still_isolated(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"mcpServers": {"harness": _isolated_entry()}}) + "\n", encoding="utf-8"
+    )
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.isolated_development is True
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert adapter.remove_project(root) is IntegrationChange.UNCHANGED

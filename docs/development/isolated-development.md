@@ -109,7 +109,7 @@ make doctor-global
 
 `make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, fully quit and reopen Cursor.
 
-This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`scripts/dev harness mcp`). Cursor IDE still connects global `user-harness` unless that project server is approved; production MCP with `HARNESS_HOST_PROFILE` against this overlay lists no tools. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
+This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Cursor IDE still connects global `user-harness`; user-harness is not a Workspace server. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated root against this overlay lists no tools. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
 
 ## Optional: source the environment
 
@@ -130,14 +130,14 @@ Those flags still bypass default path selection. Isolated development normally d
 
 ## MCP
 
-This checkout commits host overlays that shadow a globally installed server named `harness`:
+This checkout commits host overlays that do not use the production Cursor/Claude adapter signature (`python -m harness.mcp_process` plus `HARNESS_HOST_PROFILE`):
 
-- Cursor: `.cursor/mcp.json` launches `${workspaceFolder}/scripts/dev harness mcp` and sets `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`.
-- Claude Code: `.mcp.json` launches `./scripts/dev harness mcp`.
+- Cursor: `.cursor/mcp.json` names `harness-dev` and launches `${workspaceFolder}/scripts/dev harness mcp` with `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`.
+- Claude Code: `.mcp.json` still names `harness` and launches `./scripts/dev harness mcp`.
 
-Those entries are intentionally not the production Cursor/Claude adapter signature (`python -m harness.mcp_process` plus `HARNESS_HOST_PROFILE`). Production install/scan/uninstall therefore leaves them alone. After changing Cursor MCP config, fully quit and reopen Cursor.
+Production install/scan/uninstall leaves those overlays alone. Overlay detection matches that launch under `harness-dev` or the previous `harness` name; extra host JSON keys do not drop isolation. After changing Cursor MCP config, fully quit and reopen Cursor.
 
-If a host still launches the user-global production server inside this checkout, that process lists no tools and refuses calls. Cursor's documented root hint is `HARNESS_WORKSPACE_ROOT`; Claude Code's is `CLAUDE_PROJECT_DIR`. Overlay detection uses process cwd when that hint is absent or unresolvable; cwd is not Workspace identity. After production Cursor install writes `${workspaceFolder}` into the global entry, `user-harness` in this window interpolates the overlay root and production MCP still refuses because `HARNESS_HOST_PROFILE` is set. The Cursor user-server also lists no tools when `HARNESS_WORKSPACE_ROOT` is missing or still the literal `${workspaceFolder}`, even if cwd is outside this overlay (commonly `$HOME`). The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has approved that project server. The overlay-checkout refuse does not activate when the host starts the user-global server with a documented root outside the overlay worktree.
+Global Cursor `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. It lists no tools and tells the model to enable the project `harness` MCP (or `harness-dev` here). A production process whose interpolated `HARNESS_WORKSPACE_ROOT` or Claude `CLAUDE_PROJECT_DIR` is this overlay still lists no tools. Cursor-profile overlay refuse does not use process cwd. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has enabled `harness-dev`.
 
 The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout and skips host/skill reconciliation so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
 
@@ -147,10 +147,14 @@ Manual equivalent of the Cursor overlay:
 
 ```json
 {
-  "command": "${workspaceFolder}/scripts/dev",
-  "args": ["harness", "mcp"],
-  "env": {
-    "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"
+  "mcpServers": {
+    "harness-dev": {
+      "command": "${workspaceFolder}/scripts/dev",
+      "args": ["harness", "mcp"],
+      "env": {
+        "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"
+      }
+    }
   }
 }
 ```

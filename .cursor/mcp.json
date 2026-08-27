@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "harness": {
+    "harness-dev": {
       "type": "stdio",
       "command": "${workspaceFolder}/scripts/dev",
       "args": ["harness", "mcp"],

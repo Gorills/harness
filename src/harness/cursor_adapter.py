@@ -28,6 +28,7 @@ _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 _SERVER_NAME = "harness"
+_ISOLATED_DEV_SERVER_NAME = "harness-dev"
 _WORKSPACE_FOLDER = "${workspaceFolder}"
 _ISOLATED_DEV_COMMAND = f"{_WORKSPACE_FOLDER}/scripts/dev"
 _ISOLATED_DEV_ARGS = ["harness", "mcp"]
@@ -38,9 +39,9 @@ _EXCLUDE_END = "# END HARNESS CURSOR MCP"
 _EXCLUDE_BODY = ("/.cursor/mcp.json", f"/.cursor/{_OWNER_MARKER}")
 _GIT_TIMEOUT_SECONDS = 5.0
 CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
-    "Cursor user-level MCP did not receive an interpolated HARNESS_WORKSPACE_ROOT from "
-    "${workspaceFolder}. Run harness install --host cursor and fully quit/reopen Cursor. "
-    "Do not hardcode a filesystem path; doctor would mark that config stale."
+    "Cursor user-level MCP is not a Workspace server. Enable this workspace's project "
+    "harness MCP in Cursor Customize and fully quit/reopen Cursor. Isolated Harness "
+    "source checkout uses harness-dev. Do not hardcode a filesystem path."
 )
 
 
@@ -266,12 +267,16 @@ class CursorAdapter:
         return successor_root
 
     def _desired_global(self) -> dict[str, object]:
-        return self._desired_stdio()
+        return {
+            "type": "stdio",
+            "command": str(self.python_executable),
+            "args": ["-m", "harness.mcp_process"],
+            "env": {
+                _HOST_PROFILE_ENV: _CURSOR_PROFILE,
+            },
+        }
 
     def _project_desired(self) -> dict[str, object]:
-        return self._desired_stdio()
-
-    def _desired_stdio(self) -> dict[str, object]:
         return {
             "type": "stdio",
             "command": str(self.python_executable),
@@ -292,6 +297,18 @@ class CursorAdapter:
     ) -> CursorRegistrationDiagnostic:
         snapshot = _read_json_config(path)
         servers = _servers(snapshot.value, path, create=False)
+        overlay = _isolated_overlay_from_servers(servers)
+        if overlay is not None:
+            entry = overlay[1]
+            configured_python, configured_workspace_root = _entry_launch_fields(entry)
+            return CursorRegistrationDiagnostic(
+                path=path,
+                state=HostRegistrationState.FOREIGN,
+                expected_python=self.python_executable,
+                configured_python=configured_python,
+                configured_workspace_root=configured_workspace_root,
+                isolated_development=True,
+            )
         if servers is None or _SERVER_NAME not in servers:
             return CursorRegistrationDiagnostic(
                 path=path,
@@ -301,31 +318,12 @@ class CursorAdapter:
                 configured_workspace_root=None,
             )
         entry = servers[_SERVER_NAME]
-        isolated = is_isolated_development_overlay_entry(entry)
         owned = _is_owned_entry(entry)
-        configured_python: str | None = None
-        configured_workspace_root: str | None = None
-        if isolated and isinstance(entry, dict):
-            command = entry.get("command")
-            if isinstance(command, str):
-                configured_python = command
-            env = entry.get("env")
-            if isinstance(env, dict):
-                observed_root = env.get(_WORKSPACE_ROOT_ENV)
-                if isinstance(observed_root, str):
-                    configured_workspace_root = observed_root
-        elif owned and isinstance(entry, dict):
-            command = entry.get("command")
-            if isinstance(command, str):
-                configured_python = command
-            env = entry.get("env")
-            if isinstance(env, dict):
-                observed_root = env.get(_WORKSPACE_ROOT_ENV)
-                if isinstance(observed_root, str):
-                    configured_workspace_root = observed_root
-        if isolated:
-            state = HostRegistrationState.FOREIGN
-        elif not owned:
+        if owned:
+            configured_python, configured_workspace_root = _entry_launch_fields(entry)
+        else:
+            configured_python, configured_workspace_root = None, None
+        if not owned:
             state = HostRegistrationState.FOREIGN
         elif entry == dict(desired):
             state = HostRegistrationState.CURRENT
@@ -337,7 +335,7 @@ class CursorAdapter:
             expected_python=self.python_executable,
             configured_python=configured_python,
             configured_workspace_root=configured_workspace_root,
-            isolated_development=isolated,
+            isolated_development=False,
         )
 
     def _ensure_entry(self, path: Path, desired: Mapping[str, object]) -> IntegrationChange:
@@ -471,6 +469,32 @@ def _workspace_root(path: Path) -> Path:
     return root
 
 
+def _entry_launch_fields(value: object) -> tuple[str | None, str | None]:
+    if not isinstance(value, dict):
+        return None, None
+    command = value.get("command")
+    configured_python = command if isinstance(command, str) else None
+    env = value.get("env")
+    configured_workspace_root: str | None = None
+    if isinstance(env, dict):
+        observed_root = env.get(_WORKSPACE_ROOT_ENV)
+        if isinstance(observed_root, str):
+            configured_workspace_root = observed_root
+    return configured_python, configured_workspace_root
+
+
+def _isolated_overlay_from_servers(
+    servers: Mapping[str, object] | None,
+) -> tuple[str, object] | None:
+    if servers is None:
+        return None
+    for name in (_ISOLATED_DEV_SERVER_NAME, _SERVER_NAME):
+        entry = servers.get(name)
+        if is_isolated_development_overlay_entry(entry):
+            return name, entry
+    return None
+
+
 def _is_owned_entry(value: object) -> bool:
     if not isinstance(value, dict):
         return False
@@ -490,6 +514,7 @@ def is_isolated_development_overlay_entry(value: object) -> bool:
     Extra JSON keys are ignored so a host round-trip cannot drop isolation. The
     launch must remain ``scripts/dev harness mcp`` with
     ``HARNESS_WORKSPACE_ROOT=${workspaceFolder}`` and without ``HARNESS_HOST_PROFILE``.
+    The Cursor server name may be ``harness-dev`` or the previous ``harness``.
     """
     if not isinstance(value, dict):
         return False
@@ -531,11 +556,9 @@ def find_isolated_development_root(path: Path) -> Path | None:
     except HostIntegrationError:
         return None
     servers = _servers(snapshot.value, overlay, create=False)
-    if servers is None:
+    if _isolated_overlay_from_servers(servers) is None:
         return None
-    if is_isolated_development_overlay_entry(servers.get(_SERVER_NAME)):
-        return root
-    return None
+    return root
 
 
 def production_mcp_isolated_checkout_root(
@@ -546,18 +569,23 @@ def production_mcp_isolated_checkout_root(
     """Return the overlay root when production host-profile MCP must refuse tools.
 
     Isolated overlay launches omit ``HARNESS_HOST_PROFILE`` and are not refused.
-    Process cwd is consulted when that profile's documented Workspace-root hint
-    is absent or does not resolve to an existing path. Cwd is never Workspace
-    identity.
+    Cursor-profile overlay refuse requires an interpolated ``HARNESS_WORKSPACE_ROOT``
+    that resolves to the overlay; missing or literal ``${workspaceFolder}`` is the
+    user-level missing-root path, not overlay refuse. Claude Code still consults
+    ``CLAUDE_PROJECT_DIR``, then process cwd when that hint is absent or does not
+    resolve to an existing path. Cwd is never Workspace identity.
     """
     values = os.environ if environment is None else environment
     profile = values.get(_HOST_PROFILE_ENV)
     if not profile:
         return None
-    documented: str | None
     if profile == _CURSOR_PROFILE:
-        documented = values.get(_WORKSPACE_ROOT_ENV)
-    elif profile == _CLAUDE_PROFILE:
+        configured = configured_cursor_workspace_root(values)
+        if configured is None:
+            return None
+        return find_isolated_development_root(Path(configured))
+    documented: str | None
+    if profile == _CLAUDE_PROFILE:
         documented = values.get(_CLAUDE_PROJECT_DIR_ENV)
     else:
         documented = values.get(_WORKSPACE_ROOT_ENV) or values.get(_CLAUDE_PROJECT_DIR_ENV)

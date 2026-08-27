@@ -275,8 +275,8 @@ def run_system_doctor(
                     DoctorSeverity.OK,
                     f"current at {cursor_diagnostic.path}; configured Python: "
                     f"{configured_python}; expected Python: {cursor_diagnostic.expected_python}; "
-                    "HARNESS_WORKSPACE_ROOT=${workspaceFolder}; Cursor interpolates that for "
-                    "user-harness from the current window",
+                    "user-harness has no HARNESS_WORKSPACE_ROOT; enable project harness MCP in "
+                    "Cursor Customize",
                 )
             )
         elif cursor_registration_state is HostRegistrationState.ABSENT:
@@ -298,7 +298,7 @@ def run_system_doctor(
                     DoctorSeverity.FAIL,
                     f"stale Harness runtime at {cursor_diagnostic.path}; expected Python: "
                     f"{cursor_diagnostic.expected_python}; configured Python: {configured_python}; "
-                    "expected HARNESS_WORKSPACE_ROOT=${workspaceFolder}; configured "
+                    "expected no HARNESS_WORKSPACE_ROOT; configured "
                     f"HARNESS_WORKSPACE_ROOT={configured_root}; "
                     "remediation: harness install --host cursor",
                 )
@@ -797,7 +797,7 @@ def _inspect_projects_and_workspaces(
                         f"Cursor project MCP override {workspace.workspace_id}",
                         DoctorSeverity.OK,
                         f"isolated-development overlay at {cursor_project.path}; "
-                        "production Cursor adapter will not mutate it",
+                        "server harness-dev (or legacy harness) is left unchanged",
                     )
                 )
             elif cursor_project.preflight_error is not None:

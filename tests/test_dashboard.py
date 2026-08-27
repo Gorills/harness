@@ -144,6 +144,7 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
         assert "Проекты · Harness" in body
+        assert "Что сейчас в работе" in body
         assert "ревью" in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
         assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
@@ -203,7 +204,8 @@ def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_p
         with urlopen(first.url, timeout=2) as response:
             body = response.read().decode("utf-8")
             assert response.status == 200
-        assert "Нет рабочих копий" in body
+        assert "Пока нет рабочих копий" in body
+        assert "harness scan" in body
         assert 'lang="ru"' in body
     finally:
         _stop_server(stop_event, executor, future)

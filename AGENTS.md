@@ -11,8 +11,8 @@ This checkout must not share process, database, socket, MCP, or host configurati
 - Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user `harness.sock`) for work in this repository.
 - Do not run `harness install` or `harness uninstall` from this environment. Those commands mutate user-global host MCP and are refused while `HARNESS_DEV_ROOT` is set.
 - Do not run `make install-global`, `make doctor-global`, or `scripts/install-global`. Those refresh the user-global `uv tool` install and host MCP. Point the operator at `make install-global` instead.
-- Tracked `.cursor/mcp.json` and `.mcp.json` shadow a global server named `harness` with `scripts/dev harness mcp`. That is the checkout-local daemon under `.harness/`, not the global install. Prefer reading this repository over those tools when implementing Harness.
-- Never invoke a user-level / global Harness MCP namespace (`user-harness` or equivalent). Production MCP with `HARNESS_HOST_PROFILE` refuses tools in this overlay checkout; if such tools still appear, do not call them.
+- Tracked `.cursor/mcp.json` names `harness-dev` and launches `${workspaceFolder}/scripts/dev harness mcp`. `.mcp.json` still names `harness` for Claude Code. Those are the checkout-local daemon under `.harness/`, not the global install. Prefer reading this repository over those tools when implementing Harness.
+- Never invoke a user-level / global Harness MCP namespace (`user-harness` or equivalent). Enable project `harness-dev` in Cursor Customize for this checkout. If leftover production tools appear against this overlay, do not call them.
 - Ignore globally installed Harness skills if they appear in the host.
 
 See [`docs/development/isolated-development.md`](docs/development/isolated-development.md).

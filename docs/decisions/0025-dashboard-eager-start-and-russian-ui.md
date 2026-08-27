@@ -19,12 +19,14 @@ Publish the current capability URL to `dashboard.url` in the same private runtim
 
 Render the dashboard in Russian. Copy is limited to work process: projects, workspaces, current Task, next step, review actions, search, and timeline. Do not describe the product, the loopback trust model, or why Harness exists. Domain identifiers (`task_id`, revisions, paths) stay literal. Task state, wait reason, visibility, and search match kind are translated only at the HTML boundary.
 
+Persisted Task `title`, checkpoint `summary`/`next_step`, and Knowledge title/body are operator-facing text. MCP server instructions and the `task_start`/`task_checkpoint` tool descriptions tell the model to write those fields in Russian. Tool names, JSON field names, enums, CLI, doctor, and IPC stay English. Harness stores the supplied UTF-8 as-is and does not language-detect or reject English Task text.
+
 ## Consequences
 
 - Opening Cursor/Claude, `harness scan`, `harness install`, or any other canonical client that autostarts `harnessd` also brings the dashboard listener up. A reboot still depends on that existing daemon autostart; this decision does not add systemd/launchd.
 - `harness dashboard` is discovery, not a start command. The runtime `dashboard.url` file is the stable local handle for the current process.
 - A healthy daemon with a down dashboard listener is a warning, not the previous "lazily inactive" success.
-- English CLI/doctor/MCP contracts are unchanged.
+- English CLI/doctor/IPC schemas and MCP payload field names are unchanged. Model-facing instructions now require Russian operator-facing Task/Knowledge text; whether a given host actually follows those instructions remains a host-acceptance concern.
 
 ## Verification
 
@@ -34,4 +36,5 @@ Automated tests must prove:
 - the runtime `dashboard.url` file is mode `0600`, matches the IPC URL, and is removed on shutdown;
 - repeated `dashboard_url` requests reuse one URL;
 - dashboard HTML is `lang="ru"`, uses operational Russian labels, and still escapes persisted Task text;
+- MCP `server/discover` instructions and `task_start`/`task_checkpoint` descriptions require Russian operator-facing Task/Knowledge text and stay inside the existing instruction/catalog budgets;
 - dashboard startup failure remains bounded so the daemon keeps serving.

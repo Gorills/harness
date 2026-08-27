@@ -156,7 +156,8 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "refused",
         "uv run --frozen harness",
         "make install-global",
-        "scripts/install-global",
+        "harness-dev",
+        "user-harness is not a Workspace server",
         "uv tool install --force --reinstall",
         "pre-overlay",
         "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
@@ -363,10 +364,10 @@ def test_dev_wrapper_runs_checkout_harness_not_path_decoy(tmp_path: Path) -> Non
     assert "0.1.0.dev0" in result.stdout
 
 
-def _isolated_overlay() -> dict[str, object]:
+def _isolated_overlay(*, server_name: str = "harness-dev") -> dict[str, object]:
     return {
         "mcpServers": {
-            "harness": {
+            server_name: {
                 "type": "stdio",
                 "command": "${workspaceFolder}/scripts/dev",
                 "args": ["harness", "mcp"],
@@ -378,8 +379,9 @@ def _isolated_overlay() -> dict[str, object]:
 
 def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> None:
     overlay = json.loads((REPO_ROOT / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-    entry = overlay["mcpServers"]["harness"]
+    entry = overlay["mcpServers"]["harness-dev"]
     assert is_isolated_development_overlay_entry(entry)
+    assert "harness" not in overlay["mcpServers"]
     assert find_isolated_development_root(REPO_ROOT) == REPO_ROOT
     claude = json.loads((REPO_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["harness"]["command"] == "./scripts/dev"
@@ -752,7 +754,7 @@ def test_production_mcp_refuses_overlay_only_for_host_profile_without_foreign_ro
             environment={"HARNESS_HOST_PROFILE": "cursor"},
             cwd=overlay,
         )
-        == overlay.resolve()
+        is None
     )
     assert (
         production_mcp_isolated_checkout_root(
@@ -761,6 +763,16 @@ def test_production_mcp_refuses_overlay_only_for_host_profile_without_foreign_ro
                 "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
             },
             cwd=overlay,
+        )
+        is None
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": str(overlay),
+            },
+            cwd=elsewhere,
         )
         == overlay.resolve()
     )
@@ -866,13 +878,29 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     env.pop("CLAUDE_PROJECT_DIR", None)
     env["HARNESS_HOST_PROFILE"] = "cursor"
 
-    refused = _mcp_stdio_exchange(
+    missing_root = _mcp_stdio_exchange(
         cwd=overlay,
         env=env,
         methods=("server/discover", "tools/list"),
         call={"name": "project_status", "arguments": {}},
     )
+    missing_instructions = str(missing_root[0]["result"]["instructions"])
+    assert "user-level" in missing_instructions.lower()
+    assert "production Harness MCP is refused" not in missing_instructions
+    assert len(missing_instructions.encode("utf-8")) < 1024
+    assert missing_root[1]["result"]["tools"] == []
+    assert "not a Workspace server" in missing_root[2]["error"]["message"]
+
+    overlay_bound = dict(env)
+    overlay_bound["HARNESS_WORKSPACE_ROOT"] = str(overlay)
+    refused = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=overlay_bound,
+        methods=("server/discover", "tools/list"),
+        call={"name": "project_status", "arguments": {}},
+    )
     assert "refused" in str(refused[0]["result"]["instructions"]).lower()
+    assert "harness-dev" in str(refused[0]["result"]["instructions"])
     assert len(str(refused[0]["result"]["instructions"]).encode("utf-8")) < 1024
     assert refused[1]["result"]["tools"] == []
     assert refused[2]["error"]["message"].startswith("production Harness MCP is refused")
@@ -936,10 +964,11 @@ def test_production_mcp_stdio_lists_no_tools_for_cursor_user_server_without_root
     )
     instructions = str(refused[0]["result"]["instructions"])
     assert "user-level" in instructions.lower()
-    assert "${workspaceFolder}" in instructions
+    assert "Customize" in instructions
+    assert "harness-dev" in instructions
     assert len(instructions.encode("utf-8")) < 1024
     assert refused[1]["result"]["tools"] == []
-    assert "user-level MCP" in refused[2]["error"]["message"]
+    assert "not a Workspace server" in refused[2]["error"]["message"]
     assert "hardcode" in refused[2]["error"]["message"]
 
     uninterpolated = dict(env)

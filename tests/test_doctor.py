@@ -186,7 +186,7 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
     subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
     overlay = {
         "mcpServers": {
-            "harness": {
+            "harness-dev": {
                 "type": "stdio",
                 "command": "${workspaceFolder}/scripts/dev",
                 "args": ["harness", "mcp"],

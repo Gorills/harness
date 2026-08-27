@@ -510,7 +510,11 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
             assert response["id"] == request_id
             if method == "server/discover":
                 assert response["result"]["supportedVersions"] == ["2026-07-28"]
-                assert len(response["result"]["instructions"].encode("utf-8")) < 1024
+                instructions = response["result"]["instructions"]
+                assert len(instructions.encode("utf-8")) < 1024
+                assert "Russian" in instructions[:512]
+                assert "title" in instructions[:512]
+                assert "next_step" in instructions[:512]
             else:
                 tools = response["result"]["tools"]
                 assert [tool["name"] for tool in tools] == [
@@ -522,13 +526,12 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 ]
                 for tool in tools:
                     assert tool["inputSchema"]["additionalProperties"] is False
-                task_start_schema = next(
-                    tool["inputSchema"] for tool in tools if tool["name"] == "task_start"
-                )
+                by_name = {tool["name"]: tool for tool in tools}
+                assert "Russian" in by_name["task_start"]["description"]
+                assert "Russian" in by_name["task_checkpoint"]["description"]
+                task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
-                checkpoint_schema = next(
-                    tool["inputSchema"] for tool in tools if tool["name"] == "task_checkpoint"
-                )
+                checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
                 assert checkpoint_schema["$defs"]["KnowledgeInput"]["additionalProperties"] is False
                 assert (
                     checkpoint_schema["$defs"]["KnowledgeAnchorInput"]["additionalProperties"]
