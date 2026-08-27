@@ -28,12 +28,11 @@ Register and index each Git worktree explicitly:
 cd /path/to/repository
 harness scan
 # After Harness changes Cursor MCP config, fully quit and reopen Cursor.
-# Enable the project harness MCP in Cursor Customize for this repository (once).
 agent mcp list
 harness status
 ```
 
-Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. The Cursor CLI uses the same MCP configuration as the editor; when `agent` is installed, `agent mcp list` is a host-side inspection probe. Cursor IDE chat uses profile-scoped `user-harness`, which is not a Workspace server. After `harness install --host cursor`, enable the project `harness` MCP in Customize for each working repository and fully quit/reopen Cursor (window reload is not enough). Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
+Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. The Cursor CLI uses the same MCP configuration as the editor; when `agent` is installed, `agent mcp list` is a host-side inspection probe. Cursor IDE chat uses profile-scoped `user-harness` as the connected production server. After `harness install --host cursor`, fully quit/reopen Cursor (window reload is not enough). Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
 
 `harness scan` reconciles all current supported host profiles together. When Cursor is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
 
@@ -46,7 +45,7 @@ git pull
 uv tool install --force --python 3.13 .
 harness install --host all   # use the profiles installed on this machine
 harness doctor
-# If Cursor config changed, fully quit/reopen Cursor, enable project harness MCP in Customize, then:
+# If Cursor config changed, fully quit/reopen Cursor, then:
 agent mcp list
 ```
 
@@ -79,7 +78,7 @@ Purge is refused while another supported host remains active and is fail-closed 
 
 Bare `harness doctor` is read-only and operational. `OK` means the inspected invariant holds, `WARN` means absent/lazy/stale-but-non-destructive state that may need attention, and `FAIL` means an integrity, ownership, compatibility, or runtime mismatch. Any `FAIL` makes the command exit nonzero; warnings alone do not. Project/index/skill checks use one SQLite read snapshot. A quiescent WAL database is opened immutably so doctor does not create `-wal`/`-shm` files merely by inspecting it; an existing live WAL is still read through SQLite's normal read-only WAL path so uncheckpointed durable frames remain visible.
 
-For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, a leftover `HARNESS_WORKSPACE_ROOT` on the global entry, wrong or missing `${workspaceFolder}` on project entries, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, enable the project `harness` MCP in Customize, then inspect the host with `agent mcp list` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. An absent Claude MCP registration is a warning, not a Cursor failure.
+For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, a leftover `HARNESS_WORKSPACE_ROOT` on the global entry, wrong or missing `${workspaceFolder}` on project entries, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. An absent Claude MCP registration is a warning, not a Cursor failure.
 
 Index state and Generated skills report `timed out` or `failed` for named Workspaces when live inspection hits the doctor deadline or raises an inspection error. `unavailable` is reserved for Project Git/identity inspection failure of a named Workspace, not for a timeout. Workspaces skipped by the count limit or aggregate time budget are named as `not inspected (doctor budget)`. Timeout and budget-truncation warnings do not fail the command; identity mismatches and other integrity failures still do.
 

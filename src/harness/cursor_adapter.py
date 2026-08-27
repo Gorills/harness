@@ -27,6 +27,7 @@ _CLAUDE_PROFILE = "claude-code"
 _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
+_WORKSPACE_FOLDER_PATHS_ENV = "WORKSPACE_FOLDER_PATHS"
 _SERVER_NAME = "harness"
 _ISOLATED_DEV_SERVER_NAME = "harness-dev"
 _WORKSPACE_FOLDER = "${workspaceFolder}"
@@ -39,9 +40,8 @@ _EXCLUDE_END = "# END HARNESS CURSOR MCP"
 _EXCLUDE_BODY = ("/.cursor/mcp.json", f"/.cursor/{_OWNER_MARKER}")
 _GIT_TIMEOUT_SECONDS = 5.0
 CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
-    "Cursor user-level MCP is not a Workspace server. Enable this workspace's project "
-    "harness MCP in Cursor Customize and fully quit/reopen Cursor. Isolated Harness "
-    "source checkout uses harness-dev. Do not hardcode a filesystem path."
+    "Cursor MCP did not receive a Workspace root. Open a project folder in Cursor IDE. "
+    "Isolated Harness source checkout uses harness-dev."
 )
 
 
@@ -92,10 +92,18 @@ class CursorAdapter:
         if configured is None:
             raise HostIntegrationError(CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE)
         root = _workspace_root(Path(configured))
+        owned = interpolated_cursor_workspace_root(environment)
+        source = "cursor-workspace-folder-paths"
+        if owned is not None:
+            try:
+                if _workspace_root(Path(owned)) == root:
+                    source = "cursor-workspace-folder"
+            except HostIntegrationError:
+                pass
         return (
             WorkspaceHint(
                 path=root,
-                source="cursor-workspace-folder",
+                source=source,
                 match_mode=WorkspaceHintMatchMode.ROOT,
             ),
         )
@@ -427,19 +435,66 @@ class CursorAdapter:
         _replace_if_unchanged(path, existing, raw, mode)
 
 
-def configured_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
-    """Return the Cursor-documented root hint, or None when it was not interpolated."""
+def interpolated_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
+    """Return Harness-owned interpolated ${workspaceFolder}, or None when absent/literal."""
     configured = environment.get(_WORKSPACE_ROOT_ENV)
     if not configured or configured == _WORKSPACE_FOLDER:
         return None
     return configured
 
 
+def cursor_workspace_folder_paths(environment: Mapping[str, str]) -> tuple[str, ...]:
+    """Return existing directories from Cursor's WORKSPACE_FOLDER_PATHS, if present."""
+    raw = environment.get(_WORKSPACE_FOLDER_PATHS_ENV)
+    if not raw:
+        return ()
+    found: list[str] = []
+    seen: set[str] = set()
+    for part in raw.split(","):
+        candidate = part.strip()
+        if not candidate:
+            continue
+        try:
+            resolved = str(Path(candidate).expanduser().resolve(strict=True))
+        except (OSError, RuntimeError):
+            continue
+        if not Path(resolved).is_dir() or resolved in seen:
+            continue
+        seen.add(resolved)
+        found.append(resolved)
+    return tuple(found)
+
+
+def configured_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
+    """Return the Cursor Workspace root the shared or project-scoped process should bind.
+
+    Project-scoped MCP interpolates ``HARNESS_WORKSPACE_ROOT=${workspaceFolder}``.
+    Profile-scoped ``user-harness`` does not set that env; Cursor still injects
+    ``WORKSPACE_FOLDER_PATHS``. When the interpolated Harness-owned root is the
+    isolated-development overlay, a non-overlay folder-path wins so a reload from
+    the Harness checkout does not empty working-project catalogs.
+    """
+    owned = interpolated_cursor_workspace_root(environment)
+    folders = cursor_workspace_folder_paths(environment)
+    non_overlay_folders = tuple(
+        path for path in folders if find_isolated_development_root(Path(path)) is None
+    )
+    if owned is not None and find_isolated_development_root(Path(owned)) is None:
+        return owned
+    if non_overlay_folders:
+        return non_overlay_folders[0]
+    if owned is not None:
+        return owned
+    if folders:
+        return folders[0]
+    return None
+
+
 def cursor_user_mcp_missing_workspace_root(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> bool:
-    """Return True when Cursor profile MCP lacks an interpolated ${workspaceFolder} root."""
+    """Return True when Cursor profile MCP has no interpolated root and no folder paths."""
     values = os.environ if environment is None else environment
     if values.get(_HOST_PROFILE_ENV) != _CURSOR_PROFILE:
         return False
@@ -570,20 +625,29 @@ def production_mcp_isolated_checkout_root(
 
     Isolated overlay launches omit ``HARNESS_HOST_PROFILE`` and are not refused.
     Cursor-profile overlay refuse requires an interpolated ``HARNESS_WORKSPACE_ROOT``
-    that resolves to the overlay; missing or literal ``${workspaceFolder}`` is the
-    user-level missing-root path, not overlay refuse. Claude Code still consults
-    ``CLAUDE_PROJECT_DIR``, then process cwd when that hint is absent or does not
-    resolve to an existing path. Cwd is never Workspace identity.
+    that resolves to the overlay *and* no non-overlay ``WORKSPACE_FOLDER_PATHS``
+    alternative. A profile-scoped user-level process therefore keeps serving tools
+    in working repositories after a reload from the Harness checkout. Missing or
+    literal ``${workspaceFolder}`` without folder paths is the missing-root path,
+    not overlay refuse. Claude Code still consults ``CLAUDE_PROJECT_DIR``, then
+    process cwd when that hint is absent or does not resolve to an existing path.
+    Cwd is never Workspace identity.
     """
     values = os.environ if environment is None else environment
     profile = values.get(_HOST_PROFILE_ENV)
     if not profile:
         return None
     if profile == _CURSOR_PROFILE:
-        configured = configured_cursor_workspace_root(values)
-        if configured is None:
+        owned = interpolated_cursor_workspace_root(values)
+        if owned is None:
             return None
-        return find_isolated_development_root(Path(configured))
+        overlay = find_isolated_development_root(Path(owned))
+        if overlay is None:
+            return None
+        folders = cursor_workspace_folder_paths(values)
+        if any(find_isolated_development_root(Path(path)) is None for path in folders):
+            return None
+        return overlay
     documented: str | None
     if profile == _CLAUDE_PROFILE:
         documented = values.get(_CLAUDE_PROJECT_DIR_ENV)

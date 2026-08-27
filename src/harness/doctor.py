@@ -275,8 +275,8 @@ def run_system_doctor(
                     DoctorSeverity.OK,
                     f"current at {cursor_diagnostic.path}; configured Python: "
                     f"{configured_python}; expected Python: {cursor_diagnostic.expected_python}; "
-                    "user-harness has no HARNESS_WORKSPACE_ROOT; enable project harness MCP in "
-                    "Cursor Customize",
+                    "user-harness has no HARNESS_WORKSPACE_ROOT in mcp.json; "
+                    "Cursor IDE supplies WORKSPACE_FOLDER_PATHS at runtime",
                 )
             )
         elif cursor_registration_state is HostRegistrationState.ABSENT:

@@ -72,10 +72,8 @@ _ISOLATED_CHECKOUT_REFUSAL_MESSAGE = (
     "use the tracked harness-dev overlay or native host tools"
 )
 _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS = (
-    "Cursor user-level Harness MCP does not bind a Workspace. Do not call these tools. "
-    "Enable the project harness MCP in Cursor Customize for this workspace. Isolated "
-    "Harness source checkout uses harness-dev. Fully quit/reopen Cursor after enabling. "
-    "Do not hardcode a path."
+    "Cursor MCP has no Workspace root. Open a project folder in Cursor IDE. Isolated "
+    "Harness source checkout uses harness-dev. Do not call these tools."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10

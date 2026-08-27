@@ -24,6 +24,7 @@ from harness.dashboard_i18n import (
     CANCEL,
     CANCEL_TASK,
     CREATED,
+    DETACHED_HEAD,
     DIRTY,
     DIRTY_PATHS,
     EM_DASH,
@@ -109,6 +110,7 @@ from harness.task_checkpoints import (
     TaskCheckpointError,
     TaskCheckpointRecord,
     TaskEventRecord,
+    TaskEventType,
     get_latest_task_checkpoint_status,
     list_task_checkpoints,
     list_task_events,
@@ -161,6 +163,14 @@ class DashboardError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class DashboardGitBranch:
+    """Durable Git branch recorded for one Task, not the live Workspace checkout."""
+
+    captured: bool
+    name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardWorkspaceRow:
     """One bounded Workspace summary rendered by the local Projects dashboard."""
 
@@ -176,10 +186,19 @@ class DashboardWorkspaceRow:
     task_revision: int | None
     last_activity: str | None
     next_step: str | None
+    task_git_branch: DashboardGitBranch | None
     branch: str | None
     dirty_path_count: int | None
     indexed_file_count: int
     live_error: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardTaskRow:
+    """One recent Task plus the durable Git branch recorded for that Task."""
+
+    task: TaskRecord
+    git_branch: DashboardGitBranch
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +214,7 @@ class DashboardWorkspaceDetail:
     """One Workspace, recent durable Tasks, and optional bounded indexed-path search."""
 
     workspace: DashboardWorkspaceRow
-    recent_tasks: tuple[TaskRecord, ...]
+    recent_tasks: tuple[DashboardTaskRow, ...]
     search_query: str | None
     search_results: tuple[IndexedPathSearchResult, ...]
 
@@ -206,6 +225,8 @@ class DashboardTaskDetail:
 
     workspace: DashboardWorkspaceRow
     task: TaskRecord
+    git_branch: DashboardGitBranch
+    baseline_git_branch: DashboardGitBranch
     stack_hints: tuple[str, ...]
     checkpoints: tuple[TaskCheckpointRecord, ...]
     events: tuple[TaskEventRecord, ...]
@@ -297,7 +318,15 @@ def read_dashboard_workspace_detail(
                 """,
                 (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
             ).fetchall()
-            recent_tasks = tuple(get_task(connection, task_id[0]) for task_id in task_ids)
+            loaded_tasks = tuple(get_task(connection, task_id[0]) for task_id in task_ids)
+            recorded_branches = _read_recorded_git_branches(
+                connection,
+                tuple(task.task_id for task in loaded_tasks),
+            )
+            recent_tasks = tuple(
+                DashboardTaskRow(task=task, git_branch=recorded_branches[task.task_id])
+                for task in loaded_tasks
+            )
             results = (
                 ()
                 if search_query is None
@@ -333,6 +362,7 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
             workspace = get_workspace(connection, task.workspace_id)
             row = _read_workspace_row_persisted(connection, workspace)
             stack_hints = get_task_stack_hints(connection, task_id)
+            baseline_git_branch = _read_task_baseline_branch(connection, task_id)
             checkpoints = list_task_checkpoints(
                 connection,
                 task_id,
@@ -355,6 +385,11 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
             ):
                 raise sqlite3.DatabaseError("invalid dashboard Task event count")
             event_count = count_row[0]
+            git_branch = (
+                DashboardGitBranch(captured=True, name=checkpoints[-1].current_branch)
+                if checkpoints
+                else baseline_git_branch
+            )
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -365,6 +400,8 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
     return DashboardTaskDetail(
         workspace=_with_live_workspace_status(row),
         task=task,
+        git_branch=git_branch,
+        baseline_git_branch=baseline_git_branch,
         stack_hints=stack_hints,
         checkpoints=checkpoints,
         events=events,
@@ -400,6 +437,11 @@ def _read_workspace_row_persisted(
         task_revision=None if task is None else task.revision,
         last_activity=None if task is None else task.updated_at,
         next_step=None if checkpoint is None else checkpoint.next_step,
+        task_git_branch=(
+            None
+            if task is None
+            else _read_recorded_git_branches(connection, (task.task_id,))[task.task_id]
+        ),
         branch=None,
         dirty_path_count=None,
         indexed_file_count=_indexed_file_count(connection, workspace.workspace_id),
@@ -433,6 +475,82 @@ def _with_live_workspace_status(row: DashboardWorkspaceRow) -> DashboardWorkspac
         dirty_path_count=dirty_path_count,
         live_error=live_error,
     )
+
+
+def _read_task_baseline_branch(
+    connection: sqlite3.Connection,
+    task_id: str,
+) -> DashboardGitBranch:
+    row = connection.execute(
+        "SELECT branch FROM task_baselines WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return DashboardGitBranch(captured=False, name=None)
+    return _validated_persisted_branch(row[0], captured=True)
+
+
+def _read_recorded_git_branches(
+    connection: sqlite3.Connection,
+    task_ids: tuple[str, ...],
+) -> dict[str, DashboardGitBranch]:
+    if not task_ids:
+        return {}
+    placeholders = ",".join("?" * len(task_ids))
+    rows = connection.execute(
+        f"""
+        SELECT
+            tasks.id,
+            CASE WHEN latest.id IS NULL THEN 0 ELSE 1 END,
+            latest.current_branch,
+            CASE WHEN baseline.task_id IS NULL THEN 0 ELSE 1 END,
+            baseline.branch
+        FROM tasks
+        LEFT JOIN task_baselines AS baseline
+            ON baseline.task_id = tasks.id
+        LEFT JOIN (
+            SELECT checkpoints.task_id, checkpoints.id, checkpoints.current_branch
+            FROM task_checkpoints AS checkpoints
+            INNER JOIN (
+                SELECT task_id, MAX(task_revision) AS task_revision
+                FROM task_checkpoints
+                WHERE task_id IN ({placeholders})
+                GROUP BY task_id
+            ) AS newest
+                ON newest.task_id = checkpoints.task_id
+               AND newest.task_revision = checkpoints.task_revision
+        ) AS latest
+            ON latest.task_id = tasks.id
+        WHERE tasks.id IN ({placeholders})
+        """,
+        (*task_ids, *task_ids),
+    ).fetchall()
+    found = {row[0] for row in rows}
+    if found != set(task_ids):
+        raise sqlite3.DatabaseError("dashboard Task git-branch query missed a Task")
+    recorded: dict[str, DashboardGitBranch] = {}
+    for task_id, has_checkpoint, checkpoint_branch, has_baseline, baseline_branch in rows:
+        if not isinstance(task_id, str) or not task_id:
+            raise sqlite3.DatabaseError("dashboard Task git-branch query returned an invalid id")
+        if isinstance(has_checkpoint, bool) or has_checkpoint not in {0, 1}:
+            raise sqlite3.DatabaseError("dashboard Task checkpoint capture flag is invalid")
+        if isinstance(has_baseline, bool) or has_baseline not in {0, 1}:
+            raise sqlite3.DatabaseError("dashboard Task baseline capture flag is invalid")
+        if has_checkpoint == 1:
+            recorded[task_id] = _validated_persisted_branch(checkpoint_branch, captured=True)
+        elif has_baseline == 1:
+            recorded[task_id] = _validated_persisted_branch(baseline_branch, captured=True)
+        else:
+            recorded[task_id] = DashboardGitBranch(captured=False, name=None)
+    return recorded
+
+
+def _validated_persisted_branch(value: object, *, captured: bool) -> DashboardGitBranch:
+    if value is None:
+        return DashboardGitBranch(captured=captured, name=None)
+    if not isinstance(value, str) or not value:
+        raise sqlite3.DatabaseError("dashboard persisted Git branch is invalid")
+    return DashboardGitBranch(captured=captured, name=value)
 
 
 def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> int:
@@ -539,6 +657,28 @@ def _display_live_status(value: str | int | None, row: DashboardWorkspaceRow) ->
     if row.live_error is not None:
         return GIT_UNAVAILABLE
     return EM_DASH if value is None else str(value)
+
+
+def _display_recorded_branch(branch: DashboardGitBranch) -> str:
+    if not branch.captured:
+        return EM_DASH
+    if branch.name is None:
+        return DETACHED_HEAD
+    return branch.name
+
+
+def _render_task_git_branch(branch: DashboardGitBranch) -> str:
+    return (
+        f'<p class="task-git-branch"><span>{escape(BRANCH)}</span> '
+        f'<strong class="mono">{escape(_display_recorded_branch(branch))}</strong></p>'
+    )
+
+
+def _render_timeline_branch(branch: DashboardGitBranch) -> str:
+    return (
+        f'<div class="timeline-branch"><strong>{escape(BRANCH)}</strong> '
+        f'<span class="mono">{escape(_display_recorded_branch(branch))}</span></div>'
+    )
 
 
 def _hidden_input(name: str, value: str | int) -> str:
@@ -725,6 +865,9 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
         )
         task_title = row.task_title or row.task_id
     focus = escape(task_title) if row.task_id is None else task_link
+    task_branch = (
+        "" if row.task_git_branch is None else _render_task_git_branch(row.task_git_branch)
+    )
     next_step = "" if row.next_step is None else f'<p class="next-step">{escape(row.next_step)}</p>'
     live_branch = _display_live_status(row.branch, row)
     live_dirty = _display_live_status(row.dirty_path_count, row)
@@ -747,7 +890,7 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
         f"{escape(row.workspace_root.name or str(row.workspace_root))}</a></h2>"
         f'<p class="workspace-path">{escape(str(row.workspace_root))}</p>'
         f'<div class="task-focus"><div class="task-focus-label">{escape(TASK_FOCUS)}</div>'
-        f'<p class="task-focus-title">{focus}</p>{next_step}</div></div>'
+        f'<p class="task-focus-title">{focus}</p>{task_branch}{next_step}</div></div>'
         '<aside class="card-side"><div class="mini-stats">'
         f'<div class="mini-stat"><span>{escape(BRANCH)}</span><strong>{escape(live_branch)}</strong></div>'
         f'<div class="mini-stat"><span>{escape(DIRTY)}</span><strong>{escape(live_dirty)}</strong></div>'
@@ -833,11 +976,12 @@ def render_project_page(detail: DashboardProjectDetail, *, base_path: str) -> st
     )
 
 
-def _render_recent_tasks(tasks: tuple[TaskRecord, ...], base_path: str) -> str:
+def _render_recent_tasks(tasks: tuple[DashboardTaskRow, ...], base_path: str) -> str:
     if not tasks:
         return f'<div class="empty-state"><strong>{escape(NO_TASKS_TITLE)}</strong></div>'
     parts = ['<div class="task-list">']
-    for task in tasks:
+    for row in tasks:
+        task = row.task
         task_url = _url(base_path, "tasks", task.task_id)
         wait_reason = None if task.wait_reason is None else task.wait_reason.value
         parts.append(
@@ -846,6 +990,8 @@ def _render_recent_tasks(tasks: tuple[TaskRecord, ...], base_path: str) -> str:
             '<div class="task-row-meta">'
             f'<span class="mono">{escape(task.task_id[:10])}</span>'
             f"<span>{escape(REVISION)} {task.revision}</span>"
+            f'<span>{escape(BRANCH)} <span class="mono">'
+            f"{escape(_display_recorded_branch(row.git_branch))}</span></span>"
             f"<span>{escape(task.updated_at)}</span></div></div>"
             f"{_state_pill(task.state.value, wait_reason)}</article>"
         )
@@ -963,10 +1109,17 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
     items: list[str] = ['<div class="timeline">']
     for event in reversed(visible_events):
         content: list[str] = []
+        if event.event_type is TaskEventType.CREATED:
+            content.append(_render_timeline_branch(detail.baseline_git_branch))
         checkpoint = (
             checkpoints.get(event.checkpoint_id) if event.checkpoint_id is not None else None
         )
         if checkpoint is not None:
+            content.append(
+                _render_timeline_branch(
+                    DashboardGitBranch(captured=True, name=checkpoint.current_branch)
+                )
+            )
             content.append(f'<div class="timeline-summary">{escape(checkpoint.summary)}</div>')
             if checkpoint.next_step is not None:
                 content.append(
@@ -1038,6 +1191,8 @@ def render_task_page(detail: DashboardTaskDetail, *, base_path: str) -> str:
         f'<dd><a href="{escape(workspace_url, quote=True)}" class="mono">{escape(task.workspace_id)}</a></dd></div>'
         f'<div class="fact"><dt>{escape(PROJECT)}</dt>'
         f'<dd><a href="{escape(project_url, quote=True)}" class="mono">{escape(row.project_id)}</a></dd></div>'
+        f'<div class="fact"><dt>{escape(BRANCH)}</dt>'
+        f'<dd class="mono">{escape(_display_recorded_branch(detail.git_branch))}</dd></div>'
         f'<div class="fact"><dt>{escape(STATE)}</dt>'
         f"<dd>{escape(task_state_label(task.state.value, wait_reason))}</dd></div>"
         f'<div class="fact"><dt>{escape(WAIT_REASON)}</dt><dd>{escape(wait_reason_label(wait_reason))}</dd></div>'

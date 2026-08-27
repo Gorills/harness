@@ -469,7 +469,7 @@ def test_cursor_scan_reports_restart_when_project_override_is_created(
 
     assert "Cursor restart required: fully quit and reopen Cursor" in output
     assert "Cursor verification: agent mcp list" in output
-    assert "user-harness is not a Workspace server" in output
+    assert "user-harness is the connected production server" in output
     assert "harness-dev" in output
     assert (repo / ".cursor" / "mcp.json").is_file()
 
@@ -539,7 +539,7 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     assert "Cursor project overrides changed: 1" in cursor_install
     assert "Cursor restart required: fully quit and reopen Cursor" in cursor_install
     assert "Cursor verification: agent mcp list" in cursor_install
-    assert "user-harness is not a Workspace server" in cursor_install
+    assert "user-harness is the connected production server" in cursor_install
     cursor_global = home / ".cursor" / "mcp.json"
     global_value = json.loads(cursor_global.read_text(encoding="utf-8"))
     assert global_value["mcpServers"]["harness"]["env"] == {

@@ -16,9 +16,15 @@ import pytest
 from harness.daemon import DaemonError, serve_daemon
 from harness.dashboard import (
     DashboardError,
+    DashboardGitBranch,
     DashboardServerManager,
     dashboard_url_path,
+    read_dashboard_task_detail,
+    read_dashboard_workspace_detail,
     read_dashboard_workspace_rows,
+    render_projects_page,
+    render_task_page,
+    render_workspace_page,
 )
 from harness.index import scan_workspace
 from harness.ipc import (
@@ -32,6 +38,7 @@ from harness.ipc import (
 from harness.registry import create_project, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.task_checkpoints import checkpoint_task
+from harness.task_workflow import task_start
 from harness.tasks import TaskState, TaskWaitReason, create_task_record
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="dashboard daemon discovery uses POSIX IPC")
@@ -44,7 +51,7 @@ def _git(cwd: Path, *arguments: str) -> None:
 def _make_repo(path: Path) -> None:
     path.mkdir()
     (path / "tracked.txt").write_text("tracked\n", encoding="utf-8")
-    _git(path, "init")
+    _git(path, "init", "-b", "main")
     _git(path, "add", "tracked.txt")
     _git(
         path,
@@ -180,10 +187,15 @@ def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
     assert row.workspace_id == workspace_id
     assert row.task_title == "Completed task"
     assert row.task_state == "completed"
+    assert row.task_git_branch == DashboardGitBranch(captured=True, name="main")
     assert row.branch is None
     assert row.dirty_path_count is None
     assert row.live_error == "Git status unavailable"
     assert row.indexed_file_count == 1
+    html = render_projects_page(rows, base_path="/cap/")
+    assert 'class="task-git-branch"' in html
+    assert '<strong class="mono">main</strong>' in html
+    assert "Git недоступен" in html
 
 
 def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_path: Path) -> None:
@@ -258,3 +270,106 @@ def test_dashboard_shutdown_failure_does_not_leak_daemon_socket_or_locks(
     monkeypatch.setattr(DashboardServerManager, "close", original_close)
     second_stop, second_executor, second_future = _start_server(database, socket_path)
     _stop_server(second_stop, second_executor, second_future)
+
+
+def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    _git(root, "switch", "-c", "feature/dashboard-branch")
+    connection = connect_database(database)
+    try:
+        task_start(connection, workspace_id, "Work on feature")
+    finally:
+        connection.close()
+    _git(root, "switch", "main")
+
+    rows = read_dashboard_workspace_rows(database)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.branch == "main"
+    assert row.task_git_branch == DashboardGitBranch(captured=True, name="feature/dashboard-branch")
+    overview = render_projects_page(rows, base_path="/cap/")
+    assert 'class="task-git-branch"' in overview
+    assert '<strong class="mono">feature/dashboard-branch</strong>' in overview
+    assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in overview
+
+    workspace = read_dashboard_workspace_detail(database, workspace_id)
+    assert workspace.recent_tasks[0].git_branch == DashboardGitBranch(
+        captured=True, name="feature/dashboard-branch"
+    )
+    workspace_html = render_workspace_page(workspace, base_path="/cap/")
+    assert 'Ветка <span class="mono">feature/dashboard-branch</span>' in workspace_html
+
+    assert row.task_id is not None
+    detail = read_dashboard_task_detail(database, row.task_id)
+    assert detail.git_branch == DashboardGitBranch(captured=True, name="feature/dashboard-branch")
+    assert detail.baseline_git_branch == DashboardGitBranch(
+        captured=True, name="feature/dashboard-branch"
+    )
+    task_html = render_task_page(detail, base_path="/cap/")
+    assert '<dt>Ветка</dt><dd class="mono">feature/dashboard-branch</dd>' in task_html
+    assert (
+        '<div class="timeline-branch"><strong>Ветка</strong> '
+        '<span class="mono">feature/dashboard-branch</span></div>'
+    ) in task_html
+
+
+def test_dashboard_prefers_latest_checkpoint_branch_over_baseline(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    connection = connect_database(database)
+    try:
+        task = task_start(connection, workspace_id, "Started on main")
+    finally:
+        connection.close()
+    _git(root, "switch", "-c", "feature/later")
+    connection = connect_database(database)
+    try:
+        checkpoint_task(
+            connection,
+            task.task_id,
+            expected_revision=task.revision,
+            expected_workspace_id=workspace_id,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Moved to a feature branch",
+            next_step="Review the move",
+        )
+    finally:
+        connection.close()
+    _git(root, "switch", "main")
+
+    detail = read_dashboard_task_detail(database, task.task_id)
+    assert detail.baseline_git_branch == DashboardGitBranch(captured=True, name="main")
+    assert detail.git_branch == DashboardGitBranch(captured=True, name="feature/later")
+    html = render_task_page(detail, base_path="/cap/")
+    assert '<dt>Ветка</dt><dd class="mono">feature/later</dd>' in html
+    assert (
+        '<div class="timeline-branch"><strong>Ветка</strong> <span class="mono">main</span></div>'
+    ) in html
+    assert (
+        '<div class="timeline-branch"><strong>Ветка</strong> '
+        '<span class="mono">feature/later</span></div>'
+    ) in html
+
+
+def test_dashboard_shows_detached_head_for_task_without_named_branch(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(root, "checkout", "--detach", head)
+    connection = connect_database(database)
+    try:
+        create_task_record(connection, workspace_id, "Detached work")
+    finally:
+        connection.close()
+
+    rows = read_dashboard_workspace_rows(database)
+    assert rows[0].task_git_branch == DashboardGitBranch(captured=True, name=None)
+    html = render_projects_page(rows, base_path="/cap/")
+    assert '<strong class="mono">(detached)</strong>' in html
+    assert rows[0].branch is None
+    assert '<div class="mini-stat"><span>Ветка</span><strong>—</strong></div>' in html

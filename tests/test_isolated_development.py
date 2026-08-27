@@ -157,7 +157,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "uv run --frozen harness",
         "make install-global",
         "harness-dev",
-        "user-harness is not a Workspace server",
+        "WORKSPACE_FOLDER_PATHS",
         "uv tool install --force --reinstall",
         "pre-overlay",
         "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
@@ -780,6 +780,17 @@ def test_production_mcp_refuses_overlay_only_for_host_profile_without_foreign_ro
         production_mcp_isolated_checkout_root(
             environment={
                 "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": str(overlay),
+                "WORKSPACE_FOLDER_PATHS": str(ordinary),
+            },
+            cwd=elsewhere,
+        )
+        is None
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
                 "HARNESS_WORKSPACE_ROOT": str(ordinary),
             },
             cwd=overlay,
@@ -876,6 +887,7 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     env = dict(os.environ)
     env.pop("HARNESS_WORKSPACE_ROOT", None)
     env.pop("CLAUDE_PROJECT_DIR", None)
+    env.pop("WORKSPACE_FOLDER_PATHS", None)
     env["HARNESS_HOST_PROFILE"] = "cursor"
 
     missing_root = _mcp_stdio_exchange(
@@ -885,11 +897,11 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
         call={"name": "project_status", "arguments": {}},
     )
     missing_instructions = str(missing_root[0]["result"]["instructions"])
-    assert "user-level" in missing_instructions.lower()
+    assert "no Workspace root" in missing_instructions
     assert "production Harness MCP is refused" not in missing_instructions
     assert len(missing_instructions.encode("utf-8")) < 1024
     assert missing_root[1]["result"]["tools"] == []
-    assert "not a Workspace server" in missing_root[2]["error"]["message"]
+    assert "did not receive a Workspace root" in missing_root[2]["error"]["message"]
 
     overlay_bound = dict(env)
     overlay_bound["HARNESS_WORKSPACE_ROOT"] = str(overlay)
@@ -904,6 +916,21 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     assert len(str(refused[0]["result"]["instructions"]).encode("utf-8")) < 1024
     assert refused[1]["result"]["tools"] == []
     assert refused[2]["error"]["message"].startswith("production Harness MCP is refused")
+
+    recovered = dict(overlay_bound)
+    recovered["WORKSPACE_FOLDER_PATHS"] = str(ordinary)
+    recovered_listed = _mcp_stdio_exchange(
+        cwd=overlay,
+        env=recovered,
+        methods=("tools/list",),
+    )
+    assert [tool["name"] for tool in recovered_listed[0]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]
 
     allowed_cursor = dict(env)
     allowed_cursor["HARNESS_WORKSPACE_ROOT"] = str(ordinary)
@@ -946,39 +973,55 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     assert claude_refused[0]["result"]["tools"] == []
 
 
-def test_production_mcp_stdio_lists_no_tools_for_cursor_user_server_without_root(
+def test_production_mcp_stdio_lists_tools_for_cursor_user_server_with_folder_paths(
     tmp_path: Path,
 ) -> None:
     ordinary = _git_workspace(tmp_path / "ordinary")
     env = dict(os.environ)
     env.pop("HARNESS_WORKSPACE_ROOT", None)
     env.pop("CLAUDE_PROJECT_DIR", None)
+    env.pop("WORKSPACE_FOLDER_PATHS", None)
     env["HARNESS_HOST_PROFILE"] = "cursor"
-    env["WORKSPACE_FOLDER_PATHS"] = str(ordinary)
 
-    refused = _mcp_stdio_exchange(
+    missing = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=env,
+        methods=("tools/list",),
+    )
+    assert missing[0]["result"]["tools"] == []
+
+    env["WORKSPACE_FOLDER_PATHS"] = str(ordinary)
+    listed = _mcp_stdio_exchange(
         cwd=ordinary,
         env=env,
         methods=("server/discover", "tools/list"),
         call={"name": "project_status", "arguments": {}},
     )
-    instructions = str(refused[0]["result"]["instructions"])
-    assert "user-level" in instructions.lower()
-    assert "Customize" in instructions
-    assert "harness-dev" in instructions
+    instructions = str(listed[0]["result"]["instructions"])
+    assert "production Harness MCP is refused" not in instructions
     assert len(instructions.encode("utf-8")) < 1024
-    assert refused[1]["result"]["tools"] == []
-    assert "not a Workspace server" in refused[2]["error"]["message"]
-    assert "hardcode" in refused[2]["error"]["message"]
+    assert [tool["name"] for tool in listed[1]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]
 
     uninterpolated = dict(env)
     uninterpolated["HARNESS_WORKSPACE_ROOT"] = "${workspaceFolder}"
-    listed = _mcp_stdio_exchange(
+    still_listed = _mcp_stdio_exchange(
         cwd=ordinary,
         env=uninterpolated,
         methods=("tools/list",),
     )
-    assert listed[0]["result"]["tools"] == []
+    assert [tool["name"] for tool in still_listed[0]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]
 
     allowed = dict(env)
     allowed["HARNESS_WORKSPACE_ROOT"] = str(ordinary)

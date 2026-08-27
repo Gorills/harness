@@ -129,9 +129,8 @@ def _print_cursor_reload_guidance(*, expect_harness: bool) -> None:
     if expect_harness:
         print("Cursor verification: agent mcp list")
         print(
-            "Cursor IDE: user-harness is not a Workspace server. Enable the project harness MCP "
-            "in Customize for each working repository. Isolated Harness source checkout uses "
-            "harness-dev."
+            "Cursor IDE: user-harness is the connected production server. Isolated Harness "
+            "source checkout uses harness-dev."
         )
     else:
         print("Cursor verification: agent mcp list (confirm Harness is absent)")

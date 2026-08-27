@@ -10,9 +10,11 @@ import pytest
 import harness.cursor_adapter as cursor_module
 from harness.cursor_adapter import (
     CursorAdapter,
+    configured_cursor_workspace_root,
     cursor_user_mcp_missing_workspace_root,
     discover_cursor_adapter,
     is_isolated_development_overlay_entry,
+    production_mcp_isolated_checkout_root,
 )
 from harness.host_adapters import (
     HostIntegrationError,
@@ -414,28 +416,30 @@ def test_cursor_workspace_hint_requires_exact_configured_root(tmp_path: Path) ->
     assert hints[0].source == "cursor-workspace-folder"
     assert hints[0].match_mode is WorkspaceHintMatchMode.ROOT
 
-    with pytest.raises(HostIntegrationError, match="user-level MCP"):
+    with pytest.raises(HostIntegrationError, match="did not receive a Workspace root"):
         workspace_hints_from_environment(
             environment={"HARNESS_HOST_PROFILE": "cursor"}, cwd=elsewhere
         )
 
-    with pytest.raises(HostIntegrationError, match="user-level MCP"):
-        workspace_hints_from_environment(
-            environment={
-                "HARNESS_HOST_PROFILE": "cursor",
-                "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
-                "WORKSPACE_FOLDER_PATHS": str(root),
-            },
-            cwd=elsewhere,
-        )
+    fallback = workspace_hints_from_environment(
+        environment={
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+            "WORKSPACE_FOLDER_PATHS": str(root),
+        },
+        cwd=elsewhere,
+    )
+    assert len(fallback) == 1
+    assert fallback[0].path == root.resolve()
+    assert fallback[0].source == "cursor-workspace-folder-paths"
 
 
-def test_cursor_user_mcp_missing_workspace_root_ignores_inherited_folder_paths(
+def test_cursor_user_mcp_uses_workspace_folder_paths_when_root_env_is_absent(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
-    assert cursor_user_mcp_missing_workspace_root(
+    assert not cursor_user_mcp_missing_workspace_root(
         environment={"HARNESS_HOST_PROFILE": "cursor", "WORKSPACE_FOLDER_PATHS": str(root)}
     )
     assert cursor_user_mcp_missing_workspace_root(
@@ -449,6 +453,64 @@ def test_cursor_user_mcp_missing_workspace_root_ignores_inherited_folder_paths(
     )
     assert not cursor_user_mcp_missing_workspace_root(
         environment={"HARNESS_HOST_PROFILE": "claude-code"}
+    )
+
+
+def _write_overlay_repo(path: Path) -> Path:
+    root = _repo(path)
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"mcpServers": {"harness-dev": _isolated_entry()}}) + "\n", encoding="utf-8"
+    )
+    _git(root, "add", ".cursor/mcp.json")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "isolated overlay",
+    )
+    return root
+
+
+def test_cursor_overlay_interpolated_root_falls_back_to_working_folder_paths(
+    tmp_path: Path,
+) -> None:
+    overlay = _write_overlay_repo(tmp_path / "overlay")
+    working = tmp_path / "working"
+    working.mkdir()
+    environment = {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "HARNESS_WORKSPACE_ROOT": str(overlay),
+        "WORKSPACE_FOLDER_PATHS": str(working),
+    }
+    assert configured_cursor_workspace_root(environment) == str(working.resolve())
+    assert production_mcp_isolated_checkout_root(environment=environment, cwd=overlay) is None
+    hints = workspace_hints_from_environment(environment=environment, cwd=overlay)
+    assert hints[0].path == working.resolve()
+    assert hints[0].source == "cursor-workspace-folder-paths"
+
+    overlay_only = {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "HARNESS_WORKSPACE_ROOT": str(overlay),
+    }
+    assert configured_cursor_workspace_root(overlay_only) == str(overlay)
+    assert (
+        production_mcp_isolated_checkout_root(environment=overlay_only, cwd=working)
+        == overlay.resolve()
+    )
+
+    user_level_working = {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "WORKSPACE_FOLDER_PATHS": str(working),
+    }
+    assert configured_cursor_workspace_root(user_level_working) == str(working.resolve())
+    assert (
+        production_mcp_isolated_checkout_root(environment=user_level_working, cwd=overlay) is None
     )
 
 

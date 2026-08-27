@@ -13,13 +13,13 @@ The interface also needs a stable visual language rather than accumulating ad-ho
 
 ## Decision
 
-Add capability-scoped Project, Workspace, and Task detail routes under the existing random dashboard path. Workspace detail reuses the existing deterministic indexed-path search domain primitive with a fixed bounded result limit; it exposes only path metadata and match reason, never source text or stored content hashes. Task detail renders bounded recent timeline events, checkpoint summaries/next steps, changed-path metadata, and operator feedback from the existing durable Task history. Human actions continue to call the exact same revision-CAS domain workflow.
+Add capability-scoped Project, Workspace, and Task detail routes under the existing random dashboard path. Workspace detail reuses the existing deterministic indexed-path search domain primitive with a fixed bounded result limit; it exposes only path metadata and match reason, never source text or stored content hashes. Task detail renders bounded recent timeline events, checkpoint summaries/next steps, the durable Git branch recorded for the Task, changed-path metadata, and operator feedback from the existing durable Task history. Overview cards and Workspace Task lists show that same recorded branch next to the Task description so historical work remains attributable after the live checkout moves. Human actions continue to call the exact same revision-CAS domain workflow.
 
 Serve dashboard CSS and JavaScript as capability-scoped local assets. The Content Security Policy permits only same-origin style, script, and EventSource connections; inline script/style is not required. The UI uses progressive enhancement: navigation, search, and human-review forms work without JavaScript. JavaScript is limited to realtime freshness behavior.
 
 Realtime uses Server-Sent Events only as a dashboard refresh hint. Every rendered page embeds a SHA-256 fingerprint of its bounded authoritative view model in the capability-scoped EventSource URL. On connection, the server recomputes that view once to close the race between HTML rendering and EventSource setup, then keeps one read-only SQLite connection open and watches `PRAGMA data_version` instead of repeatedly rebuilding the view or running live Git subprocesses. A changed data version emits only a `refresh` marker; the stream never carries Task text, source content, model reasoning, or mutation payloads. The browser reloads after a refresh when no user input is at risk; when feedback/search input is non-empty it shows an explicit update affordance instead of discarding the draft. SSE sessions are bounded in duration, capped per dashboard server, and reconnect through normal EventSource behavior.
 
-The visual system is a dense editorial developer-tool direction: warm neutral surfaces, one restrained coral accent, serif display typography paired with system sans/monospace data, a named 4/8px spacing scale, shallow elevation, textual state pills, visible keyboard focus, responsive layouts, dark-mode tokens, and motion only for hover/live-state feedback. Reduced-motion preferences disable non-essential transitions and animation. Color is never the only carrier of Task state. Operator-facing copy is Russian and limited to the work process; it must not explain the product, loopback trust model, or Harness architecture. See ADR-0025.
+The visual system is a dense editorial developer-tool direction: warm neutral surfaces, one restrained coral accent, document-scale serif headings (with wrapping line-height, especially for long Task titles) paired with system sans/monospace data, a named 4/8px spacing scale, shallow elevation, textual state pills, visible keyboard focus, responsive layouts, dark-mode tokens, and motion only for hover/live-state feedback. Reduced-motion preferences disable non-essential transitions and animation. Color is never the only carrier of Task state. Operator-facing copy is Russian and limited to the work process; it must not explain the product, loopback trust model, or Harness architecture. See ADR-0025.
 
 ## Consequences
 
@@ -35,7 +35,7 @@ The visual system is a dense editorial developer-tool direction: warm neutral su
 Automated coverage must prove:
 
 - unscoped Project/Workspace/Task/assets/events routes remain inaccessible;
-- Project/Workspace/Task navigation renders durable state and escapes all persisted text;
+- Project/Workspace/Task navigation renders durable state, including the recorded Task Git branch, and escapes all persisted text;
 - Workspace search returns only bounded indexed-path metadata;
 - external Task/index changes produce an SSE refresh hint without streaming the changed content;
 - CSP permits only same-origin assets/EventSource and no inline script/style;
