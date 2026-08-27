@@ -72,8 +72,11 @@ _ISOLATED_CHECKOUT_REFUSAL_MESSAGE = (
     "use the tracked harness-dev overlay or native host tools"
 )
 _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS = (
-    "Cursor MCP has no Workspace root. Open a project folder in Cursor IDE. Isolated "
-    "Harness source checkout uses harness-dev. Do not call these tools."
+    "Cursor MCP has no Workspace root. Production Cursor MCP is the project harness "
+    "MCP server in this window's .cursor/mcp.json. Enable it with "
+    "`agent mcp enable harness`, then fully quit and reopen Cursor. Leftover "
+    "user-harness is not Workspace identity. Isolated Harness source checkout uses "
+    "harness-dev. Do not call these tools."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10

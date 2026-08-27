@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 
-from harness.cursor_adapter import CursorAdapter, discover_cursor_adapter
+from harness.cursor_adapter import (
+    CursorAdapter,
+    CursorProjectRuntimeStatus,
+    cursor_project_enable_command,
+    discover_cursor_adapter,
+)
 from harness.daemon import DaemonError, hold_database_maintenance_lock
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import run_doctor_checks
@@ -19,6 +24,11 @@ from harness.host_adapters import (
     HostRegistrationState,
     IntegrationChange,
     discover_claude_code_adapter,
+)
+from harness.host_integration_state import (
+    add_host_profiles,
+    load_host_integration_state,
+    remove_host_profiles,
 )
 from harness.ipc import (
     IpcError,
@@ -63,6 +73,9 @@ class HostInstallResult:
     host_profile: str
     registration_change: IntegrationChange
     project_change_count: int = 0
+    project_runtime_verified: int = 0
+    project_runtime_manual: int = 0
+    manual_enable_commands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,18 +141,41 @@ def install_harness(
 
     results: list[HostInstallResult] = []
     for adapter in selected:
+        intent_change = IntegrationChange.UNCHANGED
+        if isinstance(adapter, CursorAdapter):
+            intent_change = add_host_profiles(paths, ("cursor",))
         change = adapter.register_mcp()
+        if intent_change is IntegrationChange.CHANGED:
+            change = IntegrationChange.CHANGED
         project_changes = 0
+        runtime_verified = 0
+        runtime_manual = 0
+        manual_commands: list[str] = []
         if isinstance(adapter, CursorAdapter):
             for workspace in workspaces:
                 project_changes += int(
                     adapter.reconcile_project(workspace.workspace_root) is IntegrationChange.CHANGED
                 )
+                runtime = adapter.enable_and_verify_project_mcp(
+                    workspace.workspace_root, environment=environment
+                )
+                if runtime.status is CursorProjectRuntimeStatus.VERIFIED:
+                    runtime_verified += 1
+                elif runtime.status is CursorProjectRuntimeStatus.MANUAL:
+                    runtime_manual += 1
+                    command = runtime.enable_command or cursor_project_enable_command(
+                        workspace.workspace_root
+                    )
+                    if command not in manual_commands:
+                        manual_commands.append(command)
         results.append(
             HostInstallResult(
                 host_profile=adapter.profile,
                 registration_change=change,
                 project_change_count=project_changes,
+                project_runtime_verified=runtime_verified,
+                project_runtime_manual=runtime_manual,
+                manual_enable_commands=tuple(manual_commands),
             )
         )
     overall = (
@@ -191,6 +227,7 @@ def uninstall_harness(
                 adapter.preflight_project_remove(workspace.workspace_root)
 
     active = _active_profiles(
+        paths=paths,
         environment=environment,
         python_executable=python_executable,
         selected=selected,
@@ -217,10 +254,18 @@ def uninstall_harness(
                     "run harness install --host cursor before removing another host"
                 )
 
-    any_selected_owned = any(
-        state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
-        for state in observed_selected.values()
-    )
+    any_selected_owned = False
+    for adapter in selected:
+        state = observed_selected[adapter.profile]
+        if adapter.profile == "cursor":
+            if load_host_integration_state(paths).includes("cursor") or state in {
+                HostRegistrationState.CURRENT,
+                HostRegistrationState.STALE_OWNED,
+            }:
+                any_selected_owned = True
+            continue
+        if state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}:
+            any_selected_owned = True
     has_state = paths.database.exists() or paths.socket.exists()
     if not any_selected_owned and not has_state:
         if purge:
@@ -265,6 +310,10 @@ def uninstall_harness(
     results: list[HostUninstallResult] = []
     for adapter in selected:
         change = adapter.unregister_mcp()
+        if isinstance(adapter, CursorAdapter):
+            intent_change = remove_host_profiles(paths, ("cursor",))
+            if intent_change is IntegrationChange.CHANGED:
+                change = IntegrationChange.CHANGED
         results.append(
             HostUninstallResult(
                 host_profile=adapter.profile,
@@ -332,6 +381,7 @@ def _selected_adapters(
 
 def _active_profiles(
     *,
+    paths: RuntimePaths,
     environment: Mapping[str, str] | None,
     python_executable: Path | None,
     selected: tuple[ClaudeCodeAdapter | CursorAdapter, ...],
@@ -346,6 +396,7 @@ def _active_profiles(
         )
         if claude is not None:
             states["claude-code"] = claude.registration_state()
+    cursor_intent = load_host_integration_state(paths).includes("cursor")
     if "cursor" not in states:
         cursor = selected_by_profile.get("cursor")
         if cursor is None:
@@ -357,15 +408,21 @@ def _active_profiles(
     for profile, state in states.items():
         if profile not in selected_states and state is HostRegistrationState.FOREIGN:
             continue
+        if profile == "cursor":
+            continue
         if profile not in selected_states and state is HostRegistrationState.STALE_OWNED:
             raise InstallationError(
                 f"other Harness host profile is stale: {profile}; run harness install --host {profile}"
             )
-    return {
+    active = {
         profile
         for profile, state in states.items()
-        if state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
+        if profile != "cursor"
+        and state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
     }
+    if cursor_intent:
+        active.add("cursor")
+    return active
 
 
 def _registered_workspaces(paths: RuntimePaths) -> tuple[WorkspaceRecord, ...]:
@@ -587,7 +644,7 @@ def _skill_registry_path(environment: Mapping[str, str] | None) -> Path:
     home_value = values.get("HOME")
     home = Path.home() if not home_value else Path(home_value).expanduser()
     try:
-        return default_skill_registry(home=home)
+        return default_skill_registry(home=home, environment=values)
     except SkillRegistryError as exc:
         raise InstallationError("Harness skill registry path is unsafe") from exc
 

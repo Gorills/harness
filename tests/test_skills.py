@@ -132,6 +132,20 @@ def test_default_registry_and_strict_metadata_loading(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     assert default_skill_registry(home=home) == home / ".harness" / "skills"
+    assert (
+        default_skill_registry(
+            home=home,
+            environment={"HARNESS_SKILL_REGISTRY": str(tmp_path / "skills")},
+        )
+        == tmp_path / "skills"
+    )
+    assert (
+        default_skill_registry(
+            home=home,
+            environment={"HARNESS_DEV_ROOT": str(tmp_path / "checkout")},
+        )
+        == tmp_path / "checkout" / ".harness" / "skills"
+    )
     assert load_skill_registry(home / "missing") == ()
 
     registry = home / ".harness" / "skills"

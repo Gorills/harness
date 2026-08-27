@@ -38,11 +38,13 @@ harness_dev_activate() {
     export HARNESS_DEV_ROOT="$root"
     export XDG_STATE_HOME="$root/.harness/state"
     export XDG_RUNTIME_DIR="$root/.harness/runtime"
+    export HARNESS_SKILL_REGISTRY="$root/.harness/skills"
 
     mkdir -p -- "$root/.harness"
     chmod 700 -- "$root/.harness"
     _harness_dev_prepare_directory "$XDG_STATE_HOME"
     _harness_dev_prepare_directory "$XDG_RUNTIME_DIR"
+    _harness_dev_prepare_directory "$HARNESS_SKILL_REGISTRY"
 
     local venv_bin="$root/.venv/bin"
     if [[ -d "$venv_bin" ]]; then

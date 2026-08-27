@@ -42,11 +42,71 @@ def _venv_scripts_dir(venv: Path) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin")
 
 
+def _isolated_wheel_env() -> dict[str, str]:
+    """Copy the process environment without the source-checkout overlay identity."""
+    values = os.environ.copy()
+    values.pop("PYTHONPATH", None)
+    for key in (
+        "HARNESS_DEV_ROOT",
+        "HARNESS_SKILL_REGISTRY",
+        "HARNESS_DEV_SAVED_XDG_STATE_HOME",
+        "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
+    ):
+        values.pop(key, None)
+    return values
+
+
+def _git_init_with_file(
+    path: Path, environment: Mapping[str, str], name: str, content: str
+) -> None:
+    path.mkdir()
+    (path / name).write_text(content, encoding="utf-8")
+    _run(("git", "init", "-b", "main"), cwd=path, env=environment)
+    _run(("git", "add", "."), cwd=path, env=environment)
+    _run(
+        (
+            "git",
+            "-c",
+            "user.name=Harness Smoke",
+            "-c",
+            "user.email=harness@example.invalid",
+            "commit",
+            "-m",
+            "init",
+        ),
+        cwd=path,
+        env=environment,
+    )
+
+
+def _require_no_global_harness(path: Path) -> None:
+    if not path.is_file():
+        return
+    servers = json.loads(path.read_text(encoding="utf-8")).get("mcpServers", {})
+    if "harness" in servers:
+        raise RuntimeError(f"global mcpServers.harness is present: {path}")
+
+
+def _require_cursor_enabled(state_path: Path, *workspaces: Path) -> None:
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    enabled = payload.get("enabled", {})
+    missing = [
+        str(workspace.resolve())
+        for workspace in workspaces
+        if not enabled.get(str(workspace.resolve()))
+    ]
+    if missing:
+        raise RuntimeError(
+            f"Cursor CLI did not enable project harness for {missing!r}: {payload!r}"
+        )
+
+
 async def _cross_host_mcp_async(
     harness: Path,
     environment: dict[str, str],
     repo_a: Path,
     repo_b: Path,
+    repo_c: Path,
 ) -> None:
     def host_env(profile: str, workspace: Path) -> dict[str, str]:
         values = dict(environment)
@@ -150,10 +210,27 @@ async def _cross_host_mcp_async(
         status = await client.call_tool("project_status")
         if status.is_error or status.structured_content is None:
             raise RuntimeError("installed Cursor repo-B project_status failed")
-        if status.structured_content["workspace_id"] == workspace_a:
+        workspace_b = status.structured_content["workspace_id"]
+        if workspace_b == workspace_a:
             raise RuntimeError("two registered Workspaces were mixed by Cursor root resolution")
         if status.structured_content["current_task"] is not None:
             raise RuntimeError("Workspace-local current Task leaked into linked worktree B")
+
+    parameters = StdioServerParameters(
+        command=str(harness),
+        args=["mcp"],
+        env=host_env("cursor", repo_c),
+        cwd=str(repo_a),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        status = await client.call_tool("project_status")
+        if status.is_error or status.structured_content is None:
+            raise RuntimeError("installed Cursor independent project_status failed")
+        workspace_c = status.structured_content["workspace_id"]
+        if workspace_c in {workspace_a, workspace_b}:
+            raise RuntimeError("independent Workspace mixed with another registered root")
+        if status.structured_content["current_task"] is not None:
+            raise RuntimeError("Workspace-local current Task leaked into independent Workspace C")
 
     parameters = StdioServerParameters(
         command=str(harness),
@@ -175,6 +252,7 @@ def _cross_host_mcp(
     environment: Mapping[str, str],
     repo_a: Path,
     repo_b: Path,
+    repo_c: Path,
 ) -> None:
     values = dict(environment)
     dependency_root = str(Path(mcp_package.__file__).resolve().parents[1])
@@ -182,7 +260,7 @@ def _cross_host_mcp(
     values["PYTHONPATH"] = (
         dependency_root if not existing else dependency_root + os.pathsep + existing
     )
-    anyio.run(_cross_host_mcp_async, harness, values, repo_a, repo_b)
+    anyio.run(_cross_host_mcp_async, harness, values, repo_a, repo_b, repo_c)
 
 
 def main() -> int:
@@ -233,8 +311,7 @@ def main() -> int:
             cwd=workspace,
         )
 
-        isolated_env = os.environ.copy()
-        isolated_env.pop("PYTHONPATH", None)
+        isolated_env = _isolated_wheel_env()
         suffix = ".exe" if os.name == "nt" else ""
         for name in ("harness", "harnessd"):
             executable = scripts_dir / f"{name}{suffix}"
@@ -621,13 +698,55 @@ raise SystemExit(2)
                 encoding="utf-8",
             )
             fake_claude.chmod(0o755)
+            fake_agent = fake_bin / "agent"
+            fake_agent_state = workspace / "fake-agent-state.json"
+            fake_agent.write_text(
+                f"""#!{python}
+import json
+import os
+import sys
+from pathlib import Path
+
+state = Path(os.environ["HARNESS_FAKE_AGENT_STATE"])
+args = sys.argv[1:]
+cwd = str(Path.cwd().resolve())
+if state.exists():
+    payload = json.loads(state.read_text(encoding="utf-8"))
+else:
+    payload = {{"enabled": {{}}}}
+if args[:3] == ["mcp", "enable", "harness"]:
+    payload.setdefault("enabled", {{}})[cwd] = True
+    state.write_text(json.dumps(payload), encoding="utf-8")
+    print("Enabled MCP server harness")
+    raise SystemExit(0)
+if args[:3] == ["mcp", "list-tools", "harness"]:
+    if not payload.get("enabled", {{}}).get(cwd):
+        print("Error: MCP server 'harness' has not been approved yet")
+        raise SystemExit(1)
+    for name in (
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ):
+        print(name)
+    raise SystemExit(0)
+print("unexpected fake agent invocation: " + repr(args))
+raise SystemExit(2)
+""",
+                encoding="utf-8",
+            )
+            fake_agent.chmod(0o755)
             fake_env = isolated_env.copy()
             fake_env["PATH"] = str(fake_bin) + os.pathsep + isolated_env.get("PATH", "")
             fake_env["HARNESS_FAKE_CLAUDE_STATE"] = str(fake_state)
+            fake_env["HARNESS_FAKE_AGENT_STATE"] = str(fake_agent_state)
             fake_home = workspace / "fake-home"
             fake_home.mkdir()
             canonical_skill = fake_home / ".harness" / "skills" / "python-helper"
             canonical_skill.mkdir(parents=True)
+            (fake_home / ".harness" / "skills").chmod(0o700)
             (canonical_skill / "SKILL.md").write_text(
                 "---\nname: python-helper\ndescription: Python conventions\n---\n\n"
                 "# Python helper\n",
@@ -695,6 +814,36 @@ raise SystemExit(2)
             if "Relevant skills: 1" not in scan_a.stdout:
                 raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
 
+            independent_project = workspace / "installed-independent-project"
+            _git_init_with_file(independent_project, fake_env, "other.py", "OTHER = 1\n")
+            scan_c = _run(
+                (str(harness), "scan", str(independent_project)),
+                cwd=workspace,
+                env=fake_env,
+            )
+            if "Relevant skills: 1" not in scan_c.stdout:
+                raise RuntimeError(
+                    f"installed independent Workspace scan was unexpected: {scan_c.stdout!r}"
+                )
+
+            cursor_global = fake_home / ".cursor" / "mcp.json"
+            cursor_global.parent.mkdir(parents=True, exist_ok=True)
+            cursor_global.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "harness": {
+                                "type": "stdio",
+                                "command": str(python.absolute()),
+                                "args": ["-m", "harness.mcp_process"],
+                                "env": {"HARNESS_HOST_PROFILE": "cursor"},
+                            }
+                        }
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             cursor_install = _run(
                 (str(harness), "install", "--host", "cursor"), cwd=workspace, env=fake_env
             )
@@ -702,10 +851,16 @@ raise SystemExit(2)
                 raise RuntimeError(
                     f"installed Cursor registration failed: {cursor_install.stdout!r}"
                 )
-            cursor_global = fake_home / ".cursor" / "mcp.json"
             cursor_project_a = lifecycle_project / ".cursor" / "mcp.json"
-            if not cursor_global.is_file() or not cursor_project_a.is_file():
-                raise RuntimeError("installed Cursor global/project configs were not materialized")
+            cursor_project_c = independent_project / ".cursor" / "mcp.json"
+            if not cursor_project_a.is_file():
+                raise RuntimeError("installed Cursor project config was not materialized")
+            if not cursor_project_c.is_file():
+                raise RuntimeError(
+                    "installed Cursor project config was not materialized for independent Workspace"
+                )
+            _require_no_global_harness(cursor_global)
+            _require_cursor_enabled(fake_agent_state, lifecycle_project, independent_project)
 
             lifecycle_worktree = workspace / "installed-lifecycle-worktree"
             _run(
@@ -724,6 +879,12 @@ raise SystemExit(2)
             cursor_project_b = lifecycle_worktree / ".cursor" / "mcp.json"
             if not cursor_project_b.is_file():
                 raise RuntimeError("Cursor project override was not created for linked worktree B")
+            _require_cursor_enabled(
+                fake_agent_state,
+                lifecycle_project,
+                lifecycle_worktree,
+                independent_project,
+            )
             lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
             if not (lifecycle_projected_skill / "SKILL.md").is_file():
                 raise RuntimeError("shared Claude/Cursor skill projection is missing")
@@ -766,13 +927,20 @@ raise SystemExit(2)
             upgraded_registration = json.loads(fake_state.read_text(encoding="utf-8"))
             if upgraded_registration.get("command") != str(upgrade_python.absolute()):
                 raise RuntimeError("upgrade-safe reinstall did not update Claude Python")
-            for path in (cursor_global, cursor_project_a, cursor_project_b):
+            for path in (cursor_project_a, cursor_project_b, cursor_project_c):
                 value = json.loads(path.read_text(encoding="utf-8"))
                 command = value["mcpServers"]["harness"]["command"]
                 if command != str(upgrade_python.absolute()):
                     raise RuntimeError(
                         f"upgrade-safe reinstall did not update Cursor config: {path}"
                     )
+            _require_no_global_harness(cursor_global)
+            _require_cursor_enabled(
+                fake_agent_state,
+                lifecycle_project,
+                lifecycle_worktree,
+                independent_project,
+            )
             lifecycle_harness = upgraded_harness
 
             _cross_host_mcp(
@@ -780,6 +948,7 @@ raise SystemExit(2)
                 fake_env,
                 lifecycle_project,
                 lifecycle_worktree,
+                independent_project,
             )
 
             full_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
@@ -788,6 +957,7 @@ raise SystemExit(2)
                 "Claude Code MCP registration: OK",
                 "Cursor MCP registration: OK",
                 "Cursor project MCP overrides: OK",
+                "Cursor project MCP tools: OK",
                 "Projects: OK",
                 "Index state: OK",
                 "Generated skills: OK",
@@ -809,7 +979,7 @@ raise SystemExit(2)
                 raise RuntimeError(f"Cursor uninstall was unexpected: {uninstall_cursor.stdout!r}")
             if not fake_state.is_file() or not lifecycle_projected_skill.is_dir():
                 raise RuntimeError("Cursor uninstall damaged the remaining Claude integration")
-            if cursor_project_a.exists() or cursor_project_b.exists():
+            if cursor_project_a.exists() or cursor_project_b.exists() or cursor_project_c.exists():
                 raise RuntimeError("Cursor uninstall left Harness-owned project overrides")
 
             claude_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
@@ -833,7 +1003,12 @@ raise SystemExit(2)
             database = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "harness.db"
             if not database.is_file():
                 raise RuntimeError("multi-host uninstall did not preserve Project Intelligence")
-            if fake_state.exists() or cursor_project_a.exists() or cursor_project_b.exists():
+            if (
+                fake_state.exists()
+                or cursor_project_a.exists()
+                or cursor_project_b.exists()
+                or cursor_project_c.exists()
+            ):
                 raise RuntimeError("multi-host uninstall left Harness-owned host registrations")
 
             _run(

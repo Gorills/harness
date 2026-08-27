@@ -232,8 +232,30 @@ class _PreparedProjection:
     committed: bool = False
 
 
-def default_skill_registry(*, home: Path | None = None) -> Path:
-    """Return the canonical external skill registry path from the approved v1 contract."""
+def default_skill_registry(
+    *,
+    home: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    """Return the canonical external skill registry path from the approved v1 contract.
+
+    Isolated development honors ``HARNESS_SKILL_REGISTRY`` and otherwise uses
+    ``$HARNESS_DEV_ROOT/.harness/skills`` so checkout commands do not read
+    ``~/.harness/skills``.
+    """
+    values = os.environ if environment is None else environment
+    configured = values.get("HARNESS_SKILL_REGISTRY")
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.is_absolute():
+            raise SkillRegistryError("HARNESS_SKILL_REGISTRY must be an absolute path")
+        return path
+    isolated_root = values.get("HARNESS_DEV_ROOT")
+    if isolated_root:
+        root = Path(isolated_root).expanduser()
+        if not root.is_absolute():
+            raise SkillRegistryError("HARNESS_DEV_ROOT must be an absolute path")
+        return root / ".harness" / "skills"
     base = Path.home() if home is None else home
     if not base.is_absolute():
         raise SkillRegistryError("Harness home directory must be absolute")

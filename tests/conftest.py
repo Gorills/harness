@@ -17,3 +17,4 @@ def isolate_harness_xdg_from_user_home(
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.delenv("HARNESS_SKILL_REGISTRY", raising=False)

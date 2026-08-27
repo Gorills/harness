@@ -12,7 +12,8 @@ Isolation is done by overriding the XDG bases from [ADR-0007](../decisions/0007-
 | Database | `~/.local/state/harness/harness.db` | `.harness/state/harness/harness.db` |
 | Socket | `$XDG_RUNTIME_DIR/harness/harness.sock` or `/tmp/harness-<uid>/harness.sock` | `.harness/runtime/harness/harness.sock` |
 | Autostart | `python -m harness.daemon_process` of the invoked interpreter | same module from this checkout's environment |
-| Host MCP | user-global Cursor/Claude `harness` server | tracked project overlay launching `scripts/dev harness mcp` |
+| Host MCP | project-only Cursor `.cursor/mcp.json` `harness` plus Claude user-scope MCP | tracked project overlay launching `scripts/dev harness mcp` (`harness-dev`) |
+| Skill registry | `~/.harness/skills` | `.harness/skills` via `HARNESS_SKILL_REGISTRY` |
 | `install` / `uninstall` | mutates user-global host MCP | refused while `HARNESS_DEV_ROOT` is set |
 
 `.harness/` is gitignored. It may also hold a local `uv` bootstrap under `.harness/tools/`.
@@ -38,7 +39,7 @@ scripts/dev harness --version
 scripts/dev harness doctor
 ```
 
-`scripts/dev env` must print `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under this repository's `.harness/` directory, not `~/.local/state` or `/run/user/...`.
+`scripts/dev env` must print `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `HARNESS_SKILL_REGISTRY` under this repository's `.harness/` directory, not `~/.local/state`, `/run/user/...`, or `~/.harness/skills`.
 
 `harness doctor` without `--database` does not create durable state. After a scan exists:
 
@@ -109,7 +110,7 @@ make doctor-global
 
 `make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, fully quit and reopen Cursor.
 
-This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Cursor IDE still connects global `user-harness` as the production server for other repositories; checkout agents must not call it. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated overlay root and no non-overlay `WORKSPACE_FOLDER_PATHS` lists no tools. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
+This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Production Cursor MCP is project-only and is never rewritten here. Checkout agents must not call leftover `user-harness`. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated overlay root lists no tools, including when `WORKSPACE_FOLDER_PATHS` names a working repository. After `make install-global`, the installed Harness migrates leftover `user-harness`, re-approves project configs, and does not touch checkout `.harness/`. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
 
 ## Optional: source the environment
 
@@ -137,7 +138,7 @@ This checkout commits host overlays that do not use the production Cursor/Claude
 
 Production install/scan/uninstall leaves those overlays alone. Overlay detection matches that launch under `harness-dev` or the previous `harness` name; extra host JSON keys do not drop isolation. After changing Cursor MCP config, fully quit and reopen Cursor.
 
-Global Cursor `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP uses that as the working-project Workspace when the interpolated Harness-owned root is absent or is this overlay. A production process whose interpolated `HARNESS_WORKSPACE_ROOT` is this overlay *and* that has no non-overlay folder-path lists no tools. Claude `CLAUDE_PROJECT_DIR` overlay refuse is unchanged. Cursor-profile overlay refuse does not use process cwd. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has enabled `harness-dev`.
+Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP does not use it as Workspace identity. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. A production process whose interpolated `HARNESS_WORKSPACE_ROOT` is this overlay lists no tools even when `WORKSPACE_FOLDER_PATHS` names a working repository. Claude `CLAUDE_PROJECT_DIR` overlay refuse is unchanged. Cursor-profile overlay refuse does not use process cwd. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has enabled `harness-dev`.
 
 The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout and skips host/skill reconciliation so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
 

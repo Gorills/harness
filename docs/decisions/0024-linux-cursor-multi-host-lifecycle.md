@@ -4,7 +4,7 @@
 - **Date:** 2026-08-26
 - **Amended:** 2026-08-27
 - **Deciders:** Repository architecture baseline
-- **Later amendment:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes the decision that global `user-harness` carries `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and is the Cursor IDE Workspace server. Overlay-refuse on that shared process is also superseded.
+- **Later amendment:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes owned global `user-harness`. Production Cursor MCP is project-only `.cursor/mcp.json` `harness`, enabled with official `agent mcp enable harness`. `WORKSPACE_FOLDER_PATHS` is not Workspace identity. Overlay-refuse on a Cursor-profile process applies only when interpolated `HARNESS_WORKSPACE_ROOT` is the overlay.
 
 ## Context
 
@@ -16,7 +16,7 @@ Official Cursor MCP, CLI, and Skills documentation was re-checked on 2026-08-26 
 
 ## Decision
 
-**Amendment 2026-08-27:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes putting `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` on the global `user-harness` process and overlay-refusing that shared process. The Decision text below is historical; implement ADR-0026 for current Cursor Workspace identity.
+**Amendment 2026-08-27:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes putting `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` on the global `user-harness` process and using `WORKSPACE_FOLDER_PATHS` as Workspace identity. The Decision text below is historical; implement ADR-0026 for current Cursor Workspace identity.
 
 Harness supports local Linux Cursor IDE and Cursor CLI with one `CursorAdapter` over Cursor's documented JSON configuration. The global registration is `~/.cursor/mcp.json` under `mcpServers.harness` and launches the exact installed Python with `-m harness.mcp_process` plus `HARNESS_HOST_PROFILE=cursor` and `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`. For every registered Harness Workspace, the adapter reconciles a complete `.cursor/mcp.json` project override for the same server name. The override repeats type, command, args, host profile, and the same `${workspaceFolder}` root hint so a later-approved project identifier has the same contract.
 
@@ -47,11 +47,11 @@ Checkout development and `uv tool install` of this repository require `uv` 0.12.
 ## Consequences
 
 - Cursor IDE and CLI use the same local adapter/configuration path and resolve Workspaces without cwd guessing.
-- **Superseded by ADR-0026:** `user-harness` is not Workspace identity and must not carry `${workspaceFolder}`. A Cursor-profile process without an interpolated project root lists no tools. Project overrides remain, and Cursor keeps them disconnected until they are approved.
+- **Superseded by ADR-0026:** production Cursor MCP is project-only. Owned global `user-harness` is removed. A Cursor-profile process without an interpolated project root lists no tools. Project MCP is enabled with official `agent mcp enable harness`.
 - Claude Code and Cursor can coexist over one Harness daemon, Project registry, Task/Knowledge state, and minimal duplicate-free skill projection.
-- Project override upgrades follow the installed Python interpreter, so a stale project shadow cannot defeat a refreshed global registration.
+- Project override upgrades follow the installed Python interpreter, so a stale project shadow cannot defeat a refreshed install.
 - Tracked team Cursor config is never rewritten automatically; teams can opt into an exact manually adopted Harness entry.
-- The Harness source checkout keeps a tracked isolated-development Cursor overlay (`harness-dev`) that is the intended checkout-local server and is not rewritten by production adapters. Cursor IDE still connects `user-harness` unless that project overlay is approved.
+- The Harness source checkout keeps a tracked isolated-development Cursor overlay (`harness-dev`) that is the intended checkout-local server and is not rewritten or enabled as production `harness` by production adapters.
 - Isolated development refuses `harness install`/`uninstall` while `HARNESS_DEV_ROOT` is set, and refuses a system `harness scan` of that overlay root.
 - Production MCP with `HARNESS_HOST_PROFILE` lists no tools and refuses calls when launched against that overlay checkout; the `scripts/dev` overlay without the profile marker remains.
 - Cursor is the primary Linux local profile to close; omitted `--host` remains `claude-code`.

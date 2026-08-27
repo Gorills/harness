@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from fake_hosts import path_without_agent, write_fake_cursor_agent
 
 import harness.cursor_adapter as cursor_module
 from harness.cursor_adapter import (
+    CURSOR_PROJECT_MCP_TOOLS,
     CursorAdapter,
+    CursorProjectRuntimeStatus,
     configured_cursor_workspace_root,
+    cursor_project_enable_command,
     cursor_user_mcp_missing_workspace_root,
     discover_cursor_adapter,
     is_isolated_development_overlay_entry,
@@ -88,17 +93,30 @@ def test_cursor_global_registration_preserves_user_config_and_file_on_uninstall(
     adapter = CursorAdapter(home=home, python_executable=Path("/venv/bin/python"))
 
     assert adapter.registration_state() is HostRegistrationState.ABSENT
+    assert adapter.register_mcp() is IntegrationChange.UNCHANGED
+    value = json.loads(config.read_text(encoding="utf-8"))
+    assert value["theme"] == "user"
+    assert "harness" not in value["mcpServers"]
+    assert value["mcpServers"]["other"] == {"url": "https://example.invalid"}
+
+    leftover = {
+        "theme": "user",
+        "mcpServers": {
+            "other": {"url": "https://example.invalid"},
+            "harness": _global_entry(Path("/venv/bin/python")),
+        },
+    }
+    config.write_text(json.dumps(leftover), encoding="utf-8")
+    assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
     assert adapter.register_mcp() is IntegrationChange.CHANGED
     value = json.loads(config.read_text(encoding="utf-8"))
     assert value["theme"] == "user"
+    assert "harness" not in value["mcpServers"]
     assert value["mcpServers"]["other"] == {"url": "https://example.invalid"}
-    assert value["mcpServers"]["harness"] == _global_entry(Path("/venv/bin/python"))
     assert adapter.register_mcp() is IntegrationChange.UNCHANGED
 
-    assert adapter.unregister_mcp() is IntegrationChange.CHANGED
+    assert adapter.unregister_mcp() is IntegrationChange.UNCHANGED
     assert config.is_file()
-    value = json.loads(config.read_text(encoding="utf-8"))
-    assert value == {"theme": "user", "mcpServers": {"other": {"url": "https://example.invalid"}}}
 
 
 def test_cursor_global_uninstall_preserves_preexisting_empty_config_file(tmp_path: Path) -> None:
@@ -108,12 +126,14 @@ def test_cursor_global_uninstall_preserves_preexisting_empty_config_file(tmp_pat
     config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
     adapter = CursorAdapter(home=home, python_executable=Path("/venv/bin/python"))
 
-    assert adapter.register_mcp() is IntegrationChange.CHANGED
+    assert adapter.register_mcp() is IntegrationChange.UNCHANGED
+    leftover = {"mcpServers": {"harness": _global_entry(Path("/venv/bin/python"))}}
+    config.write_text(json.dumps(leftover) + "\n", encoding="utf-8")
     assert adapter.unregister_mcp() is IntegrationChange.CHANGED
     assert json.loads(config.read_text(encoding="utf-8")) == {"mcpServers": {}}
 
 
-def test_cursor_global_registration_replaces_only_stale_owned_entry(tmp_path: Path) -> None:
+def test_cursor_global_registration_removes_only_stale_owned_entry(tmp_path: Path) -> None:
     home = tmp_path / "home"
     config = home / ".cursor" / "mcp.json"
     config.parent.mkdir(parents=True)
@@ -133,7 +153,7 @@ def test_cursor_global_registration_replaces_only_stale_owned_entry(tmp_path: Pa
     assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
     assert adapter.register_mcp() is IntegrationChange.CHANGED
     value = json.loads(config.read_text(encoding="utf-8"))
-    assert value["mcpServers"]["harness"] == _global_entry(Path("/new/python"))
+    assert "harness" not in value["mcpServers"]
     assert value["mcpServers"]["other"] == {"command": "other"}
 
 
@@ -157,9 +177,7 @@ def test_cursor_global_registration_removes_workspace_folder_from_stale_owned_en
 
     assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
     assert adapter.register_mcp() is IntegrationChange.CHANGED
-    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["harness"] == _global_entry(
-        Path("/python")
-    )
+    assert "harness" not in json.loads(config.read_text(encoding="utf-8"))["mcpServers"]
 
 
 def test_cursor_refuses_foreign_same_name_registration(tmp_path: Path) -> None:
@@ -421,25 +439,35 @@ def test_cursor_workspace_hint_requires_exact_configured_root(tmp_path: Path) ->
             environment={"HARNESS_HOST_PROFILE": "cursor"}, cwd=elsewhere
         )
 
-    fallback = workspace_hints_from_environment(
+    with pytest.raises(HostIntegrationError, match="did not receive a Workspace root"):
+        workspace_hints_from_environment(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+                "WORKSPACE_FOLDER_PATHS": str(root),
+            },
+            cwd=elsewhere,
+        )
+
+    ignored_spawn_window = workspace_hints_from_environment(
         environment={
             "HARNESS_HOST_PROFILE": "cursor",
-            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
-            "WORKSPACE_FOLDER_PATHS": str(root),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+            "WORKSPACE_FOLDER_PATHS": str(elsewhere),
         },
         cwd=elsewhere,
     )
-    assert len(fallback) == 1
-    assert fallback[0].path == root.resolve()
-    assert fallback[0].source == "cursor-workspace-folder-paths"
+    assert len(ignored_spawn_window) == 1
+    assert ignored_spawn_window[0].path == root.resolve()
+    assert ignored_spawn_window[0].source == "cursor-workspace-folder"
 
 
-def test_cursor_user_mcp_uses_workspace_folder_paths_when_root_env_is_absent(
+def test_cursor_user_mcp_requires_interpolated_workspace_root(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "repo"
     root.mkdir()
-    assert not cursor_user_mcp_missing_workspace_root(
+    assert cursor_user_mcp_missing_workspace_root(
         environment={"HARNESS_HOST_PROFILE": "cursor", "WORKSPACE_FOLDER_PATHS": str(root)}
     )
     assert cursor_user_mcp_missing_workspace_root(
@@ -477,7 +505,7 @@ def _write_overlay_repo(path: Path) -> Path:
     return root
 
 
-def test_cursor_overlay_interpolated_root_falls_back_to_working_folder_paths(
+def test_cursor_overlay_interpolated_root_does_not_follow_spawn_window_folder_paths(
     tmp_path: Path,
 ) -> None:
     overlay = _write_overlay_repo(tmp_path / "overlay")
@@ -488,11 +516,14 @@ def test_cursor_overlay_interpolated_root_falls_back_to_working_folder_paths(
         "HARNESS_WORKSPACE_ROOT": str(overlay),
         "WORKSPACE_FOLDER_PATHS": str(working),
     }
-    assert configured_cursor_workspace_root(environment) == str(working.resolve())
-    assert production_mcp_isolated_checkout_root(environment=environment, cwd=overlay) is None
-    hints = workspace_hints_from_environment(environment=environment, cwd=overlay)
-    assert hints[0].path == working.resolve()
-    assert hints[0].source == "cursor-workspace-folder-paths"
+    assert configured_cursor_workspace_root(environment) == str(overlay)
+    assert (
+        production_mcp_isolated_checkout_root(environment=environment, cwd=working)
+        == overlay.resolve()
+    )
+    hints = workspace_hints_from_environment(environment=environment, cwd=working)
+    assert hints[0].path == overlay.resolve()
+    assert hints[0].source == "cursor-workspace-folder"
 
     overlay_only = {
         "HARNESS_HOST_PROFILE": "cursor",
@@ -508,10 +539,11 @@ def test_cursor_overlay_interpolated_root_falls_back_to_working_folder_paths(
         "HARNESS_HOST_PROFILE": "cursor",
         "WORKSPACE_FOLDER_PATHS": str(working),
     }
-    assert configured_cursor_workspace_root(user_level_working) == str(working.resolve())
+    assert configured_cursor_workspace_root(user_level_working) is None
     assert (
         production_mcp_isolated_checkout_root(environment=user_level_working, cwd=overlay) is None
     )
+    assert cursor_user_mcp_missing_workspace_root(environment=user_level_working)
 
 
 def test_discover_cursor_adapter_uses_home_and_exact_python(tmp_path: Path) -> None:
@@ -526,12 +558,12 @@ def test_discover_cursor_adapter_uses_home_and_exact_python(tmp_path: Path) -> N
 def test_cursor_atomic_replacement_preserves_concurrent_target_and_prior_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    home = tmp_path / "home"
-    config = home / ".cursor" / "mcp.json"
-    config.parent.mkdir(parents=True)
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
     original = b'{"mcpServers": {}, "owner": "user"}\n'
     config.write_bytes(original)
-    adapter = CursorAdapter(home=home, python_executable=Path("/python"))
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
     real_move = cursor_module._move_if_absent
     injected = False
 
@@ -548,7 +580,7 @@ def test_cursor_atomic_replacement_preserves_concurrent_target_and_prior_backup(
 
     monkeypatch.setattr(cursor_module, "_move_if_absent", race_move)
     with pytest.raises(HostRegistrationCollisionError, match="appeared during mutation"):
-        adapter.register_mcp()
+        adapter.reconcile_project(root)
 
     assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["harness"] == {
         "command": "/foreign"
@@ -652,3 +684,107 @@ def test_cursor_legacy_harness_overlay_name_is_still_isolated(tmp_path: Path) ->
     assert diagnostic.isolated_development is True
     assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
     assert adapter.remove_project(root) is IntegrationChange.UNCHANGED
+
+
+def test_cursor_project_enable_verifies_exact_five_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, state)
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(state))
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+
+    result = adapter.enable_and_verify_project_mcp(root)
+    assert result.status is CursorProjectRuntimeStatus.VERIFIED
+    assert result.tools == CURSOR_PROJECT_MCP_TOOLS
+    again = adapter.enable_and_verify_project_mcp(root)
+    assert again.status is CursorProjectRuntimeStatus.VERIFIED
+
+
+def test_cursor_project_enable_falls_back_when_agent_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    monkeypatch.setenv("PATH", path_without_agent())
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    result = adapter.enable_and_verify_project_mcp(root)
+    assert result.status is CursorProjectRuntimeStatus.MANUAL
+    assert result.enable_command == cursor_project_enable_command(root.resolve())
+
+
+def test_cursor_project_enable_fails_when_installed_agent_cannot_enable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, state)
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(state))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_FAIL_ENABLE", "1")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    with pytest.raises(HostIntegrationError, match="could not enable project MCP"):
+        adapter.enable_and_verify_project_mcp(root)
+
+
+def test_cursor_project_verify_falls_back_to_owned_launch_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, state)
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(state))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_FAIL_TOOLS", "1")
+    enabled = json.dumps({"enabled": {str(root.resolve()): True}})
+    state.write_text(enabled, encoding="utf-8")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path(sys.executable))
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+
+    result = adapter.enable_and_verify_project_mcp(root)
+    assert result.status is CursorProjectRuntimeStatus.VERIFIED
+    assert result.tools == CURSOR_PROJECT_MCP_TOOLS
+
+
+def test_cursor_project_inspect_fails_when_tools_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, state)
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(state))
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    missing = adapter.inspect_project_mcp_tools(root)
+    assert missing.status is CursorProjectRuntimeStatus.UNAVAILABLE
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_FAIL_TOOLS", "1")
+    enabled = json.dumps({"enabled": {str(root.resolve()): True}})
+    state.write_text(enabled, encoding="utf-8")
+    with pytest.raises(HostIntegrationError, match="tool catalog is not"):
+        adapter.enable_and_verify_project_mcp(root)
+
+
+def test_cursor_isolated_overlay_is_not_enabled_as_production_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"mcpServers": {"harness-dev": _isolated_entry()}}) + "\n", encoding="utf-8"
+    )
+    fake_bin = tmp_path / "bin"
+    state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, state)
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(state))
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    result = adapter.enable_and_verify_project_mcp(root)
+    assert result.status is CursorProjectRuntimeStatus.SKIPPED_OVERLAY
+    assert not state.exists()

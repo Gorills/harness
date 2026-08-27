@@ -32,9 +32,9 @@ agent mcp list
 harness status
 ```
 
-Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. The Cursor CLI uses the same MCP configuration as the editor; when `agent` is installed, `agent mcp list` is a host-side inspection probe. Cursor IDE chat uses profile-scoped `user-harness` as the connected production server. After `harness install --host cursor`, fully quit/reopen Cursor (window reload is not enough). Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
+Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. When `agent` is installed, `harness install --host cursor` and `harness scan` run `agent mcp enable harness` and verify `agent mcp list-tools harness`. Missing `agent` prints `cd <workspace> && agent mcp enable harness` plus a full Cursor quit/reopen (window reload is not enough). Leftover `user-harness` is not Workspace identity and is removed. Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
 
-`harness scan` reconciles all current supported host profiles together. When Cursor is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
+`harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
 
 ## Upgrade or reinstall
 
@@ -51,7 +51,7 @@ agent mcp list
 
 From a Harness source checkout the same refresh is `make install-global` or `make install-global HOST=all`. That helper leaves isolated-development overlay environment first and uses `--force --reinstall` because the development version stays `0.1.0.dev0`. Do not run it through `scripts/dev`.
 
-The post-upgrade `harness install` is required. It compares the running daemon's frozen schema/version/Python/code identity with the newly installed runtime and cleanly replaces a stale daemon before updating selected host registrations. Cursor global and every registered Workspace override are updated to the new interpreter together with Claude when `--host all` is selected. This covers both a changed virtual-environment path and an in-place reinstall at the same path. Upgrading from the previous Linux release is also explicit: that protocol-v1 daemon does not implement `runtime_diagnostics`, so Harness accepts only its structured unknown-method response, validates legacy `status`, requests the existing clean `shutdown`, then starts and verifies the current runtime. Other IPC/diagnostics failures are not treated as permission to kill or replace a daemon.
+The post-upgrade `harness install` is required. It compares the running daemon's frozen schema/version/Python/code identity with the newly installed runtime and cleanly replaces a stale daemon before updating selected host registrations. Cursor host intent, leftover global `user-harness` removal, and every registered Workspace override are updated to the new interpreter together with Claude when `--host all` is selected. This covers both a changed virtual-environment path and an in-place reinstall at the same path. Upgrading from the previous Linux release is also explicit: that protocol-v1 daemon does not implement `runtime_diagnostics`, so Harness accepts only its structured unknown-method response, validates legacy `status`, requests the existing clean `shutdown`, then starts and verifies the current runtime. Other IPC/diagnostics failures are not treated as permission to kill or replace a daemon.
 
 ## Uninstall
 
@@ -78,7 +78,7 @@ Purge is refused while another supported host remains active and is fail-closed 
 
 Bare `harness doctor` is read-only and operational. `OK` means the inspected invariant holds, `WARN` means absent/lazy/stale-but-non-destructive state that may need attention, and `FAIL` means an integrity, ownership, compatibility, or runtime mismatch. Any `FAIL` makes the command exit nonzero; warnings alone do not. Project/index/skill checks use one SQLite read snapshot. A quiescent WAL database is opened immutably so doctor does not create `-wal`/`-shm` files merely by inspecting it; an existing live WAL is still read through SQLite's normal read-only WAL path so uncheckpointed durable frames remain visible.
 
-For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, a leftover `HARNESS_WORKSPACE_ROOT` on the global entry, wrong or missing `${workspaceFolder}` on project entries, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. An absent Claude MCP registration is a warning, not a Cursor failure.
+For Cursor, doctor reports leftover/foreign/absent global `user-harness` separately from on-disk project configs and from Cursor approval/tool catalog. A leftover owned or foreign global `harness` is FAIL. Missing `agent` is WARN with `cd <workspace> && agent mcp enable harness`, not a blanket OK. When `agent` is present, a project without the exact five tools is FAIL for that Workspace. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect with `agent mcp list-tools harness`. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. An absent Claude MCP registration is a warning, not a Cursor failure.
 
 Index state and Generated skills report `timed out` or `failed` for named Workspaces when live inspection hits the doctor deadline or raises an inspection error. `unavailable` is reserved for Project Git/identity inspection failure of a named Workspace, not for a timeout. Workspaces skipped by the count limit or aggregate time budget are named as `not inspected (doctor budget)`. Timeout and budget-truncation warnings do not fail the command; identity mismatches and other integrity failures still do.
 
@@ -86,7 +86,17 @@ Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and 
 
 ## Automated release gate
 
-`scripts/quality.py` is the repository gate. Its installed-wheel smoke builds and installs the exact wheel, exercises shipping CLI/MCP/daemon behavior, installs the same wheel into a second isolated Python 3.13 environment, verifies stale-daemon replacement, upgrades Claude plus Cursor global/project registrations, scans a repository and linked worktree, requires one duplicate-free shared skill projection, runs real cross-host MCP Task/Knowledge continuity, checks Cursor-only uninstall with Claude still healthy, then verifies uninstall-all and purge.
+`scripts/quality.py` is the repository gate. Its installed-wheel smoke builds and installs the exact wheel, exercises shipping CLI/MCP/daemon behavior, installs the same wheel into a second isolated Python 3.13 environment, verifies stale-daemon replacement, upgrades Claude plus Cursor project registrations, scans a repository and linked worktree, requires one duplicate-free shared skill projection, runs real cross-host MCP Task/Knowledge continuity, checks Cursor-only uninstall with Claude still healthy, then verifies uninstall-all and purge.
+
+## Human-only Cursor refresh
+
+Checkout agents must not run `make install-global`. After this project-only Cursor change lands, an operator should:
+
+1. Run `make install-global` (or `make install-global HOST=all`) from the Harness checkout.
+2. Confirm leftover `~/.cursor/mcp.json` `mcpServers.harness` is absent.
+3. Fully quit and reopen Cursor.
+4. In two working repositories at once (for example Alia and Mangazeya), confirm `agent mcp list-tools harness` shows the five tools and that `project_status` roots/tasks are distinct.
+5. In the Harness source checkout, confirm only `harness-dev` is the connected overlay and that production `harness` is not enabled there.
 
 ## Proprietary host acceptance still required
 

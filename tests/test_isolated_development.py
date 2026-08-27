@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fake_hosts import path_without_agent
 
+import harness.doctor as doctor
 import harness.entrypoints as entrypoints
 from harness.cursor_adapter import (
     find_isolated_development_root,
@@ -153,6 +155,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "does not share that process, database, or Unix socket",
         ".cursor/mcp.json",
         "HARNESS_DEV_ROOT",
+        "HARNESS_SKILL_REGISTRY",
         "refused",
         "uv run --frozen harness",
         "make install-global",
@@ -187,7 +190,7 @@ def test_dev_env_script_keeps_caller_cwd_and_resolves_from_script_location(
             "bash",
             "-c",
             'source "$1" && pwd && printf "%s\\n" "$HARNESS_DEV_ROOT" '
-            '"$XDG_STATE_HOME" "$XDG_RUNTIME_DIR"',
+            '"$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$HARNESS_SKILL_REGISTRY"',
             "bash",
             str(DEV_ENV_SCRIPT),
         ],
@@ -203,6 +206,7 @@ def test_dev_env_script_keeps_caller_cwd_and_resolves_from_script_location(
     assert lines[1] == str(REPO_ROOT)
     assert lines[2] == str(REPO_ROOT / ".harness" / "state")
     assert lines[3] == str(REPO_ROOT / ".harness" / "runtime")
+    assert lines[4] == str(REPO_ROOT / ".harness" / "skills")
     assert stat.S_IMODE((REPO_ROOT / ".harness" / "state").stat().st_mode) & 0o077 == 0
     assert stat.S_IMODE((REPO_ROOT / ".harness" / "runtime").stat().st_mode) & 0o077 == 0
 
@@ -256,6 +260,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     assert f"HARNESS_DEV_ROOT={REPO_ROOT}" in env_result.stdout
     assert f"XDG_STATE_HOME={REPO_ROOT / '.harness' / 'state'}" in env_result.stdout
     assert f"XDG_RUNTIME_DIR={REPO_ROOT / '.harness' / 'runtime'}" in env_result.stdout
+    assert f"HARNESS_SKILL_REGISTRY={REPO_ROOT / '.harness' / 'skills'}" in env_result.stdout
     assert f"database={REPO_ROOT / '.harness' / 'state' / 'harness' / 'harness.db'}" in (
         env_result.stdout
     )
@@ -785,7 +790,7 @@ def test_production_mcp_refuses_overlay_only_for_host_profile_without_foreign_ro
             },
             cwd=elsewhere,
         )
-        is None
+        == overlay.resolve()
     )
     assert (
         production_mcp_isolated_checkout_root(
@@ -919,18 +924,17 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
 
     recovered = dict(overlay_bound)
     recovered["WORKSPACE_FOLDER_PATHS"] = str(ordinary)
-    recovered_listed = _mcp_stdio_exchange(
+    recovered_refused = _mcp_stdio_exchange(
         cwd=overlay,
         env=recovered,
-        methods=("tools/list",),
+        methods=("server/discover", "tools/list"),
+        call={"name": "project_status", "arguments": {}},
     )
-    assert [tool["name"] for tool in recovered_listed[0]["result"]["tools"]] == [
-        "project_status",
-        "project_search",
-        "project_context",
-        "task_start",
-        "task_checkpoint",
-    ]
+    recovered_instructions = str(recovered_refused[0]["result"]["instructions"])
+    assert "refused" in recovered_instructions.lower()
+    assert "harness-dev" in recovered_instructions
+    assert recovered_refused[1]["result"]["tools"] == []
+    assert recovered_refused[2]["error"]["message"].startswith("production Harness MCP is refused")
 
     allowed_cursor = dict(env)
     allowed_cursor["HARNESS_WORKSPACE_ROOT"] = str(ordinary)
@@ -973,7 +977,7 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     assert claude_refused[0]["result"]["tools"] == []
 
 
-def test_production_mcp_stdio_lists_tools_for_cursor_user_server_with_folder_paths(
+def test_production_mcp_stdio_lists_no_tools_for_cursor_user_server_folder_paths(
     tmp_path: Path,
 ) -> None:
     ordinary = _git_workspace(tmp_path / "ordinary")
@@ -998,30 +1002,22 @@ def test_production_mcp_stdio_lists_tools_for_cursor_user_server_with_folder_pat
         call={"name": "project_status", "arguments": {}},
     )
     instructions = str(listed[0]["result"]["instructions"])
+    assert "no Workspace root" in instructions
+    assert "not Workspace identity" in instructions
+    assert "project harness MCP" in instructions
     assert "production Harness MCP is refused" not in instructions
     assert len(instructions.encode("utf-8")) < 1024
-    assert [tool["name"] for tool in listed[1]["result"]["tools"]] == [
-        "project_status",
-        "project_search",
-        "project_context",
-        "task_start",
-        "task_checkpoint",
-    ]
+    assert listed[1]["result"]["tools"] == []
+    assert "did not receive a Workspace root" in listed[2]["error"]["message"]
 
     uninterpolated = dict(env)
     uninterpolated["HARNESS_WORKSPACE_ROOT"] = "${workspaceFolder}"
-    still_listed = _mcp_stdio_exchange(
+    still_missing = _mcp_stdio_exchange(
         cwd=ordinary,
         env=uninterpolated,
         methods=("tools/list",),
     )
-    assert [tool["name"] for tool in still_listed[0]["result"]["tools"]] == [
-        "project_status",
-        "project_search",
-        "project_context",
-        "task_start",
-        "task_checkpoint",
-    ]
+    assert still_missing[0]["result"]["tools"] == []
 
     allowed = dict(env)
     allowed["HARNESS_WORKSPACE_ROOT"] = str(ordinary)
@@ -1037,3 +1033,95 @@ def test_production_mcp_stdio_lists_tools_for_cursor_user_server_with_folder_pat
         "task_start",
         "task_checkpoint",
     ]
+
+
+def test_isolated_doctor_ignores_user_global_cursor_claude_and_skills(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    cursor_config = home / ".cursor" / "mcp.json"
+    cursor_config.parent.mkdir(parents=True)
+    cursor_config.write_text(
+        json.dumps({"mcpServers": {"harness": {"command": "/foreign-global"}}}),
+        encoding="utf-8",
+    )
+    global_skill = home / ".harness" / "skills" / "python-helper"
+    global_skill.mkdir(parents=True)
+    (global_skill / "SKILL.md").write_text(
+        "---\nname: python-helper\ndescription: global\n---\n\n# Global\n",
+        encoding="utf-8",
+    )
+    overlay = tmp_path / "checkout"
+    overlay.mkdir()
+    local_skills = overlay / ".harness" / "skills"
+    local_skills.mkdir(parents=True)
+    os.chmod(local_skills, 0o700)
+    state_home = overlay / ".harness" / "state"
+    runtime_home = overlay / ".harness" / "runtime"
+    state_home.mkdir(parents=True)
+    runtime_home.mkdir()
+    os.chmod(state_home, 0o700)
+    os.chmod(runtime_home, 0o700)
+
+    report = doctor.run_system_doctor(
+        environment={
+            "HOME": str(home),
+            "HARNESS_DEV_ROOT": str(overlay),
+            "HARNESS_SKILL_REGISTRY": str(local_skills),
+            "XDG_STATE_HOME": str(state_home),
+            "XDG_RUNTIME_DIR": str(runtime_home),
+            "PATH": path_without_agent(),
+        }
+    )
+    names = {check.name: check.detail for check in report.checks}
+    assert "user-global Cursor MCP is not inspected" in names["Cursor MCP registration"]
+    assert "user-global Claude MCP is not inspected" in names["Claude Code MCP registration"]
+    assert str(local_skills) in names["Skill registry"]
+    assert str(home / ".harness" / "skills") not in names["Skill registry"]
+    assert all(check.severity is not doctor.DoctorSeverity.FAIL for check in report.checks)
+    assert "/foreign-global" not in " ".join(check.detail for check in report.checks)
+
+
+def test_simulated_global_cursor_update_does_not_touch_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    overlay = REPO_ROOT / ".cursor" / "mcp.json"
+    original_overlay = overlay.read_bytes()
+    isolated_state = REPO_ROOT / ".harness" / "state" / "harness"
+    isolated_db = isolated_state / "harness.db"
+    isolated_db_bytes = isolated_db.read_bytes() if isolated_db.is_file() else None
+
+    home = tmp_path / "global-home"
+    home.mkdir()
+    leftover = home / ".cursor" / "mcp.json"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "harness": {
+                        "type": "stdio",
+                        "command": "/old/python",
+                        "args": ["-m", "harness.mcp_process"],
+                        "env": {"HARNESS_HOST_PROFILE": "cursor"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "global-state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "global-runtime"))
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.delenv("HARNESS_SKILL_REGISTRY", raising=False)
+    monkeypatch.setenv("PATH", path_without_agent())
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+
+    assert overlay.read_bytes() == original_overlay
+    if isolated_db_bytes is not None:
+        assert isolated_db.read_bytes() == isolated_db_bytes
+    value = json.loads(leftover.read_text(encoding="utf-8"))
+    assert "harness" not in value.get("mcpServers", {})
+    host_state = tmp_path / "global-state" / "harness" / "host-integrations.json"
+    assert json.loads(host_state.read_text(encoding="utf-8"))["profiles"] == ["cursor"]

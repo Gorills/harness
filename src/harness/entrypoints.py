@@ -7,7 +7,12 @@ from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
 
-from harness.cursor_adapter import discover_cursor_adapter, find_isolated_development_root
+from harness.cursor_adapter import (
+    CursorProjectRuntimeStatus,
+    cursor_project_enable_command,
+    discover_cursor_adapter,
+    find_isolated_development_root,
+)
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
@@ -17,6 +22,7 @@ from harness.host_adapters import (
     IntegrationChange,
     discover_claude_code_adapter,
 )
+from harness.host_integration_state import load_host_integration_state
 from harness.installation import InstallationError, install_harness, uninstall_harness
 from harness.ipc import (
     IpcError,
@@ -127,13 +133,22 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
 def _print_cursor_reload_guidance(*, expect_harness: bool) -> None:
     print("Cursor restart required: fully quit and reopen Cursor after MCP config changes.")
     if expect_harness:
-        print("Cursor verification: agent mcp list")
+        print("Cursor verification: agent mcp list-tools harness")
         print(
-            "Cursor IDE: user-harness is the connected production server. Isolated Harness "
-            "source checkout uses harness-dev."
+            "Cursor IDE: production MCP is the project harness server in this window's "
+            ".cursor/mcp.json. Leftover user-harness is not Workspace identity. "
+            "Isolated Harness source checkout uses harness-dev."
         )
     else:
         print("Cursor verification: agent mcp list (confirm Harness is absent)")
+
+
+def _print_cursor_manual_enable(commands: tuple[str, ...]) -> None:
+    if not commands:
+        return
+    print("Cursor CLI was not found; enable each project MCP, then fully quit and reopen Cursor:")
+    for command in commands:
+        print(f"  {command}")
 
 
 def _print_workspace_scan(result: WorkspaceScanResult) -> None:
@@ -331,19 +346,30 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
 
     cursor = discover_cursor_adapter()
     cursor_project_change = IntegrationChange.UNCHANGED
+    cursor_runtime_manual: tuple[str, ...] = ()
     try:
+        cursor_intent = load_host_integration_state(default_runtime_paths()).includes("cursor")
         cursor_state = cursor.registration_state()
-    except HostIntegrationError as exc:
+    except (HostIntegrationError, RuntimePathError) as exc:
         return _scan_failure(
             f"index reconciliation succeeded but Cursor integration could not be inspected: {exc}"
         )
-    if cursor_state is HostRegistrationState.CURRENT:
+    if cursor_state is HostRegistrationState.FOREIGN:
+        return _scan_failure(
+            "index reconciliation succeeded but Cursor global MCP name 'harness' is not "
+            "owned by Harness"
+        )
+    if cursor_intent:
         try:
             cursor_project_change = cursor.reconcile_project(result.workspace_root)
+            runtime = cursor.enable_and_verify_project_mcp(result.workspace_root)
         except HostIntegrationError as exc:
             return _scan_failure(
-                f"index reconciliation succeeded but Cursor project override failed: {exc}"
+                f"index reconciliation succeeded but Cursor project MCP failed: {exc}"
             )
+        if runtime.status is CursorProjectRuntimeStatus.MANUAL:
+            command = runtime.enable_command or cursor_project_enable_command(result.workspace_root)
+            cursor_runtime_manual = (command,)
         active_profiles.append(cursor.profile)
 
     skills = None
@@ -371,7 +397,10 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         print(f"Skills materialized: {skills.materialized}")
         print(f"Skills removed: {skills.removed}")
         print(f"Skills unchanged: {skills.unchanged}")
-    if cursor_project_change is IntegrationChange.CHANGED:
+    if cursor_runtime_manual:
+        _print_cursor_manual_enable(cursor_runtime_manual)
+        _print_cursor_reload_guidance(expect_harness=True)
+    elif cursor_project_change is IntegrationChange.CHANGED:
         _print_cursor_reload_guidance(expect_harness=True)
     return 0
 
@@ -395,17 +424,22 @@ def _run_install(*, host: str) -> int:
     cursor_result = next((item for item in result.hosts if item.host_profile == "cursor"), None)
     if cursor_result is not None and len(result.hosts) == 1:
         print(f"Cursor project overrides changed: {cursor_result.project_change_count}")
+        if cursor_result.project_runtime_verified:
+            print(f"Cursor project MCP tools verified: {cursor_result.project_runtime_verified}")
     print(f"Daemon schema: {result.daemon_status.schema_version}")
     print(f"Daemon runtime: {result.daemon_status.package_version}")
     print(f"Daemon Python: {result.daemon_status.python_executable}")
     print(f"Registered projects: {result.daemon_status.project_count}")
     print(f"Registered workspaces: {result.daemon_status.workspace_count}")
     print("Diagnostics: harness doctor")
-    if cursor_result is not None and (
-        cursor_result.registration_change is IntegrationChange.CHANGED
-        or cursor_result.project_change_count
-    ):
-        _print_cursor_reload_guidance(expect_harness=True)
+    if cursor_result is not None:
+        _print_cursor_manual_enable(cursor_result.manual_enable_commands)
+        if (
+            cursor_result.registration_change is IntegrationChange.CHANGED
+            or cursor_result.project_change_count
+            or cursor_result.manual_enable_commands
+        ):
+            _print_cursor_reload_guidance(expect_harness=True)
     print("Harness install: OK")
     return 0
 
