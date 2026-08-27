@@ -22,7 +22,7 @@ def test_projects_home_enhancement_exposes_architecture_and_project_navigation()
     assert "PROJECT KNOWLEDGE" in DASHBOARD_JS
     assert "AGENT WORKFLOW" in DASHBOARD_JS
     assert "provenance, anchors и freshness" in DASHBOARD_JS
-    assert "input[name=\"project_id\"]" in DASHBOARD_JS
+    assert 'input[name="project_id"]' in DASHBOARD_JS
     assert "encodeURIComponent(projectId)" in DASHBOARD_JS
     assert "Knowledge хранится на уровне проекта" in DASHBOARD_JS
     assert ".innerHTML" not in DASHBOARD_JS
