@@ -37,6 +37,8 @@ Examples:
 XDG_STATE_HOME and XDG_RUNTIME_DIR are exported under .harness/ so this
 checkout does not use the canonical per-user paths of a system install.
 Lazy daemon autostart inherits the same environment and launches this checkout.
+install/uninstall are refused while this wrapper is active; they would mutate
+the user-global host MCP.
 EOF
 }
 

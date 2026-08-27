@@ -36,6 +36,14 @@ harness_dev_activate() {
     chmod 700 -- "$root/.harness"
     _harness_dev_prepare_directory "$XDG_STATE_HOME"
     _harness_dev_prepare_directory "$XDG_RUNTIME_DIR"
+
+    local venv_bin="$root/.venv/bin"
+    if [[ -d "$venv_bin" ]]; then
+        case ":$PATH:" in
+            *":$venv_bin:"*) ;;
+            *) export PATH="$venv_bin:$PATH" ;;
+        esac
+    fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

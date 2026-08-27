@@ -654,6 +654,7 @@ def _inspect_projects_and_workspaces(
     stale_skills = 0
     skill_unknown = 0
     cursor_projects_current = 0
+    cursor_projects_isolated = 0
     cursor_projects_bad = 0
     cursor_project_checks: list[DoctorCheck] = []
 
@@ -712,7 +713,17 @@ def _inspect_projects_and_workspaces(
         else:
             configured_python = cursor_project.configured_python or "<missing>"
             configured_root = cursor_project.configured_workspace_root or "<missing>"
-            if cursor_project.preflight_error is not None:
+            if cursor_project.isolated_development:
+                cursor_projects_isolated += 1
+                cursor_project_checks.append(
+                    _check(
+                        f"Cursor project MCP override {workspace.workspace_id}",
+                        DoctorSeverity.OK,
+                        f"isolated-development overlay at {cursor_project.path}; "
+                        "production Cursor adapter will not mutate it",
+                    )
+                )
+            elif cursor_project.preflight_error is not None:
                 cursor_projects_bad += 1
                 cursor_project_checks.append(
                     _check(
@@ -826,8 +837,10 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Cursor project MCP overrides",
                 DoctorSeverity.FAIL,
-                f"{cursor_projects_current} current, {cursor_projects_bad} "
-                "missing/stale/foreign/orphaned/unsafe; see per-Workspace checks below",
+                f"{cursor_projects_current} current, {cursor_projects_isolated} "
+                "isolated-development, "
+                f"{cursor_projects_bad} missing/stale/foreign/orphaned/unsafe; "
+                "see per-Workspace checks below",
             )
         )
     elif cursor_registration_state is HostRegistrationState.CURRENT:
@@ -836,8 +849,18 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Cursor project MCP overrides",
                 cursor_severity,
-                f"{cursor_projects_current} current, 0 missing/stale/foreign; required root contract "
+                f"{cursor_projects_current} current, {cursor_projects_isolated} "
+                "isolated-development, 0 missing/stale/foreign; required root contract "
                 "is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+            )
+        )
+    elif cursor_projects_isolated:
+        checks.append(
+            _check(
+                "Cursor project MCP overrides",
+                DoctorSeverity.OK,
+                f"{cursor_projects_isolated} isolated-development overlay(s) preserved; "
+                "Cursor global Harness integration is inactive",
             )
         )
     else:

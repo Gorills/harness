@@ -62,7 +62,7 @@ if args[:2] == ["mcp", "get"]:
                 "env": {"HARNESS_HOST_PROFILE": "claude-code"},
             }))
     if not state_path.exists():
-        print('No MCP server found with name: "harness"')
+        print("No MCP server found with name: harness")
         raise SystemExit(1)
     config = json.loads(state_path.read_text())
     print("Scope: User config (available in all your projects)")

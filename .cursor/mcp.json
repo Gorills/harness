@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "harness": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/scripts/dev",
+      "args": ["harness", "mcp"],
+      "env": {
+        "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"
+      }
+    }
+  }
+}

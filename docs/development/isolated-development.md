@@ -12,6 +12,8 @@ Isolation is done by overriding the XDG bases from [ADR-0007](../decisions/0007-
 | Database | `~/.local/state/harness/harness.db` | `.harness/state/harness/harness.db` |
 | Socket | `$XDG_RUNTIME_DIR/harness/harness.sock` or `/tmp/harness-<uid>/harness.sock` | `.harness/runtime/harness/harness.sock` |
 | Autostart | `python -m harness.daemon_process` of the invoked interpreter | same module from this checkout's environment |
+| Host MCP | user-global Cursor/Claude `harness` server | tracked project overlay launching `scripts/dev harness mcp` |
+| `install` / `uninstall` | mutates user-global host MCP | refused while `HARNESS_DEV_ROOT` is set |
 
 `.harness/` is gitignored. It may also hold a local `uv` bootstrap under `.harness/tools/`.
 
@@ -92,7 +94,7 @@ uv run --frozen python scripts/quality.py
 3. Confirm that mtime is unchanged and that `.harness/state/harness/harness.db` exists.
 4. Confirm `command -v harness` (system) is not the executable used by `scripts/dev harness --version`.
 
-`scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected.
+`scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. A system `harness scan` of this source checkout is refused because the tracked overlay marks it as isolated-development only.
 
 ## Optional: source the environment
 
@@ -103,7 +105,7 @@ If you need `uv run` directly:
 uv run --frozen harness status
 ```
 
-Sourcing must not change the current working directory. Path discovery uses `scripts/dev-env.sh`'s location, not the caller's.
+Sourcing must not change the current working directory. Path discovery uses `scripts/dev-env.sh`'s location, not the caller's. When `.venv/bin` exists, it is prepended to `PATH` so an unsuffixed `harness` in this shell is still the checkout binary with isolated XDG paths. `harness install` / `harness uninstall` remain refused.
 
 With [direnv](https://direnv.net/), `.envrc` sources the same file. Run `direnv allow` once after cloning.
 
@@ -113,15 +115,25 @@ Those flags still bypass default path selection. Isolated development normally d
 
 ## MCP
 
-For development, point host config at this wrapper so the host uses checkout code and isolated paths:
+This checkout commits host overlays that shadow a globally installed server named `harness`:
+
+- Cursor: `.cursor/mcp.json` launches `${workspaceFolder}/scripts/dev harness mcp` and sets `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`.
+- Claude Code: `.mcp.json` launches `./scripts/dev harness mcp`.
+
+Those entries are intentionally not the production Cursor/Claude adapter signature (`python -m harness.mcp_process` plus `HARNESS_HOST_PROFILE`). Production install/scan/uninstall therefore leaves them alone. After changing Cursor MCP config, fully quit and reopen Cursor.
+
+The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout and skips host/skill reconciliation so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
+
+Do not run `scripts/dev harness install` or `scripts/dev harness uninstall`. Those commands would rewrite user-global host MCP using checkout code; the CLI refuses them while `HARNESS_DEV_ROOT` is set.
+
+Manual equivalent of the Cursor overlay:
 
 ```json
 {
-  "command": "/absolute/path/to/repo/scripts/dev",
-  "args": ["harness", "mcp"]
+  "command": "${workspaceFolder}/scripts/dev",
+  "args": ["harness", "mcp"],
+  "env": {
+    "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"
+  }
 }
 ```
-
-Set `HARNESS_WORKSPACE_ROOT` to the exact registered Workspace root in host configurations where
-the host does not provide a separately proven current-directory contract. The bridge uses the
-official MCP v2 SDK and delegates durable state to the isolated daemon under `.harness/`.

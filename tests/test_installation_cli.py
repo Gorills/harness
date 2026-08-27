@@ -39,6 +39,7 @@ def _repo(root: Path) -> None:
 def _skill_registry(home: Path) -> None:
     skill = home / ".harness" / "skills" / "python-helper"
     skill.mkdir(parents=True)
+    (home / ".harness" / "skills").chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: python-helper\ndescription: Python conventions\n---\n\n# Python helper\n",
         encoding="utf-8",
@@ -62,7 +63,7 @@ state = Path(os.environ["FAKE_CLAUDE_STATE"])
 args = sys.argv[1:]
 if args[:3] == ["mcp", "get", "harness"]:
     if not state.exists():
-        print('No MCP server found with name: "harness"')
+        print("No MCP server found with name: harness")
         raise SystemExit(1)
     config = json.loads(state.read_text(encoding="utf-8"))
     print("Scope: User config (available in all your projects)")
