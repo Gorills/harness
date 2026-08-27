@@ -128,6 +128,10 @@ def _print_cursor_reload_guidance(*, expect_harness: bool) -> None:
     print("Cursor restart required: fully quit and reopen Cursor after MCP config changes.")
     if expect_harness:
         print("Cursor verification: agent mcp list; agent mcp list-tools harness")
+        print(
+            "Cursor chat uses user-harness; ${workspaceFolder} is interpolated from the current "
+            "window after a full quit/reopen."
+        )
     else:
         print("Cursor verification: agent mcp list (confirm Harness is absent)")
 

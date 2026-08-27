@@ -916,3 +916,52 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
         methods=("tools/list",),
     )
     assert claude_refused[0]["result"]["tools"] == []
+
+
+def test_production_mcp_stdio_lists_no_tools_for_cursor_user_server_without_root(
+    tmp_path: Path,
+) -> None:
+    ordinary = _git_workspace(tmp_path / "ordinary")
+    env = dict(os.environ)
+    env.pop("HARNESS_WORKSPACE_ROOT", None)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    env["HARNESS_HOST_PROFILE"] = "cursor"
+    env["WORKSPACE_FOLDER_PATHS"] = str(ordinary)
+
+    refused = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=env,
+        methods=("server/discover", "tools/list"),
+        call={"name": "project_status", "arguments": {}},
+    )
+    instructions = str(refused[0]["result"]["instructions"])
+    assert "user-level" in instructions.lower()
+    assert "${workspaceFolder}" in instructions
+    assert len(instructions.encode("utf-8")) < 1024
+    assert refused[1]["result"]["tools"] == []
+    assert "user-level MCP" in refused[2]["error"]["message"]
+    assert "hardcode" in refused[2]["error"]["message"]
+
+    uninterpolated = dict(env)
+    uninterpolated["HARNESS_WORKSPACE_ROOT"] = "${workspaceFolder}"
+    listed = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=uninterpolated,
+        methods=("tools/list",),
+    )
+    assert listed[0]["result"]["tools"] == []
+
+    allowed = dict(env)
+    allowed["HARNESS_WORKSPACE_ROOT"] = str(ordinary)
+    working = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=allowed,
+        methods=("tools/list",),
+    )
+    assert [tool["name"] for tool in working[0]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]

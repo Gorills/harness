@@ -35,9 +35,10 @@ This command:
 It never uses scripts/dev, checkout `.venv/bin/harness`, or overlay XDG paths.
 Checkout agents must not run this; operators use `make install-global`.
 
-The tracked `.cursor/mcp.json` overlay in this repository still shadows the
-global Cursor server. Test the global install from another Git worktree, then
-fully quit and reopen Cursor if MCP config changed.
+The tracked `.cursor/mcp.json` overlay in this repository is the intended
+checkout-local server. Cursor IDE still connects global user-harness unless
+that project server is approved. Test the global install from another Git
+worktree, then fully quit and reopen Cursor if MCP config changed.
 EOF
 }
 
@@ -260,6 +261,6 @@ fi
 
 cat <<EOF
 Global Harness now uses $HARNESS_BIN from this checkout.
-This repository still shadows that server with scripts/dev harness mcp.
+This repository's tracked overlay launches scripts/dev harness mcp; Cursor IDE still uses user-harness unless that project server is approved.
 Test the global install from another Git worktree. If Cursor MCP config changed, fully quit and reopen Cursor.
 EOF

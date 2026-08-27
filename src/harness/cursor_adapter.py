@@ -37,6 +37,11 @@ _EXCLUDE_BEGIN = "# BEGIN HARNESS CURSOR MCP"
 _EXCLUDE_END = "# END HARNESS CURSOR MCP"
 _EXCLUDE_BODY = ("/.cursor/mcp.json", f"/.cursor/{_OWNER_MARKER}")
 _GIT_TIMEOUT_SECONDS = 5.0
+CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
+    "Cursor user-level MCP did not receive an interpolated HARNESS_WORKSPACE_ROOT from "
+    "${workspaceFolder}. Run harness install --host cursor and fully quit/reopen Cursor. "
+    "Do not hardcode a filesystem path; doctor would mark that config stale."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,11 +87,9 @@ class CursorAdapter:
         return self.home / ".cursor" / "mcp.json"
 
     def workspace_hints(self, environment: Mapping[str, str]) -> tuple[WorkspaceHint, ...]:
-        configured = environment.get(_WORKSPACE_ROOT_ENV)
-        if not configured:
-            raise HostIntegrationError(
-                "Cursor integration did not provide HARNESS_WORKSPACE_ROOT from ${workspaceFolder}"
-            )
+        configured = configured_cursor_workspace_root(environment)
+        if configured is None:
+            raise HostIntegrationError(CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE)
         root = _workspace_root(Path(configured))
         return (
             WorkspaceHint(
@@ -263,14 +266,12 @@ class CursorAdapter:
         return successor_root
 
     def _desired_global(self) -> dict[str, object]:
-        return {
-            "type": "stdio",
-            "command": str(self.python_executable),
-            "args": ["-m", "harness.mcp_process"],
-            "env": {_HOST_PROFILE_ENV: _CURSOR_PROFILE},
-        }
+        return self._desired_stdio()
 
     def _project_desired(self) -> dict[str, object]:
+        return self._desired_stdio()
+
+    def _desired_stdio(self) -> dict[str, object]:
         return {
             "type": "stdio",
             "command": str(self.python_executable),
@@ -428,6 +429,25 @@ class CursorAdapter:
         _replace_if_unchanged(path, existing, raw, mode)
 
 
+def configured_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
+    """Return the Cursor-documented root hint, or None when it was not interpolated."""
+    configured = environment.get(_WORKSPACE_ROOT_ENV)
+    if not configured or configured == _WORKSPACE_FOLDER:
+        return None
+    return configured
+
+
+def cursor_user_mcp_missing_workspace_root(
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True when Cursor profile MCP lacks an interpolated ${workspaceFolder} root."""
+    values = os.environ if environment is None else environment
+    if values.get(_HOST_PROFILE_ENV) != _CURSOR_PROFILE:
+        return False
+    return configured_cursor_workspace_root(values) is None
+
+
 def discover_cursor_adapter(
     *,
     environment: Mapping[str, str] | None = None,
@@ -465,7 +485,7 @@ def _is_owned_entry(value: object) -> bool:
 
 
 def is_isolated_development_overlay_entry(value: object) -> bool:
-    """Return True for the checkout overlay that shadows a global Harness MCP server.
+    """Return True for the checkout overlay that launches isolated Harness MCP.
 
     Extra JSON keys are ignored so a host round-trip cannot drop isolation. The
     launch must remain ``scripts/dev harness mcp`` with

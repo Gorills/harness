@@ -469,7 +469,35 @@ def test_cursor_scan_reports_restart_when_project_override_is_created(
 
     assert "Cursor restart required: fully quit and reopen Cursor" in output
     assert "agent mcp list-tools harness" in output
+    assert "Cursor chat uses user-harness" in output
     assert (repo / ".cursor" / "mcp.json").is_file()
+
+
+def test_cursor_doctor_marks_global_missing_workspace_folder_stale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+    config = home / ".cursor" / "mcp.json"
+    value = json.loads(config.read_text(encoding="utf-8"))
+    del value["mcpServers"]["harness"]["env"]["HARNESS_WORKSPACE_ROOT"]
+    config.write_text(json.dumps(value), encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "Cursor MCP registration: FAIL" in output
+    assert "configured HARNESS_WORKSPACE_ROOT=<missing>" in output
 
 
 def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
@@ -509,9 +537,13 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     assert "Cursor project overrides changed: 1" in cursor_install
     assert "Cursor restart required: fully quit and reopen Cursor" in cursor_install
     assert "agent mcp list-tools harness" in cursor_install
+    assert "Cursor chat uses user-harness" in cursor_install
     cursor_global = home / ".cursor" / "mcp.json"
     global_value = json.loads(cursor_global.read_text(encoding="utf-8"))
-    assert global_value["mcpServers"]["harness"]["env"] == {"HARNESS_HOST_PROFILE": "cursor"}
+    assert global_value["mcpServers"]["harness"]["env"] == {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+    }
     project_config = repo / ".cursor" / "mcp.json"
     project_value = json.loads(project_config.read_text(encoding="utf-8"))
     assert project_value["mcpServers"]["harness"]["env"] == {
@@ -530,6 +562,8 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     doctor_output = capsys.readouterr().out
     assert "Claude Code MCP registration: OK" in doctor_output
     assert "Cursor MCP registration: OK" in doctor_output
+    assert "user-harness" in doctor_output
+    assert "interpolates that for" in doctor_output
     assert "Cursor project MCP overrides: OK" in doctor_output
     assert "Generated skills: OK" in doctor_output
 
@@ -626,6 +660,7 @@ def test_uninstall_claude_reprojects_skills_for_remaining_cursor(
     assert harness_main() == 0
     output = capsys.readouterr().out
     assert "Cursor MCP registration: OK" in output
+    assert "user-harness" in output
     assert "Cursor project MCP overrides: OK" in output
     assert "Generated skills: OK" in output
 

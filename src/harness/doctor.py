@@ -274,7 +274,9 @@ def run_system_doctor(
                     "Cursor MCP registration",
                     DoctorSeverity.OK,
                     f"current at {cursor_diagnostic.path}; configured Python: "
-                    f"{configured_python}; expected Python: {cursor_diagnostic.expected_python}",
+                    f"{configured_python}; expected Python: {cursor_diagnostic.expected_python}; "
+                    "HARNESS_WORKSPACE_ROOT=${workspaceFolder}; Cursor interpolates that for "
+                    "user-harness from the current window",
                 )
             )
         elif cursor_registration_state is HostRegistrationState.ABSENT:
@@ -289,12 +291,15 @@ def run_system_doctor(
             )
         elif cursor_registration_state is HostRegistrationState.STALE_OWNED:
             stale_notes.append("stale Cursor Harness MCP registration")
+            configured_root = cursor_diagnostic.configured_workspace_root or "<missing>"
             checks.append(
                 _check(
                     "Cursor MCP registration",
                     DoctorSeverity.FAIL,
                     f"stale Harness runtime at {cursor_diagnostic.path}; expected Python: "
                     f"{cursor_diagnostic.expected_python}; configured Python: {configured_python}; "
+                    "expected HARNESS_WORKSPACE_ROOT=${workspaceFolder}; configured "
+                    f"HARNESS_WORKSPACE_ROOT={configured_root}; "
                     "remediation: harness install --host cursor",
                 )
             )

@@ -475,18 +475,9 @@ def workspace_hints_from_environment(
             )
             return adapter.workspace_hints(values)
         if profile == _CURSOR_PROFILE:
-            configured = values.get(_WORKSPACE_ROOT_ENV)
-            if not configured:
-                raise HostIntegrationError(
-                    "Cursor integration did not provide HARNESS_WORKSPACE_ROOT from ${workspaceFolder}"
-                )
-            return (
-                _directory_hint(
-                    configured,
-                    source="cursor-workspace-folder",
-                    match_mode=WorkspaceHintMatchMode.ROOT,
-                ),
-            )
+            from harness.cursor_adapter import discover_cursor_adapter
+
+            return discover_cursor_adapter(environment=values).workspace_hints(values)
         raise HostIntegrationError(f"unsupported Harness host profile: {profile}")
 
     configured = values.get(_WORKSPACE_ROOT_ENV)

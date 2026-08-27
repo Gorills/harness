@@ -10,6 +10,7 @@ import pytest
 import harness.cursor_adapter as cursor_module
 from harness.cursor_adapter import (
     CursorAdapter,
+    cursor_user_mcp_missing_workspace_root,
     discover_cursor_adapter,
     is_isolated_development_overlay_entry,
 )
@@ -45,15 +46,15 @@ def _repo(path: Path) -> Path:
     return path.resolve()
 
 
-def _entry(command: Path, *, project: bool = False) -> dict[str, object]:
-    env = {"HARNESS_HOST_PROFILE": "cursor"}
-    if project:
-        env["HARNESS_WORKSPACE_ROOT"] = "${workspaceFolder}"
+def _entry(command: Path) -> dict[str, object]:
     return {
         "type": "stdio",
         "command": str(command),
         "args": ["-m", "harness.mcp_process"],
-        "env": env,
+        "env": {
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+        },
     }
 
 
@@ -119,6 +120,28 @@ def test_cursor_global_registration_replaces_only_stale_owned_entry(tmp_path: Pa
     assert value["mcpServers"]["other"] == {"command": "other"}
 
 
+def test_cursor_global_registration_adds_workspace_folder_to_stale_owned_entry(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    config = home / ".cursor" / "mcp.json"
+    config.parent.mkdir(parents=True)
+    stale = {
+        "type": "stdio",
+        "command": "/python",
+        "args": ["-m", "harness.mcp_process"],
+        "env": {"HARNESS_HOST_PROFILE": "cursor"},
+    }
+    config.write_text(json.dumps({"mcpServers": {"harness": stale}}), encoding="utf-8")
+    adapter = CursorAdapter(home=home, python_executable=Path("/python"))
+
+    assert adapter.registration_state() is HostRegistrationState.STALE_OWNED
+    assert adapter.register_mcp() is IntegrationChange.CHANGED
+    assert json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["harness"] == _entry(
+        Path("/python")
+    )
+
+
 def test_cursor_refuses_foreign_same_name_registration(tmp_path: Path) -> None:
     home = tmp_path / "home"
     config = home / ".cursor" / "mcp.json"
@@ -148,7 +171,7 @@ def test_cursor_project_override_uses_workspace_folder_and_is_git_ignored(tmp_pa
     assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
     config = root / ".cursor" / "mcp.json"
     value = json.loads(config.read_text(encoding="utf-8"))
-    assert value == {"mcpServers": {"harness": _entry(Path("/venv/bin/python"), project=True)}}
+    assert value == {"mcpServers": {"harness": _entry(Path("/venv/bin/python"))}}
     assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
     ignored = _git(root, "check-ignore", "-q", ".cursor/mcp.json")
     assert ignored.returncode == 0
@@ -207,7 +230,7 @@ def test_cursor_project_diagnostic_exposes_stale_runtime_and_workspace_contract(
     root = _repo(tmp_path / "repo")
     config = root / ".cursor" / "mcp.json"
     config.parent.mkdir()
-    stale = _entry(Path("/old/python"), project=True)
+    stale = _entry(Path("/old/python"))
     stale["env"] = {
         "HARNESS_HOST_PROFILE": "cursor",
         "HARNESS_WORKSPACE_ROOT": "/wrong/root",
@@ -277,7 +300,7 @@ def test_cursor_tracked_exact_project_config_is_accepted_but_uninstall_is_manual
     config = root / ".cursor" / "mcp.json"
     config.parent.mkdir()
     config.write_text(
-        json.dumps({"mcpServers": {"harness": _entry(Path("/python"), project=True)}}),
+        json.dumps({"mcpServers": {"harness": _entry(Path("/python"))}}),
         encoding="utf-8",
     )
     _git(root, "add", ".cursor/mcp.json")
@@ -373,10 +396,42 @@ def test_cursor_workspace_hint_requires_exact_configured_root(tmp_path: Path) ->
     assert hints[0].source == "cursor-workspace-folder"
     assert hints[0].match_mode is WorkspaceHintMatchMode.ROOT
 
-    with pytest.raises(HostIntegrationError, match="HARNESS_WORKSPACE_ROOT"):
+    with pytest.raises(HostIntegrationError, match="user-level MCP"):
         workspace_hints_from_environment(
             environment={"HARNESS_HOST_PROFILE": "cursor"}, cwd=elsewhere
         )
+
+    with pytest.raises(HostIntegrationError, match="user-level MCP"):
+        workspace_hints_from_environment(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+                "WORKSPACE_FOLDER_PATHS": str(root),
+            },
+            cwd=elsewhere,
+        )
+
+
+def test_cursor_user_mcp_missing_workspace_root_ignores_inherited_folder_paths(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    assert cursor_user_mcp_missing_workspace_root(
+        environment={"HARNESS_HOST_PROFILE": "cursor", "WORKSPACE_FOLDER_PATHS": str(root)}
+    )
+    assert cursor_user_mcp_missing_workspace_root(
+        environment={
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+        }
+    )
+    assert not cursor_user_mcp_missing_workspace_root(
+        environment={"HARNESS_HOST_PROFILE": "cursor", "HARNESS_WORKSPACE_ROOT": str(root)}
+    )
+    assert not cursor_user_mcp_missing_workspace_root(
+        environment={"HARNESS_HOST_PROFILE": "claude-code"}
+    )
 
 
 def test_discover_cursor_adapter_uses_home_and_exact_python(tmp_path: Path) -> None:
