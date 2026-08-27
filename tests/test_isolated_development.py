@@ -148,6 +148,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         ".cursor/mcp.json",
         "HARNESS_DEV_ROOT",
         "refused",
+        "uv run --frozen harness",
     ):
         assert needle in text
 
@@ -332,6 +333,7 @@ def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> No
     claude = json.loads((REPO_ROOT / ".mcp.json").read_text(encoding="utf-8"))
     assert claude["mcpServers"]["harness"]["command"] == "./scripts/dev"
     assert claude["mcpServers"]["harness"]["args"] == ["harness", "mcp"]
+    assert claude["mcpServers"]["harness"]["type"] == "stdio"
 
 
 def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(

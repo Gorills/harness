@@ -6,27 +6,35 @@ import sqlite3
 import stat
 import sys
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
 
 from harness.cursor_adapter import CursorAdapter, discover_cursor_adapter
-from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
+from harness.git_workspace import (
+    GitWorkspaceDeadlineExceededError,
+    GitWorkspaceError,
+    inspect_git_workspace_runtime_identity,
+)
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
     discover_claude_code_adapter,
 )
-from harness.index import IndexingError, inspect_workspace_index_freshness
+from harness.index import (
+    IndexingError,
+    ScanDeadlineExceededError,
+    inspect_workspace_index_freshness,
+)
 from harness.ipc import (
     IpcError,
     IpcRemoteError,
     RuntimeDiagnosticsResult,
     request_runtime_diagnostics,
 )
-from harness.registry import RegistryError, list_workspaces
+from harness.registry import RegistryError, WorkspaceRecord, list_workspaces
 from harness.runtime_identity import RuntimeIdentityError, current_runtime_identity
 from harness.runtime_paths import (
     RuntimePathError,
@@ -52,9 +60,14 @@ from harness.storage import (
 )
 from harness.tasks import TaskError
 
+# Live inventory hashing is aligned with the daemon scan bound so a ~10k-file
+# Workspace can complete. The aggregate bound covers a typical multi-Workspace
+# install (at least 11 live Workspaces, including one large index) while remaining
+# finite; tests still expire both deadlines.
 _DOCTOR_WORKSPACE_LIMIT = 16
-_DOCTOR_WORKSPACE_DEADLINE_SECONDS = 2.0
-_DOCTOR_WORKSPACE_TOTAL_SECONDS = 10.0
+_DOCTOR_WORKSPACE_DEADLINE_SECONDS = 30.0
+_DOCTOR_WORKSPACE_TOTAL_SECONDS = 90.0
+_TIMEOUT_ERROR_MARKERS = ("deadline exceeded", "timed out")
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +630,51 @@ def _inspect_daemon(
     return diagnostics
 
 
+def _workspace_ref(workspace: WorkspaceRecord) -> str:
+    return f"{workspace.workspace_id} ({workspace.workspace_root})"
+
+
+def _format_workspace_refs(workspaces: Sequence[WorkspaceRecord]) -> str:
+    return ", ".join(_workspace_ref(workspace) for workspace in workspaces)
+
+
+def _counted_named(count: int, label: str, workspaces: Sequence[WorkspaceRecord]) -> str:
+    if not workspaces:
+        return f"{count} {label}"
+    return f"{count} {label} ({_format_workspace_refs(workspaces)})"
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (GitWorkspaceDeadlineExceededError, ScanDeadlineExceededError)):
+            return True
+        detail = str(current).lower()
+        if any(marker in detail for marker in _TIMEOUT_ERROR_MARKERS):
+            return True
+        current = current.__cause__ if current.__cause__ is not None else current.__context__
+    return False
+
+
+def _record_timeout_or_failure(
+    exc: BaseException,
+    workspace: WorkspaceRecord,
+    *,
+    timed_out: list[WorkspaceRecord],
+    failed: list[WorkspaceRecord],
+    stale_notes: list[str],
+    kind: str,
+) -> None:
+    if _is_timeout_error(exc):
+        timed_out.append(workspace)
+        stale_notes.append(f"timed out {kind} {_workspace_ref(workspace)}")
+        return
+    failed.append(workspace)
+    stale_notes.append(f"failed {kind} {_workspace_ref(workspace)}")
+
+
 def _inspect_projects_and_workspaces(
     connection: sqlite3.Connection,
     *,
@@ -628,7 +686,7 @@ def _inspect_projects_and_workspaces(
     checks: list[DoctorCheck],
     stale_notes: list[str],
 ) -> None:
-    workspaces = list_workspaces(connection, limit=_DOCTOR_WORKSPACE_LIMIT)
+    workspaces = list_workspaces(connection)
     project_row = connection.execute("SELECT COUNT(*) FROM projects").fetchone()
     project_count = 0 if project_row is None else int(project_row[0])
     workspace_row = connection.execute("SELECT COUNT(*) FROM workspaces").fetchone()
@@ -641,18 +699,21 @@ def _inspect_projects_and_workspaces(
         checks.append(_check("Generated skills", DoctorSeverity.OK, "no registered Workspaces"))
         return
 
-    inspectable = workspaces
-    truncated = workspace_count - len(inspectable)
+    inspectable = workspaces[:_DOCTOR_WORKSPACE_LIMIT]
+    skipped: list[WorkspaceRecord] = list(workspaces[_DOCTOR_WORKSPACE_LIMIT:])
     overall_deadline = monotonic() + _DOCTOR_WORKSPACE_TOTAL_SECONDS
     live = 0
-    unavailable = 0
+    unavailable_workspaces: list[WorkspaceRecord] = []
+    identity_timed_out: list[WorkspaceRecord] = []
     mismatched = 0
     fresh_indexes = 0
     stale_indexes = 0
-    index_unknown = 0
+    index_timed_out: list[WorkspaceRecord] = []
+    index_failed: list[WorkspaceRecord] = []
     current_skills = 0
     stale_skills = 0
-    skill_unknown = 0
+    skill_timed_out: list[WorkspaceRecord] = []
+    skill_failed: list[WorkspaceRecord] = []
     cursor_projects_current = 0
     cursor_projects_isolated = 0
     cursor_projects_bad = 0
@@ -660,7 +721,7 @@ def _inspect_projects_and_workspaces(
 
     for position, workspace in enumerate(inspectable):
         if monotonic() >= overall_deadline:
-            truncated += len(inspectable) - position
+            skipped.extend(inspectable[position:])
             break
         workspace_deadline = min(overall_deadline, monotonic() + _DOCTOR_WORKSPACE_DEADLINE_SECONDS)
         try:
@@ -668,16 +729,20 @@ def _inspect_projects_and_workspaces(
                 workspace.workspace_root,
                 deadline=workspace_deadline,
             )
-        except GitWorkspaceError:
-            unavailable += 1
-            stale_notes.append(f"unavailable Workspace {workspace.workspace_id}")
+        except GitWorkspaceError as exc:
+            if _is_timeout_error(exc):
+                identity_timed_out.append(workspace)
+                stale_notes.append(f"timed out Workspace identity {_workspace_ref(workspace)}")
+            else:
+                unavailable_workspaces.append(workspace)
+                stale_notes.append(f"unavailable Workspace {_workspace_ref(workspace)}")
             continue
         if (
             identity.layout.workspace_root != workspace.workspace_root
             or identity.layout.git_common_dir != workspace.git_common_dir
         ):
             mismatched += 1
-            stale_notes.append(f"changed Workspace identity {workspace.workspace_id}")
+            stale_notes.append(f"changed Workspace identity {_workspace_ref(workspace)}")
             continue
         live += 1
         try:
@@ -686,14 +751,21 @@ def _inspect_projects_and_workspaces(
                 workspace.workspace_id,
                 deadline=workspace_deadline,
             )
-        except (IndexingError, GitWorkspaceError, RegistryError, sqlite3.DatabaseError):
-            index_unknown += 1
+        except (IndexingError, GitWorkspaceError, RegistryError, sqlite3.DatabaseError) as exc:
+            _record_timeout_or_failure(
+                exc,
+                workspace,
+                timed_out=index_timed_out,
+                failed=index_failed,
+                stale_notes=stale_notes,
+                kind="index inspection",
+            )
         else:
             if index.is_fresh:
                 fresh_indexes += 1
             else:
                 stale_indexes += 1
-                stale_notes.append(f"stale index {workspace.workspace_id}")
+                stale_notes.append(f"stale index {_workspace_ref(workspace)}")
 
         try:
             cursor_project = cursor_adapter.project_registration_diagnostic(
@@ -778,10 +850,8 @@ def _inspect_projects_and_workspaces(
                 stale_notes.append(f"orphaned Cursor project override {workspace.workspace_id}")
 
         if not active_profiles or not registry_ok:
-            skill_unknown += 1
             continue
         if registry_root is None:
-            skill_unknown += 1
             continue
         try:
             skill = inspect_workspace_skills(
@@ -797,40 +867,63 @@ def _inspect_projects_and_workspaces(
             RegistryError,
             TaskError,
             sqlite3.DatabaseError,
-        ):
-            skill_unknown += 1
+        ) as exc:
+            _record_timeout_or_failure(
+                exc,
+                workspace,
+                timed_out=skill_timed_out,
+                failed=skill_failed,
+                stale_notes=stale_notes,
+                kind="generated-skill inspection",
+            )
         else:
             if skill.projection.is_current:
                 current_skills += 1
             else:
                 stale_skills += 1
-                stale_notes.append(f"stale generated skills {workspace.workspace_id}")
+                stale_notes.append(f"stale generated skills {_workspace_ref(workspace)}")
 
+    for workspace in skipped:
+        stale_notes.append(f"doctor budget skipped Workspace {_workspace_ref(workspace)}")
+
+    unavailable = len(unavailable_workspaces)
     project_severity = (
         DoctorSeverity.FAIL
         if mismatched
         else DoctorSeverity.WARN
-        if unavailable or truncated
+        if unavailable or identity_timed_out or skipped
         else DoctorSeverity.OK
     )
     project_detail = (
         f"{project_count} projects, {workspace_count} workspaces; "
-        f"{live} live, {unavailable} unavailable, {mismatched} identity mismatches"
+        f"{live} live, "
+        f"{_counted_named(unavailable, 'unavailable', unavailable_workspaces)}, "
+        f"{mismatched} identity mismatches"
     )
-    if truncated:
-        project_detail += f"; {truncated} workspaces not inspected (bounded doctor limit)"
+    if identity_timed_out:
+        timed_out_detail = _counted_named(len(identity_timed_out), "timed out", identity_timed_out)
+        project_detail += f"; {timed_out_detail}"
+    if skipped:
+        project_detail += (
+            f"; {len(skipped)} not inspected (doctor budget): {_format_workspace_refs(skipped)}"
+        )
     checks.append(_check("Projects", project_severity, project_detail))
 
     index_severity = (
-        DoctorSeverity.WARN if stale_indexes or index_unknown or truncated else DoctorSeverity.OK
+        DoctorSeverity.WARN
+        if stale_indexes or index_timed_out or index_failed or skipped
+        else DoctorSeverity.OK
     )
-    checks.append(
-        _check(
-            "Index state",
-            index_severity,
-            f"{fresh_indexes} fresh, {stale_indexes} stale, {index_unknown} unavailable",
+    index_detail = (
+        f"{fresh_indexes} fresh, {stale_indexes} stale, "
+        f"{_counted_named(len(index_timed_out), 'timed out', index_timed_out)}, "
+        f"{_counted_named(len(index_failed), 'failed', index_failed)}"
+    )
+    if skipped:
+        index_detail += (
+            f"; {len(skipped)} not inspected (doctor budget): {_format_workspace_refs(skipped)}"
         )
-    )
+    checks.append(_check("Index state", index_severity, index_detail))
 
     if cursor_projects_bad:
         checks.append(
@@ -844,7 +937,11 @@ def _inspect_projects_and_workspaces(
             )
         )
     elif cursor_registration_state is HostRegistrationState.CURRENT:
-        cursor_severity = DoctorSeverity.WARN if unavailable or truncated else DoctorSeverity.OK
+        cursor_severity = (
+            DoctorSeverity.WARN
+            if unavailable or identity_timed_out or skipped
+            else DoctorSeverity.OK
+        )
         checks.append(
             _check(
                 "Cursor project MCP overrides",
@@ -888,15 +985,20 @@ def _inspect_projects_and_workspaces(
         )
     else:
         skill_severity = (
-            DoctorSeverity.WARN if stale_skills or skill_unknown or truncated else DoctorSeverity.OK
+            DoctorSeverity.WARN
+            if stale_skills or skill_timed_out or skill_failed or skipped
+            else DoctorSeverity.OK
         )
-        checks.append(
-            _check(
-                "Generated skills",
-                skill_severity,
-                f"{current_skills} current, {stale_skills} stale, {skill_unknown} unavailable",
+        skill_detail = (
+            f"{current_skills} current, {stale_skills} stale, "
+            f"{_counted_named(len(skill_timed_out), 'timed out', skill_timed_out)}, "
+            f"{_counted_named(len(skill_failed), 'failed', skill_failed)}"
+        )
+        if skipped:
+            skill_detail += (
+                f"; {len(skipped)} not inspected (doctor budget): {_format_workspace_refs(skipped)}"
             )
-        )
+        checks.append(_check("Generated skills", skill_severity, skill_detail))
 
 
 def _inspect_skill_registry_permissions(path: Path, checks: list[DoctorCheck]) -> bool:
