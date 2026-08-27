@@ -54,6 +54,13 @@ def load_host_integration_state(paths: RuntimePaths) -> HostIntegrationState:
     return _parse_state(value, path)
 
 
+def load_host_integration_state_for_database(database_path: Path) -> HostIntegrationState:
+    """Read host-profile intent stored next to one Harness database."""
+    return load_host_integration_state(
+        RuntimePaths(database=database_path, socket=database_path)
+    )
+
+
 def write_host_integration_state(
     paths: RuntimePaths, state: HostIntegrationState
 ) -> IntegrationChange:

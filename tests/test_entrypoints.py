@@ -6,9 +6,14 @@ import pytest
 import harness.entrypoints as entrypoints
 from harness.doctor import DoctorCheck, DoctorReport, DoctorSeverity, SystemDoctorReport
 from harness.entrypoints import harness_main, harnessd_main
-from harness.ipc import DashboardUrlResult, IpcTransportError, WorkspaceStatusResult
+from harness.ipc import (
+    DashboardUrlResult,
+    IpcTransportError,
+    VisibilityResult,
+    WorkspaceStatusResult,
+)
 from harness.runtime_paths import RuntimePaths
-from harness.storage import DatabaseStatus
+from harness.storage import SCHEMA_VERSION, DatabaseStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 
@@ -24,6 +29,7 @@ def test_harness_main_lists_status_and_doctor(
     assert "doctor" in output
     assert "status" in output
     assert "dashboard" in output
+    assert "visibility" in output
 
 
 def test_harness_doctor_reports_runtime(
@@ -464,6 +470,46 @@ def test_harness_status_reports_ipc_error_without_traceback(
 
     assert harness_main() == 1
     assert capsys.readouterr().out.strip() == "Harness status: FAIL (local IPC request timed out)"
+
+
+def test_harness_visibility_prints_hygiene_and_cursor_caveat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    socket_path = tmp_path / "harness.sock"
+
+    def request_visibility(ipc_socket: Path, path: Path, mode: str) -> VisibilityResult:
+        assert ipc_socket == socket_path
+        assert path == workspace_root.resolve()
+        assert mode == "hidden"
+        return VisibilityResult(
+            schema_version=SCHEMA_VERSION,
+            project_id="project-1",
+            workspace_id="workspace-1",
+            workspace_root=workspace_root.resolve(),
+            visibility_mode="hidden",
+            projected_path_count=2,
+            materialized=1,
+            removed=0,
+            exclude_changed=True,
+            scm_write_enforcement="unsupported",
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "visibility", "hidden", str(workspace_root), "--socket", str(socket_path)],
+    )
+    monkeypatch.setattr(entrypoints, "request_set_visibility", request_visibility)
+
+    assert harness_main() == 0
+    output = capsys.readouterr().out
+    assert "Visibility: hidden" in output
+    assert "SCM write enforcement: unsupported" in output
+    assert "Cursor does not host-block git commit, push, or pull requests." in output
 
 
 def test_harness_status_bounds_multiline_ipc_error(

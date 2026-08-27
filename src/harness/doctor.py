@@ -24,6 +24,7 @@ from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_workspace_runtime_identity,
 )
+from harness.hidden_projection import HiddenProjectionError, inspect_hidden_workspace
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
@@ -41,7 +42,13 @@ from harness.ipc import (
     RuntimeDiagnosticsResult,
     request_runtime_diagnostics,
 )
-from harness.registry import RegistryError, WorkspaceRecord, list_workspaces
+from harness.registry import (
+    RegistryError,
+    VisibilityMode,
+    WorkspaceRecord,
+    get_project,
+    list_workspaces,
+)
 from harness.runtime_identity import RuntimeIdentityError, current_runtime_identity
 from harness.runtime_paths import (
     RuntimePathError,
@@ -502,7 +509,14 @@ def run_system_doctor(
         checks.append(
             _check("Generated skills", DoctorSeverity.WARN, "no readable Workspaces to inspect")
         )
+        checks.append(
+            _check("Hidden projection", DoctorSeverity.WARN, "no readable Workspaces to inspect")
+        )
     else:
+        try:
+            intent_profiles = tuple(sorted(load_host_integration_state(paths).profiles))
+        except HostIntegrationError:
+            intent_profiles = ()
         try:
             try:
                 database_connection.execute("BEGIN")
@@ -525,6 +539,7 @@ def run_system_doctor(
                     environment=values,
                     registry_root=registry_root,
                     registry_ok=registry_ok,
+                    intent_profiles=intent_profiles,
                     checks=checks,
                     stale_notes=stale_notes,
                 )
@@ -543,6 +558,9 @@ def run_system_doctor(
                 )
                 checks.append(
                     _check("Generated skills", DoctorSeverity.WARN, "Project inspection failed")
+                )
+                checks.append(
+                    _check("Hidden projection", DoctorSeverity.WARN, "Project inspection failed")
                 )
         finally:
             try:
@@ -798,6 +816,7 @@ def _inspect_projects_and_workspaces(
     environment: Mapping[str, str],
     registry_root: Path | None,
     registry_ok: bool,
+    intent_profiles: tuple[str, ...],
     checks: list[DoctorCheck],
     stale_notes: list[str],
 ) -> None:
@@ -812,6 +831,7 @@ def _inspect_projects_and_workspaces(
         )
         checks.append(_check("Index state", DoctorSeverity.OK, "no registered Workspaces"))
         checks.append(_check("Generated skills", DoctorSeverity.OK, "no registered Workspaces"))
+        checks.append(_check("Hidden projection", DoctorSeverity.OK, "no Hidden Projects"))
         return
 
     inspectable = workspaces[:_DOCTOR_WORKSPACE_LIMIT]
@@ -837,6 +857,11 @@ def _inspect_projects_and_workspaces(
     cursor_runtime_bad = 0
     cursor_project_checks: list[DoctorCheck] = []
     cursor_runtime_checks: list[DoctorCheck] = []
+    hidden_ok = 0
+    hidden_bad = 0
+    hidden_orphan = 0
+    hidden_failed: list[WorkspaceRecord] = []
+    hidden_has_cursor = False
 
     for position, workspace in enumerate(inspectable):
         if monotonic() >= overall_deadline:
@@ -864,6 +889,34 @@ def _inspect_projects_and_workspaces(
             stale_notes.append(f"changed Workspace identity {_workspace_ref(workspace)}")
             continue
         live += 1
+        try:
+            project = get_project(connection, workspace.project_id)
+            hidden_inspect = inspect_hidden_workspace(
+                workspace.workspace_root,
+                required_profiles=intent_profiles,
+                expect_hidden=project.visibility_mode is VisibilityMode.HIDDEN,
+                deadline=workspace_deadline,
+            )
+        except (HiddenProjectionError, GitWorkspaceError, RegistryError):
+            hidden_failed.append(workspace)
+            stale_notes.append(f"failed Hidden inspection {_workspace_ref(workspace)}")
+        else:
+            if project.visibility_mode is VisibilityMode.HIDDEN:
+                if "cursor" in intent_profiles:
+                    hidden_has_cursor = True
+                if (
+                    not intent_profiles
+                    or hidden_inspect.missing_required
+                    or hidden_inspect.unignored
+                    or hidden_inspect.tracked
+                ):
+                    hidden_bad += 1
+                    stale_notes.append(f"Hidden projection gap {_workspace_ref(workspace)}")
+                else:
+                    hidden_ok += 1
+            elif hidden_inspect.orphans:
+                hidden_orphan += 1
+                stale_notes.append(f"Hidden leftover {_workspace_ref(workspace)}")
         try:
             index = inspect_workspace_index_freshness(
                 connection,
@@ -1225,6 +1278,42 @@ def _inspect_projects_and_workspaces(
                 f"; {len(skipped)} not inspected (doctor budget): {_format_workspace_refs(skipped)}"
             )
         checks.append(_check("Generated skills", skill_severity, skill_detail))
+
+    if hidden_bad or hidden_failed:
+        checks.append(
+            _check(
+                "Hidden projection",
+                DoctorSeverity.FAIL,
+                f"{hidden_ok} current, {hidden_bad} incomplete, "
+                f"{_counted_named(len(hidden_failed), 'failed', hidden_failed)}",
+            )
+        )
+    elif hidden_ok:
+        checks.append(
+            _check(
+                "Hidden projection",
+                DoctorSeverity.OK,
+                f"{hidden_ok} Hidden workspaces have ignored Harness-owned instructions",
+            )
+        )
+    else:
+        checks.append(_check("Hidden projection", DoctorSeverity.OK, "no Hidden Projects"))
+    if hidden_orphan:
+        checks.append(
+            _check(
+                "Hidden leftovers",
+                DoctorSeverity.WARN,
+                f"{hidden_orphan} Normal workspaces still have Harness-owned Hidden instructions",
+            )
+        )
+    if hidden_ok and hidden_has_cursor:
+        checks.append(
+            _check(
+                "Hidden SCM enforcement",
+                DoctorSeverity.WARN,
+                "Cursor does not host-block git commit, push, or pull requests",
+            )
+        )
 
 
 def _inspect_skill_registry_permissions(path: Path, checks: list[DoctorCheck]) -> bool:

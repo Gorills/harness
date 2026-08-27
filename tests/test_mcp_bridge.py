@@ -21,7 +21,7 @@ from mcp.shared.exceptions import MCPError
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import request_dashboard_url
-from harness.registry import create_project, list_workspaces, register_workspace
+from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
@@ -30,6 +30,7 @@ from harness.task_checkpoints import (
     list_task_events,
 )
 from harness.tasks import TaskState, get_task, get_task_stack_hints
+from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
@@ -169,6 +170,8 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                 "schema_version",
             }
             assert status.structured_content["pending_operator_feedback"] is None
+            assert status.structured_content["visibility_mode"] == "normal"
+            assert "scm_write" not in json.dumps(status.structured_content)
             started = await client.call_tool(
                 "task_start",
                 {"title": "MCP continuity", "stack_hints": [" FastAPI ", "POSTGRES"]},
@@ -255,6 +258,61 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
         assert get_task_stack_hints(connection, task_id) == ("fastapi", "postgres")
     finally:
         connection.close()
+
+
+@pytest.mark.anyio
+async def test_mcp_hidden_status_does_not_disclose_enforcement(tmp_path: Path) -> None:
+    root, database = _repo(tmp_path)
+    connection = connect_database(database)
+    try:
+        workspace = list_workspaces(connection)[0]
+        set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("cursor",),
+            project_id=workspace.project_id,
+        )
+    finally:
+        connection.close()
+    runtime = tmp_path / "runtime"
+    socket_path = runtime / "harness" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    try:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=env,
+            cwd=str(root),
+        )
+        async with Client(stdio_client(params)) as client:
+            listed = await client.list_tools()
+            assert [tool.name for tool in listed.tools] == [
+                "project_status",
+                "project_search",
+                "project_context",
+                "task_start",
+                "task_checkpoint",
+            ]
+            status = await client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            assert status.structured_content["visibility_mode"] == "hidden"
+            dumped = json.dumps(status.structured_content)
+            assert "scm_write" not in dumped
+            assert "unsupported" not in dumped
+            assert "info/exclude" not in dumped
+            assert "harness-hidden" not in dumped
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
 
 @pytest.mark.anyio
@@ -515,6 +573,9 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "Russian" in instructions[:512]
                 assert "title" in instructions[:512]
                 assert "next_step" in instructions[:512]
+                assert "durable SCM mutations" in instructions
+                assert "scm_write" not in instructions
+                assert "info/exclude" not in instructions
             else:
                 tools = response["result"]["tools"]
                 assert [tool["name"] for tool in tools] == [

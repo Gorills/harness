@@ -325,6 +325,22 @@ class TaskCheckpointResult:
 
 
 @dataclass(frozen=True, slots=True)
+class VisibilityResult:
+    """Bounded operator result for a Hidden/Normal visibility change."""
+
+    schema_version: int
+    project_id: str
+    workspace_id: str
+    workspace_root: Path
+    visibility_mode: str
+    projected_path_count: int
+    materialized: int
+    removed: int
+    exclude_changed: bool
+    scm_write_enforcement: str
+
+
+@dataclass(frozen=True, slots=True)
 class IpcRequest:
     """Validated internal request independent of MCP wire objects."""
 
@@ -341,6 +357,8 @@ class IpcRequest:
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
     host_profiles: tuple[str, ...] | None = None
+    visibility_path: Path | None = None
+    visibility_mode: str | None = None
 
 
 def request_status(
@@ -451,6 +469,32 @@ def request_workspace_scan(
         timeout=timeout,
     )
     return _workspace_scan_from_response(response, expected_request_id=request_id)
+
+
+def request_set_visibility(
+    socket_path: Path,
+    path: Path,
+    visibility_mode: str,
+    *,
+    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+) -> VisibilityResult:
+    """Change Project visibility through daemon-owned Hidden projection."""
+    scan_path = str(path)
+    _validate_scan_path(scan_path)
+    if visibility_mode not in {"normal", "hidden"}:
+        raise IpcProtocolError("visibility mode must be normal or hidden")
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "set_visibility",
+            "params": {"path": scan_path, "visibility_mode": visibility_mode},
+        },
+        timeout=timeout,
+    )
+    return _visibility_from_response(response, expected_request_id=request_id)
 
 
 def request_workspace_skills_reconcile(
@@ -769,6 +813,17 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             scan_path=_scan_path_from_params(payload["params"]),
         )
 
+    if method == "set_visibility":
+        if set(payload) != {"version", "request_id", "method", "params"}:
+            raise IpcProtocolError("set visibility request fields do not match the IPC schema")
+        visibility_path, visibility_mode = _visibility_from_params(payload["params"])
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            visibility_path=visibility_path,
+            visibility_mode=visibility_mode,
+        )
+
     if method == "workspace_skills_reconcile":
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace skills request fields do not match the IPC schema")
@@ -1030,6 +1085,35 @@ def send_workspace_scan_response(
                     "added": result.added,
                     "updated": result.updated,
                     "removed": result.removed,
+                },
+            }
+        )
+    )
+
+
+def send_visibility_response(
+    peer: socket.socket,
+    request_id: str,
+    result: VisibilityResult,
+) -> None:
+    """Send the exact bounded visibility-change contract."""
+    peer.sendall(
+        _encode_json(
+            {
+                "version": PROTOCOL_VERSION,
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "schema_version": result.schema_version,
+                    "project_id": result.project_id,
+                    "workspace_id": result.workspace_id,
+                    "workspace_root": str(result.workspace_root),
+                    "visibility_mode": result.visibility_mode,
+                    "projected_path_count": result.projected_path_count,
+                    "materialized": result.materialized,
+                    "removed": result.removed,
+                    "exclude_changed": result.exclude_changed,
+                    "scm_write_enforcement": result.scm_write_enforcement,
                 },
             }
         )
@@ -1753,6 +1837,19 @@ def _validate_scan_path(path: str) -> None:
         raise IpcProtocolError("workspace scan path must be absolute")
 
 
+def _visibility_from_params(value: object) -> tuple[Path, str]:
+    if not isinstance(value, dict) or set(value) != {"path", "visibility_mode"}:
+        raise IpcProtocolError("set visibility params do not match the IPC schema")
+    path = value["path"]
+    visibility_mode = value["visibility_mode"]
+    if not isinstance(path, str):
+        raise IpcProtocolError("set visibility path has invalid type")
+    _validate_scan_path(path)
+    if visibility_mode not in {"normal", "hidden"}:
+        raise IpcProtocolError("visibility mode must be normal or hidden")
+    return Path(path), visibility_mode
+
+
 def _validate_search_query(value: object) -> None:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise IpcProtocolError("workspace search query must be a non-empty bounded string")
@@ -2275,6 +2372,69 @@ def _workspace_scan_from_response(
         added=counts[2],
         updated=counts[3],
         removed=counts[4],
+    )
+
+
+def _visibility_from_response(
+    response: dict[str, Any], *, expected_request_id: str
+) -> VisibilityResult:
+    result = _success_result(response, expected_request_id=expected_request_id)
+    expected_fields = {
+        "schema_version",
+        "project_id",
+        "workspace_id",
+        "workspace_root",
+        "visibility_mode",
+        "projected_path_count",
+        "materialized",
+        "removed",
+        "exclude_changed",
+        "scm_write_enforcement",
+    }
+    if set(result) != expected_fields:
+        raise IpcProtocolError("daemon visibility result does not match the IPC schema")
+    counts = (
+        result["schema_version"],
+        result["projected_path_count"],
+        result["materialized"],
+        result["removed"],
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts):
+        raise IpcProtocolError("daemon visibility counts have invalid field types")
+    exclude_changed = result["exclude_changed"]
+    if not isinstance(exclude_changed, bool):
+        raise IpcProtocolError("daemon visibility exclude_changed has invalid type")
+    workspace_id = _bounded_scan_response_string(result["workspace_id"], "workspace_id", 128)
+    project_id = _bounded_scan_response_string(result["project_id"], "project_id", 128)
+    visibility_mode = _bounded_scan_response_string(
+        result["visibility_mode"], "visibility_mode", 16
+    )
+    if visibility_mode not in {"normal", "hidden"}:
+        raise IpcProtocolError("daemon visibility has unsupported visibility mode")
+    workspace_root_value = _bounded_scan_response_string(
+        result["workspace_root"],
+        "workspace_root",
+        _HINT_PATH_MAX_LENGTH,
+    )
+    workspace_root = Path(workspace_root_value)
+    if not workspace_root.is_absolute():
+        raise IpcProtocolError("daemon visibility root must be absolute")
+    scm_write_enforcement = _bounded_scan_response_string(
+        result["scm_write_enforcement"], "scm_write_enforcement", 32
+    )
+    if scm_write_enforcement != "unsupported":
+        raise IpcProtocolError("daemon visibility has unsupported SCM enforcement value")
+    return VisibilityResult(
+        schema_version=counts[0],
+        project_id=project_id,
+        workspace_id=workspace_id,
+        workspace_root=workspace_root,
+        visibility_mode=visibility_mode,
+        projected_path_count=counts[1],
+        materialized=counts[2],
+        removed=counts[3],
+        exclude_changed=exclude_changed,
+        scm_write_enforcement=scm_write_enforcement,
     )
 
 

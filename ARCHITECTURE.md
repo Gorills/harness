@@ -357,7 +357,7 @@ Skill hot reload is an optimization, not a correctness requirement.
 Harness exposes a durable Project-level `visibility_mode` with exactly two v1 values. New Projects default to `normal`; changing the mode is an explicit operator/human action and is not exposed as a model-facing MCP mutation.
 
 - `normal`: ordinary native-host SCM behavior is allowed subject to user/host permissions; Harness does not suppress host attribution by default.
-- `hidden`: the agent remains an editing/research assistant, but durable SCM publication is human-owned. Agent-originated staging/index writes, commit/amend, ref/branch/tag mutations, push, PR/issue/review/comment/release actions, and equivalent remote SCM mutations are denied for the supported host profile.
+- `hidden`: the agent remains an editing/research assistant, and durable SCM publication is human-owned. ADR-0028 makes this policy hygiene-effective: Harness projects untracked always-on host rules and Git-local excludes, and `project_status` reports `hidden` so the model must not publish. Host `scm_write_enforcement` is still required for *enforced* Hidden (ADR-0003); Cursor does not provide it, and operator surfaces must not claim that Cursor blocks git/PR.
 
 Hidden mode also strengthens project-artifact hygiene:
 
@@ -372,9 +372,9 @@ Hidden mode also strengthens project-artifact hygiene:
 
 Because `$GIT_COMMON_DIR/info/exclude` is shared across linked worktrees, all Harness Workspaces resolving to the same Git common directory use the same effective visibility mode in v1. Contradictory per-worktree modes are rejected.
 
-Hidden is capability-gated and fail-closed. A host/profile is supported only when its adapter has real-host proof for local Hidden instructions, SCM-write enforcement, policy integrity (the agent cannot disable its own enforcement), attribution suppression where applicable, safe projection paths, and deterministic cleanup. Every agent/bridge admission to a Hidden Project re-validates the resolved adapter profile; an unsupported or unverifiable profile gets a bounded error rather than a silent downgrade to Normal. Host-profile identity for this decision comes from Harness-owned adapter/registration metadata, never from self-reported `clientInfo`. Unknown or prompt-only behavior is not reported as enforced Hidden mode. Provider-side telemetry/analytics and unrelated agents/tools operating outside the Harness integration are outside this repository/SCM visibility contract.
+Hygiene-effective Hidden (ADR-0028) is operator-selected Project policy plus local instructions and `info/exclude`. It does not refuse MCP admission on Cursor. Enforced Hidden (ADR-0003–0006) remains capability-gated: a host/profile is *enforced* only when its adapter has real-host proof for local Hidden instructions, SCM-write enforcement, policy integrity, attribution suppression where applicable, safe projection paths, deterministic cleanup, and mode-transition revocation. Host-profile identity comes from Harness-owned adapter/registration metadata, never from self-reported `clientInfo`. Unknown or prompt-only behavior is not reported as enforced Hidden mode. Provider-side telemetry/analytics and unrelated agents/tools operating outside the Harness integration are outside this repository/SCM visibility contract.
 
-See ADR-0003.
+See ADR-0003 and ADR-0028.
 
 ## 16. Host adapters
 
@@ -417,7 +417,9 @@ Dashboard rules:
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
 - show only observed activity, never claim access to model internal reasoning;
-- state transitions (accept, feedback, cancel) call the same domain services used by other interfaces;
+- state transitions (accept, feedback, cancel, Hidden/Normal) call the same domain services used by other interfaces;
+- mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
+- Hidden/Normal operator control is on the home dashboard and Workspace detail; a nested Project-id page is not required;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
 - dashboard assets stay capability-scoped and same-origin so CSP can forbid inline script/style.

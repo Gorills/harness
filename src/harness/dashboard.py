@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, quote, unquote_to_bytes, urlencode, urlsplit
 from harness.dashboard_assets import DASHBOARD_CSS, DASHBOARD_JS
 from harness.dashboard_i18n import (
     ACCEPT,
+    ACTION_REJECTED,
     ACTIONS,
     BRANCH,
     BRAND,
@@ -57,7 +58,6 @@ from harness.dashboard_i18n import (
     PAGE_PROJECTS,
     PAGE_PROJECTS_LEAD,
     PROJECT,
-    PROJECT_PREFIX,
     RECENT_TASKS,
     REVISION,
     SEARCH,
@@ -76,6 +76,10 @@ from harness.dashboard_i18n import (
     UNAVAILABLE_TITLE,
     UPDATED,
     VISIBILITY,
+    VISIBILITY_HINT_HIDDEN,
+    VISIBILITY_HINT_NORMAL,
+    VISIBILITY_SET_HIDDEN,
+    VISIBILITY_SET_NORMAL,
     WAIT_REASON,
     WORKSPACE,
     WORKSPACE_FALLBACK,
@@ -97,9 +101,16 @@ from harness.git_workspace import (
     inspect_git_working_tree_status,
     inspect_git_workspace_runtime_identity,
 )
+from harness.hidden_projection import HiddenProjectionCollisionError, HiddenProjectionError
+from harness.host_integration_state import (
+    HostIntegrationStateError,
+    load_host_integration_state_for_database,
+)
 from harness.registry import (
+    ProjectNotFoundError,
     ProjectRecord,
     RegistryError,
+    VisibilityMode,
     WorkspaceRecord,
     get_project,
     get_workspace,
@@ -134,6 +145,7 @@ from harness.tasks import (
     get_task,
     get_task_stack_hints,
 )
+from harness.visibility import set_project_visibility
 
 _DASHBOARD_URL_FILENAME = "dashboard.url"
 _DASHBOARD_TOKEN_FILENAME = "dashboard.token"
@@ -159,6 +171,30 @@ _DASHBOARD_RESPONSE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
+
+
+def _allows_dashboard_mutation(
+    *,
+    host: str | None,
+    origin: str | None,
+    sec_fetch_site: str | None,
+    expected_host: str,
+    expected_origin: str,
+) -> bool:
+    """Accept exact Host plus matching Origin, or Sec-Fetch-Site same-origin if Origin is absent/null."""
+    if host != expected_host:
+        return False
+    if origin is not None and origin.strip() not in {"", "null"}:
+        return origin.strip().rstrip("/") == expected_origin
+    return sec_fetch_site == "same-origin"
+
+
+def _action_rejected_html() -> str:
+    return (
+        '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
+        f"<title>{escape(ACTION_REJECTED)}</title></head>"
+        f"<body><h1>{escape(ACTION_REJECTED)}</h1></body></html>"
+    )
 
 
 class DashboardError(RuntimeError):
@@ -245,6 +281,14 @@ class DashboardActionRequest:
     task_id: str
     expected_revision: int
     feedback: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardVisibilityRequest:
+    """One validated operator visibility mutation from the dashboard UI."""
+
+    project_id: str
+    visibility_mode: VisibilityMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -601,7 +645,24 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
         connection.close()
 
 
-def _parse_dashboard_action_form(payload: bytes) -> DashboardActionRequest:
+def mutate_dashboard_visibility(database_path: Path, request: DashboardVisibilityRequest) -> None:
+    """Persist hygiene-effective Hidden or restore Normal from the dashboard."""
+    connection = connect_database(database_path)
+    try:
+        profiles = tuple(sorted(load_host_integration_state_for_database(database_path).profiles))
+        set_project_visibility(
+            connection,
+            mode=request.visibility_mode,
+            host_profiles=profiles,
+            project_id=request.project_id,
+        )
+    finally:
+        connection.close()
+
+
+def _parse_dashboard_action_form(
+    payload: bytes,
+) -> DashboardActionRequest | DashboardVisibilityRequest:
     try:
         encoded = payload.decode("ascii")
         parsed = parse_qs(
@@ -618,6 +679,25 @@ def _parse_dashboard_action_form(payload: bytes) -> DashboardActionRequest:
         raise TaskValidationError("dashboard action form fields must be singular")
     fields = {name: values[0] for name, values in parsed.items()}
     action = fields.get("action")
+    if action == "set_visibility":
+        expected = {"action", "project_id", "visibility_mode"}
+        if set(fields) != expected:
+            raise TaskValidationError(
+                "dashboard visibility form does not match the expected schema"
+            )
+        project_id = fields["project_id"]
+        mode_text = fields["visibility_mode"]
+        if (
+            not project_id
+            or len(project_id) > 128
+            or "\x00" in project_id
+            or mode_text not in {VisibilityMode.NORMAL.value, VisibilityMode.HIDDEN.value}
+        ):
+            raise TaskValidationError("dashboard visibility fields are invalid")
+        return DashboardVisibilityRequest(
+            project_id=project_id,
+            visibility_mode=VisibilityMode(mode_text),
+        )
     expected = {"action", "workspace_id", "task_id", "expected_revision"}
     if action == "feedback":
         expected.add("feedback")
@@ -688,6 +768,41 @@ def _hidden_input(name: str, value: str | int) -> str:
     return (
         f'<input type="hidden" name="{escape(name, quote=True)}" '
         f'value="{escape(str(value), quote=True)}">'
+    )
+
+
+def _render_visibility_form(
+    project_id: str,
+    visibility_mode: VisibilityMode | str,
+    *,
+    action: str,
+    compact: bool = False,
+) -> str:
+    mode = (
+        visibility_mode
+        if isinstance(visibility_mode, VisibilityMode)
+        else VisibilityMode(visibility_mode)
+    )
+    if mode is VisibilityMode.HIDDEN:
+        target = VisibilityMode.NORMAL
+        label = VISIBILITY_SET_NORMAL
+        hint = VISIBILITY_HINT_HIDDEN
+    else:
+        target = VisibilityMode.HIDDEN
+        label = VISIBILITY_SET_HIDDEN
+        hint = VISIBILITY_HINT_NORMAL
+    hint_html = ""
+    if not compact or mode is VisibilityMode.HIDDEN:
+        hint_html = f'<p class="visibility-hint">{escape(hint)}</p>'
+    return (
+        f'<div class="visibility-box">{hint_html}'
+        '<form method="post" action="'
+        + escape(action, quote=True)
+        + '" class="visibility-form">'
+        + _hidden_input("action", "set_visibility")
+        + _hidden_input("project_id", project_id)
+        + _hidden_input("visibility_mode", target.value)
+        + f'<button class="btn" type="submit">{escape(label)}</button></form></div>'
     )
 
 
@@ -857,7 +972,6 @@ def _render_metrics(rows: tuple[DashboardWorkspaceRow, ...]) -> str:
 
 def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
     workspace_url = _url(base_path, "workspaces", row.workspace_id)
-    project_url = _url(base_path, "projects", row.project_id)
     task_link = ""
     if row.task_id is None:
         task_title = NO_TASK
@@ -885,10 +999,7 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
         )
     return (
         '<article class="workspace-card"><div class="card-main">'
-        '<div class="card-kicker">'
-        f'<a class="project-link" href="{escape(project_url, quote=True)}">'
-        f"{escape(PROJECT_PREFIX)} {escape(row.project_id[:8])}</a>"
-        f"{_state_pill(row.task_state, row.task_wait_reason)}</div>"
+        f'<div class="card-kicker">{_state_pill(row.task_state, row.task_wait_reason)}</div>'
         f'<h2 class="workspace-name"><a href="{escape(workspace_url, quote=True)}">'
         f"{escape(row.workspace_root.name or str(row.workspace_root))}</a></h2>"
         f'<p class="workspace-path">{escape(str(row.workspace_root))}</p>'
@@ -900,7 +1011,8 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
         f'<div class="mini-stat"><span>{escape(INDEX)}</span><strong>{row.indexed_file_count}</strong></div>'
         f'<div class="mini-stat"><span>{escape(MODE)}</span>'
         f"<strong>{escape(visibility_label(row.visibility_mode))}</strong></div>"
-        f"</div>{actions}</aside></article>"
+        f"</div>{_render_visibility_form(row.project_id, row.visibility_mode, action=base_path, compact=True)}"
+        f"{actions}</aside></article>"
     )
 
 
@@ -958,7 +1070,12 @@ def render_project_page(detail: DashboardProjectDetail, *, base_path: str) -> st
         '<div class="hero-aside">'
         f'<div class="identity-line">{escape(detail.project.project_id)}</div>'
         f'<div class="identity-line">{escape(visibility_label(detail.project.visibility_mode.value))}</div>'
-        "</div></section>"
+        + _render_visibility_form(
+            detail.project.project_id,
+            detail.project.visibility_mode,
+            action=f"{base_path}projects/{quote(detail.project.project_id, safe='')}/",
+        )
+        + "</div></section>"
         + _render_metrics(rows)
         + '<section class="section"><div class="section-head"><div>'
         f'<h2 class="section-title">{escape(workspace_count_label(len(rows)))}</h2>'
@@ -1035,7 +1152,7 @@ def _render_search(detail: DashboardWorkspaceDetail) -> str:
 
 def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -> str:
     row = detail.workspace
-    project_url = _url(base_path, "projects", row.project_id)
+    workspace_url = _url(base_path, "workspaces", row.workspace_id)
     live_branch = _display_live_status(row.branch, row)
     live_dirty = _display_live_status(row.dirty_path_count, row)
     actions = ""
@@ -1048,20 +1165,17 @@ def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -
             revision=row.task_revision,
         )
     workspace_name = row.workspace_root.name or WORKSPACE_FALLBACK
-    no_actions = f'<p class="section-note">{escape(NO_ACTIONS)}</p>'
+    action_html = (
+        _render_visibility_form(row.project_id, row.visibility_mode, action=workspace_url) + actions
+    )
     content = (
         '<section class="hero compact"><div>'
         f"<h1>{escape(workspace_name)}</h1>"
-        f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div>'
-        '<div class="hero-aside">'
-        f'<div class="identity-line">{escape(row.workspace_id)}</div>'
-        f'<div class="identity-line">{escape(row.project_id)}</div></div></section>'
+        f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div></section>'
         '<section class="detail-grid"><div class="panel">'
         f'<div class="panel-head"><h2>{escape(WORKSPACE_STATE)}</h2>'
         f'{_state_pill(row.task_state, row.task_wait_reason)}</div><div class="panel-body">'
         '<dl class="fact-list">'
-        f'<div class="fact"><dt>{escape(PROJECT)}</dt>'
-        f'<dd><a href="{escape(project_url, quote=True)}" class="mono">{escape(row.project_id)}</a></dd></div>'
         f'<div class="fact"><dt>{escape(BRANCH)}</dt><dd class="mono">{escape(live_branch)}</dd></div>'
         f'<div class="fact"><dt>{escape(DIRTY_PATHS)}</dt><dd>{escape(live_dirty)}</dd></div>'
         f'<div class="fact"><dt>{escape(INDEXED_PATHS)}</dt><dd>{row.indexed_file_count}</dd></div>'
@@ -1070,7 +1184,7 @@ def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -
         f'<div class="fact"><dt>{escape(TASK)}</dt><dd class="mono">{escape(_display_task(row))}</dd></div>'
         "</dl></div></div>"
         f'<aside class="panel"><div class="panel-head"><h2>{escape(ACTIONS)}</h2></div>'
-        f'<div class="panel-body">{actions if actions else no_actions}</div></aside></section>'
+        f'<div class="panel-body">{action_html}</div></aside></section>'
         '<section class="section"><div class="section-head"><div>'
         f'<h2 class="section-title">{escape(SEARCH_SECTION)}</h2></div></div>'
         '<div class="panel"><div class="panel-body">'
@@ -1087,7 +1201,6 @@ def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -
         page_title=document_title(workspace_name),
         breadcrumbs=(
             (BREADCRUMB_PROJECTS, base_path),
-            (project_crumb(row.project_id), project_url),
             (workspace_name, None),
         ),
         events_url=_events_url(
@@ -1476,11 +1589,14 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         except (DashboardError, SearchError):
             self._send_html(404, "")
             return
-        if (
-            self.headers.get("Host") != self.expected_host
-            or self.headers.get("Origin") != self.expected_origin
+        if not _allows_dashboard_mutation(
+            host=self.headers.get("Host"),
+            origin=self.headers.get("Origin"),
+            sec_fetch_site=self.headers.get("Sec-Fetch-Site"),
+            expected_host=self.expected_host,
+            expected_origin=self.expected_origin,
         ):
-            self._send_html(403, "")
+            self._send_html(403, _action_rejected_html())
             return
         if self.headers.get("Transfer-Encoding") is not None:
             self._send_html(400, "")
@@ -1503,7 +1619,10 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             request = _parse_dashboard_action_form(payload)
-            mutate_dashboard_task(self.database_path, request)
+            if isinstance(request, DashboardVisibilityRequest):
+                mutate_dashboard_visibility(self.database_path, request)
+            else:
+                mutate_dashboard_task(self.database_path, request)
         except TaskValidationError:
             self._send_html(400, "")
             return
@@ -1513,6 +1632,11 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             TaskRevisionConflictError,
             TaskWorkspaceConflictError,
             TaskTransitionError,
+            ProjectNotFoundError,
+            HiddenProjectionError,
+            HiddenProjectionCollisionError,
+            RegistryError,
+            HostIntegrationStateError,
         ):
             self._send_html(409, "")
             return

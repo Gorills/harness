@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-25
+- **Amended:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -20,7 +21,7 @@ Add transport-independent domain operations `task_accept`, `task_feedback`, and 
 
 The daemon's bounded Workspace Task status includes `pending_operator_feedback` only when an `operator_feedback` event is attached to the Task's **current working revision**. The MCP `project_status` response exposes that field. Once the agent checkpoints and the Task revision advances, the old feedback remains immutable history but is no longer pending.
 
-Dashboard actions call those domain operations directly through daemon-owned local state; they do not edit Task tables ad hoc and do not add a second mutation workflow. The Projects page renders actions with the Task revision observed in the same dashboard read. Mutation POSTs are accepted only on the private capability path, require the exact loopback `Host`, exact same-origin `Origin`, a bounded `application/x-www-form-urlencoded` body, singular known fields, and the rendered revision token. Cross-site, malformed, stale, wrong-Workspace, and ineligible-state requests are non-mutating. All success/error HTTP responses keep the dashboard's hardened no-store/CSP/nosniff/no-referrer policy and omit `Server`/`Date` headers.
+Dashboard actions call those domain operations directly through daemon-owned local state; they do not edit Task tables ad hoc and do not add a second mutation workflow. The Projects page renders actions with the Task revision observed in the same dashboard read. Mutation POSTs are accepted only on the private capability path, require the exact loopback `Host`, a bounded `application/x-www-form-urlencoded` body, singular known fields, and the rendered revision token. Same-origin proof is either an `Origin` that matches the dashboard origin (optional trailing slash) or, when `Origin` is absent or `null`, `Sec-Fetch-Site: same-origin`. A foreign `Origin` stays non-mutating even if fetch metadata claims same-origin. Cross-site, malformed, stale, wrong-Workspace, and ineligible-state requests are non-mutating. All success/error HTTP responses keep the dashboard's hardened no-store/CSP/nosniff/no-referrer policy and omit `Server`/`Date` headers. Rejected mutations return a short Russian HTML body so browsers do not replace an empty 403 with a generic loopback-access interstitial.
 
 No new MCP tool is added. Accept/feedback/cancel are human-facing operations; agent continuity is provided by the existing `project_status` and Task tools.
 
@@ -49,5 +50,5 @@ Automated tests must prove:
 - database constraints reject malformed operator event payload/linkage and duplicate operator actions for one Task revision;
 - Accept/feedback/cancel require explicit ownership and revision CAS and keep terminal-state rules;
 - feedback resumes the same Task, obeys the one-working-Task invariant, and event persistence failure rolls back the state transition;
-- dashboard actions reject missing/foreign Origin, wrong Host, malformed/oversized bodies, stale revisions, and keep hardened response headers;
+- dashboard actions reject missing Origin without `Sec-Fetch-Site: same-origin`, foreign Origin, wrong Host, malformed/oversized bodies, stale revisions, and keep hardened response headers;
 - a real human review sequence can checkpoint to operator review, receive dashboard feedback, surface that feedback through a fresh MCP bridge `project_status`, clear pending feedback after a checkpoint, return to review, and Accept the same Task to completion.

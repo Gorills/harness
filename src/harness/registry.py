@@ -206,6 +206,36 @@ def register_workspace_for_scan(
         raise
 
 
+def update_project_visibility(
+    connection: sqlite3.Connection,
+    project_id: str,
+    visibility_mode: VisibilityMode,
+) -> ProjectRecord:
+    """Persist Project visibility after common-directory policy has been checked."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        project = get_project(connection, project_id)
+        workspaces = list_workspaces(connection, project_id=project_id)
+        common_dirs = {workspace.git_common_dir for workspace in workspaces}
+        for git_common_dir in sorted(common_dirs, key=str):
+            _require_common_dir_visibility(
+                connection,
+                git_common_dir=git_common_dir,
+                visibility_mode=visibility_mode,
+                except_project_id=project_id,
+            )
+        connection.execute(
+            "UPDATE projects SET visibility_mode = ? WHERE id = ?",
+            (visibility_mode.value, project_id),
+        )
+        connection.execute("COMMIT")
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    return ProjectRecord(project_id=project.project_id, visibility_mode=visibility_mode)
+
+
 def list_workspaces(
     connection: sqlite3.Connection,
     *,
@@ -324,16 +354,29 @@ def _require_common_dir_visibility(
     *,
     git_common_dir: Path,
     visibility_mode: VisibilityMode,
+    except_project_id: str | None = None,
 ) -> None:
-    rows = connection.execute(
-        """
-        SELECT DISTINCT projects.visibility_mode
-        FROM workspaces
-        JOIN projects ON projects.id = workspaces.project_id
-        WHERE workspaces.git_common_dir = ?
-        """,
-        (str(git_common_dir),),
-    ).fetchall()
+    if except_project_id is None:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT projects.visibility_mode
+            FROM workspaces
+            JOIN projects ON projects.id = workspaces.project_id
+            WHERE workspaces.git_common_dir = ?
+            """,
+            (str(git_common_dir),),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT projects.visibility_mode
+            FROM workspaces
+            JOIN projects ON projects.id = workspaces.project_id
+            WHERE workspaces.git_common_dir = ?
+              AND projects.id != ?
+            """,
+            (str(git_common_dir), except_project_id),
+        ).fetchall()
     for row in rows:
         persisted_mode = row[0]
         if not isinstance(persisted_mode, str):

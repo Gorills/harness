@@ -11,13 +11,21 @@ import pytest
 import harness.doctor as doctor
 from harness.doctor import run_doctor_checks
 from harness.git_workspace import GitWorkspaceDeadlineExceededError
+from harness.hidden_projection import apply_hidden_projection
 from harness.host_adapters import HostIntegrationError, HostRegistrationState
 from harness.index import IndexingError, ScanDeadlineExceededError
 from harness.ipc import IpcRemoteError
-from harness.registry import WorkspaceRecord, create_project, register_workspace
+from harness.registry import (
+    VisibilityMode,
+    WorkspaceRecord,
+    create_project,
+    register_workspace,
+    update_project_visibility,
+)
 from harness.skill_runtime import SkillRuntimeError
 from harness.skills import SkillProjectionError
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.visibility import set_project_visibility
 
 
 def test_doctor_check_escapes_terminal_control_characters() -> None:
@@ -711,3 +719,72 @@ def test_doctor_per_workspace_deadline_still_expires(
     assert "unavailable" not in index.detail
     assert f"timed out Workspace identity {workspace.workspace_id}" in stale.detail
     assert report.failure_count == 0
+
+
+def _write_host_profiles(environment: dict[str, str], *profiles: str) -> None:
+    database = Path(environment["XDG_STATE_HOME"]) / "harness" / "harness.db"
+    path = database.parent / "host-integrations.json"
+    path.write_text(
+        json.dumps({"version": 1, "profiles": list(profiles)}),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+
+
+def test_doctor_reports_hidden_projection_and_cursor_scm_gap(tmp_path: Path) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    _write_host_profiles(environment, "cursor")
+    database = Path(environment["XDG_STATE_HOME"]) / "harness" / "harness.db"
+    connection = connect_database(database)
+    try:
+        set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("cursor",),
+            project_id=workspace.project_id,
+        )
+    finally:
+        connection.close()
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    assert by_name["Hidden projection"].severity is doctor.DoctorSeverity.OK
+    assert "ignored Harness-owned instructions" in by_name["Hidden projection"].detail
+    assert by_name["Hidden SCM enforcement"].severity is doctor.DoctorSeverity.WARN
+    assert "does not host-block" in by_name["Hidden SCM enforcement"].detail
+
+
+def test_doctor_warns_on_hidden_leftovers_in_normal_mode(tmp_path: Path) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    _register_doctor_workspaces(environment, [root])
+    apply_hidden_projection((root,), ("cursor",))
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    assert by_name["Hidden leftovers"].severity is doctor.DoctorSeverity.WARN
+    assert "still have Harness-owned Hidden instructions" in by_name["Hidden leftovers"].detail
+
+
+def test_doctor_fails_when_hidden_instructions_are_missing(tmp_path: Path) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    _write_host_profiles(environment, "cursor")
+    database = Path(environment["XDG_STATE_HOME"]) / "harness" / "harness.db"
+    connection = connect_database(database)
+    try:
+        update_project_visibility(connection, workspace.project_id, VisibilityMode.HIDDEN)
+    finally:
+        connection.close()
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    assert by_name["Hidden projection"].severity is doctor.DoctorSeverity.FAIL
+    assert "incomplete" in by_name["Hidden projection"].detail
+    assert report.failure_count >= 1

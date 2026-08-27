@@ -44,6 +44,7 @@ def test_dashboard_hardens_unscoped_and_unsupported_http_responses(tmp_path: Pat
             urlopen(post, timeout=2)
         assert post_error.value.code == 403
         _assert_hardened(post_error.value)
+        assert "Действие не принято" in post_error.value.read().decode("utf-8")
 
         for method in ("HEAD", "PUT"):
             request = Request(url, method=method)

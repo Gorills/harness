@@ -176,6 +176,10 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .pill-review { color: var(--accent-strong); background: var(--accent-soft); }
 
 .action-panel { display: grid; gap: 8px; width: 100%; padding-top: 6px; }
+.visibility-box { display: grid; gap: 8px; width: 100%; }
+.visibility-hint { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; text-align: left; }
+.visibility-form { margin: 0; width: 100%; }
+.visibility-form .btn { width: 100%; }
 .action-row { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .action-row form { margin: 0; }
 .btn {

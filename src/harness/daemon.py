@@ -19,6 +19,11 @@ from harness.git_workspace import (
     inspect_git_working_tree_status,
     inspect_git_workspace_runtime_identity,
 )
+from harness.hidden_projection import HiddenProjectionError
+from harness.host_integration_state import (
+    HostIntegrationStateError,
+    load_host_integration_state_for_database,
+)
 from harness.index import (
     IndexedFileRecord,
     IndexingError,
@@ -40,6 +45,7 @@ from harness.ipc import (
     TaskStartRequestData,
     TaskStartResult,
     UnsupportedIpcTransportError,
+    VisibilityResult,
     WorkspaceIndexEntryResult,
     WorkspaceScanResult,
     WorkspaceSearchHit,
@@ -60,6 +66,7 @@ from harness.ipc import (
     send_status_response,
     send_task_checkpoint_response,
     send_task_start_response,
+    send_visibility_response,
     send_workspace_index_entry_response,
     send_workspace_scan_response,
     send_workspace_search_response,
@@ -70,6 +77,7 @@ from harness.ipc import (
 from harness.knowledge import KnowledgeError, KnowledgeValidationError
 from harness.registry import (
     RegistryError,
+    VisibilityMode,
     WorkspaceRecord,
     get_project,
     get_workspace,
@@ -117,6 +125,7 @@ from harness.tasks import (
     TaskWorkspaceConflictError,
     get_relevant_task,
 )
+from harness.visibility import set_project_visibility
 from harness.watcher import (
     DEFAULT_WATCH_DEBOUNCE_SECONDS,
     DEFAULT_WATCH_FULL_RECONCILE_SECONDS,
@@ -783,6 +792,7 @@ def serve_daemon(
                     _serve_client(
                         client,
                         database,
+                        database_path,
                         scan_lock,
                         watcher_invalidations,
                         dashboard,
@@ -817,6 +827,7 @@ def serve_daemon(
 def _serve_client(
     client: socket.socket,
     database: sqlite3.Connection,
+    database_path: Path,
     scan_lock: Lock,
     watcher_invalidations: SimpleQueue[str],
     dashboard: DashboardServerManager,
@@ -937,6 +948,21 @@ def _serve_client(
             request.scan_path,
             scan_lock,
             watcher_invalidations,
+        )
+        return
+    if (
+        request.method == "set_visibility"
+        and request.visibility_path is not None
+        and request.visibility_mode is not None
+    ):
+        _serve_set_visibility(
+            client,
+            database,
+            database_path,
+            request.request_id,
+            request.visibility_path,
+            request.visibility_mode,
+            scan_lock,
         )
         return
     _try_send_error(
@@ -1574,6 +1600,99 @@ def _serve_workspace_scan(
             code="response_too_large",
             message="Workspace scan result exceeds IPC byte limit",
         )
+
+
+def _serve_set_visibility(
+    client: socket.socket,
+    database: sqlite3.Connection,
+    database_path: Path,
+    request_id: str,
+    path: Path,
+    visibility_mode: str,
+    scan_lock: Lock,
+) -> None:
+    deadline = monotonic() + _SCAN_DEADLINE_SECONDS
+    try:
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
+            raise ScanDeadlineExceededError("visibility change deadline exceeded")
+        try:
+            profiles = tuple(
+                sorted(load_host_integration_state_for_database(database_path).profiles)
+            )
+            changed = set_project_visibility(
+                database,
+                mode=VisibilityMode(visibility_mode),
+                host_profiles=profiles,
+                path=path,
+                deadline=deadline,
+            )
+        finally:
+            scan_lock.release()
+    except ScanDeadlineExceededError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="scan_timeout",
+            message="visibility change exceeded the daemon execution deadline",
+        )
+        return
+    except GitWorkspaceError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="workspace_git_error",
+            message=str(exc),
+        )
+        return
+    except HiddenProjectionError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="hidden_projection_error",
+            message=str(exc),
+        )
+        return
+    except HostIntegrationStateError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="host_integration_error",
+            message=str(exc),
+        )
+        return
+    except RegistryError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="registry_error",
+            message=str(exc),
+        )
+        return
+    except sqlite3.DatabaseError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="database_error",
+            message="daemon could not persist visibility mode",
+        )
+        return
+    send_visibility_response(
+        client,
+        request_id,
+        VisibilityResult(
+            schema_version=SCHEMA_VERSION,
+            project_id=changed.project.project_id,
+            workspace_id=changed.workspace.workspace_id,
+            workspace_root=changed.workspace.workspace_root,
+            visibility_mode=changed.project.visibility_mode.value,
+            projected_path_count=len(changed.projection.projected_paths),
+            materialized=changed.projection.materialized,
+            removed=changed.projection.removed,
+            exclude_changed=changed.projection.exclude_changed,
+            scm_write_enforcement=changed.projection.scm_write_enforcement,
+        ),
+    )
 
 
 def _serve_workspace_skills(

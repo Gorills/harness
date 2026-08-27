@@ -26,7 +26,7 @@ The visual system is a dense editorial developer-tool direction: warm neutral su
 - Dashboard navigation and realtime remain local presentation concerns; SQLite/domain state is still authoritative.
 - The existing stdlib HTTP server remains sufficient; no new runtime web-framework dependency is required.
 - Search behavior cannot drift from CLI/MCP mechanical path search because the dashboard calls the same domain primitive.
-- A malicious site still needs the unguessable capability path, and mutation POSTs additionally retain exact Host/Origin plus revision-CAS validation.
+- A malicious site still needs the unguessable capability path, and mutation POSTs additionally retain exact loopback Host, same-origin Origin or `Sec-Fetch-Site: same-origin` when Origin is absent/`null`, plus revision-CAS validation.
 - SSE steady-state polling is an O(1) SQLite `data_version` read on one persistent read connection; it does not create a Git subprocess storm. Durable Task/operator/index commits trigger refresh hints. A Git-only live-status change with no Harness database commit is picked up by the next normal page render rather than being promised as instantaneous SSE state.
 - The dashboard now has a deliberate reusable design vocabulary instead of per-page one-off CSS.
 

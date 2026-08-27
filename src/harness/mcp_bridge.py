@@ -60,7 +60,7 @@ _SERVER_INSTRUCTIONS = (
     "with project_context, then read/edit repository files with native host tools. Start or "
     "resume a Harness task before meaningful changes and checkpoint meaningful progress. Address "
     "pending operator feedback before continuing reviewed work. Targeted native search remains "
-    "allowed."
+    "allowed. When visibility_mode is hidden, do not perform durable SCM mutations."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "

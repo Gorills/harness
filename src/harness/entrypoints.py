@@ -26,10 +26,12 @@ from harness.host_integration_state import load_host_integration_state
 from harness.installation import InstallationError, install_harness, uninstall_harness
 from harness.ipc import (
     IpcError,
+    VisibilityResult,
     WorkspaceScanResult,
     WorkspaceSearchResult,
     WorkspaceStatusResult,
     request_dashboard_url,
+    request_set_visibility,
     request_workspace_scan,
     request_workspace_search,
     request_workspace_skills_reconcile,
@@ -166,6 +168,21 @@ def _print_workspace_scan(result: WorkspaceScanResult) -> None:
     print(f"Schema: {result.schema_version}")
 
 
+def _print_visibility(result: VisibilityResult) -> None:
+    print(f"Project: {result.project_id}")
+    print(f"Workspace: {result.workspace_id}")
+    print(f"Workspace root: {result.workspace_root}")
+    print(f"Visibility: {result.visibility_mode}")
+    print(f"Hidden instruction paths: {result.projected_path_count}")
+    print(f"Materialized: {result.materialized}")
+    print(f"Removed: {result.removed}")
+    print(f"Git exclude changed: {'yes' if result.exclude_changed else 'no'}")
+    print(f"SCM write enforcement: {result.scm_write_enforcement}")
+    if result.visibility_mode == "hidden":
+        print("Cursor does not host-block git commit, push, or pull requests.")
+    print(f"Schema: {result.schema_version}")
+
+
 def _print_workspace_search(result: WorkspaceSearchResult) -> None:
     print(f"Project: {result.project_id}")
     print(f"Workspace: {result.workspace_id}")
@@ -191,6 +208,10 @@ def _status_failure(detail: str) -> int:
 
 def _scan_failure(detail: str) -> int:
     return _bounded_failure("Harness scan", detail)
+
+
+def _visibility_failure(detail: str) -> int:
+    return _bounded_failure("Harness visibility", detail)
 
 
 def _install_failure(detail: str) -> int:
@@ -402,6 +423,30 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         _print_cursor_reload_guidance(expect_harness=True)
     elif cursor_project_change is IntegrationChange.CHANGED:
         _print_cursor_reload_guidance(expect_harness=True)
+    return 0
+
+
+def _run_visibility(
+    visibility_mode: str, workspace_location: Path, socket_path: Path | None
+) -> int:
+    try:
+        location = workspace_location.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return _visibility_failure(
+            f"workspace path cannot be resolved: {workspace_location}: {exc}"
+        )
+    if not location.is_dir():
+        return _visibility_failure(f"workspace path is not a directory: {location}")
+    if socket_path is None:
+        try:
+            socket_path = _canonical_socket()
+        except (RuntimePathError, IpcError) as exc:
+            return _visibility_failure(str(exc))
+    try:
+        result = request_set_visibility(socket_path, location, visibility_mode)
+    except IpcError as exc:
+        return _visibility_failure(str(exc))
+    _print_visibility(result)
     return 0
 
 
@@ -672,6 +717,33 @@ def harness_main() -> int:
         metavar="PATH",
         help="override the canonical per-user Unix-domain socket path",
     )
+    visibility_parser = subparsers.add_parser(
+        "visibility",
+        help="set Project Hidden or Normal visibility for one Git Workspace",
+        description=(
+            "Operator-only Hidden/Normal switch. Hidden projects local host rules and Git "
+            "info/exclude without changing .gitignore. Cursor does not host-block git/PR."
+        ),
+    )
+    visibility_parser.add_argument(
+        "mode",
+        choices=("hidden", "normal"),
+        help="visibility mode to persist for the Project",
+    )
+    visibility_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        metavar="PATH",
+        help="location inside the Git Workspace (default: current directory)",
+    )
+    visibility_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Unix-domain socket path",
+    )
     search_parser = subparsers.add_parser(
         "search",
         help="search one registered Workspace's current Structural Index",
@@ -751,6 +823,8 @@ def harness_main() -> int:
         return _run_status(args.path, args.socket)
     if args.command == "scan":
         return _run_scan(args.path, args.socket)
+    if args.command == "visibility":
+        return _run_visibility(args.mode, args.path, args.socket)
     if args.command == "search":
         return _run_search(args.query, args.path, args.socket, args.limit)
     if args.command == "skills":
