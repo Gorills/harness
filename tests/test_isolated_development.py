@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import select
 import signal
 import stat
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,6 +18,7 @@ import harness.entrypoints as entrypoints
 from harness.cursor_adapter import (
     find_isolated_development_root,
     is_isolated_development_overlay_entry,
+    production_mcp_isolated_checkout_root,
 )
 from harness.entrypoints import harness_main
 from harness.ipc import WorkspaceScanResult
@@ -455,3 +458,190 @@ def test_dev_env_prepends_checkout_venv_when_present(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines()[0].split(":")[0] == str(venv_bin)
+
+
+def _write_overlay(root: Path) -> None:
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+
+
+def test_production_mcp_refuses_overlay_only_for_host_profile_without_foreign_root(
+    tmp_path: Path,
+) -> None:
+    overlay = _git_workspace(tmp_path / "overlay")
+    ordinary = _git_workspace(tmp_path / "ordinary")
+    _write_overlay(overlay)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    assert production_mcp_isolated_checkout_root(environment={}, cwd=overlay) is None
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={"HARNESS_HOST_PROFILE": "cursor"},
+            cwd=overlay,
+        )
+        == overlay.resolve()
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+            },
+            cwd=overlay,
+        )
+        == overlay.resolve()
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "cursor",
+                "HARNESS_WORKSPACE_ROOT": str(ordinary),
+            },
+            cwd=overlay,
+        )
+        is None
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "claude-code",
+                "CLAUDE_PROJECT_DIR": str(overlay),
+            },
+            cwd=elsewhere,
+        )
+        == overlay.resolve()
+    )
+    assert (
+        production_mcp_isolated_checkout_root(
+            environment={
+                "HARNESS_HOST_PROFILE": "claude-code",
+                "CLAUDE_PROJECT_DIR": str(ordinary),
+            },
+            cwd=overlay,
+        )
+        is None
+    )
+
+
+def _mcp_stdio_exchange(
+    *,
+    cwd: Path,
+    env: Mapping[str, str],
+    methods: tuple[str, ...],
+    call: dict[str, object] | None = None,
+) -> list[Any]:
+    process = subprocess.Popen(
+        [sys.executable, "-m", "harness.mcp_process"],
+        cwd=cwd,
+        env=dict(env),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "isolated-mcp-refusal", "version": "1.0"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    }
+    requests: list[dict[str, object]] = []
+    request_id = 1
+    for method in methods:
+        requests.append(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": {"_meta": meta},
+            }
+        )
+        request_id += 1
+    if call is not None:
+        requests.append(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"_meta": meta, **call},
+            }
+        )
+    responses: list[Any] = []
+    try:
+        for request in requests:
+            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
+            process.stdin.flush()
+            ready, _, _ = select.select([process.stdout], [], [], 5)
+            assert ready, f"no MCP response for {request['method']}"
+            raw = process.stdout.readline()
+            responses.append(json.loads(raw))
+    finally:
+        process.stdin.close()
+        process.terminate()
+        process.wait(timeout=5)
+    return responses
+
+
+def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path) -> None:
+    overlay = _git_workspace(tmp_path / "overlay")
+    ordinary = _git_workspace(tmp_path / "ordinary")
+    _write_overlay(overlay)
+    env = dict(os.environ)
+    env.pop("HARNESS_WORKSPACE_ROOT", None)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    env["HARNESS_HOST_PROFILE"] = "cursor"
+
+    refused = _mcp_stdio_exchange(
+        cwd=overlay,
+        env=env,
+        methods=("server/discover", "tools/list"),
+        call={"name": "project_status", "arguments": {}},
+    )
+    assert "refused" in str(refused[0]["result"]["instructions"]).lower()
+    assert len(str(refused[0]["result"]["instructions"]).encode("utf-8")) < 1024
+    assert refused[1]["result"]["tools"] == []
+    assert refused[2]["error"]["message"].startswith("production Harness MCP is refused")
+
+    allowed_cursor = dict(env)
+    allowed_cursor["HARNESS_WORKSPACE_ROOT"] = str(ordinary)
+    listed = _mcp_stdio_exchange(
+        cwd=overlay,
+        env=allowed_cursor,
+        methods=("tools/list",),
+    )
+    assert [tool["name"] for tool in listed[0]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]
+
+    overlay_without_profile = dict(env)
+    overlay_without_profile.pop("HARNESS_HOST_PROFILE", None)
+    isolated = _mcp_stdio_exchange(
+        cwd=overlay,
+        env=overlay_without_profile,
+        methods=("tools/list",),
+    )
+    assert [tool["name"] for tool in isolated[0]["result"]["tools"]] == [
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ]
+
+    claude_env = dict(env)
+    claude_env["HARNESS_HOST_PROFILE"] = "claude-code"
+    claude_env["CLAUDE_PROJECT_DIR"] = str(overlay)
+    claude_refused = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=claude_env,
+        methods=("tools/list",),
+    )
+    assert claude_refused[0]["result"]["tools"] == []

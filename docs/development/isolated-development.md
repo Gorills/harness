@@ -122,6 +122,8 @@ This checkout commits host overlays that shadow a globally installed server name
 
 Those entries are intentionally not the production Cursor/Claude adapter signature (`python -m harness.mcp_process` plus `HARNESS_HOST_PROFILE`). Production install/scan/uninstall therefore leaves them alone. After changing Cursor MCP config, fully quit and reopen Cursor.
 
+If a host still launches the user-global production server inside this checkout, that process lists no tools and refuses calls. Cursor's documented root hint is `HARNESS_WORKSPACE_ROOT`; Claude Code's is `CLAUDE_PROJECT_DIR`. Process cwd is used when that hint is absent or unresolvable (the global Cursor user-server case) and is not Workspace identity. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/`. This refuse does not activate when the host starts the user-global server with a cwd outside the overlay worktree.
+
 The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout and skips host/skill reconciliation so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
 
 Do not run `scripts/dev harness install` or `scripts/dev harness uninstall`. Those commands would rewrite user-global host MCP using checkout code; the CLI refuses them while `HARNESS_DEV_ROOT` is set.

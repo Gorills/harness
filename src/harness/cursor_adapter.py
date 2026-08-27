@@ -23,8 +23,10 @@ from harness.skills import SkillProjectionSurface
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _CURSOR_PROFILE = "cursor"
+_CLAUDE_PROFILE = "claude-code"
 _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+_CLAUDE_PROJECT_DIR_ENV = "CLAUDE_PROJECT_DIR"
 _SERVER_NAME = "harness"
 _WORKSPACE_FOLDER = "${workspaceFolder}"
 _ISOLATED_DEV_COMMAND = f"{_WORKSPACE_FOLDER}/scripts/dev"
@@ -514,6 +516,46 @@ def find_isolated_development_root(path: Path) -> Path | None:
     if is_isolated_development_overlay_entry(servers.get(_SERVER_NAME)):
         return root
     return None
+
+
+def production_mcp_isolated_checkout_root(
+    *,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> Path | None:
+    """Return the overlay root when production host-profile MCP must refuse tools.
+
+    Isolated overlay launches omit ``HARNESS_HOST_PROFILE`` and are not refused.
+    Process cwd is consulted when that profile's documented Workspace-root hint
+    is absent or does not resolve to an existing path. Cwd is never Workspace
+    identity.
+    """
+    values = os.environ if environment is None else environment
+    profile = values.get(_HOST_PROFILE_ENV)
+    if not profile:
+        return None
+    documented: str | None
+    if profile == _CURSOR_PROFILE:
+        documented = values.get(_WORKSPACE_ROOT_ENV)
+    elif profile == _CLAUDE_PROFILE:
+        documented = values.get(_CLAUDE_PROJECT_DIR_ENV)
+    else:
+        documented = values.get(_WORKSPACE_ROOT_ENV) or values.get(_CLAUDE_PROJECT_DIR_ENV)
+    if documented:
+        found = find_isolated_development_root(Path(documented))
+        if found is not None:
+            return found
+        if _existing_directory(Path(documented)):
+            return None
+    location = Path.cwd() if cwd is None else cwd
+    return find_isolated_development_root(location)
+
+
+def _existing_directory(path: Path) -> bool:
+    try:
+        return path.expanduser().resolve(strict=True).is_dir()
+    except (OSError, RuntimeError):
+        return False
 
 
 def _read_json_config(path: Path) -> _ConfigSnapshot:

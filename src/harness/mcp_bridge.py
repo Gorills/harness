@@ -27,6 +27,7 @@ from mcp_types import (
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from harness.cursor_adapter import production_mcp_isolated_checkout_root
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.host_adapters import workspace_hints_from_environment
 from harness.ipc import (
@@ -53,6 +54,15 @@ _SERVER_INSTRUCTIONS = (
     "repository files with native host tools. Start or resume a Harness task before "
     "meaningful changes and checkpoint meaningful progress. Address pending operator feedback before "
     "continuing reviewed work. Targeted native search remains allowed."
+)
+_ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
+    "Production Harness MCP is refused in the Harness source checkout. Do not call Harness MCP "
+    "tools. Read this repository with native host tools. Checkout-local MCP is scripts/dev "
+    "harness mcp without HARNESS_HOST_PROFILE."
+)
+_ISOLATED_CHECKOUT_REFUSAL_MESSAGE = (
+    "production Harness MCP is refused in the Harness source checkout; "
+    "use the tracked isolated overlay or native host tools"
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
@@ -122,6 +132,15 @@ class KnowledgeInput(_StrictInputModel):
 
 class HarnessMCPServer(MCPServer):
     """MCPServer with explicit fail-closed model and stdio wire contracts."""
+
+    def __init__(
+        self,
+        *args: Any,
+        isolated_checkout_refusal: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._isolated_checkout_refusal = isolated_checkout_refusal
 
     async def run_stdio_async(self) -> None:
         """Run official SDK stdio with bounded request identity and response frames."""
@@ -214,6 +233,8 @@ class HarnessMCPServer(MCPServer):
                     )
 
     async def list_tools(self) -> list[MCPTool]:
+        if self._isolated_checkout_refusal:
+            return []
         tools = await super().list_tools()
         for tool in tools:
             if tool.name in _TOOL_ARGUMENTS:
@@ -226,6 +247,11 @@ class HarnessMCPServer(MCPServer):
         arguments: dict[str, Any],
         context: Context[Any, Any] | None = None,
     ) -> CallToolResult | InputRequiredResult:
+        if self._isolated_checkout_refusal:
+            raise MCPError(
+                code=INVALID_REQUEST,
+                message=_ISOLATED_CHECKOUT_REFUSAL_MESSAGE,
+            )
         allowed = _TOOL_ARGUMENTS.get(name)
         if allowed is not None:
             unknown = sorted(set(arguments).difference(allowed))
@@ -243,12 +269,18 @@ class HarnessMCPServer(MCPServer):
 
 def build_mcp_server() -> MCPServer:
     """Build the production stdio MCP adapter without owning domain state."""
+    isolated_checkout_refusal = production_mcp_isolated_checkout_root() is not None
     server = HarnessMCPServer(
         "Harness",
         description="Local-first project intelligence and durable task continuity.",
-        instructions=_SERVER_INSTRUCTIONS,
+        instructions=(
+            _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS
+            if isolated_checkout_refusal
+            else _SERVER_INSTRUCTIONS
+        ),
         version=distribution_version("harness"),
         log_level="WARNING",
+        isolated_checkout_refusal=isolated_checkout_refusal,
     )
 
     @server.tool(

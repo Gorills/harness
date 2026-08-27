@@ -12,4 +12,5 @@ This repository is the Harness source checkout. It must not share process, datab
 - Do not read or write `~/.local/state/harness`, the per-user `harness.sock`, `~/.cursor/mcp.json`, or a user-scope Claude `harness` MCP registration for work in this checkout.
 - Do not run `harness install` / `harness uninstall` from this environment. Isolated development refuses those commands because they mutate user-global host MCP.
 - Project MCP named `harness` here launches `scripts/dev harness mcp` with checkout-local XDG paths. It is not the global install. Prefer reading this repository over those tools when implementing Harness.
-- Ignore globally installed Harness skills or user-level Harness MCP tools if they appear.
+- Never invoke `user-harness` or any other user-level / global Harness MCP namespace. Production MCP with `HARNESS_HOST_PROFILE` refuses tools in this overlay checkout; do not call leftover Harness MCP tools if they still appear.
+- Ignore globally installed Harness skills if they appear.
