@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import stat
 import subprocess
 import time
@@ -18,6 +19,7 @@ from harness.dashboard import (
     DashboardError,
     DashboardGitBranch,
     DashboardServerManager,
+    dashboard_token_path,
     dashboard_url_path,
     read_dashboard_task_detail,
     read_dashboard_workspace_detail,
@@ -270,6 +272,72 @@ def test_dashboard_shutdown_failure_does_not_leak_daemon_socket_or_locks(
     monkeypatch.setattr(DashboardServerManager, "close", original_close)
     second_stop, second_executor, second_future = _start_server(database, socket_path)
     _stop_server(second_stop, second_executor, second_future)
+
+
+def _free_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    assert isinstance(port, int) and 1 <= port <= 65535
+    return port
+
+
+def test_dashboard_reuses_durable_token_and_preferred_port_across_restarts(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    port = _free_loopback_port()
+    token_file = dashboard_token_path(database)
+    first = DashboardServerManager(database, port=port)
+    try:
+        url = first.get_url()
+        parsed = urlsplit(url)
+        assert parsed.hostname == "127.0.0.1"
+        assert parsed.port == port
+        assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    finally:
+        first.close()
+
+    second = DashboardServerManager(database, port=port)
+    try:
+        assert second.get_url() == url
+        with urlopen(url, timeout=2) as response:
+            assert response.status == 200
+    finally:
+        second.close()
+    assert token_file.exists()
+
+
+def test_dashboard_busy_preferred_port_is_bounded(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    with socket.create_server(("127.0.0.1", 0), reuse_port=False) as occupied:
+        port = occupied.getsockname()[1]
+        manager = DashboardServerManager(database, port=port)
+        with pytest.raises(DashboardError, match="could not bind"):
+            manager.get_url()
+        assert not manager.is_running()
+
+
+def test_daemon_binds_selected_dashboard_listen_port(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    port = _free_loopback_port()
+    monkeypatch.setattr(
+        "harness.runtime_paths.dashboard_listen_port",
+        lambda _socket, **_kwargs: port,
+    )
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        url = request_dashboard_url(socket_path).url
+        parsed = urlsplit(url)
+        assert parsed.port == port
+        with urlopen(url, timeout=2) as response:
+            assert response.status == 200
+    finally:
+        _stop_server(stop_event, executor, future)
 
 
 def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Path) -> None:

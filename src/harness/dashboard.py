@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import sqlite3
 import stat
@@ -104,6 +105,7 @@ from harness.registry import (
     get_workspace,
     list_workspaces,
 )
+from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
 from harness.storage import DatabaseError, connect_database
 from harness.task_checkpoints import (
@@ -133,8 +135,9 @@ from harness.tasks import (
     get_task_stack_hints,
 )
 
-_DASHBOARD_HOST = "127.0.0.1"
 _DASHBOARD_URL_FILENAME = "dashboard.url"
+_DASHBOARD_TOKEN_FILENAME = "dashboard.token"
+_DASHBOARD_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 _DASHBOARD_START_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_STOP_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_FORM_MAX_BYTES = 4096
@@ -811,7 +814,7 @@ def _render_shell(
         '<span class="live-indicator" data-live-indicator data-state="reconnecting">'
         '<span class="live-dot" aria-hidden="true"></span>'
         f'<span class="live-copy" data-live-copy>{escape(LIVE_CONNECTING)}</span>'
-        f'<button class="update-link" type="button" data-refresh-now">{escape(LIVE_REFRESH)}</button>'
+        f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button>'
         "</span></div></header>"
         f'<nav class="breadcrumbs" aria-label="{escape(NAVIGATION, quote=True)}">'
         f"{''.join(breadcrumb_html)}</nav>"
@@ -1637,6 +1640,11 @@ def dashboard_url_path(socket_path: Path) -> Path:
     return socket_path.parent / _DASHBOARD_URL_FILENAME
 
 
+def dashboard_token_path(database_path: Path) -> Path:
+    """Return the durable capability-token file next to the selected database."""
+    return database_path.parent / _DASHBOARD_TOKEN_FILENAME
+
+
 def _write_private_url_file(path: Path, url: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -1699,12 +1707,64 @@ def _unlink_private_url_file(path: Path) -> None:
         return
 
 
+def _read_private_ascii_line(path: Path) -> str | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_size > 128
+    ):
+        return None
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return None
+    if b"\n" not in payload:
+        return None
+    line, remainder = payload.split(b"\n", 1)
+    if remainder:
+        return None
+    try:
+        return line.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+
+def _load_or_create_access_token(path: Path) -> str:
+    existing = _read_private_ascii_line(path)
+    if existing is not None and _DASHBOARD_TOKEN_PATTERN.fullmatch(existing):
+        return existing
+    token = secrets.token_urlsafe(32)
+    try:
+        _write_private_url_file(path, token)
+    except OSError:
+        pass
+    return token
+
+
 class DashboardServerManager:
     """Own one daemon-lifetime loopback dashboard HTTP server."""
 
-    def __init__(self, database_path: Path, *, url_file: Path | None = None) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        url_file: Path | None = None,
+        port: int = 0,
+    ) -> None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise DashboardError("dashboard loopback port is invalid")
         self._database_path = database_path
         self._url_file = url_file
+        self._token_file = dashboard_token_path(database_path)
+        self._port = port
         self._server: _DashboardHttpServer | None = None
         self._thread: Thread | None = None
         self._stop_event: Event | None = None
@@ -1729,23 +1789,29 @@ class DashboardServerManager:
             return self._url
         self.close()
 
-        access_token = secrets.token_urlsafe(32)
+        access_token = _load_or_create_access_token(self._token_file)
         stop_event = Event()
         started_event = Event()
         self._failure = None
         try:
-            server = _DashboardHttpServer(
-                (_DASHBOARD_HOST, 0),
-                _request_handler(self._database_path, access_token, stop_event),
-            )
+            try:
+                server = _DashboardHttpServer(
+                    (DASHBOARD_HOST, self._port),
+                    _request_handler(self._database_path, access_token, stop_event),
+                )
+            except OSError as exc:
+                requested = self._port if self._port else "ephemeral"
+                raise DashboardError(
+                    f"dashboard loopback listener could not bind {DASHBOARD_HOST}:{requested}"
+                ) from exc
             server.timeout = 0.05
             port = server.server_address[1]
             if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
                 server.server_close()
                 raise DashboardError("dashboard loopback listener returned an invalid port")
             handler = cast(type[_DashboardRequestHandler], server.RequestHandlerClass)
-            handler.expected_host = f"{_DASHBOARD_HOST}:{port}"
-            handler.expected_origin = f"http://{_DASHBOARD_HOST}:{port}"
+            handler.expected_host = f"{DASHBOARD_HOST}:{port}"
+            handler.expected_origin = f"http://{DASHBOARD_HOST}:{port}"
             thread = Thread(
                 target=self._run_server,
                 args=(server, stop_event, started_event),
@@ -1756,7 +1822,7 @@ class DashboardServerManager:
             self._thread = thread
             self._stop_event = stop_event
             self._started_event = started_event
-            self._url = f"http://{_DASHBOARD_HOST}:{port}/{access_token}/"
+            self._url = f"http://{DASHBOARD_HOST}:{port}/{access_token}/"
             thread.start()
             self._wait_until_started(thread, started_event)
             self._publish_url_file(self._url)

@@ -700,6 +700,7 @@ def serve_daemon(
 ) -> None:
     """Serve local IPC while keeping registered Workspace indexes reconciled."""
     from harness.dashboard import DashboardError, DashboardServerManager, dashboard_url_path
+    from harness.runtime_paths import dashboard_listen_port
 
     _require_posix_transport()
     _require_daemon_runtime_identity()
@@ -715,7 +716,11 @@ def serve_daemon(
     watcher_thread: Thread | None = None
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
     watcher_invalidations: SimpleQueue[str] = SimpleQueue()
-    dashboard = DashboardServerManager(database_path, url_file=dashboard_url_path(socket_path))
+    dashboard = DashboardServerManager(
+        database_path,
+        url_file=dashboard_url_path(socket_path),
+        port=dashboard_listen_port(socket_path),
+    )
     effective_stop_event = Event() if stop_event is None else stop_event
     try:
         _prepare_socket_path_for_bind(socket_path)

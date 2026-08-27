@@ -412,7 +412,8 @@ The dashboard uses the Python stdlib loopback HTTP server with capability-scoped
 
 Dashboard rules:
 
-- bind loopback only by default;
+- bind loopback only by default, on `127.0.0.1:17373` for the canonical per-user daemon and `127.0.0.1:17374` for an isolated checkout;
+- persist the capability path token next to the selected database so the operator URL stays stable across daemon restarts;
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
 - show only observed activity, never claim access to model internal reasoning;

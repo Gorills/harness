@@ -46,6 +46,7 @@ from harness.runtime_identity import RuntimeIdentityError, current_runtime_ident
 from harness.runtime_paths import (
     RuntimePathError,
     RuntimePaths,
+    dashboard_listen_port,
     default_runtime_paths,
     require_private_runtime_directory,
     require_private_state_directory,
@@ -563,11 +564,13 @@ def run_system_doctor(
             _check("Dashboard", DoctorSeverity.OK, "daemon-owned loopback dashboard is running")
         )
     else:
+        expected_port = dashboard_listen_port(paths.socket, environment=environment)
+        expected = f"; expected 127.0.0.1:{expected_port}" if expected_port else ""
         checks.append(
             _check(
                 "Dashboard",
                 DoctorSeverity.WARN,
-                "daemon is running but dashboard listener is not",
+                f"daemon is running but dashboard listener is not{expected}",
             )
         )
 

@@ -4,6 +4,7 @@ import http.client
 import re
 import subprocess
 from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
@@ -100,6 +101,16 @@ def _read(url: str) -> tuple[int, dict[str, str], str]:
         )
 
 
+class _DashboardButtonParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.buttons: list[dict[str, str | None]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "button":
+            self.buttons.append(dict(attrs))
+
+
 def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
     tmp_path: Path,
 ) -> None:
@@ -124,6 +135,11 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert 'lang="ru"' in overview
         assert 'class="task-git-branch"' in overview
         assert '<strong class="mono">main</strong>' in overview
+        parser = _DashboardButtonParser()
+        parser.feed(overview)
+        refresh_buttons = [attrs for attrs in parser.buttons if "data-refresh-now" in attrs]
+        assert refresh_buttons, parser.buttons
+        assert all('"' not in name for attrs in parser.buttons for name in attrs)
 
         status, css_headers, css = _read(base_url + "assets/dashboard.css")
         assert status == 200

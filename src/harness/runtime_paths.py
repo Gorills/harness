@@ -28,6 +28,11 @@ class RuntimePaths:
     socket: Path
 
 
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 17373
+DASHBOARD_ISOLATED_PORT = 17374
+
+
 def default_runtime_paths(
     *,
     environment: Mapping[str, str] | None = None,
@@ -59,6 +64,34 @@ def default_runtime_paths(
         database=state_base / "harness" / "harness.db",
         socket=runtime_directory / "harness.sock",
     )
+
+
+def dashboard_listen_port(
+    socket_path: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    temp_directory: Path | None = None,
+    effective_uid: int | None = None,
+) -> int:
+    """Return the loopback TCP port for this daemon instance's dashboard.
+
+    The canonical per-user daemon binds ``DASHBOARD_PORT``. An isolated checkout
+    (``HARNESS_DEV_ROOT``) binds the neighboring ``DASHBOARD_ISOLATED_PORT`` so
+    both listeners can exist at once. Explicit socket overrides stay ephemeral.
+    """
+    canonical = default_runtime_paths(
+        environment=environment,
+        home=home,
+        temp_directory=temp_directory,
+        effective_uid=effective_uid,
+    ).socket
+    if socket_path != canonical:
+        return 0
+    values = os.environ if environment is None else environment
+    if values.get("HARNESS_DEV_ROOT"):
+        return DASHBOARD_ISOLATED_PORT
+    return DASHBOARD_PORT
 
 
 def ensure_private_state_directory(
