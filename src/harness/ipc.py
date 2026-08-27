@@ -378,7 +378,7 @@ def request_dashboard_url(
     *,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> DashboardUrlResult:
-    """Ask harnessd to lazily start its loopback dashboard and return the private URL."""
+    """Ask harnessd for the daemon-owned loopback dashboard URL."""
     request_id = uuid4().hex
     response = _request_response(
         socket_path,

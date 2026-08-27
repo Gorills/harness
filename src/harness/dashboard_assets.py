@@ -350,16 +350,16 @@ DASHBOARD_JS = r"""
   refreshButton.addEventListener('click', () => window.location.reload());
 
   const source = new EventSource(eventsUrl);
-  source.addEventListener('ready', () => setState('live', 'Live'));
+  source.addEventListener('ready', () => setState('live', 'Онлайн'));
   source.addEventListener('refresh', () => {
     if (hasUnsavedInput()) {
-      setState('update', 'Update available');
+      setState('update', 'Есть обновление');
       return;
     }
-    setState('update', 'Refreshing');
+    setState('update', 'Обновление');
     window.setTimeout(() => window.location.reload(), 160);
   });
-  source.onerror = () => setState('reconnecting', 'Reconnecting');
+  source.onerror = () => setState('reconnecting', 'Переподключение');
   window.addEventListener('pagehide', () => source.close(), { once: true });
 })();
 """.strip()

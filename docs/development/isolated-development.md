@@ -54,9 +54,10 @@ These commands autostart an isolated `harnessd` when the local socket is absent.
 scripts/dev harness scan
 scripts/dev harness status
 scripts/dev harness search indexed_files
+scripts/dev harness dashboard
 ```
 
-`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root.
+`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon; `scripts/dev harness dashboard` prints the current private URL. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
 Foreground daemon (optional; not required after autostart works):
 

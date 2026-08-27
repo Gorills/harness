@@ -450,7 +450,7 @@ def run_system_doctor(
             _check(
                 "Dashboard",
                 DoctorSeverity.WARN,
-                "daemon unavailable; lazy dashboard not inspectable",
+                "daemon unavailable; dashboard not inspectable",
             )
         )
     elif diagnostics.dashboard_running:
@@ -461,8 +461,8 @@ def run_system_doctor(
         checks.append(
             _check(
                 "Dashboard",
-                DoctorSeverity.OK,
-                "daemon dashboard subsystem available; listener is lazily inactive",
+                DoctorSeverity.WARN,
+                "daemon is running but dashboard listener is not",
             )
         )
 

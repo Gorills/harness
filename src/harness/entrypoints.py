@@ -687,9 +687,10 @@ def harness_main() -> int:
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",
-        help="show the daemon-owned local Projects dashboard",
+        help="print the daemon-owned local Projects dashboard URL",
         description=(
-            "Lazily start the daemon-owned loopback Projects dashboard and print its private URL."
+            "Print the private URL of the daemon-owned loopback Projects dashboard. "
+            "The listener starts with the daemon."
         ),
     )
     dashboard_parser.add_argument(

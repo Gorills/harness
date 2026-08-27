@@ -112,10 +112,9 @@ def test_dashboard_feedback_is_same_origin_cas_and_resumes_same_task(tmp_path: P
         origin = f"http://127.0.0.1:{parsed.port}"
         with urlopen(url, timeout=2) as response:
             body = response.read().decode("utf-8")
-        assert "Ready for review" in body
-        assert ">Accept<" in body
-        assert ">Send feedback<" in body
-        assert ">Cancel<" in body
+        assert ">Принять<" in body
+        assert ">Замечание<" in body
+        assert ">Отменить<" in body
         assert f'value="{waiting.revision}"' in body
 
         fields: dict[str, str | int] = {

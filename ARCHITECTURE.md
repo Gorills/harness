@@ -406,17 +406,19 @@ Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth.
+The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Operator-facing copy is Russian and limited to the current work process.
 
 Dashboard rules:
 
 - bind loopback only by default;
+- start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
 - show only observed activity, never claim access to model internal reasoning;
-- state transitions (`Accept`, feedback, cancel) call the same domain services used by other interfaces;
+- state transitions (accept, feedback, cancel) call the same domain services used by other interfaces;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
 - dashboard assets stay capability-scoped and same-origin so CSP can forbid inline script/style.
+- operator copy must not explain the product, loopback trust model, or Harness architecture.
 
 ## 18. Security and privacy boundaries
 

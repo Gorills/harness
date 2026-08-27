@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-26
+- **Amended:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -18,7 +19,7 @@ Serve dashboard CSS and JavaScript as capability-scoped local assets. The Conten
 
 Realtime uses Server-Sent Events only as a dashboard refresh hint. Every rendered page embeds a SHA-256 fingerprint of its bounded authoritative view model in the capability-scoped EventSource URL. On connection, the server recomputes that view once to close the race between HTML rendering and EventSource setup, then keeps one read-only SQLite connection open and watches `PRAGMA data_version` instead of repeatedly rebuilding the view or running live Git subprocesses. A changed data version emits only a `refresh` marker; the stream never carries Task text, source content, model reasoning, or mutation payloads. The browser reloads after a refresh when no user input is at risk; when feedback/search input is non-empty it shows an explicit update affordance instead of discarding the draft. SSE sessions are bounded in duration, capped per dashboard server, and reconnect through normal EventSource behavior.
 
-The visual system is a dense editorial developer-tool direction: warm neutral surfaces, one restrained coral accent, serif display typography paired with system sans/monospace data, a named 4/8px spacing scale, shallow elevation, textual state pills, visible keyboard focus, responsive layouts, dark-mode tokens, and motion only for hover/live-state feedback. Reduced-motion preferences disable non-essential transitions and animation. Color is never the only carrier of Task state.
+The visual system is a dense editorial developer-tool direction: warm neutral surfaces, one restrained coral accent, serif display typography paired with system sans/monospace data, a named 4/8px spacing scale, shallow elevation, textual state pills, visible keyboard focus, responsive layouts, dark-mode tokens, and motion only for hover/live-state feedback. Reduced-motion preferences disable non-essential transitions and animation. Color is never the only carrier of Task state. Operator-facing copy is Russian and limited to the work process; it must not explain the product, loopback trust model, or Harness architecture. See ADR-0025.
 
 ## Consequences
 

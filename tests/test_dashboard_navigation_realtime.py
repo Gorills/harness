@@ -120,7 +120,8 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "<style" not in overview
         assert "dashboard.css" in overview
         assert "dashboard.js" in overview
-        assert "Your local work, in one place." in overview
+        assert "Проекты" in overview
+        assert 'lang="ru"' in overview
 
         status, css_headers, css = _read(base_url + "assets/dashboard.css")
         assert status == 200
@@ -148,21 +149,19 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         )
         assert status == 200
         assert "src/feature_flag.py" in workspace_page
-        assert "identifier tokens" in workspace_page
+        assert "идентификатор" in workspace_page
         assert "ENABLED = True" not in workspace_page
-        assert "Mechanical metadata only" in workspace_page
         assert task.task_id[:10] in workspace_page
 
         status, _headers, task_page = _read(task_url)
         assert status == 200
-        assert "What actually happened" in task_page
-        assert "Operator feedback" in task_page
+        assert "История" in task_page
+        assert "Замечание" in task_page
         assert "Tighten &lt;b&gt;mobile&lt;/b&gt; spacing" in task_page
         assert "First review &lt;mark&gt;needs escaping&lt;/mark&gt;" in task_page
         assert "<b>dashboard</b>" not in task_page
         assert "<mark>needs escaping</mark>" not in task_page
-        assert "Ready for review" in task_page
-        assert ">Accept<" in task_page
+        assert ">Принять<" in task_page
 
         with pytest.raises(HTTPError) as unscoped:
             urlopen(f"{origin}/tasks/{quote(task.task_id, safe='')}/", timeout=2)

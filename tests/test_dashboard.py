@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -13,13 +14,19 @@ from urllib.request import urlopen
 import pytest
 
 from harness.daemon import DaemonError, serve_daemon
-from harness.dashboard import DashboardError, DashboardServerManager, read_dashboard_workspace_rows
+from harness.dashboard import (
+    DashboardError,
+    DashboardServerManager,
+    dashboard_url_path,
+    read_dashboard_workspace_rows,
+)
 from harness.index import scan_workspace
 from harness.ipc import (
     DashboardUrlResult,
     IpcError,
     IpcRemoteError,
     request_dashboard_url,
+    request_runtime_diagnostics,
     request_status,
 )
 from harness.registry import create_project, register_workspace
@@ -136,8 +143,8 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
-        assert "Harness Projects" in body
-        assert "waiting" in body
+        assert "Проекты · Harness" in body
+        assert "ревью" in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
         assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
         assert "<script>alert('task')</script>" not in body
@@ -178,21 +185,29 @@ def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
     assert row.indexed_file_count == 1
 
 
-def test_daemon_lazily_reuses_dashboard_url_over_user_ipc(tmp_path: Path) -> None:
+def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     socket_path = tmp_path / "ipc" / "harness.sock"
+    url_file = dashboard_url_path(socket_path)
     stop_event, executor, future = _start_server(database, socket_path)
     try:
+        diagnostics = request_runtime_diagnostics(socket_path)
+        assert diagnostics.dashboard_running is True
+        published = url_file.read_text(encoding="ascii").strip()
+        assert stat.S_IMODE(url_file.stat().st_mode) == 0o600
         first = request_dashboard_url(socket_path)
         second = request_dashboard_url(socket_path)
         assert isinstance(first, DashboardUrlResult)
         assert second == first
+        assert first.url == published
         with urlopen(first.url, timeout=2) as response:
             body = response.read().decode("utf-8")
             assert response.status == 200
-        assert "No registered Workspaces." in body
+        assert "Нет рабочих копий" in body
+        assert 'lang="ru"' in body
     finally:
         _stop_server(stop_event, executor, future)
+    assert not url_file.exists()
 
 
 def test_dashboard_start_failure_is_bounded_and_daemon_keeps_serving(

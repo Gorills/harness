@@ -170,7 +170,7 @@ def test_status_round_trip_returns_only_bounded_registry_counts(tmp_path: Path) 
     assert not socket_path.exists()
 
 
-def test_runtime_diagnostics_report_exact_daemon_identity_without_starting_dashboard(
+def test_runtime_diagnostics_report_exact_daemon_identity_with_dashboard_running(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "harness.db"
@@ -187,7 +187,7 @@ def test_runtime_diagnostics_report_exact_daemon_identity_without_starting_dashb
             code_sha256=runtime_identity.code_sha256,
             project_count=0,
             workspace_count=0,
-            dashboard_running=False,
+            dashboard_running=True,
         )
     finally:
         _stop_server(stop_event, executor, future)
