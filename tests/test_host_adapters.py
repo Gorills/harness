@@ -9,6 +9,7 @@ from harness.host_adapters import (
     ClaudeCodeAdapter,
     HostIntegrationError,
     HostRegistrationCollisionError,
+    HostRegistrationState,
     IntegrationChange,
     discover_claude_code_adapter,
     workspace_hints_from_environment,
@@ -386,6 +387,30 @@ def test_claude_inspection_failure_is_not_treated_as_absent(
         adapter.unregister_mcp()
 
 
+def test_claude_inspect_treats_unquoted_2_1_109_absent_as_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = ClaudeCodeAdapter(tmp_path / "claude", tmp_path / "python")
+    outputs = iter(
+        [
+            _completed([], 1, "No MCP server found with name: harness\n"),
+            _completed([], 1, 'No MCP server found with name: "harness"\n'),
+            _completed([], 1, "unexpected claude mcp get failure\n"),
+        ]
+    )
+    monkeypatch.setattr(
+        ClaudeCodeAdapter,
+        "_run",
+        staticmethod(lambda command, cwd=None: next(outputs)),
+    )
+
+    assert adapter.registration_state() is HostRegistrationState.ABSENT
+    assert adapter.registration_state() is HostRegistrationState.ABSENT
+    with pytest.raises(HostIntegrationError, match="inspection command failed"):
+        adapter.registration_state()
+
+
 def test_claude_command_execution_errors_are_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -407,8 +432,6 @@ def test_claude_registration_state_distinguishes_absent_current_stale_and_foreig
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from harness.host_adapters import HostRegistrationState
-
     adapter = ClaudeCodeAdapter(tmp_path / "claude", tmp_path / "python")
     outputs = iter(
         [

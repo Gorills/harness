@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import stat
@@ -11,6 +12,13 @@ from pathlib import Path
 
 import pytest
 
+import harness.entrypoints as entrypoints
+from harness.cursor_adapter import (
+    find_isolated_development_root,
+    is_isolated_development_overlay_entry,
+)
+from harness.entrypoints import harness_main
+from harness.ipc import WorkspaceScanResult
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import SCHEMA_VERSION
 
@@ -137,6 +145,9 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         ".harness/state/harness/harness.db",
         ".harness/runtime/harness/harness.sock",
         "does not share that process, database, or Unix socket",
+        ".cursor/mcp.json",
+        "HARNESS_DEV_ROOT",
+        "refused",
     ):
         assert needle in text
 
@@ -181,6 +192,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     help_result = _run([str(DEV_SCRIPT), "help"], cwd=REPO_ROOT)
     assert help_result.returncode == 0
     assert "scripts/dev harness doctor" in help_result.stdout
+    assert "install/uninstall are refused" in help_result.stdout
 
     empty = _run([str(DEV_SCRIPT)], cwd=REPO_ROOT)
     assert empty.returncode == 1
@@ -297,3 +309,147 @@ def test_dev_wrapper_runs_checkout_harness_not_path_decoy(tmp_path: Path) -> Non
     assert "DECOY-SYSTEM-HARNESS" not in result.stdout
     assert "DECOY-SYSTEM-HARNESS" not in result.stderr
     assert "0.1.0.dev0" in result.stdout
+
+
+def _isolated_overlay() -> dict[str, object]:
+    return {
+        "mcpServers": {
+            "harness": {
+                "type": "stdio",
+                "command": "${workspaceFolder}/scripts/dev",
+                "args": ["harness", "mcp"],
+                "env": {"HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"},
+            }
+        }
+    }
+
+
+def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> None:
+    overlay = json.loads((REPO_ROOT / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+    entry = overlay["mcpServers"]["harness"]
+    assert is_isolated_development_overlay_entry(entry)
+    assert find_isolated_development_root(REPO_ROOT) == REPO_ROOT
+    claude = json.loads((REPO_ROOT / ".mcp.json").read_text(encoding="utf-8"))
+    assert claude["mcpServers"]["harness"]["command"] == "./scripts/dev"
+    assert claude["mcpServers"]["harness"]["args"] == ["harness", "mcp"]
+
+
+def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "repo")
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(root)])
+
+    def request_scan(_socket: Path, _path: Path) -> WorkspaceScanResult:
+        raise AssertionError("canonical scan must not contact the daemon")
+
+    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(
+        entrypoints,
+        "_canonical_socket",
+        lambda: (_ for _ in ()).throw(AssertionError("must not autostart")),
+    )
+
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "Harness scan: FAIL" in output
+    assert "isolated development" in output
+
+
+def test_isolated_scan_of_overlay_root_skips_host_skill_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "repo")
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+    monkeypatch.setenv("HARNESS_DEV_ROOT", str(root))
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    seen: list[tuple[Path, Path]] = []
+
+    def request_scan(ipc_socket: Path, path: Path) -> WorkspaceScanResult:
+        seen.append((ipc_socket, path))
+        return WorkspaceScanResult(
+            schema_version=3,
+            workspace_id="workspace-1",
+            project_id="project-1",
+            visibility_mode="normal",
+            workspace_root=root.resolve(),
+            project_created=True,
+            workspace_created=True,
+            file_count=1,
+            added=1,
+            updated=0,
+            removed=0,
+        )
+
+    def skills_reconcile(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("isolated overlay scan must not project skills")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "scan", str(root), "--socket", str(socket_path)],
+    )
+    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_skills_reconcile", skills_reconcile)
+
+    assert harness_main() == 0
+    assert seen == [(socket_path, root.resolve())]
+    output = capsys.readouterr().out
+    assert "Host/skill reconciliation skipped: isolated-development checkout overlay" in output
+
+
+def test_isolated_env_refuses_install_and_uninstall(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("HARNESS_DEV_ROOT", str(REPO_ROOT))
+
+    def install(**_kwargs: object) -> None:
+        raise AssertionError("install must not run")
+
+    def uninstall(**_kwargs: object) -> None:
+        raise AssertionError("uninstall must not run")
+
+    monkeypatch.setattr(entrypoints, "install_harness", install)
+    monkeypatch.setattr(entrypoints, "uninstall_harness", uninstall)
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 1
+    assert "HARNESS_DEV_ROOT" in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "all"])
+    assert harness_main() == 1
+    assert "HARNESS_DEV_ROOT" in capsys.readouterr().out
+
+
+def test_dev_env_prepends_checkout_venv_when_present(tmp_path: Path) -> None:
+    venv_bin = REPO_ROOT / ".venv" / "bin"
+    if not venv_bin.is_dir():
+        pytest.skip("project environment is not synced")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    result = _run(
+        [
+            "bash",
+            "-c",
+            'source "$1" && printf "%s\\n" "$PATH"',
+            "bash",
+            str(DEV_ENV_SCRIPT),
+        ],
+        cwd=elsewhere,
+        env={
+            "HOME": str(tmp_path / "home"),
+            "PATH": "/usr/bin",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[0].split(":")[0] == str(venv_bin)

@@ -417,3 +417,60 @@ def test_cursor_atomic_replacement_preserves_concurrent_target_and_prior_backup(
     backups = list(config.parent.glob(".harness-cursor-backup-*"))
     assert len(backups) == 1
     assert backups[0].read_bytes() == original
+
+
+def _isolated_entry() -> dict[str, object]:
+    return {
+        "type": "stdio",
+        "command": "${workspaceFolder}/scripts/dev",
+        "args": ["harness", "mcp"],
+        "env": {"HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"},
+    }
+
+
+def test_cursor_isolated_development_overlay_is_left_unchanged(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"mcpServers": {"harness": _isolated_entry()}}) + "\n", encoding="utf-8"
+    )
+    _git(root, "add", ".cursor/mcp.json")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "isolated overlay",
+    )
+    original = config.read_text(encoding="utf-8")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.isolated_development is True
+    assert diagnostic.preflight_error is None
+    assert diagnostic.state is HostRegistrationState.FOREIGN
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert adapter.remove_project(root) is IntegrationChange.UNCHANGED
+    assert config.read_text(encoding="utf-8") == original
+    assert _git(root, "status", "--porcelain").stdout == ""
+
+
+def test_cursor_foreign_non_isolation_entry_still_collides(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps({"mcpServers": {"harness": {"command": "/foreign"}}}),
+        encoding="utf-8",
+    )
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    with pytest.raises(HostRegistrationCollisionError, match="non-Harness"):
+        adapter.reconcile_project(root)
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.isolated_development is False
+    assert diagnostic.preflight_error is not None

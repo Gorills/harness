@@ -27,6 +27,8 @@ _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _SERVER_NAME = "harness"
 _WORKSPACE_FOLDER = "${workspaceFolder}"
+_ISOLATED_DEV_COMMAND = f"{_WORKSPACE_FOLDER}/scripts/dev"
+_ISOLATED_DEV_ARGS = ["harness", "mcp"]
 _OWNER_MARKER = ".harness-mcp-owner.json"
 _OWNER_VERSION = 1
 _EXCLUDE_BEGIN = "# BEGIN HARNESS CURSOR MCP"
@@ -45,6 +47,7 @@ class CursorRegistrationDiagnostic:
     configured_python: str | None
     configured_workspace_root: str | None
     preflight_error: str | None = None
+    isolated_development: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +124,7 @@ class CursorAdapter:
                 configured_python=diagnostic.configured_python,
                 configured_workspace_root=diagnostic.configured_workspace_root,
                 preflight_error=str(exc),
+                isolated_development=diagnostic.isolated_development,
             )
         return diagnostic
 
@@ -135,6 +139,8 @@ class CursorAdapter:
     def preflight_project_reconcile(self, workspace_root: Path) -> None:
         root = _workspace_root(workspace_root)
         path = self._project_config(root)
+        if self._project_is_isolated_development(root):
+            return
         state = self._registration_state(path, self._project_desired())
         if state is HostRegistrationState.FOREIGN:
             raise HostRegistrationCollisionError(
@@ -158,6 +164,8 @@ class CursorAdapter:
     def preflight_project_remove(self, workspace_root: Path) -> None:
         root = _workspace_root(workspace_root)
         path = self._project_config(root)
+        if self._project_is_isolated_development(root):
+            return
         state = self._registration_state(path, self._project_desired())
         if state is HostRegistrationState.FOREIGN:
             raise HostRegistrationCollisionError(
@@ -181,6 +189,8 @@ class CursorAdapter:
     def reconcile_project(self, workspace_root: Path) -> IntegrationChange:
         root = _workspace_root(workspace_root)
         self.preflight_project_reconcile(root)
+        if self._project_is_isolated_development(root):
+            return IntegrationChange.UNCHANGED
         path = self._project_config(root)
         state = self._registration_state(path, self._project_desired())
         if state is HostRegistrationState.CURRENT:
@@ -206,6 +216,8 @@ class CursorAdapter:
     def remove_project(self, workspace_root: Path) -> IntegrationChange:
         root = _workspace_root(workspace_root)
         self.preflight_project_remove(root)
+        if self._project_is_isolated_development(root):
+            return IntegrationChange.UNCHANGED
         marker = self._read_owner_marker(root)
         change = self._remove_entry(
             self._project_config(root),
@@ -286,10 +298,11 @@ class CursorAdapter:
                 configured_workspace_root=None,
             )
         entry = servers[_SERVER_NAME]
+        isolated = is_isolated_development_overlay_entry(entry)
         owned = _is_owned_entry(entry)
         configured_python: str | None = None
         configured_workspace_root: str | None = None
-        if owned and isinstance(entry, dict):
+        if isolated and isinstance(entry, dict):
             command = entry.get("command")
             if isinstance(command, str):
                 configured_python = command
@@ -298,7 +311,18 @@ class CursorAdapter:
                 observed_root = env.get(_WORKSPACE_ROOT_ENV)
                 if isinstance(observed_root, str):
                     configured_workspace_root = observed_root
-        if not owned:
+        elif owned and isinstance(entry, dict):
+            command = entry.get("command")
+            if isinstance(command, str):
+                configured_python = command
+            env = entry.get("env")
+            if isinstance(env, dict):
+                observed_root = env.get(_WORKSPACE_ROOT_ENV)
+                if isinstance(observed_root, str):
+                    configured_workspace_root = observed_root
+        if isolated:
+            state = HostRegistrationState.FOREIGN
+        elif not owned:
             state = HostRegistrationState.FOREIGN
         elif entry == dict(desired):
             state = HostRegistrationState.CURRENT
@@ -310,6 +334,7 @@ class CursorAdapter:
             expected_python=self.python_executable,
             configured_python=configured_python,
             configured_workspace_root=configured_workspace_root,
+            isolated_development=isolated,
         )
 
     def _ensure_entry(self, path: Path, desired: Mapping[str, object]) -> IntegrationChange:
@@ -346,6 +371,9 @@ class CursorAdapter:
         else:
             _replace_if_unchanged(path, snapshot.raw, _encode_json(snapshot.value), snapshot.mode)
         return IntegrationChange.CHANGED
+
+    def _project_is_isolated_development(self, workspace_root: Path) -> bool:
+        return find_isolated_development_root(workspace_root) == workspace_root
 
     def _project_config(self, workspace_root: Path) -> Path:
         return workspace_root / ".cursor" / "mcp.json"
@@ -432,6 +460,54 @@ def _is_owned_entry(value: object) -> bool:
         and isinstance(env, dict)
         and env.get(_HOST_PROFILE_ENV) == _CURSOR_PROFILE
     )
+
+
+def is_isolated_development_overlay_entry(value: object) -> bool:
+    """Return True for the tracked checkout overlay that shadows a global Harness MCP server."""
+    if not isinstance(value, dict):
+        return False
+    env = value.get("env")
+    return (
+        set(value) == {"type", "command", "args", "env"}
+        and value.get("type") == "stdio"
+        and value.get("command") == _ISOLATED_DEV_COMMAND
+        and value.get("args") == _ISOLATED_DEV_ARGS
+        and isinstance(env, dict)
+        and set(env) == {_WORKSPACE_ROOT_ENV}
+        and env.get(_WORKSPACE_ROOT_ENV) == _WORKSPACE_FOLDER
+        and env.get(_HOST_PROFILE_ENV) is None
+    )
+
+
+def find_isolated_development_root(path: Path) -> Path | None:
+    """Return the Git worktree root when it owns the isolated-development Cursor overlay."""
+    try:
+        current = path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if current.is_file():
+        current = current.parent
+    completed = _git(current, "rev-parse", "--show-toplevel")
+    if completed.returncode != 0:
+        return None
+    toplevel = completed.stdout.strip()
+    if not toplevel:
+        return None
+    try:
+        root = Path(toplevel).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    overlay = root / ".cursor" / "mcp.json"
+    try:
+        snapshot = _read_json_config(overlay)
+    except HostIntegrationError:
+        return None
+    servers = _servers(snapshot.value, overlay, create=False)
+    if servers is None:
+        return None
+    if is_isolated_development_overlay_entry(servers.get(_SERVER_NAME)):
+        return root
+    return None
 
 
 def _read_json_config(path: Path) -> _ConfigSnapshot:

@@ -1,0 +1,14 @@
+---
+description: Keep this Harness checkout isolated from a globally installed Harness
+alwaysApply: true
+---
+
+# Isolated Harness development
+
+This repository is the Harness source checkout. It must not share process, database, socket, MCP, or host config with a separately installed Harness.
+
+- Do not invoke `harness` or `harnessd` from `PATH`. Use `scripts/dev` (or `source scripts/dev-env.sh` then `uv run --frozen`).
+- Do not read or write `~/.local/state/harness`, the per-user `harness.sock`, `~/.cursor/mcp.json`, or a user-scope Claude `harness` MCP registration for work in this checkout.
+- Do not run `harness install` / `harness uninstall` from this environment. Isolated development refuses those commands because they mutate user-global host MCP.
+- Project MCP named `harness` here launches `scripts/dev harness mcp` with checkout-local XDG paths. It is not the global install. Prefer reading this repository over those tools when implementing Harness.
+- Ignore globally installed Harness skills or user-level Harness MCP tools if they appear.

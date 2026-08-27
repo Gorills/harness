@@ -25,6 +25,12 @@ _ANTIGRAVITY_IDE_PROFILE = "antigravity-ide"
 _ANTIGRAVITY_CLI_PROFILE = "antigravity-cli"
 _CLAUDE_SERVER_NAME = "harness"
 _CLAUDE_COMMAND_TIMEOUT_SECONDS = 10.0
+_CLAUDE_ABSENT_SERVER_LINES = frozenset(
+    {
+        f'No MCP server found with name: "{_CLAUDE_SERVER_NAME}"',
+        f"No MCP server found with name: {_CLAUDE_SERVER_NAME}",
+    }
+)
 
 
 class HostIntegrationError(RuntimeError):
@@ -177,7 +183,9 @@ class ClaudeCodeAdapter:
             )
         if completed.returncode == 0:
             return completed.stdout
-        if f'No MCP server found with name: "{_CLAUDE_SERVER_NAME}"' in completed.stdout:
+        # `_run` merges stderr into stdout. Claude Code 2.1.109 prints the unquoted
+        # absent-server text on stderr; older CLIs quoted the server name.
+        if _is_absent_claude_mcp_output(completed.stdout):
             return None
         raise HostIntegrationError(
             f"Claude Code MCP inspection command failed with exit code {completed.returncode}"
@@ -360,6 +368,11 @@ class ClaudeCodeAdapter:
             raise HostIntegrationError(
                 "Claude Code integration command could not be executed"
             ) from exc
+
+
+def _is_absent_claude_mcp_output(output: str) -> bool:
+    """Return True for quoted or unquoted Claude `mcp get` absent-server text."""
+    return any(line.strip() in _CLAUDE_ABSENT_SERVER_LINES for line in output.splitlines())
 
 
 def claude_code_skill_projection_surface() -> SkillProjectionSurface:

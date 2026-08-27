@@ -25,7 +25,7 @@ uv run --frozen python scripts/quality.py
 
 The quality gate checks lock freshness, Ruff formatting/lint, strict mypy, pytest, and an isolated wheel-install smoke test for the `harness` and `harnessd` console scripts.
 
-For checkout-local CLI/daemon work that must not share state with a system Harness install:
+For checkout-local CLI/daemon work that must not share state, MCP, or host configuration with a system Harness install:
 
 ```text
 scripts/dev sync
@@ -34,7 +34,7 @@ scripts/dev harness scan
 scripts/dev stop
 ```
 
-See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Prefer `scripts/dev` over a global `harness` on `PATH`.
+See [`docs/development/isolated-development.md`](docs/development/isolated-development.md). Always use `scripts/dev` instead of a global `harness` on `PATH`. Do not run `harness install`/`uninstall` from this checkout.
 
 If direct Git/network access is unavailable but authenticated GitHub object access remains available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Prefer `scripts/publish_git_data.py preflight` plus `publish`. When the execution shell cannot reach GitHub but a connected Git Data tool can create blobs, raw UTF-8 blob publication is also allowed for staged files that are valid UTF-8, with the returned remote blob SHA required to match the staged SHA before any tree/commit/ref publication. Never manually assemble base64; binary or non-UTF-8 changes require a byte-safe machine transport.
 

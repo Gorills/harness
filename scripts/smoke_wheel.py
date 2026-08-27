@@ -588,7 +588,7 @@ state = Path(os.environ["HARNESS_FAKE_CLAUDE_STATE"])
 args = sys.argv[1:]
 if args == ["mcp", "get", "harness"]:
     if not state.exists():
-        print('No MCP server found with name: "harness"')
+        print("No MCP server found with name: harness")
         raise SystemExit(1)
     value = json.loads(state.read_text(encoding="utf-8"))
     print("harness:")
@@ -610,7 +610,7 @@ if args[:3] == ["mcp", "add-json", "harness"] and args[4:] == ["--scope", "user"
     raise SystemExit(0)
 if args == ["mcp", "remove", "harness", "--scope", "user"]:
     if not state.exists():
-        print('No MCP server found with name: "harness"')
+        print("No MCP server found with name: harness")
         raise SystemExit(1)
     state.unlink()
     print("Removed MCP server harness")

@@ -1,4 +1,5 @@
 import json
+import os
 from argparse import ArgumentParser
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -6,7 +7,7 @@ from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
 
-from harness.cursor_adapter import discover_cursor_adapter
+from harness.cursor_adapter import discover_cursor_adapter, find_isolated_development_root
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
@@ -248,7 +249,48 @@ def _run_status(workspace_location: Path, socket_path: Path | None) -> int:
     return 0
 
 
+def _isolated_development_host_lifecycle_error() -> str | None:
+    root = os.environ.get("HARNESS_DEV_ROOT")
+    if not root:
+        return None
+    return (
+        "install/uninstall is refused while HARNESS_DEV_ROOT is set because it would mutate "
+        f"the user-global host MCP from isolated development ({root})"
+    )
+
+
+def _isolated_development_canonical_scan_error(location: Path) -> str | None:
+    overlay_root = find_isolated_development_root(location)
+    if overlay_root is None:
+        return None
+    configured = os.environ.get("HARNESS_DEV_ROOT")
+    if configured:
+        try:
+            if Path(configured).expanduser().resolve(strict=True) == overlay_root:
+                return None
+        except (OSError, RuntimeError):
+            pass
+    return (
+        "this Harness source checkout is reserved for isolated development; "
+        "use scripts/dev harness scan instead of a system Harness install"
+    )
+
+
 def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
+    try:
+        location = workspace_location.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        return _scan_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
+    if not location.is_dir():
+        return _scan_failure(f"workspace path is not a directory: {location}")
+    blocked = None
+    try:
+        blocked = _isolated_development_canonical_scan_error(location)
+    except HostIntegrationError as exc:
+        return _scan_failure(str(exc))
+    if blocked is not None:
+        return _scan_failure(blocked)
+
     if socket_path is None:
         try:
             socket_path = _canonical_socket()
@@ -256,16 +298,20 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
             return _scan_failure(str(exc))
 
     try:
-        location = workspace_location.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        return _scan_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
-    if not location.is_dir():
-        return _scan_failure(f"workspace path is not a directory: {location}")
-
-    try:
         result = request_workspace_scan(socket_path, location)
     except IpcError as exc:
         return _scan_failure(str(exc))
+
+    try:
+        overlay_root = find_isolated_development_root(result.workspace_root)
+    except HostIntegrationError as exc:
+        return _scan_failure(
+            f"index reconciliation succeeded but isolated-development overlay could not be inspected: {exc}"
+        )
+    if overlay_root == result.workspace_root:
+        _print_workspace_scan(result)
+        print("Host/skill reconciliation skipped: isolated-development checkout overlay")
+        return 0
 
     active_profiles: list[str] = []
     claude = discover_claude_code_adapter()
@@ -327,6 +373,9 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
 
 
 def _run_install(*, host: str) -> int:
+    blocked = _isolated_development_host_lifecycle_error()
+    if blocked is not None:
+        return _install_failure(blocked)
     try:
         result = install_harness(host=host)
     except (InstallationError, HostIntegrationError) as exc:
@@ -358,6 +407,9 @@ def _run_install(*, host: str) -> int:
 
 
 def _run_uninstall(*, host: str, purge: bool) -> int:
+    blocked = _isolated_development_host_lifecycle_error()
+    if blocked is not None:
+        return _uninstall_failure(blocked)
     try:
         result = uninstall_harness(host=host, purge=purge)
     except (InstallationError, HostIntegrationError) as exc:

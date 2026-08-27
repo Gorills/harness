@@ -1,13 +1,18 @@
+import json
+import os
 import socket
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
 import harness.doctor as doctor
 from harness.doctor import run_doctor_checks
+from harness.host_adapters import HostIntegrationError, HostRegistrationState
 from harness.ipc import IpcRemoteError
-from harness.storage import SCHEMA_VERSION, initialize_database
+from harness.registry import create_project, register_workspace
+from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 
 
 def test_doctor_check_escapes_terminal_control_characters() -> None:
@@ -108,6 +113,137 @@ def test_run_system_doctor_on_clean_machine_is_read_only_and_warning_only(tmp_pa
     assert by_name["Database"].severity is doctor.DoctorSeverity.WARN
     assert by_name["Daemon"].severity is doctor.DoctorSeverity.WARN
     assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.WARN
+
+
+def test_run_system_doctor_warns_when_claude_registration_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _AbsentClaude:
+        executable = tmp_path / "claude"
+
+        def registration_state(self) -> HostRegistrationState:
+            return HostRegistrationState.ABSENT
+
+    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _AbsentClaude())
+    home = tmp_path / "home"
+    home.mkdir()
+    report = doctor.run_system_doctor(
+        environment={
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "PATH": os.environ.get("PATH", ""),
+        }
+    )
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.WARN
+    assert "absent" in by_name["Claude Code MCP registration"].detail
+
+
+def test_run_system_doctor_fails_closed_on_unexpected_claude_inspect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _BrokenClaude:
+        executable = tmp_path / "claude"
+
+        def registration_state(self) -> HostRegistrationState:
+            raise HostIntegrationError("Claude Code MCP inspection command failed with exit code 2")
+
+    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _BrokenClaude())
+    home = tmp_path / "home"
+    home.mkdir()
+    report = doctor.run_system_doctor(
+        environment={
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "PATH": os.environ.get("PATH", ""),
+        }
+    )
+    by_name = {check.name: check for check in report.checks}
+    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.FAIL
+    assert report.failure_count >= 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX isolated-development overlay")
+def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    state_dir = state_home / "harness"
+    state_dir.mkdir(parents=True, mode=0o700)
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    overlay = {
+        "mcpServers": {
+            "harness": {
+                "type": "stdio",
+                "command": "${workspaceFolder}/scripts/dev",
+                "args": ["harness", "mcp"],
+                "env": {"HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"},
+            }
+        }
+    }
+    overlay_path = root / ".cursor" / "mcp.json"
+    overlay_path.parent.mkdir()
+    overlay_text = json.dumps(overlay) + "\n"
+    overlay_path.write_text(overlay_text, encoding="utf-8")
+    (root / "README.md").write_text("repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+
+    initialize_database(state_dir / "harness.db")
+    connection = connect_database(state_dir / "harness.db")
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=root)
+    finally:
+        connection.close()
+
+    report = doctor.run_system_doctor(
+        environment={
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(state_home),
+            "XDG_RUNTIME_DIR": str(runtime_home),
+            "PATH": os.environ.get("PATH", ""),
+        }
+    )
+    overlay_checks = [
+        check for check in report.checks if check.name.startswith("Cursor project MCP override ")
+    ]
+    assert overlay_checks
+    assert all(check.severity is doctor.DoctorSeverity.OK for check in overlay_checks)
+    assert any("isolated-development overlay" in check.detail for check in overlay_checks)
+    summary = next(check for check in report.checks if check.name == "Cursor project MCP overrides")
+    assert summary.severity is doctor.DoctorSeverity.OK
+    assert "isolated-development" in summary.detail
+    assert overlay_path.read_text(encoding="utf-8") == overlay_text
+    assert all(
+        "Cursor project" not in check.name
+        for check in report.checks
+        if check.severity is doctor.DoctorSeverity.FAIL
+    )
 
 
 def test_run_system_doctor_refuses_database_symlink_without_following_target(

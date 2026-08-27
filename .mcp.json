@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "harness": {
+      "command": "./scripts/dev",
+      "args": ["harness", "mcp"]
+    }
+  }
+}

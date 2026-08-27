@@ -1,13 +1,13 @@
 # Linux local release and acceptance
 
-Harness currently targets Linux/POSIX with Claude Code and local Cursor IDE/CLI in Normal mode. The package still carries a development version until proprietary-host acceptance is completed.
+The primary Linux local close-out is Cursor IDE/CLI in Normal mode (`harness install --host cursor`). Claude Code and `--host all` remain implemented. Omitting `--host` still selects `claude-code` for compatibility. The package still carries a development version until proprietary-host acceptance is completed; that Cursor UI/CLI matrix stays unchecked.
 
 ## Prerequisites
 
 - Linux with a current Git executable.
 - Python 3.13.
-- `uv` for the repository installation path.
-- Claude Code CLI on `PATH` when installing/uninstalling the Claude profile. Cursor local config does not require a Cursor executable for JSON ownership checks.
+- `uv` 0.12.5 for the repository installation path (`scripts/dev` bootstraps `.harness/tools/uv` in a checkout). System `uv` 0.12.1 cannot `uv tool install` this repository.
+- Claude Code CLI on `PATH` when installing/uninstalling the Claude profile. Cursor local config does not require a Cursor executable for JSON ownership checks. Current Claude `mcp get` absent-server text (quoted or unquoted) is treated as absent, so that CLI output drift is not a Cursor doctor/install/uninstall/scan blocker.
 - SQLite in the selected Python runtime with FTS5.
 
 ## Install from this repository
@@ -16,11 +16,11 @@ Harness currently targets Linux/POSIX with Claude Code and local Cursor IDE/CLI 
 git clone https://github.com/Gorills/harness.git
 cd harness
 uv tool install --python 3.13 .
-harness install                         # Claude Code default
-harness install --host cursor          # add Cursor
-# or: harness install --host all
+harness install --host cursor
 harness doctor
 ```
+
+Claude Code remains available as `harness install` (omitted `--host`) or `harness install --host claude-code`. Install both implemented hosts with `harness install --host all`.
 
 Register and index each Git worktree explicitly:
 
@@ -56,13 +56,13 @@ The post-upgrade `harness install` is required. It compares the running daemon's
 ## Uninstall
 
 ```bash
-harness uninstall
+harness uninstall --host cursor
 ```
 
-The no-argument form preserves the previous Claude-only behavior. Select Cursor or both hosts explicitly:
+The no-argument form preserves the previous Claude-only behavior. Select Claude Code or both hosts explicitly:
 
 ```bash
-harness uninstall --host cursor
+harness uninstall
 harness uninstall --host all
 ```
 
@@ -78,7 +78,7 @@ Purge is refused while another supported host remains active and is fail-closed 
 
 Bare `harness doctor` is read-only and operational. `OK` means the inspected invariant holds, `WARN` means absent/lazy/stale-but-non-destructive state that may need attention, and `FAIL` means an integrity, ownership, compatibility, or runtime mismatch. Any `FAIL` makes the command exit nonzero; warnings alone do not. Project/index/skill checks use one SQLite read snapshot. A quiescent WAL database is opened immutably so doctor does not create `-wal`/`-shm` files merely by inspecting it; an existing live WAL is still read through SQLite's normal read-only WAL path so uncheckpointed durable frames remain visible.
 
-For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, wrong or missing `${workspaceFolder}`, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` and `agent mcp list-tools harness` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start.
+For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, wrong or missing `${workspaceFolder}`, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` and `agent mcp list-tools harness` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. An absent Claude MCP registration is a warning, not a Cursor failure.
 
 Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and `harness doctor --database PATH` for read-only inspection of one explicitly selected initialized database.
 
@@ -88,4 +88,4 @@ Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and 
 
 ## Proprietary host acceptance still required
 
-Automation does not prove vendor UI/runtime behavior. Before calling a specific Claude Code or Cursor build accepted, verify the matrix in `docs/host-compatibility.md`, including MCP discovery, five tool schemas, host-specific Workspace resolution, restart/cross-host continuity, generated skill visibility/de-duplication, and Harness-owned cleanup. Cursor CLI's shared config inspection commands are useful for that real-host path, but automation does not substitute for the proprietary host. Cursor Cloud Agents use separate cloud/team MCP configuration and are outside this local release profile.
+Automation does not prove vendor UI/runtime behavior. Proprietary Cursor IDE/CLI acceptance is not done; before calling a specific Claude Code or Cursor build accepted, verify the matrix in `docs/host-compatibility.md`, including MCP discovery, five tool schemas, host-specific Workspace resolution, restart/cross-host continuity, generated skill visibility/de-duplication, and Harness-owned cleanup. Cursor CLI's shared config inspection commands are useful for that real-host path, but automation does not substitute for the proprietary host. Cursor Cloud Agents use separate cloud/team MCP configuration and are outside this local release profile.
