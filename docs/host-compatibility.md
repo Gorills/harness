@@ -6,7 +6,7 @@
 
 **Antigravity skill evidence re-checked:** 2026-08-25.
 
-**Cursor MCP/CLI/Skills evidence re-checked:** 2026-08-26.
+**Cursor MCP/CLI/Skills evidence re-checked:** 2026-08-27.
 
 This file is evidence for adapter design, not a promise that undocumented host internals remain stable. Re-check official docs when adapter behavior changes.
 
@@ -56,7 +56,9 @@ Automated tests prove registry parsing, legacy and greenfield relevance, bounded
 
 - Global MCP config: `~/.cursor/mcp.json`; project config: `.cursor/mcp.json`. Global and project MCP servers are merged, and a same-name project server has priority over the global entry.
 - Cursor IDE and Cursor CLI use the same MCP configuration. Current CLI inspection commands include `agent mcp list` and `agent mcp list-tools <identifier>`.
+- Cursor's current STDIO schema documents `type: "stdio"` and `command` as required, with optional `args` and `env`.
 - Cursor supports interpolation including `${workspaceFolder}` for project configuration; it expands to the project root containing `.cursor/mcp.json`.
+- After changing `mcp.json`, current Cursor help explicitly says to save the file and restart Cursor. MCP Logs in the Output panel are the documented troubleshooting surface.
 - Skills load from `.agents/skills` and `.cursor/skills`, with user equivalents.
 - Cursor also loads compatibility skill directories including `.claude/skills` and `.codex/skills`. A projection that writes duplicates to several roots is therefore unsafe by default.
 
@@ -66,7 +68,7 @@ The production Linux Cursor adapter edits only Cursor's documented local JSON MC
 
 Config mutation preserves unrelated top-level fields and MCP servers, refuses a foreign same-name `harness`, revalidates bytes before mutation, and uses atomic no-clobber replacement/recovery. Harness never deletes the global config container on uninstall because it cannot prove file ownership across runs. Project config is stricter: tracked config may be accepted only when it already contains the exact current Harness entry, while any required tracked mutation fails closed for manual adoption/removal. If Harness creates an untracked project config, a Workspace-local ownership marker records that fact and Git `info/exclude` keeps the generated config/marker untracked without touching `.gitignore`; linked worktrees are handled against their shared Git common exclude file.
 
-`harness install --host cursor` reconciles the global entry and all already registered Workspace overrides. `harness install --host all` and matching uninstall selection coordinate Claude + Cursor over one daemon. `scan` reconciles one combined active profile set, so Cursor compatibility roots reuse an existing Claude projection where possible instead of creating duplicates. Partial uninstall recalculates skills for the remaining host and leaves the daemon alive. Doctor reports Cursor global state and every bounded live Workspace override separately from Claude.
+`harness install --host cursor` reconciles the global entry and all already registered Workspace overrides. `harness install --host all` and matching uninstall selection coordinate Claude + Cursor over one daemon. `scan` reconciles one combined active profile set, so Cursor compatibility roots reuse an existing Claude projection where possible instead of creating duplicates. Partial uninstall recalculates skills for the remaining host and leaves the daemon alive. When any Cursor MCP config is actually changed, the CLI tells the user to fully quit/reopen Cursor and shows the current host-side inspection commands. Doctor reports Cursor global state and every bounded live Workspace override separately from Claude, including expected/configured Python, the project path, `${workspaceFolder}` contract, ownership/adoption failures, and an actionable remediation while remaining read-only.
 
 Automated acceptance now includes a real Harness MCP subprocess switching Claude → Cursor → Claude, two linked Workspaces with distinct IDs, Project-wide Knowledge/Task retrieval, Workspace-local current Task/index isolation, and installed-wheel multi-host upgrade/uninstall lifecycle. Proprietary Cursor IDE/CLI discovery remains in the real-host matrix. Cursor Cloud Agents are not covered by the local `.cursor/mcp.json` adapter; their personal/team/cloud MCP configuration and API are a separate future profile.
 
@@ -133,6 +135,8 @@ For every supported host/profile and supported OS family where behavior differs,
 - Codex AGENTS discovery source: https://github.com/openai/codex/blob/main/codex-rs/core/src/agents_md.rs
 - Codex managed-permission sandbox source: https://github.com/openai/codex/blob/main/codex-rs/windows-sandbox-rs/src/resolved_permissions.rs
 - Cursor MCP: https://cursor.com/docs/mcp
+- Cursor MCP help/restart and project-over-global precedence: https://cursor.com/help/customization/mcp
+- Cursor CLI MCP inspection: https://cursor.com/docs/cli/mcp
 - Cursor skills: https://cursor.com/docs/skills
 - Cursor rules: https://cursor.com/docs/rules
 - Cursor attribution changelog: https://cursor.com/changelog/3-0

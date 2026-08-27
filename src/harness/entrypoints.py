@@ -13,6 +13,7 @@ from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
+    IntegrationChange,
     discover_claude_code_adapter,
 )
 from harness.installation import InstallationError, install_harness, uninstall_harness
@@ -120,6 +121,14 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Dirty paths: {status.dirty_path_count}")
     print(f"Indexed files: {status.indexed_file_count}")
     print(f"Schema: {status.schema_version}")
+
+
+def _print_cursor_reload_guidance(*, expect_harness: bool) -> None:
+    print("Cursor restart required: fully quit and reopen Cursor after MCP config changes.")
+    if expect_harness:
+        print("Cursor verification: agent mcp list; agent mcp list-tools harness")
+    else:
+        print("Cursor verification: agent mcp list (confirm Harness is absent)")
 
 
 def _print_workspace_scan(result: WorkspaceScanResult) -> None:
@@ -271,6 +280,7 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
             active_profiles.append(claude.profile)
 
     cursor = discover_cursor_adapter()
+    cursor_project_change = IntegrationChange.UNCHANGED
     try:
         cursor_state = cursor.registration_state()
     except HostIntegrationError as exc:
@@ -279,7 +289,7 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         )
     if cursor_state is HostRegistrationState.CURRENT:
         try:
-            cursor.reconcile_project(result.workspace_root)
+            cursor_project_change = cursor.reconcile_project(result.workspace_root)
         except HostIntegrationError as exc:
             return _scan_failure(
                 f"index reconciliation succeeded but Cursor project override failed: {exc}"
@@ -311,6 +321,8 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         print(f"Skills materialized: {skills.materialized}")
         print(f"Skills removed: {skills.removed}")
         print(f"Skills unchanged: {skills.unchanged}")
+    if cursor_project_change is IntegrationChange.CHANGED:
+        _print_cursor_reload_guidance(expect_harness=True)
     return 0
 
 
@@ -327,12 +339,20 @@ def _run_install(*, host: str) -> int:
                 f"Host {item.host_profile}: {item.registration_change.value}; "
                 f"project overrides changed: {item.project_change_count}"
             )
+    cursor_result = next((item for item in result.hosts if item.host_profile == "cursor"), None)
+    if cursor_result is not None and len(result.hosts) == 1:
+        print(f"Cursor project overrides changed: {cursor_result.project_change_count}")
     print(f"Daemon schema: {result.daemon_status.schema_version}")
     print(f"Daemon runtime: {result.daemon_status.package_version}")
     print(f"Daemon Python: {result.daemon_status.python_executable}")
     print(f"Registered projects: {result.daemon_status.project_count}")
     print(f"Registered workspaces: {result.daemon_status.workspace_count}")
     print("Diagnostics: harness doctor")
+    if cursor_result is not None and (
+        cursor_result.registration_change is IntegrationChange.CHANGED
+        or cursor_result.project_change_count
+    ):
+        _print_cursor_reload_guidance(expect_harness=True)
     print("Harness install: OK")
     return 0
 
@@ -350,10 +370,18 @@ def _run_uninstall(*, host: str, purge: bool) -> int:
                 f"Host {item.host_profile}: {item.registration_change.value}; "
                 f"project overrides changed: {item.project_change_count}"
             )
+    cursor_result = next((item for item in result.hosts if item.host_profile == "cursor"), None)
+    if cursor_result is not None and len(result.hosts) == 1:
+        print(f"Cursor project overrides changed: {cursor_result.project_change_count}")
     print(f"Generated skills removed: {result.skill_cleanup.removed}")
     print(f"Workspaces cleaned: {result.skill_cleanup.cleaned_workspace_count}")
     print(f"Workspaces skipped safely: {result.skill_cleanup.skipped_workspace_count}")
     print(f"Project Intelligence: {'purged' if result.purged else 'preserved'}")
+    if cursor_result is not None and (
+        cursor_result.registration_change is IntegrationChange.CHANGED
+        or cursor_result.project_change_count
+    ):
+        _print_cursor_reload_guidance(expect_harness=False)
     print("Harness uninstall: OK")
     return 0
 

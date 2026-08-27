@@ -5,6 +5,7 @@ import shutil
 import sqlite3
 import stat
 import sys
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -248,16 +249,19 @@ def run_system_doctor(
     )
     cursor_registration_state: HostRegistrationState | None = None
     try:
-        cursor_registration_state = cursor_adapter.registration_state()
+        cursor_diagnostic = cursor_adapter.registration_diagnostic()
     except HostIntegrationError as exc:
         checks.append(_check("Cursor MCP registration", DoctorSeverity.FAIL, _bounded_detail(exc)))
     else:
+        cursor_registration_state = cursor_diagnostic.state
+        configured_python = cursor_diagnostic.configured_python or "<missing>"
         if cursor_registration_state is HostRegistrationState.CURRENT:
             checks.append(
                 _check(
                     "Cursor MCP registration",
                     DoctorSeverity.OK,
-                    f"current Harness global registration at {cursor_adapter.global_config_path}",
+                    f"current at {cursor_diagnostic.path}; configured Python: "
+                    f"{configured_python}; expected Python: {cursor_diagnostic.expected_python}",
                 )
             )
         elif cursor_registration_state is HostRegistrationState.ABSENT:
@@ -265,7 +269,9 @@ def run_system_doctor(
                 _check(
                     "Cursor MCP registration",
                     DoctorSeverity.OK,
-                    "Harness Cursor integration is not configured",
+                    "Harness Cursor integration is not configured; "
+                    f"expected Python: {cursor_diagnostic.expected_python}; "
+                    "remediation: harness install --host cursor",
                 )
             )
         elif cursor_registration_state is HostRegistrationState.STALE_OWNED:
@@ -274,7 +280,9 @@ def run_system_doctor(
                 _check(
                     "Cursor MCP registration",
                     DoctorSeverity.FAIL,
-                    "Harness-owned global registration points at a different installed runtime",
+                    f"stale Harness runtime at {cursor_diagnostic.path}; expected Python: "
+                    f"{cursor_diagnostic.expected_python}; configured Python: {configured_python}; "
+                    "remediation: harness install --host cursor",
                 )
             )
         else:
@@ -283,7 +291,8 @@ def run_system_doctor(
                 _check(
                     "Cursor MCP registration",
                     DoctorSeverity.FAIL,
-                    "non-Harness global registration already owns the name 'harness'",
+                    f"foreign server named 'harness' at {cursor_diagnostic.path}; remediation: "
+                    "rename or remove the foreign entry before harness install --host cursor",
                 )
             )
 
@@ -646,6 +655,7 @@ def _inspect_projects_and_workspaces(
     skill_unknown = 0
     cursor_projects_current = 0
     cursor_projects_bad = 0
+    cursor_project_checks: list[DoctorCheck] = []
 
     for position, workspace in enumerate(inspectable):
         if monotonic() >= overall_deadline:
@@ -685,21 +695,75 @@ def _inspect_projects_and_workspaces(
                 stale_notes.append(f"stale index {workspace.workspace_id}")
 
         try:
-            cursor_project_state = cursor_adapter.project_registration_state(
+            cursor_project = cursor_adapter.project_registration_diagnostic(
                 workspace.workspace_root
             )
-        except HostIntegrationError:
+        except HostIntegrationError as exc:
             cursor_projects_bad += 1
+            issue = _bounded_detail(exc)
+            cursor_project_checks.append(
+                _check(
+                    f"Cursor project MCP override {workspace.workspace_id}",
+                    DoctorSeverity.FAIL,
+                    issue,
+                )
+            )
             stale_notes.append(f"Cursor project override unreadable {workspace.workspace_id}")
         else:
-            if cursor_registration_state is HostRegistrationState.CURRENT:
-                if cursor_project_state is HostRegistrationState.CURRENT:
+            configured_python = cursor_project.configured_python or "<missing>"
+            configured_root = cursor_project.configured_workspace_root or "<missing>"
+            if cursor_project.preflight_error is not None:
+                cursor_projects_bad += 1
+                cursor_project_checks.append(
+                    _check(
+                        f"Cursor project MCP override {workspace.workspace_id}",
+                        DoctorSeverity.FAIL,
+                        f"{cursor_project.path}: {cursor_project.preflight_error}; "
+                        "remediation: resolve the ownership/adoption issue, then run "
+                        "harness install --host cursor",
+                    )
+                )
+                stale_notes.append(f"unsafe Cursor project override {workspace.workspace_id}")
+            elif cursor_registration_state is HostRegistrationState.CURRENT:
+                if cursor_project.state is HostRegistrationState.CURRENT:
                     cursor_projects_current += 1
+                    cursor_project_checks.append(
+                        _check(
+                            f"Cursor project MCP override {workspace.workspace_id}",
+                            DoctorSeverity.OK,
+                            f"current at {cursor_project.path}; configured Python: "
+                            f"{configured_python}; expected Python: "
+                            f"{cursor_project.expected_python}; "
+                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                        )
+                    )
                 else:
                     cursor_projects_bad += 1
+                    cursor_project_checks.append(
+                        _check(
+                            f"Cursor project MCP override {workspace.workspace_id}",
+                            DoctorSeverity.FAIL,
+                            f"{cursor_project.path}: {cursor_project.state.value}; expected Python: "
+                            f"{cursor_project.expected_python}; configured Python: "
+                            f"{configured_python}; expected "
+                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}; configured "
+                            f"HARNESS_WORKSPACE_ROOT={configured_root}; remediation: "
+                            "harness install --host cursor",
+                        )
+                    )
                     stale_notes.append(f"stale Cursor project override {workspace.workspace_id}")
-            elif cursor_project_state is not HostRegistrationState.ABSENT:
+            elif cursor_project.state is not HostRegistrationState.ABSENT:
                 cursor_projects_bad += 1
+                cursor_project_checks.append(
+                    _check(
+                        f"Cursor project MCP override {workspace.workspace_id}",
+                        DoctorSeverity.FAIL,
+                        f"{cursor_project.path}: orphaned {cursor_project.state.value} "
+                        "project override while global Cursor integration is inactive; "
+                        "remediation: harness uninstall --host cursor or "
+                        "harness install --host cursor",
+                    )
+                )
                 stale_notes.append(f"orphaned Cursor project override {workspace.workspace_id}")
 
         if not active_profiles or not registry_ok:
@@ -762,8 +826,8 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Cursor project MCP overrides",
                 DoctorSeverity.FAIL,
-                f"{cursor_projects_current} current, {cursor_projects_bad} missing/stale/foreign/orphaned; "
-                "required root contract is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                f"{cursor_projects_current} current, {cursor_projects_bad} "
+                "missing/stale/foreign/orphaned/unsafe; see per-Workspace checks below",
             )
         )
     elif cursor_registration_state is HostRegistrationState.CURRENT:
@@ -784,6 +848,8 @@ def _inspect_projects_and_workspaces(
                 "Cursor global Harness integration is inactive and no project overrides were found",
             )
         )
+
+    checks.extend(cursor_project_checks)
 
     if not active_profiles:
         checks.append(
@@ -862,7 +928,17 @@ def _exists_without_following(path: Path) -> bool:
 
 
 def _check(name: str, severity: DoctorSeverity, detail: str) -> DoctorCheck:
-    return DoctorCheck(name=name, severity=severity, detail=detail[:1024])
+    return DoctorCheck(name=name, severity=severity, detail=_single_line_detail(detail)[:1024])
+
+
+def _single_line_detail(detail: str) -> str:
+    safe: list[str] = []
+    for character in detail:
+        if unicodedata.category(character).startswith("C"):
+            safe.append(ascii(character)[1:-1])
+        else:
+            safe.append(character)
+    return "".join(safe)
 
 
 def _bounded_detail(exc: BaseException) -> str:
