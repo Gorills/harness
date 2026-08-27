@@ -125,7 +125,10 @@ def test_cursor_refuses_foreign_same_name_registration(tmp_path: Path) -> None:
     )
     adapter = CursorAdapter(home=home, python_executable=Path("/python"))
 
-    assert adapter.registration_state() is HostRegistrationState.FOREIGN
+    diagnostic = adapter.registration_diagnostic()
+    assert diagnostic.state is HostRegistrationState.FOREIGN
+    assert diagnostic.configured_python is None
+    assert diagnostic.configured_workspace_root is None
     with pytest.raises(HostRegistrationCollisionError):
         adapter.register_mcp()
     with pytest.raises(HostRegistrationCollisionError):
@@ -192,6 +195,75 @@ def test_cursor_tracked_project_config_requires_manual_adoption(tmp_path: Path) 
     with pytest.raises(HostIntegrationError, match="manual adoption"):
         adapter.reconcile_project(root)
     assert _git(root, "status", "--porcelain").stdout == ""
+
+
+def test_cursor_project_diagnostic_exposes_stale_runtime_and_workspace_contract(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    stale = _entry(Path("/old/python"), project=True)
+    stale["env"] = {
+        "HARNESS_HOST_PROFILE": "cursor",
+        "HARNESS_WORKSPACE_ROOT": "/wrong/root",
+    }
+    config.write_text(json.dumps({"mcpServers": {"harness": stale}}), encoding="utf-8")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/new/python"))
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+
+    assert diagnostic.path == config
+    assert diagnostic.state is HostRegistrationState.STALE_OWNED
+    assert diagnostic.expected_python == Path("/new/python")
+    assert diagnostic.configured_python == "/old/python"
+    assert diagnostic.configured_workspace_root == "/wrong/root"
+    assert diagnostic.preflight_error is None
+
+
+def test_cursor_project_diagnostic_reports_tracked_manual_adoption(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    config.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    _git(root, "add", ".cursor/mcp.json")
+    _git(
+        root,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "tracked cursor config",
+    )
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+
+    assert diagnostic.state is HostRegistrationState.ABSENT
+    assert diagnostic.preflight_error is not None
+    assert "manual adoption" in diagnostic.preflight_error
+    assert str(config) in diagnostic.preflight_error
+
+
+def test_cursor_project_diagnostic_reports_malformed_ownership_marker(
+    tmp_path: Path,
+) -> None:
+    root = _repo(tmp_path / "repo")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    marker = root / ".cursor" / ".harness-mcp-owner.json"
+    marker.write_text("not-json\n", encoding="utf-8")
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+
+    assert diagnostic.state is HostRegistrationState.CURRENT
+    assert diagnostic.preflight_error is not None
+    assert "ownership marker is malformed" in diagnostic.preflight_error
+    assert str(marker) in diagnostic.preflight_error
 
 
 def test_cursor_tracked_exact_project_config_is_accepted_but_uninstall_is_manual(

@@ -36,6 +36,18 @@ _GIT_TIMEOUT_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
+class CursorRegistrationDiagnostic:
+    """Read-only details for one Cursor Harness MCP registration."""
+
+    path: Path
+    state: HostRegistrationState
+    expected_python: Path
+    configured_python: str | None
+    configured_workspace_root: str | None
+    preflight_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _ConfigSnapshot:
     path: Path
     raw: bytes | None
@@ -83,11 +95,34 @@ class CursorAdapter:
         return cursor_skill_projection_surface()
 
     def registration_state(self) -> HostRegistrationState:
-        return self._registration_state(self.global_config_path, self._desired_global())
+        return self.registration_diagnostic().state
+
+    def registration_diagnostic(self) -> CursorRegistrationDiagnostic:
+        """Inspect the global Harness MCP entry without mutating Cursor configuration."""
+        return self._registration_diagnostic(self.global_config_path, self._desired_global())
 
     def project_registration_state(self, workspace_root: Path) -> HostRegistrationState:
         root = _workspace_root(workspace_root)
         return self._registration_state(self._project_config(root), self._project_desired())
+
+    def project_registration_diagnostic(self, workspace_root: Path) -> CursorRegistrationDiagnostic:
+        """Inspect one Workspace override, including ownership/adoption preflight errors."""
+        root = _workspace_root(workspace_root)
+        diagnostic = self._registration_diagnostic(
+            self._project_config(root), self._project_desired()
+        )
+        try:
+            self.preflight_project_reconcile(root)
+        except HostIntegrationError as exc:
+            return CursorRegistrationDiagnostic(
+                path=diagnostic.path,
+                state=diagnostic.state,
+                expected_python=diagnostic.expected_python,
+                configured_python=diagnostic.configured_python,
+                configured_workspace_root=diagnostic.configured_workspace_root,
+                preflight_error=str(exc),
+            )
+        return diagnostic
 
     def register_mcp(self) -> IntegrationChange:
         return self._ensure_entry(self.global_config_path, self._desired_global())
@@ -235,16 +270,47 @@ class CursorAdapter:
     def _registration_state(
         self, path: Path, desired: Mapping[str, object]
     ) -> HostRegistrationState:
+        return self._registration_diagnostic(path, desired).state
+
+    def _registration_diagnostic(
+        self, path: Path, desired: Mapping[str, object]
+    ) -> CursorRegistrationDiagnostic:
         snapshot = _read_json_config(path)
         servers = _servers(snapshot.value, path, create=False)
         if servers is None or _SERVER_NAME not in servers:
-            return HostRegistrationState.ABSENT
+            return CursorRegistrationDiagnostic(
+                path=path,
+                state=HostRegistrationState.ABSENT,
+                expected_python=self.python_executable,
+                configured_python=None,
+                configured_workspace_root=None,
+            )
         entry = servers[_SERVER_NAME]
-        if not _is_owned_entry(entry):
-            return HostRegistrationState.FOREIGN
-        if entry == dict(desired):
-            return HostRegistrationState.CURRENT
-        return HostRegistrationState.STALE_OWNED
+        owned = _is_owned_entry(entry)
+        configured_python: str | None = None
+        configured_workspace_root: str | None = None
+        if owned and isinstance(entry, dict):
+            command = entry.get("command")
+            if isinstance(command, str):
+                configured_python = command
+            env = entry.get("env")
+            if isinstance(env, dict):
+                observed_root = env.get(_WORKSPACE_ROOT_ENV)
+                if isinstance(observed_root, str):
+                    configured_workspace_root = observed_root
+        if not owned:
+            state = HostRegistrationState.FOREIGN
+        elif entry == dict(desired):
+            state = HostRegistrationState.CURRENT
+        else:
+            state = HostRegistrationState.STALE_OWNED
+        return CursorRegistrationDiagnostic(
+            path=path,
+            state=state,
+            expected_python=self.python_executable,
+            configured_python=configured_python,
+            configured_workspace_root=configured_workspace_root,
+        )
 
     def _ensure_entry(self, path: Path, desired: Mapping[str, object]) -> IntegrationChange:
         snapshot = _read_json_config(path)

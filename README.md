@@ -28,8 +28,13 @@ harness install --host cursor
 harness doctor
 cd /path/to/git/repository
 harness scan
+# After Harness changes Cursor MCP config, fully quit and reopen Cursor.
+agent mcp list
+agent mcp list-tools harness   # expect exactly five Harness tools
 harness status
 ```
+
+Cursor's current official docs require a restart after editing `mcp.json`; Harness prints that restart/reopen reminder whenever install, scan, or uninstall actually changes Cursor MCP configuration. The Cursor CLI shares the editor MCP config, so `agent mcp list` and `agent mcp list-tools harness` are the preferred host-side inspection probes when the CLI is installed. These probes are acceptance evidence from Cursor itself, not substitutes for opening the target Workspace in the proprietary IDE.
 
 Claude Code registration remains owned through the official `claude mcp` CLI and resolves the active Workspace from `CLAUDE_PROJECT_DIR`. Cursor uses `~/.cursor/mcp.json` globally plus a complete `.cursor/mcp.json` override for every registered Workspace; the override passes Cursor's documented `${workspaceFolder}` as `HARNESS_WORKSPACE_ROOT`, and the Cursor bridge profile accepts only that exact root hint instead of guessing from cwd. `harness scan` detects all current supported Harness profiles and performs one compatible skill reconciliation, so Claude and Cursor do not receive duplicate Harness skills through Cursor's compatibility roots.
 

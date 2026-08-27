@@ -27,8 +27,13 @@ Register and index each Git worktree explicitly:
 ```bash
 cd /path/to/repository
 harness scan
+# If scan changed .cursor/mcp.json, fully quit and reopen Cursor.
+agent mcp list
+agent mcp list-tools harness   # expect exactly five Harness tools
 harness status
 ```
+
+Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. The Cursor CLI uses the same MCP configuration as the editor; when `agent` is installed, `agent mcp list` should show `harness` from the expected project/global source and `agent mcp list-tools harness` should expose exactly the five Harness production tools before host acceptance is claimed.
 
 `harness scan` reconciles all current supported host profiles together. When Cursor is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
 
@@ -41,6 +46,9 @@ git pull
 uv tool install --force --python 3.13 .
 harness install --host all   # use the profiles installed on this machine
 harness doctor
+# If Cursor config changed, fully quit/reopen Cursor, then re-run:
+agent mcp list
+agent mcp list-tools harness
 ```
 
 The post-upgrade `harness install` is required. It compares the running daemon's frozen schema/version/Python/code identity with the newly installed runtime and cleanly replaces a stale daemon before updating selected host registrations. Cursor global and every registered Workspace override are updated to the new interpreter together with Claude when `--host all` is selected. This covers both a changed virtual-environment path and an in-place reinstall at the same path. Upgrading from the previous Linux release is also explicit: that protocol-v1 daemon does not implement `runtime_diagnostics`, so Harness accepts only its structured unknown-method response, validates legacy `status`, requests the existing clean `shutdown`, then starts and verifies the current runtime. Other IPC/diagnostics failures are not treated as permission to kill or replace a daemon.
@@ -69,6 +77,8 @@ Purge is refused while another supported host remains active and is fail-closed 
 ## Doctor interpretation
 
 Bare `harness doctor` is read-only and operational. `OK` means the inspected invariant holds, `WARN` means absent/lazy/stale-but-non-destructive state that may need attention, and `FAIL` means an integrity, ownership, compatibility, or runtime mismatch. Any `FAIL` makes the command exit nonzero; warnings alone do not. Project/index/skill checks use one SQLite read snapshot. A quiescent WAL database is opened immutably so doctor does not create `-wal`/`-shm` files merely by inspecting it; an existing live WAL is still read through SQLite's normal read-only WAL path so uncheckpointed durable frames remain visible.
+
+For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, wrong or missing `${workspaceFolder}`, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` and `agent mcp list-tools harness` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start.
 
 Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and `harness doctor --database PATH` for read-only inspection of one explicitly selected initialized database.
 

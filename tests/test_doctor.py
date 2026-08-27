@@ -10,6 +10,22 @@ from harness.ipc import IpcRemoteError
 from harness.storage import SCHEMA_VERSION, initialize_database
 
 
+def test_doctor_check_escapes_terminal_control_characters() -> None:
+    check = doctor._check(
+        "Cursor MCP registration",
+        doctor.DoctorSeverity.FAIL,
+        "configured Python: /tmp/evil\nFAKE: OK\x1b[2J\u202eruntime",
+    )
+
+    assert "\n" not in check.detail
+    assert "\x1b" not in check.detail
+    assert "\u202e" not in check.detail
+    assert r"\n" in check.detail
+    assert r"\x1b" in check.detail
+    assert r"\u202e" in check.detail
+    assert "FAKE: OK" in check.detail
+
+
 def test_run_doctor_checks_is_ephemeral(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

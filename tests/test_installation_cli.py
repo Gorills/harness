@@ -444,6 +444,33 @@ def test_purge_preflight_refuses_database_symlink_without_unlinking_target(
     assert outside.read_bytes() == b"user-data"
 
 
+def test_cursor_scan_reports_restart_when_project_override_is_created(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _skill_registry(home)
+    repo = tmp_path / "repo"
+    _repo(repo)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    assert harness_main() == 0
+    output = capsys.readouterr().out
+
+    assert "Cursor restart required: fully quit and reopen Cursor" in output
+    assert "agent mcp list-tools harness" in output
+    assert (repo / ".cursor" / "mcp.json").is_file()
+
+
 def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -478,6 +505,9 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     assert harness_main() == 0
     cursor_install = capsys.readouterr().out
     assert "Harness host: cursor" in cursor_install
+    assert "Cursor project overrides changed: 1" in cursor_install
+    assert "Cursor restart required: fully quit and reopen Cursor" in cursor_install
+    assert "agent mcp list-tools harness" in cursor_install
     cursor_global = home / ".cursor" / "mcp.json"
     global_value = json.loads(cursor_global.read_text(encoding="utf-8"))
     assert global_value["mcpServers"]["harness"]["env"] == {"HARNESS_HOST_PROFILE": "cursor"}
@@ -510,6 +540,12 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     broken_doctor = capsys.readouterr().out
     assert "Claude Code MCP registration: OK" in broken_doctor
     assert "Cursor project MCP overrides: FAIL" in broken_doctor
+    assert "Cursor project MCP override " in broken_doctor
+    assert str(project_config) in broken_doctor
+    assert f"expected Python: {os.path.abspath(sys.executable)}" in broken_doctor
+    assert "configured Python: /stale/cursor/python" in broken_doctor
+    assert "expected HARNESS_WORKSPACE_ROOT=${workspaceFolder}" in broken_doctor
+    assert "remediation: harness install --host cursor" in broken_doctor
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
     capsys.readouterr()
@@ -519,6 +555,7 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     assert harness_main() == 0
     uninstall_output = capsys.readouterr().out
     assert "Project Intelligence: preserved" in uninstall_output
+    assert "Cursor verification: agent mcp list (confirm Harness is absent)" in uninstall_output
     assert project_config.exists() is False
     assert claude_state.is_file()
     assert paths.socket.exists()
@@ -528,7 +565,9 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     assert harness_main() == 0
     after = capsys.readouterr().out
     assert "Claude Code MCP registration: OK" in after
-    assert "Cursor MCP registration: OK (Harness Cursor integration is not configured)" in after
+    assert "Cursor MCP registration: OK" in after
+    assert "Harness Cursor integration is not configured" in after
+    assert "remediation: harness install --host cursor" in after
     assert "Generated skills: OK" in after
 
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
