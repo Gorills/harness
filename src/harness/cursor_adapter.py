@@ -463,17 +463,23 @@ def _is_owned_entry(value: object) -> bool:
 
 
 def is_isolated_development_overlay_entry(value: object) -> bool:
-    """Return True for the tracked checkout overlay that shadows a global Harness MCP server."""
+    """Return True for the checkout overlay that shadows a global Harness MCP server.
+
+    Extra JSON keys are ignored so a host round-trip cannot drop isolation. The
+    launch must remain ``scripts/dev harness mcp`` with
+    ``HARNESS_WORKSPACE_ROOT=${workspaceFolder}`` and without ``HARNESS_HOST_PROFILE``.
+    """
     if not isinstance(value, dict):
         return False
+    configured_type = value.get("type")
+    if configured_type is not None and configured_type != "stdio":
+        return False
     env = value.get("env")
+    if not isinstance(env, dict):
+        return False
     return (
-        set(value) == {"type", "command", "args", "env"}
-        and value.get("type") == "stdio"
-        and value.get("command") == _ISOLATED_DEV_COMMAND
+        value.get("command") == _ISOLATED_DEV_COMMAND
         and value.get("args") == _ISOLATED_DEV_ARGS
-        and isinstance(env, dict)
-        and set(env) == {_WORKSPACE_ROOT_ENV}
         and env.get(_WORKSPACE_ROOT_ENV) == _WORKSPACE_FOLDER
         and env.get(_HOST_PROFILE_ENV) is None
     )

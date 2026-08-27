@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 import harness.cursor_adapter as cursor_module
-from harness.cursor_adapter import CursorAdapter, discover_cursor_adapter
+from harness.cursor_adapter import (
+    CursorAdapter,
+    discover_cursor_adapter,
+    is_isolated_development_overlay_entry,
+)
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationCollisionError,
@@ -474,3 +478,27 @@ def test_cursor_foreign_non_isolation_entry_still_collides(tmp_path: Path) -> No
     diagnostic = adapter.project_registration_diagnostic(root)
     assert diagnostic.isolated_development is False
     assert diagnostic.preflight_error is not None
+
+
+def test_cursor_isolated_overlay_still_matches_when_host_adds_extra_keys(tmp_path: Path) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    entry = _isolated_entry()
+    entry["disabled"] = False
+    assert isinstance(entry["env"], dict)
+    entry["env"]["CURSOR_EXTRA"] = "1"
+    config.write_text(json.dumps({"mcpServers": {"harness": entry}}) + "\n", encoding="utf-8")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert is_isolated_development_overlay_entry(entry) is True
+    assert diagnostic.isolated_development is True
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+
+
+def test_cursor_isolated_overlay_rejects_host_profile_marker() -> None:
+    entry = _isolated_entry()
+    assert isinstance(entry["env"], dict)
+    entry["env"]["HARNESS_HOST_PROFILE"] = "cursor"
+    assert is_isolated_development_overlay_entry(entry) is False

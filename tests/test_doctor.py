@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -9,9 +10,13 @@ import pytest
 
 import harness.doctor as doctor
 from harness.doctor import run_doctor_checks
+from harness.git_workspace import GitWorkspaceDeadlineExceededError
 from harness.host_adapters import HostIntegrationError, HostRegistrationState
+from harness.index import IndexingError, ScanDeadlineExceededError
 from harness.ipc import IpcRemoteError
-from harness.registry import create_project, register_workspace
+from harness.registry import WorkspaceRecord, create_project, register_workspace
+from harness.skill_runtime import SkillRuntimeError
+from harness.skills import SkillProjectionError
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 
 
@@ -410,3 +415,299 @@ def test_run_system_doctor_normalizes_project_registry_database_errors(
     assert by_name["Index state"].severity is doctor.DoctorSeverity.WARN
     assert by_name["Generated skills"].severity is doctor.DoctorSeverity.WARN
     assert database.is_file()
+
+
+def _doctor_environment(tmp_path: Path) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    (state_home / "harness").mkdir(parents=True, mode=0o700)
+    return {
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(state_home),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "PATH": os.environ.get("PATH", ""),
+    }
+
+
+def _git_repository(root: Path) -> Path:
+    root.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=root, check=True, capture_output=True)
+    (root / "README.md").write_text("repo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+    )
+    return root
+
+
+def _register_doctor_workspaces(
+    environment: dict[str, str], roots: list[Path]
+) -> list[WorkspaceRecord]:
+    database = Path(environment["XDG_STATE_HOME"]) / "harness" / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        return [
+            register_workspace(connection, project_id=project.project_id, path=root)
+            for root in roots
+        ]
+    finally:
+        connection.close()
+
+
+def _checks_by_name(report: doctor.SystemDoctorReport) -> dict[str, doctor.DoctorCheck]:
+    return {check.name: check for check in report.checks}
+
+
+def test_doctor_workspace_budgets_remain_finite() -> None:
+    assert 0 < doctor._DOCTOR_WORKSPACE_DEADLINE_SECONDS < float("inf")
+    assert 0 < doctor._DOCTOR_WORKSPACE_TOTAL_SECONDS < float("inf")
+    assert doctor._DOCTOR_WORKSPACE_DEADLINE_SECONDS <= doctor._DOCTOR_WORKSPACE_TOTAL_SECONDS
+    assert doctor._DOCTOR_WORKSPACE_LIMIT >= 11
+    assert doctor._DOCTOR_WORKSPACE_DEADLINE_SECONDS >= 30.0
+    assert doctor._DOCTOR_WORKSPACE_TOTAL_SECONDS >= 90.0
+
+
+def test_doctor_labels_index_timeout_with_workspace_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    monkeypatch.setattr(
+        doctor,
+        "inspect_workspace_index_freshness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ScanDeadlineExceededError("Workspace scan deadline exceeded")
+        ),
+    )
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    index = by_name["Index state"]
+    stale = by_name["Stale integrations"]
+    assert index.severity is doctor.DoctorSeverity.WARN
+    assert "timed out" in index.detail
+    assert "unavailable" not in index.detail
+    assert workspace.workspace_id in index.detail
+    assert str(workspace.workspace_root) in index.detail
+    assert f"timed out index inspection {workspace.workspace_id}" in stale.detail
+    assert str(workspace.workspace_root) in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_labels_skill_timeout_with_workspace_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _CurrentClaude:
+        executable = tmp_path / "claude"
+
+        def registration_state(self) -> HostRegistrationState:
+            return HostRegistrationState.CURRENT
+
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _CurrentClaude())
+
+    def fail_skills(*_args: object, **_kwargs: object) -> None:
+        raise SkillRuntimeError(
+            "Workspace skill integration could not be inspected"
+        ) from SkillProjectionError("skill projection inspection deadline exceeded")
+
+    monkeypatch.setattr(doctor, "inspect_workspace_skills", fail_skills)
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    skills = by_name["Generated skills"]
+    stale = by_name["Stale integrations"]
+    assert skills.severity is doctor.DoctorSeverity.WARN
+    assert "timed out" in skills.detail
+    assert "unavailable" not in skills.detail
+    assert workspace.workspace_id in skills.detail
+    assert str(workspace.workspace_root) in skills.detail
+    assert f"timed out generated-skill inspection {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_labels_index_inspection_failure_not_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    monkeypatch.setattr(
+        doctor,
+        "inspect_workspace_index_freshness",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            IndexingError("Workspace changed while scanning: README.md")
+        ),
+    )
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    index = by_name["Index state"]
+    stale = by_name["Stale integrations"]
+    assert index.severity is doctor.DoctorSeverity.WARN
+    assert "1 failed" in index.detail
+    assert "unavailable" not in index.detail
+    assert workspace.workspace_id in index.detail
+    assert str(workspace.workspace_root) in index.detail
+    assert f"failed index inspection {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_unavailable_is_only_git_identity_failure(tmp_path: Path) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "missing-checkout")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    shutil.rmtree(root)
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    projects = by_name["Projects"]
+    index = by_name["Index state"]
+    skills = by_name["Generated skills"]
+    stale = by_name["Stale integrations"]
+    assert projects.severity is doctor.DoctorSeverity.WARN
+    assert "1 unavailable" in projects.detail
+    assert "timed out" not in projects.detail
+    assert workspace.workspace_id in projects.detail
+    assert str(workspace.workspace_root) in projects.detail
+    assert "unavailable" not in index.detail
+    assert "unavailable" not in skills.detail
+    assert workspace.workspace_id not in index.detail
+    assert f"unavailable Workspace {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_identity_timeout_is_not_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    monkeypatch.setattr(
+        doctor,
+        "inspect_git_workspace_runtime_identity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            GitWorkspaceDeadlineExceededError("Git workspace inspection deadline exceeded")
+        ),
+    )
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    projects = by_name["Projects"]
+    index = by_name["Index state"]
+    stale = by_name["Stale integrations"]
+    assert projects.severity is doctor.DoctorSeverity.WARN
+    assert "1 timed out" in projects.detail
+    assert "0 unavailable" in projects.detail
+    assert workspace.workspace_id in projects.detail
+    assert str(workspace.workspace_root) in projects.detail
+    assert "unavailable" not in index.detail
+    assert f"timed out Workspace identity {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_truncation_names_skipped_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    first = _git_repository(tmp_path / "first")
+    second = _git_repository(tmp_path / "second")
+    workspaces = _register_doctor_workspaces(environment, [first, second])
+    monkeypatch.setattr(doctor, "_DOCTOR_WORKSPACE_LIMIT", 1)
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    inspectable_id = min(workspace.workspace_id for workspace in workspaces)
+    skipped = next(
+        workspace for workspace in workspaces if workspace.workspace_id != inspectable_id
+    )
+    by_name = _checks_by_name(report)
+    projects = by_name["Projects"]
+    index = by_name["Index state"]
+    skills = by_name["Generated skills"]
+    stale = by_name["Stale integrations"]
+    assert projects.severity is doctor.DoctorSeverity.WARN
+    assert index.severity is doctor.DoctorSeverity.WARN
+    assert "doctor budget" in projects.detail
+    assert skipped.workspace_id in projects.detail
+    assert str(skipped.workspace_root) in projects.detail
+    assert skipped.workspace_id in index.detail
+    assert "unavailable" not in index.detail
+    assert "unavailable" not in skills.detail
+    assert f"doctor budget skipped Workspace {skipped.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_aggregate_deadline_still_expires_and_names_remaining(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    first = _git_repository(tmp_path / "first")
+    second = _git_repository(tmp_path / "second")
+    workspaces = _register_doctor_workspaces(environment, [first, second])
+    monkeypatch.setattr(doctor, "_DOCTOR_WORKSPACE_TOTAL_SECONDS", 0.0)
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    projects = by_name["Projects"]
+    index = by_name["Index state"]
+    stale = by_name["Stale integrations"]
+    assert projects.severity is doctor.DoctorSeverity.WARN
+    assert "doctor budget" in projects.detail
+    assert "unavailable" not in index.detail
+    for workspace in workspaces:
+        assert workspace.workspace_id in projects.detail
+        assert str(workspace.workspace_root) in projects.detail
+        assert workspace.workspace_id in index.detail
+        assert f"doctor budget skipped Workspace {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0
+
+
+def test_doctor_per_workspace_deadline_still_expires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    [workspace] = _register_doctor_workspaces(environment, [root])
+    monkeypatch.setattr(doctor, "_DOCTOR_WORKSPACE_DEADLINE_SECONDS", 0.0)
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    by_name = _checks_by_name(report)
+    projects = by_name["Projects"]
+    index = by_name["Index state"]
+    stale = by_name["Stale integrations"]
+    assert projects.severity is doctor.DoctorSeverity.WARN
+    assert "1 timed out" in projects.detail
+    assert "0 unavailable" in projects.detail
+    assert workspace.workspace_id in projects.detail
+    assert str(workspace.workspace_root) in projects.detail
+    assert "unavailable" not in index.detail
+    assert f"timed out Workspace identity {workspace.workspace_id}" in stale.detail
+    assert report.failure_count == 0

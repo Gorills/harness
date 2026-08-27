@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-26
+- **Amended:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -10,7 +11,7 @@ The first Linux/Claude Code installation slice made install/uninstall mechanical
 
 ## Decision
 
-On the supported Linux/POSIX profile, bare `harness doctor` is the read-only operational diagnostic. It inspects the canonical paths and permissions, SQLite/FTS5, Claude adapter and Harness-owned registration, daemon runtime identity, canonical database, registered Project/Workspace Git identity, deterministic index freshness, canonical skill registry and expected generated projections, dashboard subsystem state, and stale integrations. Warnings describe absent/lazy/repairable state and do not make the command fail; integrity, ownership, compatibility, or runtime mismatches are failures. Workspace live checks are bounded by both per-Workspace and aggregate deadlines and never reconcile state.
+On the supported Linux/POSIX profile, bare `harness doctor` is the read-only operational diagnostic. It inspects the canonical paths and permissions, SQLite/FTS5, Claude adapter and Harness-owned registration, daemon runtime identity, canonical database, registered Project/Workspace Git identity, deterministic index freshness, canonical skill registry and expected generated projections, dashboard subsystem state, and stale integrations. Warnings describe absent/lazy/repairable state and do not make the command fail; integrity, ownership, compatibility, or runtime mismatches are failures. Workspace live checks are bounded by both per-Workspace and aggregate deadlines and never reconcile state. Those bounds distinguish three operator-visible outcomes: **unavailable** means non-timeout Git/identity inspection failed for a named Workspace; **timed out** or **failed** means Workspace-identity, index, or generated-skill inspection hit the deadline or (for index and generated skills) raised a non-timeout inspection error for a named Workspace; **doctor budget** means remaining named Workspaces were not inspected because the count limit or aggregate deadline was reached. Timeouts and budget truncation remain warnings. The per-Workspace deadline is aligned with the daemon scan bound (30s) so a ~10k-file live inventory can complete; the aggregate deadline (90s) covers a typical multi-Workspace install (at least 11 live Workspaces, including one large index) while remaining finite.
 
 `harness doctor --runtime-only` preserves the original in-memory SQLite/FTS5-only diagnostic. `harness doctor --database PATH` remains a read-only selected-database recovery/development check. Quiescent WAL databases are inspected through an immutable SQLite snapshot so doctor does not create `-wal`/`-shm` artifacts merely by reading them; when a real WAL sidecar already exists, the read-only connection follows live WAL frames instead. Operational Project/index/skill checks share one SQLite read transaction so the report is a point-in-time durable-state snapshot. No doctor mode starts the daemon, starts the dashboard, registers a host, scans a Workspace, reconciles skills, or mutates durable state.
 
@@ -36,7 +37,8 @@ Automated tests and the installed-wheel smoke must prove:
 - unsafe canonical database/skill-registry objects fail closed without following or mutating them;
 - stale SQLite sidecars are reported without deletion;
 - initialized database inspection is read-only and does not create quiescent WAL sidecars while still observing live WAL frames when present;
-- live Project/index/skill/dashboard state is reported from authoritative sources without reconciliation;
+- live Project/index/skill/dashboard state is reported from authoritative sources without reconciliation, and doctor names Workspaces whose identity is unavailable or timed out, whose index/skill inspection timed out or failed, or who were skipped by the count/time budget;
+- doctor live-Workspace deadlines remain finite and tests can still expire them;
 - daemon diagnostics preserve exact schema/version/interpreter/code fingerprint contracts;
 - the previously released protocol-v1 daemon without `runtime_diagnostics` is upgraded only through validated legacy `status` plus clean `shutdown`;
 - reinstall through a second Python 3.13 environment replaces the stale daemon and Claude registration;

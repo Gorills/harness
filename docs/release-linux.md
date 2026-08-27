@@ -80,6 +80,8 @@ Bare `harness doctor` is read-only and operational. `OK` means the inspected inv
 
 For Cursor, doctor reports the configured and expected Python runtime and gives the exact project config path plus remediation for stale/foreign/orphaned overrides, wrong or missing `${workspaceFolder}`, tracked manual-adoption requirements, malformed ownership metadata, and other unsafe config states. It remains read-only. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect the host with `agent mcp list` and `agent mcp list-tools harness` when the CLI is available. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. An absent Claude MCP registration is a warning, not a Cursor failure.
 
+Index state and Generated skills report `timed out` or `failed` for named Workspaces when live inspection hits the doctor deadline or raises an inspection error. `unavailable` is reserved for Project Git/identity inspection failure of a named Workspace, not for a timeout. Workspaces skipped by the count limit or aggregate time budget are named as `not inspected (doctor budget)`. Timeout and budget-truncation warnings do not fail the command; identity mismatches and other integrity failures still do.
+
 Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and `harness doctor --database PATH` for read-only inspection of one explicitly selected initialized database.
 
 ## Automated release gate

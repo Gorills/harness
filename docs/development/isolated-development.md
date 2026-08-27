@@ -94,7 +94,7 @@ uv run --frozen python scripts/quality.py
 3. Confirm that mtime is unchanged and that `.harness/state/harness/harness.db` exists.
 4. Confirm `command -v harness` (system) is not the executable used by `scripts/dev harness --version`.
 
-`scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. A system `harness scan` of this source checkout is refused because the tracked overlay marks it as isolated-development only.
+`scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. `uv run --frozen harness` from this checkout without sourcing `scripts/dev-env.sh` is the same mix: checkout code plus the global daemon, and must not be used here. A system `harness scan` of this source checkout is refused because the tracked overlay marks it as isolated-development only. Overlay detection requires `scripts/dev harness mcp` plus `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and no `HARNESS_HOST_PROFILE`; extra host JSON keys do not drop that isolation.
 
 ## Optional: source the environment
 
