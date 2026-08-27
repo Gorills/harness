@@ -144,7 +144,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         status, css_headers, css = _read(base_url + "assets/dashboard.css")
         assert status == 200
         assert css_headers["Content-Type"].startswith("text/css")
-        assert "--accent: #d8683d" in css
+        assert "--accent: #8b7cff" in css
         assert "prefers-reduced-motion" in css
 
         status, js_headers, javascript = _read(base_url + "assets/dashboard.js")
