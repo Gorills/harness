@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 import harness.installation as installation
+import harness.storage as storage
 from harness.installation import InstallationError
 from harness.ipc import IpcRemoteError, RuntimeDiagnosticsResult, ShutdownResult, StatusResult
 from harness.runtime_identity import RuntimeIdentity
 from harness.runtime_paths import RuntimePaths
-from harness.storage import SCHEMA_VERSION
+from harness.storage import SCHEMA_VERSION, initialize_database
 
 
 def _diagnostics(
@@ -234,3 +236,48 @@ def test_install_refuses_daemon_schema_newer_than_current_package(
 
     with pytest.raises(InstallationError, match="schema newer"):
         installation._ensure_current_daemon(paths, None)
+
+
+def test_registered_workspaces_lists_rows_from_older_supported_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    current = storage.SCHEMA_VERSION
+    assert current > 2
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", current - 1)
+    initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
+
+    workspaces = installation._registered_workspaces(
+        RuntimePaths(database, tmp_path / "harness.sock")
+    )
+
+    assert [workspace.workspace_id for workspace in workspaces] == ["workspace"]
+    assert [workspace.workspace_root for workspace in workspaces] == [Path("/repo")]
+
+
+def test_registered_workspaces_returns_empty_before_workspaces_table_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", 1)
+    initialize_database(database)
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", SCHEMA_VERSION)
+
+    workspaces = installation._registered_workspaces(
+        RuntimePaths(database, tmp_path / "harness.sock")
+    )
+
+    assert workspaces == ()

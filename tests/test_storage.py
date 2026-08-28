@@ -67,6 +67,46 @@ def test_connect_database_read_only_observes_uncheckpointed_live_wal_frames(
         writer.close()
 
 
+def test_connect_database_read_only_refuses_older_schema_unless_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    current = storage.SCHEMA_VERSION
+    assert current > 2
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", current - 1)
+    initialize_database(database)
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
+
+    with pytest.raises(InvalidSchemaStateError, match="initialize it before opening"):
+        connect_database_read_only(database)
+
+    connection = connect_database_read_only(database, allow_older_schema=True)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+def test_connect_database_read_only_refuses_newer_schema_even_when_older_allowed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    versions = tuple(range(1, SCHEMA_VERSION + 2))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+        connection.executemany(
+            "INSERT INTO schema_migrations(version) VALUES (?)",
+            [(version,) for version in versions],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(UnsupportedSchemaVersionError):
+        connect_database_read_only(database, allow_older_schema=True)
+
+
 def test_connect_database_read_only_refuses_live_wal_without_existing_shm(
     tmp_path: Path,
 ) -> None:

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-26
-- **Amended:** 2026-08-27
+- **Amended:** 2026-08-28
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -17,7 +17,7 @@ On the supported Linux/POSIX profile, bare `harness doctor` is the read-only ope
 
 The daemon exposes additive protocol-v1 `runtime_diagnostics` containing schema version, package version, absolute Python executable, a SHA-256 fingerprint of the installed Harness Python source tree frozen when the daemon process starts, Project/Workspace counts, and dashboard-running state. The fingerprint is computed without following symlinks, is size-bounded, and fails if package entries change while being read.
 
-`harness install` reuses a daemon only when schema, package version, Python executable, and frozen code fingerprint exactly match the current installed runtime. Otherwise it requests clean shutdown, waits for the existing singleton boundary to release, starts the current runtime, and verifies the new daemon identity before changing the Claude registration. The immediately preceding protocol-v1 daemon predates `runtime_diagnostics`; a structured `invalid_request` for that additive method is treated as the one supported compatibility transition. Harness validates its legacy `status`, refuses a newer schema, uses the already-supported `shutdown`, and then verifies the restarted current runtime. No other diagnostics error authorizes replacement. `harness uninstall` likewise upgrades/restarts a stale or legacy owned daemon before project-skill cleanup so destructive integration cleanup does not execute under old loaded code.
+`harness install` reuses a daemon only when schema, package version, Python executable, and frozen code fingerprint exactly match the current installed runtime. Otherwise it requests clean shutdown, waits for the existing singleton boundary to release, starts the current runtime, and verifies the new daemon identity before changing the Claude registration. Cursor project preflight lists registered Workspace roots from the existing canonical database before that restart, so the listing is read-only and accepts a migratable older schema (`<= SCHEMA_VERSION`, Workspace identity columns stable since schema v2). A newer schema remains refused. After the current daemon is verified, install enumerates again under the current schema. The immediately preceding protocol-v1 daemon predates `runtime_diagnostics`; a structured `invalid_request` for that additive method is treated as the one supported compatibility transition. Harness validates its legacy `status`, refuses a newer schema, uses the already-supported `shutdown`, and then verifies the restarted current runtime. No other diagnostics error authorizes replacement. `harness uninstall` likewise upgrades/restarts a stale or legacy owned daemon before project-skill cleanup so destructive integration cleanup does not execute under old loaded code.
 
 The installed CLI also exposes read-only `harness skills list` for the canonical external skill registry.
 
@@ -41,6 +41,7 @@ Automated tests and the installed-wheel smoke must prove:
 - doctor live-Workspace deadlines remain finite and tests can still expire them;
 - daemon diagnostics preserve exact schema/version/interpreter/code fingerprint contracts;
 - the previously released protocol-v1 daemon without `runtime_diagnostics` is upgraded only through validated legacy `status` plus clean `shutdown`;
+- install/uninstall Workspace-root listing before daemon restart accepts a migratable older schema and still refuses a newer schema;
 - reinstall through a second Python 3.13 environment replaces the stale daemon and Claude registration;
 - a stale code fingerprint is replaced even when version and interpreter path are unchanged;
 - installed-wheel lifecycle reaches a full doctor with zero failures after install and scan.

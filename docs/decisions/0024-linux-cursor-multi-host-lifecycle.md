@@ -5,6 +5,7 @@
 - **Amended:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 - **Later amendment:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes owned global `user-harness`. Production Cursor MCP is project-only `.cursor/mcp.json` `harness`, enabled with official `agent mcp enable harness`. `WORKSPACE_FOLDER_PATHS` is not Workspace identity. Overlay-refuse on a Cursor-profile process applies only when interpolated `HARNESS_WORKSPACE_ROOT` is the overlay.
+- **Codex amendment:** [ADR-0030](0030-codex-project-scoped-workspace-mcp.md) adds Codex and makes install-all incompatible while preserving uninstall-all.
 
 ## Context
 

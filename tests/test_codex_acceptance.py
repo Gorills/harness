@@ -1,0 +1,148 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from accept_codex import (
+    CodexAcceptanceError,
+    _acceptance_prompt,
+    _isolated_environment,
+    _prepare_temporary_codex_home,
+    _validate_wire_tools,
+    completed_harness_tool_calls,
+    main,
+)
+
+
+def test_codex_acceptance_scopes_api_key_away_from_local_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("CODEX_API_KEY", "acceptance-secret")
+
+    environment = _isolated_environment(tmp_path, tmp_path / "codex")
+
+    assert "CODEX_API_KEY" not in environment
+
+
+def test_codex_acceptance_extracts_only_successful_completed_harness_calls() -> None:
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_status",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "other",
+                "tool": "ignored",
+                "status": "completed",
+            },
+        },
+        {"type": "item.started", "item": {"type": "mcp_tool_call"}},
+    ]
+    assert completed_harness_tool_calls(events) == ("project_status",)
+
+
+def test_codex_acceptance_rejects_failed_harness_call() -> None:
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server_name": "harness",
+                "name": "project_status",
+                "status": "failed",
+                "error": "boom",
+            },
+        }
+    ]
+    with pytest.raises(CodexAcceptanceError, match="tool call failed"):
+        completed_harness_tool_calls(events)
+
+
+def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
+    properties = {
+        "project_status": (),
+        "project_search": ("query", "scope", "limit"),
+        "project_context": ("refs",),
+        "task_start": ("title", "stack_hints", "task_id", "expected_revision"),
+        "task_checkpoint": (
+            "task_id",
+            "expected_revision",
+            "state",
+            "summary",
+            "next_step",
+            "wait_reason",
+            "verification",
+            "knowledge",
+        ),
+    }
+    tools = [
+        {
+            "name": name,
+            "description": f"{name} description",
+            "inputSchema": {
+                "type": "object",
+                "properties": {key: {} for key in keys},
+                "additionalProperties": False,
+            },
+        }
+        for name, keys in properties.items()
+    ]
+
+    assert _validate_wire_tools(tools) == tuple(properties)
+
+
+def test_codex_acceptance_prompt_uses_searchable_fixture_and_complete_verification() -> None:
+    prompt = _acceptance_prompt()
+
+    assert "project_search for pyproject with scope code" in prompt
+    assert "with evidence 'Codex CLI completed all five Harness MCP calls'" in prompt
+
+
+def test_codex_acceptance_uses_private_temporary_trust(tmp_path: Path) -> None:
+    workspaces = (tmp_path / "repo.with.dot", tmp_path / "second repo")
+    for workspace in workspaces:
+        workspace.mkdir()
+    codex_home = _prepare_temporary_codex_home(tmp_path, workspaces)
+
+    assert (codex_home.stat().st_mode & 0o777) == 0o700
+    config = codex_home / "config.toml"
+    assert (config.stat().st_mode & 0o777) == 0o600
+    assert config.read_text(encoding="utf-8") == "\n".join(
+        f'[projects."{workspace.resolve()}"]\ntrust_level = "trusted"\n' for workspace in workspaces
+    )
+
+
+def test_codex_acceptance_requires_explicit_model_usage_acknowledgement(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(()) == 2
+    output = capsys.readouterr().out
+    assert "External destination: the OpenAI Codex service" in output
+    assert "one model run" in output
+    assert "No user repository source is included" in output
+    assert "Pass --run-model only after approval" in output
+
+
+def test_codex_acceptance_requires_explicit_api_key_for_model(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("CODEX_API_KEY", raising=False)
+
+    assert main(("--run-model",)) == 1
+    output = capsys.readouterr().out
+    assert "requires CODEX_API_KEY" in output or "set CODEX_API_KEY" in output
+    assert "do not paste it into chat" in output

@@ -9,6 +9,7 @@ from typing import Final
 from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
 from harness.host_adapters import (
     claude_code_skill_projection_surface,
+    codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
@@ -25,9 +26,10 @@ from harness.skills import (
     plan_skill_projection,
     resolve_workspace_skills,
     validate_skill_projection_compatibility,
+    validate_skill_projection_surface_combination,
 )
 
-_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "cursor"})
+_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "codex", "cursor"})
 
 
 class SkillRuntimeError(RuntimeError):
@@ -69,6 +71,16 @@ def validate_skill_definitions_for_profiles(
 ) -> None:
     """Validate canonical skill metadata for the selected supported host profiles."""
     validate_skill_projection_compatibility(definitions, _surfaces_for_profiles(profiles))
+
+
+def validate_skill_profile_combination(profiles: Sequence[str]) -> None:
+    """Reject active hosts that cannot share a duplicate-free project skill layout."""
+    try:
+        validate_skill_projection_surface_combination(_surfaces_for_profiles(profiles))
+    except SkillError as exc:
+        raise SkillRuntimeError(
+            "active host profiles cannot share a duplicate-free skill projection"
+        ) from exc
 
 
 def reconcile_workspace_skills(
@@ -177,6 +189,8 @@ def _surfaces_for_profiles(profiles: Sequence[str]) -> tuple[SkillProjectionSurf
     for profile in normalized:
         if profile == "claude-code":
             surfaces.append(claude_code_skill_projection_surface())
+        elif profile == "codex":
+            surfaces.append(codex_skill_projection_surface())
         elif profile == "cursor":
             surfaces.append(cursor_skill_projection_surface())
     return tuple(surfaces)

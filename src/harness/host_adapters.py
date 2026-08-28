@@ -474,6 +474,12 @@ def workspace_hints_from_environment(
                 executable=Path("claude"), python_executable=Path(sys.executable)
             )
             return adapter.workspace_hints(values)
+        if profile == _CODEX_PROFILE:
+            from harness.codex_adapter import CodexAdapter
+
+            return CodexAdapter(
+                executable=Path("codex"), python_executable=Path(sys.executable)
+            ).workspace_hints(values)
         if profile == _CURSOR_PROFILE:
             from harness.cursor_adapter import discover_cursor_adapter
 

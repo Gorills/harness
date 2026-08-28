@@ -484,6 +484,36 @@ def plan_skill_projection(
     if not surfaces:
         return SkillProjectionPlan(root, (), ())
     validate_skill_projection_compatibility(tuple(r.definition for r in resolved_skills), surfaces)
+    chosen = validate_skill_projection_surface_combination(surfaces)
+    definitions = tuple(resolved.definition for resolved in resolved_skills)
+    managed_roots = tuple(
+        sorted({visible for surface in surfaces for visible in surface.visible_roots}, key=str)
+    )
+    recursive_visible_roots = tuple(
+        sorted(
+            {visible for surface in surfaces for visible in surface.recursive_visible_roots},
+            key=str,
+        )
+    )
+    return SkillProjectionPlan(
+        workspace_root=root,
+        targets=tuple(
+            SkillProjectionTarget(relative_root=item, skills=definitions) for item in chosen
+        ),
+        managed_roots=managed_roots,
+        recursive_visible_roots=recursive_visible_roots,
+    )
+
+
+def validate_skill_projection_surface_combination(
+    surfaces: Sequence[SkillProjectionSurface],
+) -> tuple[PurePosixPath, ...]:
+    """Return the minimal duplicate-free roots, or reject incompatible host surfaces."""
+    if not surfaces:
+        return ()
+    profiles = [surface.profile for surface in surfaces]
+    if len(set(profiles)) != len(profiles):
+        raise SkillProjectionError("skill projection profiles must be unique")
     candidates = tuple(sorted({surface.target_root for surface in surfaces}, key=str))
     valid: list[tuple[int, tuple[str, ...], tuple[PurePosixPath, ...]]] = []
     for count in range(1, len(candidates) + 1):
@@ -509,24 +539,7 @@ def plan_skill_projection(
             "active host skill visibility roots cannot produce a duplicate-free projection plan"
         )
     _, _, chosen = min(valid)
-    definitions = tuple(resolved.definition for resolved in resolved_skills)
-    managed_roots = tuple(
-        sorted({visible for surface in surfaces for visible in surface.visible_roots}, key=str)
-    )
-    recursive_visible_roots = tuple(
-        sorted(
-            {visible for surface in surfaces for visible in surface.recursive_visible_roots},
-            key=str,
-        )
-    )
-    return SkillProjectionPlan(
-        workspace_root=root,
-        targets=tuple(
-            SkillProjectionTarget(relative_root=item, skills=definitions) for item in chosen
-        ),
-        managed_roots=managed_roots,
-        recursive_visible_roots=recursive_visible_roots,
-    )
+    return chosen
 
 
 def inspect_skill_projection(

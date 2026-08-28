@@ -74,8 +74,14 @@ def connect_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def connect_database_read_only(path: Path) -> sqlite3.Connection:
-    """Open an initialized Harness database read-only without creating quiescent WAL sidecars."""
+def connect_database_read_only(
+    path: Path, *, allow_older_schema: bool = False
+) -> sqlite3.Connection:
+    """Open an initialized Harness database read-only without creating quiescent WAL sidecars.
+
+    ``allow_older_schema`` is for install/uninstall Workspace-root listing before
+    daemon migration. It still refuses a schema newer than this runtime.
+    """
     _require_read_only_database_file(path)
     query = "mode=ro" if _live_wal_sidecars_are_safe(path) else "mode=ro&immutable=1"
     database = f"{path.absolute().as_uri()}?{query}"
@@ -87,7 +93,7 @@ def connect_database_read_only(path: Path) -> sqlite3.Connection:
             raise DatabaseError("SQLite foreign key enforcement could not be enabled")
         current_version = _read_schema_version(connection)
         _ensure_supported_schema(current_version)
-        if current_version != SCHEMA_VERSION:
+        if current_version != SCHEMA_VERSION and not allow_older_schema:
             raise InvalidSchemaStateError(
                 f"database schema is {current_version}; initialize it before opening"
             )

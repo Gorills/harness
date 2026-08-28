@@ -104,11 +104,11 @@ Isolated `scripts/dev harness install` is refused on purpose. To copy this check
 
 ```bash
 make install-global
-make install-global HOST=all
+make install-global HOST=codex
 make doctor-global
 ```
 
-`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, fully quit and reopen Cursor.
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=claude-code` and `HOST=codex` select those profiles; install each compatible active profile separately because the three-profile skill graph is rejected. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
 
 This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Production Cursor MCP is project-only and is never rewritten here. Checkout agents must not call leftover `user-harness`. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated overlay root lists no tools, including when `WORKSPACE_FOLDER_PATHS` names a working repository. After `make install-global`, the installed Harness migrates leftover `user-harness`, re-approves project configs, and does not touch checkout `.harness/`. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
 

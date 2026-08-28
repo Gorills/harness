@@ -22,7 +22,7 @@ usage() {
 Refresh the user-global Harness install from this checkout.
 
 Usage:
-  scripts/install-global [--host cursor|claude-code|all] [--no-doctor]
+  scripts/install-global [--host cursor|claude-code|codex] [--no-doctor]
   scripts/install-global --doctor-only
   scripts/install-global --dry-run [--host ...]
 
@@ -36,12 +36,10 @@ It never uses scripts/dev, checkout `.venv/bin/harness`, or overlay XDG paths.
 Checkout agents must not run this; operators use `make install-global`.
 
 The tracked `.cursor/mcp.json` overlay in this repository is the intended
-checkout-local server (`harness-dev`). Production Cursor MCP is project-only
-`.cursor/mcp.json` `harness`, enabled with `agent mcp enable harness`. This
-helper migrates leftover global `user-harness`, re-approves project configs,
-and does not touch checkout `.harness/` overlay state. Test the global install
-from another Git worktree, then fully quit and reopen Cursor if MCP config
-changed.
+checkout-local server (`harness-dev`). Production Codex and Cursor MCP are
+project-only. This helper refreshes the selected profile and does not touch
+checkout `.harness/` overlay state. Test the global install from another Git
+worktree, then restart the selected host if project MCP config changed.
 EOF
 }
 
@@ -138,9 +136,9 @@ leave_isolated_overlay() {
 
 validate_host() {
     case "$HOST" in
-        cursor | claude-code | all) return 0 ;;
+        cursor | claude-code | codex) return 0 ;;
         *)
-            echo "scripts/install-global: --host must be cursor, claude-code, or all (got: $HOST)" >&2
+            echo "scripts/install-global: --host must be cursor, claude-code, or codex (got: $HOST)" >&2
             return 1
             ;;
     esac
@@ -180,7 +178,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --host)
             if [[ $# -lt 2 ]]; then
-                echo "scripts/install-global: --host requires cursor, claude-code, or all" >&2
+                echo "scripts/install-global: --host requires cursor, claude-code, or codex" >&2
                 exit 1
             fi
             HOST="$2"
@@ -265,8 +263,8 @@ fi
 
 cat <<EOF
 Global Harness now uses $HARNESS_BIN from this checkout.
-Production Cursor MCP is project-only `.cursor/mcp.json` harness, enabled with
-`agent mcp enable harness`. This checkout overlay remains harness-dev and is
-not rewritten. Test the global install from another Git worktree. If Cursor MCP
-config changed, fully quit and reopen Cursor.
+Production Cursor MCP is project-only \`.cursor/mcp.json\` harness, enabled with
+\`agent mcp enable harness\`; Codex MCP is project-only \`.codex/config.toml\`.
+This checkout overlay remains harness-dev and is not rewritten. Test the global
+install from another Git worktree and restart the selected host after changes.
 EOF

@@ -651,5 +651,5 @@ def test_harness_skills_sync_and_validate_builtin_quality_pack(
     monkeypatch.setattr(sys, "argv", ["harness", "skills", "validate"])
     assert harness_main() == 0
     out = capsys.readouterr().out
-    assert "Host profiles: claude-code, cursor" in out
+    assert "Host profiles: claude-code, codex, cursor" in out
     assert "Skill validation: OK" in out

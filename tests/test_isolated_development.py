@@ -584,9 +584,12 @@ def test_makefile_routes_global_install_through_the_helper() -> None:
     help_result = _run(["make", "-C", str(REPO_ROOT), "help"], cwd=REPO_ROOT)
     assert help_result.returncode == 0, help_result.stderr
     assert "make install-global" in help_result.stdout
-    dry = _run(["make", "-C", str(REPO_ROOT), "-n", "install-global", "HOST=all"], cwd=REPO_ROOT)
+    dry = _run(
+        ["make", "-C", str(REPO_ROOT), "-n", "install-global", "HOST=codex"],
+        cwd=REPO_ROOT,
+    )
     assert dry.returncode == 0, dry.stderr
-    assert "./scripts/install-global --host all" in dry.stdout
+    assert "./scripts/install-global --host codex" in dry.stdout
 
 
 def test_install_global_script_does_not_source_overlay_env() -> None:
@@ -595,6 +598,17 @@ def test_install_global_script_does_not_source_overlay_env() -> None:
     assert 'source "$script_dir/dev-env.sh"' not in text
     assert "source ./scripts/dev-env.sh" not in text
     assert "--force --reinstall --python" in text
+
+
+def test_install_global_epilogue_does_not_command_substitute() -> None:
+    text = INSTALL_GLOBAL_SCRIPT.read_text(encoding="utf-8")
+    epilogue = text.rsplit("cat <<EOF\n", 1)[1]
+    body = epilogue.split("\nEOF\n", 1)[0]
+    assert "$HARNESS_BIN" in body
+    assert r"\`.cursor/mcp.json\`" in body
+    assert r"\`.codex/config.toml\`" in body
+    assert r"\`agent mcp enable harness\`" in body
+    assert "`" not in body.replace("\\`", "")
 
 
 def test_install_global_help_does_not_require_uv() -> None:
@@ -608,7 +622,7 @@ def test_install_global_help_does_not_require_uv() -> None:
 def test_install_global_rejects_unknown_host() -> None:
     result = _run([str(INSTALL_GLOBAL_SCRIPT), "--host", "vscode"], cwd=REPO_ROOT)
     assert result.returncode == 1
-    assert "cursor, claude-code, or all" in result.stderr
+    assert "cursor, claude-code, or codex" in result.stderr
 
 
 def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: Path) -> None:
@@ -653,17 +667,17 @@ def test_install_global_dry_run_keeps_non_overlay_xdg(tmp_path: Path) -> None:
         },
     )
     result = _run(
-        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "all"],
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "codex"],
         cwd=REPO_ROOT,
         env=env,
     )
     assert result.returncode == 0, result.stderr
     fields = _plan_fields(result.stdout)
-    assert fields["host"] == "all"
+    assert fields["host"] == "codex"
     assert fields["XDG_STATE_HOME"] == str(custom_state)
     assert fields["XDG_RUNTIME_DIR"] == str(custom_runtime)
     assert fields["HARNESS_DEV_ROOT"] == ""
-    assert fields["lifecycle_command"].endswith(" install --host all")
+    assert fields["lifecycle_command"].endswith(" install --host codex")
 
 
 def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> None:
@@ -1018,6 +1032,29 @@ def test_production_mcp_stdio_lists_no_tools_for_cursor_user_server_folder_paths
         methods=("tools/list",),
     )
     assert still_missing[0]["result"]["tools"] == []
+
+
+def test_production_mcp_stdio_lists_no_tools_for_codex_without_project_root(
+    tmp_path: Path,
+) -> None:
+    ordinary = _git_workspace(tmp_path / "ordinary")
+    env = dict(os.environ)
+    env.pop("HARNESS_WORKSPACE_ROOT", None)
+    env.pop("CLAUDE_PROJECT_DIR", None)
+    env["HARNESS_HOST_PROFILE"] = "codex"
+
+    refused = _mcp_stdio_exchange(
+        cwd=ordinary,
+        env=env,
+        methods=("server/discover", "tools/list"),
+        call={"name": "project_status", "arguments": {}},
+    )
+    instructions = str(refused[0]["result"]["instructions"])
+    assert "Codex MCP has no Workspace root" in instructions
+    assert "trusted project .codex/config.toml" in instructions
+    assert len(instructions.encode("utf-8")) < 1024
+    assert refused[1]["result"]["tools"] == []
+    assert "did not receive a Workspace root" in refused[2]["error"]["message"]
 
     allowed = dict(env)
     allowed["HARNESS_WORKSPACE_ROOT"] = str(ordinary)

@@ -19,7 +19,7 @@ help:
 	  '  make install-global                 refresh the user-global uv-tool Harness' \
 	  '  make install-global HOST=cursor     same (default host; primary Linux close-out)' \
 	  '  make install-global HOST=claude-code' \
-	  '  make install-global HOST=all        update every supported host profile' \
+	  '  make install-global HOST=codex' \
 	  '  make doctor-global                  run the user-global harness doctor only' \
 	  '' \
 	  'install-global reinstalls this tree with uv 0.12.5, then runs that' \

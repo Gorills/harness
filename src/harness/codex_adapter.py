@@ -1,0 +1,827 @@
+from __future__ import annotations
+
+import ctypes
+import errno
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.host_adapters import (
+    HostIntegrationError,
+    HostRegistrationCollisionError,
+    HostRegistrationState,
+    IntegrationChange,
+    codex_skill_projection_surface,
+)
+from harness.skills import SkillProjectionSurface
+from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
+
+_CODEX_PROFILE = "codex"
+_HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
+_WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
+_SERVER_NAME = "harness"
+_OWNER_MARKER = ".harness-mcp-owner.json"
+_OWNER_VERSION = 1
+_EXCLUDE_BEGIN = "# BEGIN HARNESS CODEX MCP"
+_EXCLUDE_END = "# END HARNESS CODEX MCP"
+_EXCLUDE_BODY = ("/.codex/config.toml", f"/.codex/{_OWNER_MARKER}")
+_GIT_TIMEOUT_SECONDS = 5.0
+
+CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
+    "Codex MCP did not receive a Workspace root. Production Harness MCP must be "
+    "launched from the trusted project .codex/config.toml with explicit "
+    "HARNESS_WORKSPACE_ROOT. Re-run `harness scan` for this Workspace and restart "
+    "the Codex client."
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CodexProjectRegistrationDiagnostic:
+    """Read-only state for one project-scoped Codex Harness MCP registration."""
+
+    path: Path
+    state: HostRegistrationState
+    expected_python: Path
+    configured_python: str | None
+    configured_workspace_root: str | None
+    harness_owned: bool
+    preflight_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnerMarker:
+    workspace_root: str
+
+
+@dataclass(frozen=True, slots=True)
+class CodexAdapter:
+    """Codex project-scoped MCP configuration with explicit Workspace identity.
+
+    Harness automatically mutates only a complete ``.codex/config.toml`` container
+    proven by its adjacent ownership marker. Existing user or tracked TOML is never
+    rewritten; an exact desired server entry may instead be adopted manually.
+    """
+
+    executable: Path
+    python_executable: Path
+
+    @property
+    def profile(self) -> str:
+        return _CODEX_PROFILE
+
+    def skill_projection_surface(self) -> SkillProjectionSurface:
+        return codex_skill_projection_surface()
+
+    def registration_state(self) -> HostRegistrationState:
+        """Codex uses project-scoped registration; Harness owns no user-global entry."""
+        return HostRegistrationState.ABSENT
+
+    def register_mcp(self) -> IntegrationChange:
+        """Leave user-global Codex configuration untouched."""
+        return IntegrationChange.UNCHANGED
+
+    def unregister_mcp(self) -> IntegrationChange:
+        """Leave user-global Codex configuration untouched."""
+        return IntegrationChange.UNCHANGED
+
+    def workspace_hints(self, environment: Mapping[str, str]) -> tuple[WorkspaceHint, ...]:
+        configured = environment.get(_WORKSPACE_ROOT_ENV)
+        if not configured:
+            raise HostIntegrationError(CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE)
+        root = _workspace_root(Path(configured))
+        return (
+            WorkspaceHint(
+                path=root,
+                source="codex-project-config-root",
+                match_mode=WorkspaceHintMatchMode.ROOT,
+            ),
+        )
+
+    def project_registration_state(
+        self, workspace_root: Path, *, hidden: bool = False
+    ) -> HostRegistrationState:
+        return self.project_registration_diagnostic(workspace_root, hidden=hidden).state
+
+    def project_registration_diagnostic(
+        self, workspace_root: Path, *, hidden: bool = False
+    ) -> CodexProjectRegistrationDiagnostic:
+        root = _workspace_root(workspace_root)
+        path = _config_path(root)
+        marker = _read_owner_marker(root)
+        raw = _read_optional_regular_file(path, label="Codex project config")
+        configured_python: str | None = None
+        configured_root: str | None = None
+
+        if raw is None:
+            state = (
+                HostRegistrationState.STALE_OWNED
+                if marker is not None
+                else HostRegistrationState.ABSENT
+            )
+        else:
+            value = _parse_toml(raw, path)
+            entry = _harness_entry(value)
+            configured_python, configured_root = _entry_identity(entry)
+            if entry is None:
+                state = HostRegistrationState.ABSENT
+            elif marker is not None:
+                if not _config_is_owned_shape(value, root):
+                    state = HostRegistrationState.FOREIGN
+                elif _config_is_desired(value, root, self.python_executable, hidden=hidden):
+                    state = HostRegistrationState.CURRENT
+                else:
+                    state = HostRegistrationState.STALE_OWNED
+            elif _manual_config_is_desired(value, root, self.python_executable, hidden=hidden):
+                state = HostRegistrationState.CURRENT
+            else:
+                state = HostRegistrationState.FOREIGN
+
+        preflight_error: str | None = None
+        try:
+            self.preflight_project_reconcile(root, hidden=hidden)
+        except HostIntegrationError as exc:
+            preflight_error = str(exc)
+        return CodexProjectRegistrationDiagnostic(
+            path=path,
+            state=state,
+            expected_python=self.python_executable,
+            configured_python=configured_python,
+            configured_workspace_root=configured_root,
+            harness_owned=marker is not None,
+            preflight_error=preflight_error,
+        )
+
+    def preflight_project_reconcile(self, workspace_root: Path, *, hidden: bool = False) -> None:
+        root = _workspace_root(workspace_root)
+        path = _config_path(root)
+        marker_path = _marker_path(root)
+        marker = _read_owner_marker(root)
+        raw = _read_optional_regular_file(path, label="Codex project config")
+
+        if _git_is_tracked(root, marker_path.relative_to(root)):
+            raise HostIntegrationError(
+                f"tracked Harness Codex ownership marker requires manual cleanup: {marker_path}"
+            )
+        if _git_is_tracked(root, path.relative_to(root)):
+            if raw is not None and _manual_config_is_desired(
+                _parse_toml(raw, path), root, self.python_executable, hidden=hidden
+            ):
+                return
+            requirement = (
+                "an exact manual Harness MCP entry plus the Harness Hidden developer instructions"
+                if hidden
+                else "an exact manual Harness MCP entry"
+            )
+            raise HostIntegrationError(
+                f"tracked .codex/config.toml requires {requirement}; "
+                "Harness will not modify tracked Codex configuration"
+            )
+        if raw is None:
+            return
+
+        value = _parse_toml(raw, path)
+        entry = _harness_entry(value)
+        if marker is not None and not _config_is_owned_shape(value, root):
+            raise HostIntegrationError(
+                "Harness-owned Codex config contains unknown user content and cannot be "
+                f"rewritten: {path}"
+            )
+        if _manual_config_is_desired(value, root, self.python_executable, hidden=hidden):
+            return
+        if marker is not None and _config_is_owned_shape(value, root):
+            return
+        if entry is None:
+            raise HostIntegrationError(
+                "existing .codex/config.toml is user-owned; add the Harness MCP table "
+                "manually or move the existing project configuration before retrying"
+            )
+        raise HostRegistrationCollisionError(
+            f"Codex project config already has a non-Harness MCP server named 'harness': {path}"
+        )
+
+    def reconcile_project(self, workspace_root: Path, *, hidden: bool = False) -> IntegrationChange:
+        root = _workspace_root(workspace_root)
+        self.preflight_project_reconcile(root, hidden=hidden)
+        path = _config_path(root)
+        marker_path = _marker_path(root)
+        raw = _read_optional_regular_file(path, label="Codex project config")
+        marker = _read_owner_marker(root)
+
+        if raw is not None:
+            value = _parse_toml(raw, path)
+            if marker is None and _manual_config_is_desired(
+                value, root, self.python_executable, hidden=hidden
+            ):
+                return IntegrationChange.UNCHANGED
+            if marker is not None and _config_is_desired(
+                value, root, self.python_executable, hidden=hidden
+            ):
+                if marker is not None and _ensure_codex_exclude(root):
+                    return IntegrationChange.CHANGED
+                return IntegrationChange.UNCHANGED
+            if marker is None or not _config_is_owned_shape(value, root):
+                raise HostRegistrationCollisionError(
+                    f"Codex project config cannot be safely reconciled: {path}"
+                )
+
+        desired = _desired_config(root, self.python_executable, hidden=hidden)
+        _require_directory_safe(path.parent)
+        if marker is None:
+            _replace_if_unchanged(
+                marker_path,
+                None,
+                _owner_marker_bytes(root),
+                0o600,
+                label="Codex ownership marker",
+            )
+        _ensure_codex_exclude(root)
+        _replace_if_unchanged(
+            path,
+            raw,
+            desired,
+            0o600 if raw is None else stat.S_IMODE(path.lstat().st_mode),
+            label="Codex project config",
+        )
+        return IntegrationChange.CHANGED
+
+    def preflight_project_remove(self, workspace_root: Path) -> None:
+        root = _workspace_root(workspace_root)
+        path = _config_path(root)
+        marker_path = _marker_path(root)
+        marker = _read_owner_marker(root)
+        raw = _read_optional_regular_file(path, label="Codex project config")
+        if marker is None:
+            if raw is None:
+                return
+            entry = _harness_entry(_parse_toml(raw, path))
+            if entry is None or _entry_is_desired(entry, root, self.python_executable):
+                return
+            raise HostRegistrationCollisionError(
+                f"Codex project config has a non-Harness MCP server named 'harness': {path}"
+            )
+        if _git_is_tracked(root, path.relative_to(root)) or _git_is_tracked(
+            root, marker_path.relative_to(root)
+        ):
+            raise HostIntegrationError(
+                "tracked Harness Codex project configuration requires manual removal"
+            )
+        if raw is not None and not _config_is_owned_shape(_parse_toml(raw, path), root):
+            raise HostIntegrationError(
+                "Harness-owned Codex config contains unknown user content and cannot be removed: "
+                f"{path}"
+            )
+
+    def remove_project(self, workspace_root: Path) -> IntegrationChange:
+        root = _workspace_root(workspace_root)
+        self.preflight_project_remove(root)
+        path = _config_path(root)
+        marker_path = _marker_path(root)
+        marker = _read_owner_marker(root)
+        raw = _read_optional_regular_file(path, label="Codex project config")
+        if marker is None:
+            if raw is None:
+                return IntegrationChange.UNCHANGED
+            entry = _harness_entry(_parse_toml(raw, path))
+            if entry is None or _entry_is_desired(entry, root, self.python_executable):
+                return IntegrationChange.UNCHANGED
+            raise HostRegistrationCollisionError(
+                f"Codex project config has a non-Harness MCP server named 'harness': {path}"
+            )
+        if _git_is_tracked(root, path.relative_to(root)) or _git_is_tracked(
+            root, marker_path.relative_to(root)
+        ):
+            raise HostIntegrationError(
+                "tracked Harness Codex project configuration requires manual removal"
+            )
+        if raw is not None and not _config_is_owned_shape(_parse_toml(raw, path), root):
+            raise HostIntegrationError(
+                "Harness-owned Codex config contains unknown user content and cannot be removed: "
+                f"{path}"
+            )
+        if raw is not None:
+            _delete_if_unchanged(path, raw, label="Codex project config")
+        marker_raw = _read_optional_regular_file(marker_path, label="Codex ownership marker")
+        if marker_raw is not None:
+            _delete_if_unchanged(marker_path, marker_raw, label="Codex ownership marker")
+        if not _another_owned_worktree(root):
+            _remove_codex_exclude(root)
+        _remove_empty_directory(path.parent)
+        return IntegrationChange.CHANGED
+
+
+def discover_codex_adapter(
+    *,
+    environment: Mapping[str, str] | None = None,
+    python_executable: Path | None = None,
+) -> CodexAdapter | None:
+    """Discover the Codex CLI without reading or mutating user configuration."""
+    values = os.environ if environment is None else environment
+    executable = shutil.which("codex", path=values.get("PATH"))
+    if executable is None:
+        return None
+    return CodexAdapter(
+        executable=_absolute_executable_path(executable),
+        python_executable=_absolute_executable_path(
+            Path(sys.executable) if python_executable is None else python_executable
+        ),
+    )
+
+
+def codex_profile_missing_workspace_root(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    values = os.environ if environment is None else environment
+    return values.get(_HOST_PROFILE_ENV) == _CODEX_PROFILE and not values.get(_WORKSPACE_ROOT_ENV)
+
+
+def codex_owned_hidden_instructions_active(workspace_root: Path) -> bool:
+    """Return whether a marker-owned project config contains the exact Hidden policy."""
+    root = _workspace_root(workspace_root)
+    if _read_owner_marker(root) is None:
+        return False
+    path = _config_path(root)
+    raw = _read_optional_regular_file(path, label="Codex project config")
+    if raw is None:
+        return False
+    value = _parse_toml(raw, path)
+    return (
+        _config_is_owned_shape(value, root)
+        and value.get("developer_instructions") == HIDDEN_INSTRUCTION_BODY
+    )
+
+
+def _desired_entry(root: Path, python_executable: Path) -> dict[str, object]:
+    return {
+        "command": str(python_executable),
+        "args": ["-m", "harness.mcp_process"],
+        "cwd": str(root),
+        "env": {
+            _HOST_PROFILE_ENV: _CODEX_PROFILE,
+            _WORKSPACE_ROOT_ENV: str(root),
+        },
+    }
+
+
+def _desired_config(root: Path, python_executable: Path, *, hidden: bool = False) -> bytes:
+    entry = _desired_entry(root, python_executable)
+    lines = [
+        "# Generated and owned by Harness. Do not edit this file in place.",
+    ]
+    if hidden:
+        lines.extend(
+            [
+                f"developer_instructions = {_toml_string(HIDDEN_INSTRUCTION_BODY)}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "[mcp_servers.harness]",
+            f"command = {_toml_string(entry['command'])}",
+            'args = ["-m", "harness.mcp_process"]',
+            f"cwd = {_toml_string(entry['cwd'])}",
+            "",
+            "[mcp_servers.harness.env]",
+            f"{_HOST_PROFILE_ENV} = {_toml_string(_CODEX_PROFILE)}",
+            f"{_WORKSPACE_ROOT_ENV} = {_toml_string(root)}",
+            "",
+        ]
+    )
+    return "\n".join(lines).encode("utf-8")
+
+
+def _toml_string(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=True)
+
+
+def _parse_toml(raw: bytes, path: Path) -> dict[str, object]:
+    try:
+        value = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise HostIntegrationError(f"Codex project config is not valid UTF-8 TOML: {path}") from exc
+    if not isinstance(value, dict):
+        raise HostIntegrationError(f"Codex project config top level must be a table: {path}")
+    return value
+
+
+def _harness_entry(value: dict[str, object]) -> dict[str, object] | None:
+    servers = value.get("mcp_servers")
+    if servers is None:
+        return None
+    if not isinstance(servers, dict):
+        return None
+    entry = servers.get(_SERVER_NAME)
+    return entry if isinstance(entry, dict) else None
+
+
+def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | None]:
+    if entry is None:
+        return None, None
+    command = entry.get("command")
+    env = entry.get("env")
+    root = env.get(_WORKSPACE_ROOT_ENV) if isinstance(env, dict) else None
+    return (
+        command if isinstance(command, str) else None,
+        root if isinstance(root, str) else None,
+    )
+
+
+def _entry_is_desired(entry: dict[str, object] | None, root: Path, python_executable: Path) -> bool:
+    return entry == _desired_entry(root, python_executable)
+
+
+def _manual_config_is_desired(
+    value: dict[str, object],
+    root: Path,
+    python_executable: Path,
+    *,
+    hidden: bool,
+) -> bool:
+    if not _entry_is_desired(_harness_entry(value), root, python_executable):
+        return False
+    return not hidden or value.get("developer_instructions") == HIDDEN_INSTRUCTION_BODY
+
+
+def _config_is_desired(
+    value: dict[str, object],
+    root: Path,
+    python_executable: Path,
+    *,
+    hidden: bool,
+) -> bool:
+    return _config_is_owned_shape(value, root) and value == tomllib.loads(
+        _desired_config(root, python_executable, hidden=hidden).decode("utf-8")
+    )
+
+
+def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
+    if set(value) not in ({"mcp_servers"}, {"developer_instructions", "mcp_servers"}):
+        return False
+    if (
+        "developer_instructions" in value
+        and value["developer_instructions"] != HIDDEN_INSTRUCTION_BODY
+    ):
+        return False
+    servers = value.get("mcp_servers")
+    if not isinstance(servers, dict) or set(servers) != {_SERVER_NAME}:
+        return False
+    entry = servers.get(_SERVER_NAME)
+    if not isinstance(entry, dict) or set(entry) != {"command", "args", "cwd", "env"}:
+        return False
+    env = entry.get("env")
+    return (
+        entry.get("args") == ["-m", "harness.mcp_process"]
+        and entry.get("cwd") == str(root)
+        and isinstance(entry.get("command"), str)
+        and isinstance(env, dict)
+        and env
+        == {
+            _HOST_PROFILE_ENV: _CODEX_PROFILE,
+            _WORKSPACE_ROOT_ENV: str(root),
+        }
+    )
+
+
+def _config_path(root: Path) -> Path:
+    return root / ".codex" / "config.toml"
+
+
+def _marker_path(root: Path) -> Path:
+    return root / ".codex" / _OWNER_MARKER
+
+
+def _owner_marker_bytes(root: Path) -> bytes:
+    return (
+        json.dumps(
+            {"version": _OWNER_VERSION, "workspace_root": str(root)},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _read_owner_marker(root: Path) -> _OwnerMarker | None:
+    path = _marker_path(root)
+    raw = _read_optional_regular_file(path, label="Codex ownership marker")
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HostIntegrationError(f"Codex ownership marker is malformed: {path}") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"version", "workspace_root"}
+        or value.get("version") != _OWNER_VERSION
+        or value.get("workspace_root") != str(root)
+    ):
+        raise HostIntegrationError(f"Codex ownership marker does not match Workspace: {path}")
+    return _OwnerMarker(workspace_root=str(root))
+
+
+def _workspace_root(path: Path) -> Path:
+    try:
+        location = path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HostIntegrationError(f"Codex Workspace path cannot be resolved: {path}") from exc
+    completed = _git(location, "rev-parse", "--show-toplevel")
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise HostIntegrationError(f"Codex Workspace is not a Git worktree: {location}")
+    try:
+        root = Path(completed.stdout.strip()).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise HostIntegrationError("Git returned an invalid Codex Workspace root") from exc
+    if not root.is_dir():
+        raise HostIntegrationError("Git returned a non-directory Codex Workspace root")
+    return root
+
+
+def _absolute_executable_path(value: str | Path) -> Path:
+    return Path(os.path.abspath(os.path.expanduser(os.fspath(value))))
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HostIntegrationError("Git could not inspect Codex project configuration") from exc
+
+
+def _git_is_tracked(root: Path, relative: Path) -> bool:
+    completed = _git(root, "ls-files", "--error-unmatch", "--", relative.as_posix())
+    if completed.returncode == 0:
+        return True
+    if completed.returncode == 1:
+        return False
+    raise HostIntegrationError("Git could not determine whether Codex project config is tracked")
+
+
+def _git_info_exclude(root: Path) -> Path:
+    completed = _git(root, "rev-parse", "--git-path", "info/exclude")
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise HostIntegrationError("Git info/exclude path could not be resolved")
+    path = Path(completed.stdout.strip())
+    if not path.is_absolute():
+        path = root / path
+    return Path(os.path.abspath(path))
+
+
+def _exclude_block() -> bytes:
+    return ("\n".join((_EXCLUDE_BEGIN, *_EXCLUDE_BODY, _EXCLUDE_END)) + "\n").encode()
+
+
+def _ensure_codex_exclude(root: Path) -> bool:
+    path = _git_info_exclude(root)
+    raw = _read_optional_regular_file(path, label="Git info/exclude")
+    block = _exclude_block()
+    content = b"" if raw is None else raw
+    if block in content:
+        return False
+    if _EXCLUDE_BEGIN.encode() in content or _EXCLUDE_END.encode() in content:
+        raise HostIntegrationError("Git info/exclude contains an ambiguous Harness Codex block")
+    if content and not content.endswith(b"\n"):
+        content += b"\n"
+    _replace_if_unchanged(
+        path,
+        raw,
+        content + block,
+        0o644 if raw is None else stat.S_IMODE(path.lstat().st_mode),
+        label="Git info/exclude",
+    )
+    return True
+
+
+def _remove_codex_exclude(root: Path) -> None:
+    path = _git_info_exclude(root)
+    raw = _read_optional_regular_file(path, label="Git info/exclude")
+    if raw is None:
+        return
+    block = _exclude_block()
+    if block not in raw:
+        return
+    _replace_if_unchanged(
+        path,
+        raw,
+        raw.replace(block, b"", 1),
+        stat.S_IMODE(path.lstat().st_mode),
+        label="Git info/exclude",
+    )
+
+
+def _another_owned_worktree(root: Path) -> bool:
+    completed = _git(root, "worktree", "list", "--porcelain")
+    if completed.returncode != 0:
+        raise HostIntegrationError("Git linked worktrees could not be inspected")
+    for line in completed.stdout.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        candidate = Path(line.removeprefix("worktree "))
+        try:
+            other = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if other == root or not other.is_dir():
+            continue
+        try:
+            if _read_owner_marker(other) is not None:
+                return True
+        except HostIntegrationError:
+            continue
+    return False
+
+
+def _read_optional_regular_file(path: Path, *, label: str) -> bytes | None:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise HostIntegrationError(f"{label} cannot be inspected: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise HostIntegrationError(f"{label} is not a real regular file: {path}")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise HostIntegrationError(f"{label} cannot be read: {path}") from exc
+
+
+def _require_directory_safe(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        metadata = path.lstat()
+    except OSError as exc:
+        raise HostIntegrationError(f"Codex config directory cannot be prepared: {path}") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise HostIntegrationError(f"Codex config directory is unsafe: {path}")
+
+
+def _replace_if_unchanged(
+    path: Path,
+    expected: bytes | None,
+    replacement: bytes,
+    mode: int,
+    *,
+    label: str,
+) -> None:
+    _require_directory_safe(path.parent)
+    fd, temporary_name = tempfile.mkstemp(prefix=".harness-codex-", dir=path.parent)
+    temporary = Path(temporary_name)
+    backup: Path | None = None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(replacement)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        if expected is None:
+            if not _move_if_absent(temporary, path):
+                raise HostRegistrationCollisionError(f"{label} appeared before mutation: {path}")
+            _fsync_directory(path.parent)
+            return
+        current = _read_optional_regular_file(path, label=label)
+        if current != expected:
+            raise HostRegistrationCollisionError(f"{label} changed before mutation: {path}")
+        backup = _unused_sibling(path, ".harness-codex-backup-")
+        if not _move_if_absent(path, backup):
+            raise HostIntegrationError(f"{label} backup path appeared: {backup}")
+        if _read_optional_regular_file(backup, label=label) != expected:
+            _restore_backup(path, backup, label=label)
+            backup = None
+            raise HostRegistrationCollisionError(f"{label} changed during mutation: {path}")
+        if not _move_if_absent(temporary, path):
+            _restore_backup(path, backup, label=label, preserve_if_occupied=True)
+            backup = None
+            raise HostRegistrationCollisionError(
+                f"{label} appeared during mutation; previous content was preserved: {path}"
+            )
+        backup.unlink()
+        backup = None
+        _fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _delete_if_unchanged(path: Path, expected: bytes, *, label: str) -> None:
+    if _read_optional_regular_file(path, label=label) != expected:
+        raise HostRegistrationCollisionError(f"{label} changed before removal: {path}")
+    backup = _unused_sibling(path, ".harness-codex-delete-")
+    if not _move_if_absent(path, backup):
+        raise HostIntegrationError(f"{label} removal backup path appeared: {backup}")
+    if _read_optional_regular_file(backup, label=label) != expected:
+        _restore_backup(path, backup, label=label)
+        raise HostRegistrationCollisionError(f"{label} changed during removal: {path}")
+    backup.unlink()
+    _fsync_directory(path.parent)
+
+
+def _restore_backup(
+    path: Path,
+    backup: Path,
+    *,
+    label: str,
+    preserve_if_occupied: bool = False,
+) -> None:
+    if _path_exists(path):
+        if preserve_if_occupied:
+            return
+        raise HostIntegrationError(
+            f"{label} recovery could not restore {path}; backup preserved at {backup}"
+        )
+    if not _move_if_absent(backup, path):
+        raise HostIntegrationError(
+            f"{label} recovery could not restore {path}; backup preserved at {backup}"
+        )
+
+
+def _unused_sibling(path: Path, prefix: str) -> Path:
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=path.parent)
+    os.close(fd)
+    candidate = Path(name)
+    candidate.unlink()
+    return candidate
+
+
+def _move_if_absent(source: Path, target: Path) -> bool:
+    if os.name == "nt":
+        raise HostIntegrationError("Codex project MCP configuration currently requires POSIX")
+    try:
+        library = ctypes.CDLL(None, use_errno=True)
+    except OSError as exc:
+        raise HostIntegrationError("atomic no-clobber rename is unavailable") from exc
+    source_bytes = os.fsencode(source)
+    target_bytes = os.fsencode(target)
+    renameat2 = getattr(library, "renameat2", None)
+    if renameat2 is not None:
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = renameat2(-100, source_bytes, -100, target_bytes, 1)
+    else:
+        renamex_np = getattr(library, "renamex_np", None)
+        if renamex_np is None:
+            raise HostIntegrationError("atomic no-clobber rename is unavailable")
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = renamex_np(source_bytes, target_bytes, 0x00000004)
+    if result == 0:
+        return True
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        return False
+    raise OSError(error_number, os.strerror(error_number), target)
+
+
+def _path_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise HostIntegrationError(f"Codex integration path cannot be inspected: {path}") from exc
+    return True
+
+
+def _remove_empty_directory(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

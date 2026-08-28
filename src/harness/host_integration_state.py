@@ -15,7 +15,7 @@ from harness.runtime_paths import RuntimePathError, RuntimePaths, ensure_private
 
 HOST_INTEGRATION_STATE_VERSION = 1
 HOST_INTEGRATION_STATE_FILENAME = "host-integrations.json"
-SUPPORTED_HOST_PROFILES = frozenset({"claude-code", "cursor"})
+SUPPORTED_HOST_PROFILES = frozenset({"claude-code", "codex", "cursor"})
 _WRITE_MODE = 0o600
 _TEMPORARY_PREFIX = ".harness-host-integrations-"
 

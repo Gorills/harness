@@ -1228,6 +1228,29 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
             )
             assert checkpoint.is_error is False
 
+        codex_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "harness.mcp_process"],
+            env=host_env("codex", root),
+            cwd=str(tmp_path),
+        )
+        async with Client(stdio_client(codex_params)) as client:
+            status = await client.call_tool("project_status")
+            assert status.is_error is False
+            assert status.structured_content is not None
+            assert status.structured_content["workspace_id"] == root_workspace_id
+            assert status.structured_content["current_task"]["task_id"] == task_id
+            knowledge = await client.call_tool(
+                "project_search",
+                {"query": "cross host invariant", "scope": "knowledge", "limit": 5},
+            )
+            assert knowledge.is_error is False
+            assert knowledge.structured_content is not None
+            assert any(
+                item["ref"].startswith("knowledge:")
+                for item in knowledge.structured_content["results"]
+            )
+
         cursor_params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "harness.mcp_process"],

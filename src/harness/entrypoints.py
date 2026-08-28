@@ -8,6 +8,7 @@ from threading import Event
 from types import FrameType
 
 from harness.builtin_skills import BuiltinSkillError, sync_builtin_skills
+from harness.codex_adapter import discover_codex_adapter
 from harness.cursor_adapter import (
     CursorProjectRuntimeStatus,
     cursor_project_enable_command,
@@ -153,6 +154,17 @@ def _print_cursor_manual_enable(commands: tuple[str, ...]) -> None:
     print("Cursor CLI was not found; enable each project MCP, then fully quit and reopen Cursor:")
     for command in commands:
         print(f"  {command}")
+
+
+def _print_codex_reload_guidance(*, expect_harness: bool) -> None:
+    print("Codex restart required: restart the Codex client after project MCP config changes.")
+    if expect_harness:
+        print("Codex trust: open and trust the Workspace so project .codex/config.toml is loaded.")
+        print("Codex verification: run `codex mcp get harness --json` from the Workspace root.")
+    else:
+        print(
+            "Codex verification: confirm the Harness-owned project .codex/config.toml was removed."
+        )
 
 
 def _print_workspace_scan(result: WorkspaceScanResult) -> None:
@@ -398,11 +410,36 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         if registration_state is HostRegistrationState.CURRENT:
             active_profiles.append(claude.profile)
 
+    try:
+        integration_state = load_host_integration_state(default_runtime_paths())
+    except (HostIntegrationError, RuntimePathError) as exc:
+        return _scan_failure(
+            f"index reconciliation succeeded but host integration intent could not be inspected: {exc}"
+        )
+
+    codex_project_change = IntegrationChange.UNCHANGED
+    if integration_state.includes("codex"):
+        codex = discover_codex_adapter()
+        if codex is None:
+            return _scan_failure(
+                "index reconciliation succeeded but the configured Codex integration could not "
+                "be reconciled because the Codex CLI was not found on PATH"
+            )
+        try:
+            codex_project_change = codex.reconcile_project(
+                result.workspace_root, hidden=result.visibility_mode == "hidden"
+            )
+        except HostIntegrationError as exc:
+            return _scan_failure(
+                f"index reconciliation succeeded but Codex project MCP failed: {exc}"
+            )
+        active_profiles.append(codex.profile)
+
     cursor = discover_cursor_adapter()
     cursor_project_change = IntegrationChange.UNCHANGED
     cursor_runtime_manual: tuple[str, ...] = ()
     try:
-        cursor_intent = load_host_integration_state(default_runtime_paths()).includes("cursor")
+        cursor_intent = integration_state.includes("cursor")
         cursor_state = cursor.registration_state()
     except (HostIntegrationError, RuntimePathError) as exc:
         return _scan_failure(
@@ -456,6 +493,8 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         _print_cursor_reload_guidance(expect_harness=True)
     elif cursor_project_change is IntegrationChange.CHANGED:
         _print_cursor_reload_guidance(expect_harness=True)
+    if codex_project_change is IntegrationChange.CHANGED:
+        _print_codex_reload_guidance(expect_harness=True)
     return 0
 
 
@@ -505,10 +544,13 @@ def _run_install(*, host: str) -> int:
                 f"project overrides changed: {item.project_change_count}"
             )
     cursor_result = next((item for item in result.hosts if item.host_profile == "cursor"), None)
+    codex_result = next((item for item in result.hosts if item.host_profile == "codex"), None)
     if cursor_result is not None and len(result.hosts) == 1:
         print(f"Cursor project overrides changed: {cursor_result.project_change_count}")
         if cursor_result.project_runtime_verified:
             print(f"Cursor project MCP tools verified: {cursor_result.project_runtime_verified}")
+    if codex_result is not None and len(result.hosts) == 1:
+        print(f"Codex project overrides changed: {codex_result.project_change_count}")
     print(f"Daemon schema: {result.daemon_status.schema_version}")
     print(f"Daemon runtime: {result.daemon_status.package_version}")
     print(f"Daemon Python: {result.daemon_status.python_executable}")
@@ -523,6 +565,11 @@ def _run_install(*, host: str) -> int:
             or cursor_result.manual_enable_commands
         ):
             _print_cursor_reload_guidance(expect_harness=True)
+    if codex_result is not None and (
+        codex_result.registration_change is IntegrationChange.CHANGED
+        or codex_result.project_change_count
+    ):
+        _print_codex_reload_guidance(expect_harness=True)
     print("Harness install: OK")
     return 0
 
@@ -544,8 +591,11 @@ def _run_uninstall(*, host: str, purge: bool) -> int:
                 f"project overrides changed: {item.project_change_count}"
             )
     cursor_result = next((item for item in result.hosts if item.host_profile == "cursor"), None)
+    codex_result = next((item for item in result.hosts if item.host_profile == "codex"), None)
     if cursor_result is not None and len(result.hosts) == 1:
         print(f"Cursor project overrides changed: {cursor_result.project_change_count}")
+    if codex_result is not None and len(result.hosts) == 1:
+        print(f"Codex project overrides changed: {codex_result.project_change_count}")
     print(f"Generated skills removed: {result.skill_cleanup.removed}")
     print(f"Workspaces cleaned: {result.skill_cleanup.cleaned_workspace_count}")
     print(f"Workspaces skipped safely: {result.skill_cleanup.skipped_workspace_count}")
@@ -555,6 +605,11 @@ def _run_uninstall(*, host: str, purge: bool) -> int:
         or cursor_result.project_change_count
     ):
         _print_cursor_reload_guidance(expect_harness=False)
+    if codex_result is not None and (
+        codex_result.registration_change is IntegrationChange.CHANGED
+        or codex_result.project_change_count
+    ):
+        _print_codex_reload_guidance(expect_harness=False)
     print("Harness uninstall: OK")
     return 0
 
@@ -663,15 +718,16 @@ def harness_main() -> int:
     subparsers = parser.add_subparsers(dest="command")
     install_parser = subparsers.add_parser(
         "install",
-        help="install one or all supported per-user Harness integrations",
+        help="install a supported local Harness integration",
         description=(
-            "Prepare the canonical local daemon and idempotently register Harness with Claude "
-            "Code, Cursor, or both local host profiles."
+            "Prepare the canonical local daemon and idempotently register Harness with one local "
+            "host profile. The explicit 'all' selection is rejected while the three-profile "
+            "skill visibility graph cannot be projected without duplicates."
         ),
     )
     install_parser.add_argument(
         "--host",
-        choices=("claude-code", "cursor", "all"),
+        choices=("claude-code", "codex", "cursor", "all"),
         default="claude-code",
         help="host integration to install (default: claude-code)",
     )
@@ -679,13 +735,13 @@ def harness_main() -> int:
         "uninstall",
         help="remove Harness-owned integration artifacts",
         description=(
-            "Remove Harness-owned Claude Code registration and generated project skills while "
-            "preserving Project Intelligence by default."
+            "Remove selected Harness-owned host registration, project MCP configuration, and "
+            "generated skills while preserving Project Intelligence by default."
         ),
     )
     uninstall_parser.add_argument(
         "--host",
-        choices=("claude-code", "cursor", "all"),
+        choices=("claude-code", "codex", "cursor", "all"),
         default="claude-code",
         help="host integration to remove (default: claude-code)",
     )

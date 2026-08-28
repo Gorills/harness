@@ -6,13 +6,18 @@ import shutil
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-from fake_hosts import path_without_agent, write_fake_cursor_agent
+from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_agent
 
 from harness.entrypoints import harness_main
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.registry import VisibilityMode, create_project, register_workspace
 from harness.runtime_paths import default_runtime_paths
+from harness.storage import connect_database, initialize_database
+from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX installation lifecycle")
 
@@ -481,6 +486,221 @@ def test_cursor_scan_reports_restart_when_project_override_is_created(
     assert (repo / ".cursor" / "mcp.json").is_file()
 
 
+def test_codex_install_scan_uninstall_owns_only_project_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    write_fake_codex(fake_bin)
+    _skill_registry(home)
+    repo = tmp_path / "repo"
+    _repo(repo)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 0
+    install_output = capsys.readouterr().out
+    assert "Harness host: codex" in install_output
+    assert "Codex project overrides changed: 0" in install_output
+    assert json.loads(
+        (state_home / "harness" / "host-integrations.json").read_text(encoding="utf-8")
+    )["profiles"] == ["codex"]
+    assert not (home / ".codex" / "config.toml").exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    assert harness_main() == 0
+    scan_output = capsys.readouterr().out
+    assert "Codex restart required" in scan_output
+    assert "Codex trust" in scan_output
+    config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
+    assert config["mcp_servers"]["harness"]["cwd"] == str(repo.resolve())
+    assert config["mcp_servers"]["harness"]["env"] == {
+        "HARNESS_HOST_PROFILE": "codex",
+        "HARNESS_WORKSPACE_ROOT": str(repo.resolve()),
+    }
+    assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "Codex adapter: OK" in doctor_output
+    assert "Codex host integration: OK" in doctor_output
+    assert "Codex project MCP configs: OK (1 current" in doctor_output
+
+    config_path = repo / ".codex" / "config.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            f'command = "{os.path.abspath(sys.executable)}"',
+            'command = "/stale/codex/python"',
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 1
+    broken_doctor = capsys.readouterr().out
+    assert "Codex project MCP configs: FAIL" in broken_doctor
+    assert "configured Python: /stale/codex/python" in broken_doctor
+    assert "remediation: harness install --host codex" in broken_doctor
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 0
+    capsys.readouterr()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "codex"])
+    assert harness_main() == 0
+    uninstall_output = capsys.readouterr().out
+    assert "Codex project overrides changed: 1" in uninstall_output
+    assert not (repo / ".codex" / "config.toml").exists()
+    assert not (repo / ".codex" / ".harness-mcp-owner.json").exists()
+    assert not (repo / ".agents" / "skills" / "python-helper").exists()
+    assert not (state_home / "harness" / "host-integrations.json").exists()
+
+
+def test_install_all_rejects_three_host_skill_visibility_collision_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude_state = tmp_path / "claude-state.json"
+    _fake_claude(fake_bin, claude_state)
+    write_fake_codex(fake_bin)
+    write_fake_cursor_agent(fake_bin, tmp_path / "agent-state.json")
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(tmp_path / "agent-state.json"))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "duplicate-free project skill layout" in output
+    assert not claude_state.exists()
+    assert not (state_home / "harness" / "host-integrations.json").exists()
+    assert not default_runtime_paths().database.exists()
+    assert not default_runtime_paths().socket.exists()
+
+
+def test_codex_install_supports_existing_hidden_project_without_changing_agents_md(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin"
+    write_fake_codex(fake_bin)
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    agents = repo / "AGENTS.md"
+    agents.write_text("# User-owned project instructions\n", encoding="utf-8")
+    agents_before = agents.read_bytes()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    paths = default_runtime_paths()
+    paths.database.parent.mkdir(parents=True, mode=0o700)
+    initialize_database(paths.database)
+    connection = connect_database(paths.database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=repo)
+        set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("claude-code",),
+            project_id=project.project_id,
+        )
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 0
+    output = capsys.readouterr().out
+    assert "Harness host: codex" in output
+    state = json.loads(
+        (state_home / "harness" / "host-integrations.json").read_text(encoding="utf-8")
+    )
+    assert state["profiles"] == ["codex"]
+    config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
+    assert config["developer_instructions"] == HIDDEN_INSTRUCTION_BODY
+    assert agents.read_bytes() == agents_before
+    assert paths.socket.exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "Codex project MCP configs: OK" in doctor_output
+    assert "Hidden projection: OK" in doctor_output
+    assert "Codex does not host-block git commit, push, or pull requests" in doctor_output
+
+
+def test_codex_install_hidden_user_config_collision_fails_before_host_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin"
+    write_fake_codex(fake_bin)
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    _repo(repo)
+    config = repo / ".codex" / "config.toml"
+    config.parent.mkdir()
+    original = b'model = "user-owned"\n'
+    config.write_bytes(original)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    paths = default_runtime_paths()
+    paths.database.parent.mkdir(parents=True, mode=0o700)
+    initialize_database(paths.database)
+    connection = connect_database(paths.database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=repo)
+        set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("claude-code",),
+            project_id=project.project_id,
+        )
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "existing .codex/config.toml is user-owned" in output
+    assert config.read_bytes() == original
+    assert not (state_home / "harness" / "host-integrations.json").exists()
+    assert not paths.socket.exists()
+
+
 def test_cursor_doctor_marks_global_workspace_folder_stale(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -691,7 +911,10 @@ def test_cursor_install_enables_independent_workspaces_and_linked_worktree(
     monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(agent_state))
     monkeypatch.setenv("PATH", path_without_agent(fake_bin))
 
-    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
     capsys.readouterr()
     for root in (repo_a, repo_c, worktree):
@@ -740,7 +963,10 @@ def test_uninstall_claude_reprojects_skills_for_remaining_cursor(
     monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
     monkeypatch.setenv("PATH", path_without_agent(fake_bin))
 
-    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
     capsys.readouterr()
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
@@ -793,7 +1019,10 @@ def test_purge_is_refused_while_another_host_remains_active(
     monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
     monkeypatch.setenv("PATH", path_without_agent(fake_bin))
 
-    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "all"])
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
     capsys.readouterr()
     host_state = tmp_path / "state" / "harness" / "host-integrations.json"

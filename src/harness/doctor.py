@@ -12,6 +12,7 @@ from enum import StrEnum
 from pathlib import Path
 from time import monotonic
 
+from harness.codex_adapter import CodexAdapter, discover_codex_adapter
 from harness.cursor_adapter import (
     CursorAdapter,
     CursorProjectRuntimeStatus,
@@ -212,6 +213,7 @@ def run_system_doctor(
 
     isolated_development = bool(values.get("HARNESS_DEV_ROOT"))
     claude_registration_state: HostRegistrationState | None = None
+    codex_host_active = False
     cursor_registration_state: HostRegistrationState | None = None
     cursor_host_active = False
     inspect_cursor_runtime = False
@@ -232,6 +234,20 @@ def run_system_doctor(
             )
         )
         claude_registration_state = None
+        checks.append(
+            _check(
+                "Codex adapter",
+                DoctorSeverity.WARN,
+                "isolated development; production Codex CLI/config is not inspected",
+            )
+        )
+        checks.append(
+            _check(
+                "Codex host integration",
+                DoctorSeverity.OK,
+                "isolated development uses checkout overlay harness-dev, not production Codex intent",
+            )
+        )
         checks.append(
             _check(
                 "Cursor MCP registration",
@@ -325,6 +341,41 @@ def run_system_doctor(
                         )
                     )
 
+        codex_discovered = discover_codex_adapter(
+            environment=environment,
+            python_executable=python_executable,
+        )
+        if codex_discovered is None:
+            checks.append(
+                _check("Codex adapter", DoctorSeverity.WARN, "Codex CLI not found on PATH")
+            )
+        else:
+            checks.append(
+                _check(
+                    "Codex adapter",
+                    DoctorSeverity.OK,
+                    f"discovered at {codex_discovered.executable}",
+                )
+            )
+        try:
+            codex_host_active = load_host_integration_state(paths).includes("codex")
+        except HostIntegrationError as exc:
+            checks.append(
+                _check("Codex host integration", DoctorSeverity.FAIL, _bounded_detail(exc))
+            )
+            codex_host_active = False
+        else:
+            checks.append(
+                _check(
+                    "Codex host integration",
+                    DoctorSeverity.OK,
+                    "project-only Codex intent is recorded in Harness state"
+                    if codex_host_active
+                    else "Harness Codex integration is not configured; remediation: "
+                    "harness install --host codex",
+                )
+            )
+
         try:
             cursor_host_active = load_host_integration_state(paths).includes("cursor")
         except HostIntegrationError as exc:
@@ -417,6 +468,15 @@ def run_system_doctor(
                     _check("Cursor CLI", DoctorSeverity.OK, f"discovered at {cursor_agent}")
                 )
 
+    codex_adapter = discover_codex_adapter(
+        environment=environment,
+        python_executable=python_executable,
+    ) or CodexAdapter(
+        executable=Path("codex"),
+        python_executable=(
+            Path(sys.executable) if python_executable is None else python_executable
+        ).resolve(),
+    )
     cursor_adapter = discover_cursor_adapter(
         environment=environment,
         python_executable=python_executable,
@@ -529,10 +589,13 @@ def run_system_doctor(
                                 "claude-code",
                                 claude_registration_state is HostRegistrationState.CURRENT,
                             ),
+                            ("codex", codex_host_active),
                             ("cursor", cursor_host_active),
                         )
                         if selected
                     ),
+                    codex_adapter=codex_adapter,
+                    codex_host_active=codex_host_active,
                     cursor_adapter=cursor_adapter,
                     cursor_host_active=cursor_host_active,
                     inspect_cursor_runtime=inspect_cursor_runtime,
@@ -810,6 +873,8 @@ def _inspect_projects_and_workspaces(
     connection: sqlite3.Connection,
     *,
     active_profiles: tuple[str, ...],
+    codex_adapter: CodexAdapter,
+    codex_host_active: bool,
     cursor_adapter: CursorAdapter,
     cursor_host_active: bool,
     inspect_cursor_runtime: bool,
@@ -857,11 +922,14 @@ def _inspect_projects_and_workspaces(
     cursor_runtime_bad = 0
     cursor_project_checks: list[DoctorCheck] = []
     cursor_runtime_checks: list[DoctorCheck] = []
+    codex_projects_current = 0
+    codex_projects_bad = 0
+    codex_project_checks: list[DoctorCheck] = []
     hidden_ok = 0
     hidden_bad = 0
     hidden_orphan = 0
     hidden_failed: list[WorkspaceRecord] = []
-    hidden_has_cursor = False
+    hidden_unenforced_profiles: set[str] = set()
 
     for position, workspace in enumerate(inspectable):
         if monotonic() >= overall_deadline:
@@ -902,8 +970,9 @@ def _inspect_projects_and_workspaces(
             stale_notes.append(f"failed Hidden inspection {_workspace_ref(workspace)}")
         else:
             if project.visibility_mode is VisibilityMode.HIDDEN:
-                if "cursor" in intent_profiles:
-                    hidden_has_cursor = True
+                hidden_unenforced_profiles.update(
+                    profile for profile in intent_profiles if profile in {"codex", "cursor"}
+                )
                 if (
                     not intent_profiles
                     or hidden_inspect.missing_required
@@ -938,6 +1007,66 @@ def _inspect_projects_and_workspaces(
             else:
                 stale_indexes += 1
                 stale_notes.append(f"stale index {_workspace_ref(workspace)}")
+
+        try:
+            codex_project = codex_adapter.project_registration_diagnostic(
+                workspace.workspace_root,
+                hidden=project.visibility_mode is VisibilityMode.HIDDEN,
+            )
+        except HostIntegrationError as exc:
+            codex_projects_bad += 1
+            codex_project_checks.append(
+                _check(
+                    f"Codex project MCP config {workspace.workspace_id}",
+                    DoctorSeverity.FAIL,
+                    _bounded_detail(exc),
+                )
+            )
+            stale_notes.append(f"Codex project config unreadable {workspace.workspace_id}")
+        else:
+            configured_python = codex_project.configured_python or "<missing>"
+            configured_root = codex_project.configured_workspace_root or "<missing>"
+            if codex_host_active:
+                if (
+                    codex_project.state is HostRegistrationState.CURRENT
+                    and codex_project.preflight_error is None
+                ):
+                    codex_projects_current += 1
+                    codex_project_checks.append(
+                        _check(
+                            f"Codex project MCP config {workspace.workspace_id}",
+                            DoctorSeverity.OK,
+                            f"current at {codex_project.path}; configured Python: "
+                            f"{configured_python}; expected Python: {codex_project.expected_python}; "
+                            f"HARNESS_WORKSPACE_ROOT={configured_root}",
+                        )
+                    )
+                else:
+                    codex_projects_bad += 1
+                    issue = codex_project.preflight_error or codex_project.state.value
+                    codex_project_checks.append(
+                        _check(
+                            f"Codex project MCP config {workspace.workspace_id}",
+                            DoctorSeverity.FAIL,
+                            f"{codex_project.path}: {issue}; expected Python: "
+                            f"{codex_project.expected_python}; configured Python: "
+                            f"{configured_python}; expected HARNESS_WORKSPACE_ROOT="
+                            f"{workspace.workspace_root}; configured HARNESS_WORKSPACE_ROOT="
+                            f"{configured_root}; remediation: harness install --host codex",
+                        )
+                    )
+                    stale_notes.append(f"stale Codex project config {workspace.workspace_id}")
+            elif codex_project.harness_owned:
+                codex_projects_bad += 1
+                codex_project_checks.append(
+                    _check(
+                        f"Codex project MCP config {workspace.workspace_id}",
+                        DoctorSeverity.FAIL,
+                        f"orphaned Harness-owned config at {codex_project.path}; remediation: "
+                        "harness uninstall --host codex or harness install --host codex",
+                    )
+                )
+                stale_notes.append(f"orphaned Codex project config {workspace.workspace_id}")
 
         try:
             cursor_project = cursor_adapter.project_registration_diagnostic(
@@ -1166,6 +1295,39 @@ def _inspect_projects_and_workspaces(
         )
     checks.append(_check("Index state", index_severity, index_detail))
 
+    if codex_projects_bad:
+        checks.append(
+            _check(
+                "Codex project MCP configs",
+                DoctorSeverity.FAIL,
+                f"{codex_projects_current} current, {codex_projects_bad} "
+                "missing/stale/foreign/orphaned/unsafe; see per-Workspace checks below",
+            )
+        )
+    elif codex_host_active:
+        codex_severity = (
+            DoctorSeverity.WARN
+            if unavailable or identity_timed_out or skipped
+            else DoctorSeverity.OK
+        )
+        checks.append(
+            _check(
+                "Codex project MCP configs",
+                codex_severity,
+                f"{codex_projects_current} current, 0 missing/stale/foreign; each config "
+                "binds an explicit absolute HARNESS_WORKSPACE_ROOT",
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "Codex project MCP configs",
+                DoctorSeverity.OK,
+                "Codex host integration is inactive and no Harness-owned configs were found",
+            )
+        )
+    checks.extend(codex_project_checks)
+
     if cursor_projects_bad:
         checks.append(
             _check(
@@ -1306,12 +1468,22 @@ def _inspect_projects_and_workspaces(
                 f"{hidden_orphan} Normal workspaces still have Harness-owned Hidden instructions",
             )
         )
-    if hidden_ok and hidden_has_cursor:
+    if hidden_ok and hidden_unenforced_profiles:
+        labels = [
+            "Codex" if profile == "codex" else "Cursor"
+            for profile in sorted(hidden_unenforced_profiles)
+        ]
+        if len(labels) == 1:
+            subject = labels[0]
+            verb = "does"
+        else:
+            subject = " and ".join(labels)
+            verb = "do"
         checks.append(
             _check(
                 "Hidden SCM enforcement",
                 DoctorSeverity.WARN,
-                "Cursor does not host-block git commit, push, or pull requests",
+                f"{subject} {verb} not host-block git commit, push, or pull requests",
             )
         )
 

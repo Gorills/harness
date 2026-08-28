@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import time
+import tomllib
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -11,11 +12,13 @@ from threading import Event
 import pytest
 
 from harness.daemon import serve_daemon
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.hidden_projection import (
     CLAUDE_HIDDEN_RULE_RELATIVE,
     CURSOR_HIDDEN_MARKER_RELATIVE,
     CURSOR_HIDDEN_RULE_RELATIVE,
     HiddenProjectionCollisionError,
+    HiddenProjectionError,
     apply_hidden_projection,
     remove_hidden_projection,
 )
@@ -267,6 +270,73 @@ def test_collision_does_not_change_visibility_mode(tmp_path: Path) -> None:
                 project_id=project.project_id,
             )
         assert get_project(connection, project.project_id).visibility_mode is VisibilityMode.NORMAL
+    finally:
+        connection.close()
+
+
+def test_codex_hidden_uses_project_developer_instructions_without_overwriting_agents_md(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root, {"AGENTS.md": "# User-owned instructions\n", "README.md": "repo\n"})
+    agents_before = (root / "AGENTS.md").read_bytes()
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=root)
+        hidden = set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("codex",),
+            project_id=project.project_id,
+        )
+        assert hidden.project.visibility_mode is VisibilityMode.HIDDEN
+        assert (root / "AGENTS.md").read_bytes() == agents_before
+        config_path = root / ".codex" / "config.toml"
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        assert config["developer_instructions"] == HIDDEN_INSTRUCTION_BODY
+        assert _git(root, "check-ignore", "-q", ".codex/config.toml").returncode == 0
+
+        normal = set_project_visibility(
+            connection,
+            mode=VisibilityMode.NORMAL,
+            host_profiles=("codex",),
+            project_id=project.project_id,
+        )
+        assert normal.project.visibility_mode is VisibilityMode.NORMAL
+        config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        assert "developer_instructions" not in config
+        assert (root / "AGENTS.md").read_bytes() == agents_before
+    finally:
+        connection.close()
+
+
+def test_codex_hidden_refuses_user_config_without_exact_developer_instructions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root, {"README.md": "repo\n"})
+    config = root / ".codex" / "config.toml"
+    config.parent.mkdir()
+    original = '[mcp_servers.harness]\ncommand = "/manual/python"\n'
+    config.write_text(original, encoding="utf-8")
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=root)
+        with pytest.raises(HiddenProjectionError, match="Codex Hidden developer instructions"):
+            set_project_visibility(
+                connection,
+                mode=VisibilityMode.HIDDEN,
+                host_profiles=("codex",),
+                project_id=project.project_id,
+            )
+        assert get_project(connection, project.project_id).visibility_mode is VisibilityMode.NORMAL
+        assert config.read_text(encoding="utf-8") == original
     finally:
         connection.close()
 

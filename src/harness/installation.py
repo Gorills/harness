@@ -4,12 +4,14 @@ import os
 import shutil
 import sqlite3
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 
 from harness.builtin_skills import BuiltinSkillError, BuiltinSkillSyncResult, sync_builtin_skills
+from harness.codex_adapter import CodexAdapter, discover_codex_adapter
 from harness.cursor_adapter import (
     CursorAdapter,
     CursorProjectRuntimeStatus,
@@ -21,6 +23,7 @@ from harness.daemon_autostart import ensure_canonical_daemon
 from harness.doctor import run_doctor_checks
 from harness.host_adapters import (
     ClaudeCodeAdapter,
+    HostIntegrationError,
     HostRegistrationCollisionError,
     HostRegistrationState,
     IntegrationChange,
@@ -37,6 +40,7 @@ from harness.ipc import (
     RuntimeDiagnosticsResult,
     SkillCleanupResult,
     request_runtime_diagnostics,
+    request_set_visibility,
     request_shutdown,
     request_skill_cleanup,
     request_status,
@@ -56,13 +60,15 @@ from harness.runtime_state import (
     canonical_database_purge_candidates,
     preflight_canonical_database_state,
 )
+from harness.skill_runtime import SkillRuntimeError, validate_skill_profile_combination
 from harness.skills import SkillRegistryError, default_skill_registry
 from harness.storage import SCHEMA_VERSION, DatabaseError, connect_database_read_only
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _SHUTDOWN_TIMEOUT_SECONDS = 3.0
 _SHUTDOWN_POLL_SECONDS = 0.05
-_SUPPORTED_HOSTS = ("claude-code", "cursor")
+_SUPPORTED_HOSTS = ("claude-code", "codex", "cursor")
+_PROJECT_SCOPED_ADAPTERS = (CodexAdapter, CursorAdapter)
 
 
 class InstallationError(RuntimeError):
@@ -110,10 +116,23 @@ def install_harness(
     environment: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
 ) -> InstallResult:
-    """Install one or all supported local Harness host integrations idempotently."""
+    """Install one supported local Harness host integration idempotently.
+
+    ``all`` remains an explicit compatibility check but is rejected while the complete
+    three-profile skill visibility graph cannot be projected without duplicates.
+    """
     _require_runtime_prerequisites()
+    if host == "all":
+        raise InstallationError(
+            "selected host integrations cannot share a duplicate-free project skill layout; "
+            "install a compatible pair explicitly instead of Claude Code, Codex, and Cursor "
+            "together"
+        )
     selected = _selected_adapters(
-        host, environment=environment, python_executable=python_executable
+        host,
+        environment=environment,
+        python_executable=python_executable,
+        codex_cli_required=True,
     )
     for adapter in selected:
         state = adapter.registration_state()
@@ -125,14 +144,38 @@ def install_harness(
     paths = _runtime_paths(environment)
     _require_safe_database_state(paths)
     try:
+        active_profiles = _active_profiles(
+            paths=paths,
+            environment=environment,
+            python_executable=python_executable,
+            selected=selected,
+            selected_states={adapter.profile: adapter.registration_state() for adapter in selected},
+        )
+        validate_skill_profile_combination(
+            tuple(sorted(active_profiles | {a.profile for a in selected}))
+        )
+    except SkillRuntimeError as exc:
+        raise InstallationError(
+            "selected host integrations cannot share a duplicate-free project skill layout; "
+            "remove one of Claude Code, Codex, or Cursor before installing the other two"
+        ) from exc
+    preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
+    hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
+    for adapter in selected:
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
+            for workspace in preflight_workspaces:
+                if isinstance(adapter, CodexAdapter):
+                    adapter.preflight_project_reconcile(
+                        workspace.workspace_root,
+                        hidden=workspace.workspace_root in hidden_workspace_roots,
+                    )
+                else:
+                    adapter.preflight_project_reconcile(workspace.workspace_root)
+
+    try:
         builtin_skills = sync_builtin_skills(_skill_registry_path(environment))
     except BuiltinSkillError as exc:
         raise InstallationError("Harness built-in skills could not be reconciled") from exc
-    preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
-    for adapter in selected:
-        if isinstance(adapter, CursorAdapter):
-            for workspace in preflight_workspaces:
-                adapter.preflight_project_reconcile(workspace.workspace_root)
 
     try:
         daemon_status = _ensure_current_daemon(paths, environment)
@@ -140,16 +183,23 @@ def install_harness(
         raise InstallationError("Harness daemon could not be prepared") from exc
 
     workspaces = _registered_workspaces(paths)
+    hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
     for adapter in selected:
-        if isinstance(adapter, CursorAdapter):
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
             for workspace in workspaces:
-                adapter.preflight_project_reconcile(workspace.workspace_root)
+                if isinstance(adapter, CodexAdapter):
+                    adapter.preflight_project_reconcile(
+                        workspace.workspace_root,
+                        hidden=workspace.workspace_root in hidden_workspace_roots,
+                    )
+                else:
+                    adapter.preflight_project_reconcile(workspace.workspace_root)
 
     results: list[HostInstallResult] = []
     for adapter in selected:
         intent_change = IntegrationChange.UNCHANGED
-        if isinstance(adapter, CursorAdapter):
-            intent_change = add_host_profiles(paths, ("cursor",))
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
+            intent_change = add_host_profiles(paths, (adapter.profile,))
         change = adapter.register_mcp()
         if intent_change is IntegrationChange.CHANGED:
             change = IntegrationChange.CHANGED
@@ -157,11 +207,18 @@ def install_harness(
         runtime_verified = 0
         runtime_manual = 0
         manual_commands: list[str] = []
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
+            for workspace in workspaces:
+                if isinstance(adapter, CodexAdapter):
+                    project_change = adapter.reconcile_project(
+                        workspace.workspace_root,
+                        hidden=workspace.workspace_root in hidden_workspace_roots,
+                    )
+                else:
+                    project_change = adapter.reconcile_project(workspace.workspace_root)
+                project_changes += int(project_change is IntegrationChange.CHANGED)
         if isinstance(adapter, CursorAdapter):
             for workspace in workspaces:
-                project_changes += int(
-                    adapter.reconcile_project(workspace.workspace_root) is IntegrationChange.CHANGED
-                )
                 runtime = adapter.enable_and_verify_project_mcp(
                     workspace.workspace_root, environment=environment
                 )
@@ -184,6 +241,25 @@ def install_harness(
                 manual_enable_commands=tuple(manual_commands),
             )
         )
+    try:
+        active_after_install = _active_profiles(
+            paths=paths,
+            environment=environment,
+            python_executable=python_executable,
+            selected=selected,
+            selected_states={adapter.profile: adapter.registration_state() for adapter in selected},
+        )
+        profiles_after_install = tuple(
+            profile for profile in _SUPPORTED_HOSTS if profile in active_after_install
+        )
+        if workspaces and profiles_after_install:
+            _reconcile_remaining_profiles(paths, workspaces, profiles_after_install)
+            for hidden_root in _hidden_project_representative_roots(paths):
+                request_set_visibility(paths.socket, hidden_root, "hidden")
+    except (HostIntegrationError, IpcError) as exc:
+        raise InstallationError(
+            "Harness project integration could not be reconciled after host installation"
+        ) from exc
     overall = (
         IntegrationChange.CHANGED
         if any(
@@ -210,7 +286,10 @@ def uninstall_harness(
 ) -> UninstallResult:
     """Remove selected Harness-owned host artifacts while preserving other active hosts."""
     selected = _selected_adapters(
-        host, environment=environment, python_executable=python_executable
+        host,
+        environment=environment,
+        python_executable=python_executable,
+        codex_cli_required=False,
     )
     selected_profiles = {adapter.profile for adapter in selected}
     observed_selected: dict[str, HostRegistrationState] = {}
@@ -229,7 +308,7 @@ def uninstall_harness(
 
     workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
     for adapter in selected:
-        if isinstance(adapter, CursorAdapter):
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
             for workspace in workspaces:
                 adapter.preflight_project_remove(workspace.workspace_root)
 
@@ -261,11 +340,32 @@ def uninstall_harness(
                     "run harness install --host cursor before removing another host"
                 )
 
+    if "codex" in remaining:
+        remaining_codex = discover_codex_adapter(
+            environment=environment,
+            python_executable=python_executable,
+        )
+        if remaining_codex is None:
+            raise InstallationError(
+                "remaining Codex host cannot be verified because the Codex CLI was not found on PATH"
+            )
+        hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
+        for workspace in workspaces:
+            state = remaining_codex.project_registration_state(
+                workspace.workspace_root,
+                hidden=workspace.workspace_root in hidden_workspace_roots,
+            )
+            if state is not HostRegistrationState.CURRENT:
+                raise InstallationError(
+                    "remaining Codex host is not healthy for all registered Workspaces; "
+                    "run harness install --host codex before removing another host"
+                )
+
     any_selected_owned = False
     for adapter in selected:
         state = observed_selected[adapter.profile]
-        if adapter.profile == "cursor":
-            if load_host_integration_state(paths).includes("cursor") or state in {
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
+            if load_host_integration_state(paths).includes(adapter.profile) or state in {
                 HostRegistrationState.CURRENT,
                 HostRegistrationState.STALE_OWNED,
             }:
@@ -293,11 +393,10 @@ def uninstall_harness(
 
     try:
         _ensure_current_daemon(paths, environment)
-        cleanup = (
-            _reconcile_remaining_profiles(paths, workspaces, remaining)
-            if remaining
-            else request_skill_cleanup(paths.socket, tuple(sorted(active or selected_profiles)))
-        )
+        cleanup = request_skill_cleanup(paths.socket, tuple(sorted(active or selected_profiles)))
+        if remaining:
+            reconciled = _reconcile_remaining_profiles(paths, workspaces, remaining)
+            cleanup = _combined_cleanup(cleanup, reconciled)
     except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError(
             "Harness project integration cleanup could not be completed"
@@ -305,7 +404,7 @@ def uninstall_harness(
 
     project_changes_by_profile: dict[str, int] = {}
     for adapter in selected:
-        if not isinstance(adapter, CursorAdapter):
+        if not isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
             continue
         project_changes = 0
         for workspace in workspaces:
@@ -317,8 +416,8 @@ def uninstall_harness(
     results: list[HostUninstallResult] = []
     for adapter in selected:
         change = adapter.unregister_mcp()
-        if isinstance(adapter, CursorAdapter):
-            intent_change = remove_host_profiles(paths, ("cursor",))
+        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
+            intent_change = remove_host_profiles(paths, (adapter.profile,))
             if intent_change is IntegrationChange.CHANGED:
                 change = IntegrationChange.CHANGED
         results.append(
@@ -362,20 +461,36 @@ def _selected_adapters(
     *,
     environment: Mapping[str, str] | None,
     python_executable: Path | None,
-) -> tuple[ClaudeCodeAdapter | CursorAdapter, ...]:
+    codex_cli_required: bool,
+) -> tuple[ClaudeCodeAdapter | CodexAdapter | CursorAdapter, ...]:
     profiles = _SUPPORTED_HOSTS if host == "all" else (host,)
     if any(profile not in _SUPPORTED_HOSTS for profile in profiles):
         raise InstallationError(f"unsupported Harness host selection: {host}")
-    adapters: list[ClaudeCodeAdapter | CursorAdapter] = []
+    adapters: list[ClaudeCodeAdapter | CodexAdapter | CursorAdapter] = []
     for profile in profiles:
         if profile == "claude-code":
-            adapter = discover_claude_code_adapter(
+            claude_adapter = discover_claude_code_adapter(
                 environment=environment,
                 python_executable=python_executable,
             )
-            if adapter is None:
+            if claude_adapter is None:
                 raise InstallationError("Claude Code CLI was not found on PATH")
-            adapters.append(adapter)
+            adapters.append(claude_adapter)
+        elif profile == "codex":
+            codex_adapter = discover_codex_adapter(
+                environment=environment,
+                python_executable=python_executable,
+            )
+            if codex_adapter is None:
+                if codex_cli_required:
+                    raise InstallationError("Codex CLI was not found on PATH")
+                codex_adapter = CodexAdapter(
+                    executable=Path("codex"),
+                    python_executable=(
+                        Path(sys.executable) if python_executable is None else python_executable
+                    ).resolve(),
+                )
+            adapters.append(codex_adapter)
         else:
             adapters.append(
                 discover_cursor_adapter(
@@ -391,7 +506,7 @@ def _active_profiles(
     paths: RuntimePaths,
     environment: Mapping[str, str] | None,
     python_executable: Path | None,
-    selected: tuple[ClaudeCodeAdapter | CursorAdapter, ...],
+    selected: tuple[ClaudeCodeAdapter | CodexAdapter | CursorAdapter, ...],
     selected_states: Mapping[str, HostRegistrationState],
 ) -> set[str]:
     states = dict(selected_states)
@@ -403,7 +518,7 @@ def _active_profiles(
         )
         if claude is not None:
             states["claude-code"] = claude.registration_state()
-    cursor_intent = load_host_integration_state(paths).includes("cursor")
+    integration_state = load_host_integration_state(paths)
     if "cursor" not in states:
         cursor = selected_by_profile.get("cursor")
         if cursor is None:
@@ -415,7 +530,7 @@ def _active_profiles(
     for profile, state in states.items():
         if profile not in selected_states and state is HostRegistrationState.FOREIGN:
             continue
-        if profile == "cursor":
+        if profile in {"codex", "cursor"}:
             continue
         if profile not in selected_states and state is HostRegistrationState.STALE_OWNED:
             raise InstallationError(
@@ -424,11 +539,10 @@ def _active_profiles(
     active = {
         profile
         for profile, state in states.items()
-        if profile != "cursor"
+        if profile not in {"codex", "cursor"}
         and state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}
     }
-    if cursor_intent:
-        active.add("cursor")
+    active.update(integration_state.profiles & {"codex", "cursor"})
     return active
 
 
@@ -436,13 +550,69 @@ def _registered_workspaces(paths: RuntimePaths) -> tuple[WorkspaceRecord, ...]:
     if not paths.database.exists():
         return ()
     try:
-        connection = connect_database_read_only(paths.database)
+        # Cursor project preflight runs before daemon restart/migration, so this
+        # listing must accept a migratable older schema. Workspace identity
+        # columns have been stable since schema v2.
+        connection = connect_database_read_only(paths.database, allow_older_schema=True)
         try:
+            present = connection.execute(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'workspaces'"
+            ).fetchone()
+            if present is None:
+                return ()
             return list_workspaces(connection)
         finally:
             connection.close()
     except (DatabaseError, sqlite3.DatabaseError, OSError) as exc:
         raise InstallationError("registered Workspaces could not be enumerated") from exc
+
+
+def _registered_hidden_workspace_roots(paths: RuntimePaths) -> frozenset[Path]:
+    """Return live registration roots whose Project is already Hidden."""
+    return frozenset(root for _, root in _registered_hidden_project_roots(paths))
+
+
+def _hidden_project_representative_roots(paths: RuntimePaths) -> tuple[Path, ...]:
+    """Return one deterministic Workspace root for each registered Hidden Project."""
+    representatives: dict[str, Path] = {}
+    for project_id, root in _registered_hidden_project_roots(paths):
+        representatives.setdefault(project_id, root)
+    return tuple(representatives.values())
+
+
+def _registered_hidden_project_roots(paths: RuntimePaths) -> tuple[tuple[str, Path], ...]:
+    if not paths.database.exists():
+        return ()
+    try:
+        connection = connect_database_read_only(paths.database, allow_older_schema=True)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_schema WHERE type = 'table'"
+                ).fetchall()
+            }
+            if not {"projects", "workspaces"}.issubset(tables):
+                return ()
+            columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(projects)").fetchall()
+            }
+            if "visibility_mode" not in columns:
+                return ()
+            rows = connection.execute(
+                """
+                SELECT w.project_id, w.workspace_root
+                FROM workspaces AS w
+                JOIN projects AS p ON p.id = w.project_id
+                WHERE p.visibility_mode = 'hidden'
+                ORDER BY w.project_id, w.id
+                """
+            ).fetchall()
+            return tuple((str(project_id), Path(str(root))) for project_id, root in rows)
+        finally:
+            connection.close()
+    except (DatabaseError, sqlite3.DatabaseError, OSError) as exc:
+        raise InstallationError("registered Project visibility could not be inspected") from exc
 
 
 def _reconcile_remaining_profiles(
@@ -487,8 +657,29 @@ def _empty_cleanup() -> SkillCleanupResult:
     )
 
 
-def _host_label(adapter: ClaudeCodeAdapter | CursorAdapter) -> str:
-    return "Claude Code" if adapter.profile == "claude-code" else "Cursor"
+def _combined_cleanup(
+    removed: SkillCleanupResult, reconciled: SkillCleanupResult
+) -> SkillCleanupResult:
+    return SkillCleanupResult(
+        schema_version=max(removed.schema_version, reconciled.schema_version),
+        workspace_count=max(removed.workspace_count, reconciled.workspace_count),
+        cleaned_workspace_count=max(
+            removed.cleaned_workspace_count, reconciled.cleaned_workspace_count
+        ),
+        skipped_workspace_count=max(
+            removed.skipped_workspace_count, reconciled.skipped_workspace_count
+        ),
+        removed=removed.removed + reconciled.removed,
+        exclude_changed_count=(removed.exclude_changed_count + reconciled.exclude_changed_count),
+    )
+
+
+def _host_label(adapter: ClaudeCodeAdapter | CodexAdapter | CursorAdapter) -> str:
+    if adapter.profile == "claude-code":
+        return "Claude Code"
+    if adapter.profile == "codex":
+        return "Codex"
+    return "Cursor"
 
 
 def _ensure_current_daemon(

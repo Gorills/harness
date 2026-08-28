@@ -27,6 +27,10 @@ from mcp_types import (
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from harness.codex_adapter import (
+    CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
+    codex_profile_missing_workspace_root,
+)
 from harness.cursor_adapter import (
     CURSOR_USER_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
     cursor_user_mcp_missing_workspace_root,
@@ -82,6 +86,11 @@ _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS = (
     "`agent mcp enable harness`, then fully quit and reopen Cursor. Leftover "
     "user-harness is not Workspace identity. Isolated Harness source checkout uses "
     "harness-dev. Do not call these tools."
+)
+_CODEX_MCP_REFUSAL_INSTRUCTIONS = (
+    "Codex MCP has no Workspace root. Production Codex MCP must be launched from the trusted "
+    "project .codex/config.toml created by `harness scan`. Restart Codex after reconciliation. "
+    "Isolated Harness source checkout uses harness-dev. Do not call these tools."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
@@ -297,6 +306,11 @@ class HarnessMCPServer(MCPServer):
 
 def _mcp_tool_refusal() -> tuple[str, str] | None:
     """Return model-facing instructions and call error when tools must not be exposed."""
+    if codex_profile_missing_workspace_root():
+        return (
+            _CODEX_MCP_REFUSAL_INSTRUCTIONS,
+            CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
+        )
     if cursor_user_mcp_missing_workspace_root():
         return (
             _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS,

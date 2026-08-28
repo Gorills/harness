@@ -67,3 +67,15 @@ raise SystemExit(2)
     )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     return executable
+
+
+def write_fake_codex(bin_dir: Path) -> Path:
+    """Install a discoverable Codex CLI placeholder for project-config lifecycle tests."""
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    executable = bin_dir / "codex"
+    executable.write_text(
+        f"#!{sys.executable}\nraise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    return executable
