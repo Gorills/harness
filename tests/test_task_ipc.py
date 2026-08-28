@@ -173,6 +173,13 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
                     "summary": "Recorded one invariant",
                     "next_step": None,
                     "wait_reason": None,
+                    "verification": [
+                        {
+                            "name": "focused tests",
+                            "status": "passed",
+                            "evidence": "pytest target passed",
+                        }
+                    ],
                     "knowledge": [
                         {
                             "kind": "invariant",
@@ -194,6 +201,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
             "wait_reason",
             "revision",
             "checkpoint_id",
+            "verification_count",
             "knowledge_ids",
         }
         assert checkpoint_result["schema_version"] == SCHEMA_VERSION
@@ -202,6 +210,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
         assert checkpoint_result["state"] == "working"
         assert checkpoint_result["wait_reason"] is None
         assert checkpoint_result["revision"] == 2
+        assert checkpoint_result["verification_count"] == 1
         checkpoint_id = checkpoint_result["checkpoint_id"]
         knowledge_ids = checkpoint_result["knowledge_ids"]
         assert isinstance(checkpoint_id, str) and checkpoint_id
@@ -210,6 +219,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
         checkpoint_serialized = json.dumps(checkpoint_raw, sort_keys=True)
         for forbidden in (
             secret_body,
+            "pytest target passed",
             "anchors",
             "changed_paths",
             "baseline_head",

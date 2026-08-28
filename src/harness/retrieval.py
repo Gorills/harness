@@ -24,12 +24,15 @@ from harness.search import (
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
 from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
+from harness.verification import list_checkpoint_verification
 
 _DEFAULT_CANDIDATE_LIMIT = 96
 _MAX_CANDIDATE_LIMIT = 384
 _SUMMARY_MAX_BYTES = 384
 _CONTEXT_HISTORY_LIMIT = 4
 _CONTEXT_TEXT_MAX_BYTES = 1024
+_CONTEXT_VERIFICATION_LIMIT = 4
+_CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES = 512
 _CONTEXT_KNOWLEDGE_ANCHOR_LIMIT = 4
 _CONTEXT_KNOWLEDGE_ANCHOR_BYTES = 2048
 _CONTEXT_STACK_HINT_LIMIT = 8
@@ -431,6 +434,13 @@ def _task_context(
                     if checkpoint.next_step is None
                     else _truncate_utf8(checkpoint.next_step, _CONTEXT_TEXT_MAX_BYTES)
                 )
+                verification = list_checkpoint_verification(connection, checkpoint.checkpoint_id)
+                item["verification"] = [
+                    {"name": record.name, "status": record.status.value}
+                    for record in verification[:_CONTEXT_VERIFICATION_LIMIT]
+                ]
+                item["verification_count"] = len(verification)
+                item["verification_truncated"] = len(verification) > _CONTEXT_VERIFICATION_LIMIT
             if event.operator_feedback is not None:
                 item["operator_feedback"] = _truncate_utf8(
                     event.operator_feedback, _CONTEXT_TEXT_MAX_BYTES
@@ -452,6 +462,7 @@ def _task_context(
             if checkpoint.next_step is None
             else _truncate_utf8(checkpoint.next_step, _CONTEXT_TEXT_MAX_BYTES)
         )
+        verification_records = list_checkpoint_verification(connection, checkpoint.checkpoint_id)
         data["selected_checkpoint"] = {
             "checkpoint_id": checkpoint.checkpoint_id,
             "task_revision": checkpoint.task_revision,
@@ -465,6 +476,23 @@ def _task_context(
             "changed_paths": list(changed_paths),
             "changed_path_count": len(checkpoint.changed_paths),
             "changed_paths_truncated": len(changed_paths) < len(checkpoint.changed_paths),
+            "verification": [
+                {
+                    "name": record.name,
+                    "status": record.status.value,
+                    "evidence": _truncate_utf8(
+                        record.evidence, _CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES
+                    ),
+                    "evidence_truncated": (
+                        len(record.evidence.encode("utf-8"))
+                        > _CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES
+                    ),
+                    "source": record.source.value,
+                }
+                for record in verification_records[:_CONTEXT_VERIFICATION_LIMIT]
+            ],
+            "verification_count": len(verification_records),
+            "verification_truncated": len(verification_records) > _CONTEXT_VERIFICATION_LIMIT,
         }
     elif fragment.startswith("event:"):
         event_id = _parse_positive_int(fragment.removeprefix("event:"), "selected Task event id")

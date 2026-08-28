@@ -31,7 +31,7 @@ def test_schema_v10_operator_event_constraints(tmp_path: Path) -> None:
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
-        assert SCHEMA_VERSION == 11
+        assert SCHEMA_VERSION == 12
         _seed_task(connection)
         connection.execute(
             """
@@ -164,13 +164,14 @@ def test_schema_v9_migrates_events_to_v10_without_fabricating_operator_history(
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")
+        connection.execute("DROP TABLE task_checkpoint_verification")
         connection.execute("DELETE FROM schema_migrations WHERE version >= 10")
         connection.commit()
     finally:
         connection.close()
 
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 11
+    assert status.schema_version == SCHEMA_VERSION == 12
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

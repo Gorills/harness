@@ -13,6 +13,7 @@ from harness.host_adapters import (
 )
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
 from harness.skills import (
+    SkillDefinition,
     SkillError,
     SkillProjectionInspection,
     SkillProjectionResult,
@@ -23,6 +24,7 @@ from harness.skills import (
     load_skill_registry,
     plan_skill_projection,
     resolve_workspace_skills,
+    validate_skill_projection_compatibility,
 )
 
 _SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "cursor"})
@@ -60,6 +62,13 @@ class SkillCleanupResult:
 def supported_skill_profiles() -> frozenset[str]:
     """Return host profiles with implemented deterministic project-skill surfaces."""
     return _SUPPORTED_PROFILES
+
+
+def validate_skill_definitions_for_profiles(
+    definitions: Sequence[SkillDefinition], profiles: Sequence[str]
+) -> None:
+    """Validate canonical skill metadata for the selected supported host profiles."""
+    validate_skill_projection_compatibility(definitions, _surfaces_for_profiles(profiles))
 
 
 def reconcile_workspace_skills(

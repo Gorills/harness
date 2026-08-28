@@ -7,6 +7,7 @@ from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
 from types import FrameType
 
+from harness.builtin_skills import BuiltinSkillError, sync_builtin_skills
 from harness.cursor_adapter import (
     CursorProjectRuntimeStatus,
     cursor_project_enable_command,
@@ -43,6 +44,7 @@ from harness.runtime_paths import (
     ensure_private_state_directory,
 )
 from harness.search import DEFAULT_SEARCH_LIMIT
+from harness.skill_runtime import supported_skill_profiles, validate_skill_definitions_for_profiles
 from harness.skills import SkillError, default_skill_registry, load_skill_registry
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -248,6 +250,37 @@ def _run_skills_list() -> int:
             print(f"{definition.skill_id}	{description}")
         else:
             print(definition.skill_id)
+    return 0
+
+
+def _run_skills_sync() -> int:
+    registry = default_skill_registry()
+    try:
+        result = sync_builtin_skills(registry)
+    except BuiltinSkillError as exc:
+        return _skills_failure(str(exc))
+    print(f"Skill registry: {registry}")
+    print(f"Built-in skills: {len(result.skill_ids)}")
+    print(f"Installed: {result.installed}")
+    print(f"Updated: {result.updated}")
+    print(f"Unchanged: {result.unchanged}")
+    if result.adopted:
+        print(f"Adopted exact built-ins: {result.adopted}")
+    return 0
+
+
+def _run_skills_validate() -> int:
+    registry = default_skill_registry()
+    try:
+        definitions = load_skill_registry(registry)
+        profiles = tuple(sorted(supported_skill_profiles()))
+        validate_skill_definitions_for_profiles(definitions, profiles)
+    except SkillError as exc:
+        return _skills_failure(str(exc))
+    print(f"Skill registry: {registry}")
+    print(f"Skills: {len(definitions)}")
+    print(f"Host profiles: {', '.join(profiles)}")
+    print("Skill validation: OK")
     return 0
 
 
@@ -460,6 +493,11 @@ def _run_install(*, host: str) -> int:
         return _install_failure(str(exc))
     print(f"Harness host: {result.host_profile}")
     print(f"MCP registration: {result.registration_change.value}")
+    print(
+        "Built-in skills: "
+        f"{len(result.builtin_skills.skill_ids)} "
+        f"(installed {result.builtin_skills.installed}, updated {result.builtin_skills.updated})"
+    )
     if len(result.hosts) > 1:
         for item in result.hosts:
             print(
@@ -790,6 +828,16 @@ def harness_main() -> int:
         help="list canonical Harness skills",
         description="List canonical skill ids and portable descriptions in stable order.",
     )
+    skills_subparsers.add_parser(
+        "sync",
+        help="install or update Harness built-in quality skills",
+        description="Reconcile the Harness-owned built-in quality pack without overwriting unknown or user-modified skill ids.",
+    )
+    skills_subparsers.add_parser(
+        "validate",
+        help="validate canonical skills against supported host surfaces",
+        description="Load the canonical registry strictly and validate portable frontmatter against every currently supported Harness host skill surface.",
+    )
 
     dashboard_parser = subparsers.add_parser(
         "dashboard",
@@ -830,6 +878,10 @@ def harness_main() -> int:
     if args.command == "skills":
         if args.skills_command == "list":
             return _run_skills_list()
+        if args.skills_command == "sync":
+            return _run_skills_sync()
+        if args.skills_command == "validate":
+            return _run_skills_validate()
         skills_parser.print_help()
         return 0
     if args.command == "dashboard":

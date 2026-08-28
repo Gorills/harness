@@ -444,6 +444,36 @@ def resolve_skills(
     return tuple(item[1] for item in selected)
 
 
+def validate_skill_projection_compatibility(
+    definitions: Sequence[SkillDefinition],
+    surfaces: Sequence[SkillProjectionSurface],
+) -> None:
+    """Validate portable skill metadata against model-visible host surface contracts."""
+    profiles = [surface.profile for surface in surfaces]
+    if len(set(profiles)) != len(profiles):
+        raise SkillProjectionError("skill projection profiles must be unique")
+    for surface in surfaces:
+        required = set(surface.required_frontmatter_fields)
+        for definition in definitions:
+            missing = sorted(required - definition.frontmatter_fields)
+            if missing:
+                raise SkillProjectionError(
+                    f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing required fields: {', '.join(missing)}"
+                )
+            if surface.frontmatter_name_must_match_skill_id:
+                name = dict(definition.frontmatter_text_fields).get("name")
+                if name != definition.skill_id:
+                    raise SkillProjectionError(
+                        f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter name must match the projected skill directory"
+                    )
+            if surface.frontmatter_name_pattern is not None:
+                name = dict(definition.frontmatter_text_fields).get("name")
+                if name is None or re.fullmatch(surface.frontmatter_name_pattern, name) is None:
+                    raise SkillProjectionError(
+                        f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter name has an unsupported format"
+                    )
+
+
 def plan_skill_projection(
     workspace_root: Path,
     resolved_skills: Sequence[ResolvedSkill],
@@ -453,36 +483,7 @@ def plan_skill_projection(
     root = _require_real_directory(workspace_root, "Workspace root")
     if not surfaces:
         return SkillProjectionPlan(root, (), ())
-    profiles = [surface.profile for surface in surfaces]
-    if len(set(profiles)) != len(profiles):
-        raise SkillProjectionError("skill projection profiles must be unique")
-    for surface in surfaces:
-        required = set(surface.required_frontmatter_fields)
-        for resolved in resolved_skills:
-            definition = resolved.definition
-            missing = sorted(required - definition.frontmatter_fields)
-            if missing:
-                raise SkillProjectionError(
-                    f"skill {definition.skill_id!r} is incompatible with "
-                    f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing "
-                    f"required fields: {', '.join(missing)}"
-                )
-            if surface.frontmatter_name_must_match_skill_id:
-                name = dict(definition.frontmatter_text_fields).get("name")
-                if name != definition.skill_id:
-                    raise SkillProjectionError(
-                        f"skill {definition.skill_id!r} is incompatible with "
-                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name must "
-                        "match the projected skill directory"
-                    )
-            if surface.frontmatter_name_pattern is not None:
-                name = dict(definition.frontmatter_text_fields).get("name")
-                if name is None or re.fullmatch(surface.frontmatter_name_pattern, name) is None:
-                    raise SkillProjectionError(
-                        f"skill {definition.skill_id!r} is incompatible with "
-                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name has "
-                        "an unsupported format"
-                    )
+    validate_skill_projection_compatibility(tuple(r.definition for r in resolved_skills), surfaces)
     candidates = tuple(sorted({surface.target_root for surface in surfaces}, key=str))
     valid: list[tuple[int, tuple[str, ...], tuple[PurePosixPath, ...]]] = []
     for count in range(1, len(candidates) + 1):

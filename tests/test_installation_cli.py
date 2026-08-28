@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -116,6 +117,8 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert harness_main() == 0
     install_output = capsys.readouterr().out
     assert "MCP registration: changed" in install_output
+    assert "Built-in skills: 12 (installed 12, updated 0)" in install_output
+    assert (home / ".harness" / "skills" / "backend-security" / "SKILL.md").is_file()
     assert "Harness install: OK" in install_output
     registration = json.loads(claude_state.read_text(encoding="utf-8"))
     assert registration == {
@@ -323,7 +326,8 @@ def test_purge_preflight_refuses_unsafe_skill_registry_before_uninstall_mutation
     sentinel = outside / "user.txt"
     sentinel.write_text("keep\n", encoding="utf-8")
     harness_home = home / ".harness"
-    harness_home.mkdir()
+    harness_home.mkdir(exist_ok=True)
+    shutil.rmtree(harness_home / "skills")
     (harness_home / "skills").symlink_to(outside, target_is_directory=True)
 
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--purge"])

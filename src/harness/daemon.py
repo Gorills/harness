@@ -55,6 +55,7 @@ from harness.ipc import (
     WorkspaceTaskCheckpointSummary,
     WorkspaceTaskStatusResult,
     WorkspaceTaskSummary,
+    WorkspaceVerificationSummary,
     receive_request,
     send_dashboard_url_response,
     send_error_response,
@@ -125,6 +126,7 @@ from harness.tasks import (
     TaskWorkspaceConflictError,
     get_relevant_task,
 )
+from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
 from harness.watcher import (
     DEFAULT_WATCH_DEBOUNCE_SECONDS,
@@ -317,6 +319,11 @@ def read_workspace_task_status(
             if task is not None
             else None
         )
+        verification = (
+            list_checkpoint_verification(connection, checkpoint.checkpoint_id)
+            if checkpoint is not None
+            else ()
+        )
         pending_operator_feedback = (
             get_operator_feedback_for_revision(connection, task.task_id, task.revision)
             if task is not None and task.state is TaskState.WORKING
@@ -351,6 +358,9 @@ def read_workspace_task_status(
             state=checkpoint.state,
             wait_reason=checkpoint.wait_reason,
             next_step=checkpoint.next_step,
+            verification=tuple(
+                WorkspaceVerificationSummary(item.name, item.status) for item in verification
+            ),
         )
     )
     return WorkspaceTaskStatusResult(
@@ -629,6 +639,7 @@ def mutate_task_checkpoint(
         summary=request.summary,
         next_step=request.next_step,
         wait_reason=request.wait_reason,
+        verification=request.verification,
         knowledge=request.knowledge,
     )
     return TaskCheckpointResult(
@@ -639,6 +650,7 @@ def mutate_task_checkpoint(
         wait_reason=mutation.task.wait_reason,
         revision=mutation.task.revision,
         checkpoint_id=mutation.checkpoint.checkpoint_id,
+        verification_count=len(mutation.verification),
         knowledge_ids=tuple(card.knowledge_id for card in mutation.knowledge_cards),
     )
 

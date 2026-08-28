@@ -596,6 +596,9 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
                 checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
+                assert (
+                    checkpoint_schema["$defs"]["VerificationInput"]["additionalProperties"] is False
+                )
                 assert checkpoint_schema["$defs"]["KnowledgeInput"]["additionalProperties"] is False
                 assert (
                     checkpoint_schema["$defs"]["KnowledgeAnchorInput"]["additionalProperties"]
@@ -1106,11 +1109,19 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
                     "state": "working",
                     "summary": "Persisted before bridge restart",
                     "next_step": "Resume from this exact checkpoint",
+                    "verification": [
+                        {
+                            "name": "focused tests",
+                            "status": "passed",
+                            "evidence": "pytest target: passed",
+                        }
+                    ],
                 },
             )
             assert checkpoint.is_error is False
             assert checkpoint.structured_content is not None
             assert checkpoint.structured_content["revision"] == 2
+            assert checkpoint.structured_content["verification_count"] == 1
 
         async with Client(stdio_client(params)) as second_client:
             status = await second_client.call_tool("project_status")
@@ -1126,6 +1137,9 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
             }
             assert status.structured_content["relevant_waiting_task"] is None
             assert status.structured_content["next_step"] == "Resume from this exact checkpoint"
+            assert status.structured_content["last_checkpoint"]["verification"] == [
+                {"name": "focused tests", "status": "passed"}
+            ]
             resumed = await second_client.call_tool("task_start", {"task_id": task_id})
             assert resumed.is_error is False
             assert resumed.structured_content is not None

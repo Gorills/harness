@@ -61,6 +61,13 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
             VALUES ('checkpoint', 'src/app.py')
             """
         )
+        connection.execute(
+            "INSERT INTO task_checkpoint_verification(checkpoint_id,position,name,status,evidence,source) VALUES ('checkpoint',0,'tests','passed','pytest: passed','agent_reported')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO task_checkpoint_verification(checkpoint_id,position,name,status,evidence,source) VALUES ('checkpoint',1,'bad','unknown','none','agent_reported')"
+            )
         with pytest.raises(sqlite3.IntegrityError):
             connection.execute(
                 """
@@ -81,13 +88,16 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM task_checkpoint_changed_paths"
         ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM task_checkpoint_verification"
+        ).fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
     finally:
         connection.close()
 
 
 def test_schema_version_includes_knowledge_schema() -> None:
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:

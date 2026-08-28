@@ -30,6 +30,12 @@ from harness.tasks import (
     TaskWorkspaceConflictError,
     get_task,
 )
+from harness.verification import (
+    VerificationDraft,
+    VerificationRecord,
+    normalize_verification_drafts,
+    persist_checkpoint_verification,
+)
 
 MAX_CHECKPOINT_SUMMARY_BYTES = 4096
 MAX_CHECKPOINT_NEXT_STEP_BYTES = 2048
@@ -101,12 +107,13 @@ class TaskEventRecord:
 
 @dataclass(frozen=True, slots=True)
 class TaskCheckpointMutation:
-    """Atomic checkpoint result including any Knowledge created by this checkpoint."""
+    """Atomic checkpoint result including semantic evidence created by this checkpoint."""
 
     task: TaskRecord
     checkpoint: TaskCheckpointRecord
     event: TaskEventRecord
     knowledge_cards: tuple[KnowledgeCardRecord, ...]
+    verification: tuple[VerificationRecord, ...]
 
 
 def checkpoint_task(
@@ -119,6 +126,7 @@ def checkpoint_task(
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
+    verification: Sequence[VerificationDraft] = (),
     knowledge: Sequence[KnowledgeDraft] = (),
     now: datetime | None = None,
 ) -> TaskCheckpointMutation:
@@ -138,6 +146,7 @@ def checkpoint_task(
         maximum_bytes=MAX_CHECKPOINT_NEXT_STEP_BYTES,
         required=False,
     )
+    normalized_verification = normalize_verification_drafts(verification)
     normalized_knowledge = normalize_knowledge_drafts(knowledge)
 
     connection.execute("BEGIN IMMEDIATE")
@@ -190,6 +199,9 @@ def checkpoint_task(
             timestamp=timestamp,
             mechanical=mechanical,
         )
+        verification_records = persist_checkpoint_verification(
+            connection, checkpoint.checkpoint_id, normalized_verification
+        )
         knowledge_cards = persist_checkpoint_knowledge(
             connection,
             current,
@@ -205,6 +217,7 @@ def checkpoint_task(
             checkpoint=checkpoint,
             event=event,
             knowledge_cards=knowledge_cards,
+            verification=verification_records,
         )
     except Exception:
         if connection.in_transaction:

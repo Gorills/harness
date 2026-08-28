@@ -31,6 +31,13 @@ from harness.tasks import (
     create_task_with_baseline,
     get_task,
 )
+from harness.verification import (
+    VerificationDraft,
+    VerificationSource,
+    VerificationStatus,
+    VerificationValidationError,
+    list_checkpoint_verification,
+)
 
 
 def _git(cwd: Path, *arguments: str) -> None:
@@ -376,5 +383,47 @@ def test_checkpoint_text_is_bounded_utf8(tmp_path: Path) -> None:
                 summary="é" * (MAX_CHECKPOINT_SUMMARY_BYTES // 2 + 1),
             )
         assert get_task(connection, created.task.task_id).revision == 1
+    finally:
+        connection.close()
+
+
+def test_checkpoint_persists_bounded_agent_reported_verification_atomically(tmp_path: Path) -> None:
+    _root, _database, connection, workspace_id = _registered(tmp_path)
+    try:
+        created = create_task_with_baseline(connection, workspace_id, "Verified checkpoint")
+        result = checkpoint_task(
+            connection,
+            created.task.task_id,
+            expected_revision=1,
+            state=TaskState.WORKING,
+            summary="Verification recorded",
+            verification=(
+                VerificationDraft(
+                    "focused tests", VerificationStatus.PASSED, "pytest target: passed"
+                ),
+                VerificationDraft(
+                    "real host acceptance",
+                    VerificationStatus.NOT_RUN,
+                    "Proprietary host unavailable",
+                ),
+            ),
+        )
+        persisted = list_checkpoint_verification(connection, result.checkpoint.checkpoint_id)
+        assert result.verification == persisted
+        assert all(item.source is VerificationSource.AGENT_REPORTED for item in persisted)
+        with pytest.raises(VerificationValidationError, match="unique"):
+            checkpoint_task(
+                connection,
+                created.task.task_id,
+                expected_revision=2,
+                state=TaskState.WORKING,
+                summary="duplicate",
+                verification=(
+                    VerificationDraft("Tests", VerificationStatus.PASSED, "ok"),
+                    VerificationDraft(" tests ", VerificationStatus.FAILED, "failed"),
+                ),
+            )
+        assert get_task(connection, created.task.task_id).revision == 2
+        assert len(list_task_checkpoints(connection, created.task.task_id)) == 1
     finally:
         connection.close()
