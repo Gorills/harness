@@ -63,6 +63,13 @@ class TaskWaitReason(StrEnum):
     EXTERNAL = "external"
 
 
+class TaskOperatorStatus(StrEnum):
+    """Human-maintained delivery marker, independent from the Task lifecycle state."""
+
+    DEPLOY_TEST = "deploy_test"
+    DEPLOY_PROD = "deploy_prod"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRecord:
     """Durable Task identity and optimistic-concurrency state."""
@@ -72,6 +79,8 @@ class TaskRecord:
     title: str
     state: TaskState
     wait_reason: TaskWaitReason | None
+    jira_url: str | None
+    operator_status: TaskOperatorStatus | None
     revision: int
     created_at: str
     updated_at: str
@@ -129,7 +138,8 @@ def get_task(connection: sqlite3.Connection, task_id: str) -> TaskRecord:
     """Load one Task by stable Harness identity."""
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+               revision, created_at, updated_at
         FROM tasks
         WHERE id = ?
         """,
@@ -196,7 +206,8 @@ def get_relevant_task(
     get_workspace(connection, workspace_id)
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+               revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ? AND state IN ('working', 'waiting')
         ORDER BY CASE state WHEN 'working' THEN 0 ELSE 1 END, updated_at DESC, id DESC
@@ -215,7 +226,8 @@ def get_latest_task(
     get_workspace(connection, workspace_id)
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+               revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ?
         ORDER BY updated_at DESC, id DESC
@@ -336,6 +348,72 @@ def _transition_task_state_in_transaction(
     return get_task(connection, task_id)
 
 
+def _reopen_task_in_transaction(
+    connection: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_revision: int,
+    timestamp: str,
+) -> TaskRecord:
+    """Explicitly reopen one terminal Task without weakening ordinary transition rules."""
+    current = get_task(connection, task_id)
+    if current.revision != expected_revision:
+        raise TaskRevisionConflictError(
+            f"task revision mismatch: expected {expected_revision}, current {current.revision}"
+        )
+    if current.state not in {TaskState.COMPLETED, TaskState.CANCELLED}:
+        raise TaskTransitionError(
+            f"reopen requires terminal Task; current state is {current.state.value}"
+        )
+    existing = _working_task(connection, current.workspace_id)
+    if existing is not None and existing.task_id != current.task_id:
+        raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE tasks
+            SET state = 'working', wait_reason = NULL, revision = revision + 1, updated_at = ?
+            WHERE id = ? AND revision = ? AND state IN ('completed', 'cancelled')
+            """,
+            (timestamp, task_id, expected_revision),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise TaskConflictError("workspace already has a working task") from exc
+    if cursor.rowcount != 1:
+        raise TaskRevisionConflictError(
+            f"task revision changed during reopen: expected {expected_revision}"
+        )
+    return get_task(connection, task_id)
+
+
+def _advance_task_revision_in_transaction(
+    connection: sqlite3.Connection,
+    task_id: str,
+    *,
+    expected_revision: int,
+    timestamp: str,
+) -> TaskRecord:
+    """Advance one Task revision for an operator-owned metadata/history mutation."""
+    current = get_task(connection, task_id)
+    if current.revision != expected_revision:
+        raise TaskRevisionConflictError(
+            f"task revision mismatch: expected {expected_revision}, current {current.revision}"
+        )
+    cursor = connection.execute(
+        """
+        UPDATE tasks
+        SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ?
+        """,
+        (timestamp, task_id, expected_revision),
+    )
+    if cursor.rowcount != 1:
+        raise TaskRevisionConflictError(
+            f"task revision changed during operator mutation: expected {expected_revision}"
+        )
+    return get_task(connection, task_id)
+
+
 def _require_no_working_task(connection: sqlite3.Connection, workspace_id: str) -> None:
     existing = _working_task(connection, workspace_id)
     if existing is not None:
@@ -349,6 +427,8 @@ def _new_task_record(*, workspace_id: str, title: str, timestamp: str) -> TaskRe
         title=title,
         state=TaskState.WORKING,
         wait_reason=None,
+        jira_url=None,
+        operator_status=None,
         revision=1,
         created_at=timestamp,
         updated_at=timestamp,
@@ -392,7 +472,8 @@ def _working_task(
 ) -> TaskRecord | None:
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+               revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ? AND state = 'working'
         """,
@@ -464,7 +545,18 @@ def _utc_timestamp(now: datetime | None) -> str:
 
 
 def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
-    task_id, workspace_id, title, state, wait_reason, revision, created_at, updated_at = row
+    (
+        task_id,
+        workspace_id,
+        title,
+        state,
+        wait_reason,
+        jira_url,
+        operator_status,
+        revision,
+        created_at,
+        updated_at,
+    ) = row
     if (
         not isinstance(task_id, str)
         or not task_id
@@ -474,6 +566,8 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
         or not title
         or not isinstance(state, str)
         or (wait_reason is not None and not isinstance(wait_reason, str))
+        or (jira_url is not None and not isinstance(jira_url, str))
+        or (operator_status is not None and not isinstance(operator_status, str))
         or isinstance(revision, bool)
         or not isinstance(revision, int)
         or revision <= 0
@@ -492,12 +586,20 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
     except ValueError as exc:
         raise TaskError(f"task row has unsupported wait_reason: {wait_reason!r}") from exc
     _validate_state_reason(task_state, task_wait_reason)
+    try:
+        task_operator_status = (
+            TaskOperatorStatus(operator_status) if operator_status is not None else None
+        )
+    except ValueError as exc:
+        raise TaskError(f"task row has unsupported operator_status: {operator_status!r}") from exc
     return TaskRecord(
         task_id=task_id,
         workspace_id=workspace_id,
         title=title,
         state=task_state,
         wait_reason=task_wait_reason,
+        jira_url=jira_url,
+        operator_status=task_operator_status,
         revision=revision,
         created_at=created_at,
         updated_at=updated_at,

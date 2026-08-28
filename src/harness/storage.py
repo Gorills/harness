@@ -7,8 +7,204 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _MIGRATIONS_TABLE = "schema_migrations"
+_TASK_SEARCH_V13_TRIGGERS = """
+CREATE TRIGGER task_search_task_insert
+AFTER INSERT ON tasks
+BEGIN
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'task:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, NEW.title, ''
+    FROM workspaces WHERE workspaces.id = NEW.workspace_id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'meta:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, '',
+           COALESCE(NEW.jira_url, '') || ' ' ||
+           CASE NEW.operator_status
+               WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+               WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               ELSE ''
+           END
+    FROM workspaces WHERE workspaces.id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER task_search_task_delete
+AFTER DELETE ON tasks
+BEGIN
+    DELETE FROM task_search WHERE task_id = OLD.id;
+END;
+
+CREATE TRIGGER task_search_task_update
+AFTER UPDATE OF workspace_id, title ON tasks
+BEGIN
+    DELETE FROM task_search WHERE task_id = OLD.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'task:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, NEW.title, ''
+    FROM workspaces WHERE workspaces.id = NEW.workspace_id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'meta:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, '',
+           COALESCE(NEW.jira_url, '') || ' ' ||
+           CASE NEW.operator_status
+               WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+               WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               ELSE ''
+           END
+    FROM workspaces WHERE workspaces.id = NEW.workspace_id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'baseline:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, '',
+           COALESCE(task_baselines.branch, '')
+    FROM task_baselines JOIN workspaces ON workspaces.id = NEW.workspace_id
+    WHERE task_baselines.task_id = NEW.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'checkpoint:' || task_checkpoints.id, NEW.id, NEW.workspace_id,
+           workspaces.project_id, '',
+           task_checkpoints.summary || ' ' || COALESCE(task_checkpoints.next_step, '') ||
+           ' ' || COALESCE(task_checkpoints.current_branch, '')
+    FROM task_checkpoints JOIN workspaces ON workspaces.id = NEW.workspace_id
+    WHERE task_checkpoints.task_id = NEW.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'event:' || task_events.id, NEW.id, NEW.workspace_id, workspaces.project_id, '',
+           COALESCE(
+               task_events.operator_feedback,
+               task_events.operator_comment,
+               task_events.jira_url,
+               CASE task_events.operator_status
+                   WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+                   WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               END,
+               ''
+           )
+    FROM task_events JOIN workspaces ON workspaces.id = NEW.workspace_id
+    WHERE task_events.task_id = NEW.id
+      AND task_events.event_type IN (
+          'operator_feedback', 'operator_comment', 'jira_link_updated',
+          'operator_status_updated'
+      );
+END;
+
+CREATE TRIGGER task_search_task_metadata_update
+AFTER UPDATE OF jira_url, operator_status ON tasks
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'meta:' || OLD.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'meta:' || NEW.id, NEW.id, NEW.workspace_id, workspaces.project_id, '',
+           COALESCE(NEW.jira_url, '') || ' ' ||
+           CASE NEW.operator_status
+               WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+               WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               ELSE ''
+           END
+    FROM workspaces WHERE workspaces.id = NEW.workspace_id;
+END;
+
+CREATE TRIGGER task_search_baseline_insert
+AFTER INSERT ON task_baselines
+BEGIN
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'baseline:' || NEW.task_id, tasks.id, tasks.workspace_id, workspaces.project_id,
+           '', COALESCE(NEW.branch, '')
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id;
+END;
+
+CREATE TRIGGER task_search_baseline_delete
+AFTER DELETE ON task_baselines
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'baseline:' || OLD.task_id;
+END;
+
+CREATE TRIGGER task_search_baseline_update
+AFTER UPDATE OF branch, task_id ON task_baselines
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'baseline:' || OLD.task_id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'baseline:' || NEW.task_id, tasks.id, tasks.workspace_id, workspaces.project_id,
+           '', COALESCE(NEW.branch, '')
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id;
+END;
+
+CREATE TRIGGER task_search_checkpoint_insert
+AFTER INSERT ON task_checkpoints
+BEGIN
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'checkpoint:' || NEW.id, tasks.id, tasks.workspace_id, workspaces.project_id, '',
+           NEW.summary || ' ' || COALESCE(NEW.next_step, '') ||
+           ' ' || COALESCE(NEW.current_branch, '')
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id;
+END;
+
+CREATE TRIGGER task_search_checkpoint_delete
+AFTER DELETE ON task_checkpoints
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
+END;
+
+CREATE TRIGGER task_search_checkpoint_update
+AFTER UPDATE OF summary, next_step, current_branch, task_id ON task_checkpoints
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'checkpoint:' || OLD.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'checkpoint:' || NEW.id, tasks.id, tasks.workspace_id, workspaces.project_id, '',
+           NEW.summary || ' ' || COALESCE(NEW.next_step, '') ||
+           ' ' || COALESCE(NEW.current_branch, '')
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id;
+END;
+
+CREATE TRIGGER task_search_event_insert
+AFTER INSERT ON task_events
+WHEN NEW.event_type IN (
+    'operator_feedback', 'operator_comment', 'jira_link_updated', 'operator_status_updated'
+)
+BEGIN
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'event:' || NEW.id, tasks.id, tasks.workspace_id, workspaces.project_id, '',
+           COALESCE(
+               NEW.operator_feedback,
+               NEW.operator_comment,
+               NEW.jira_url,
+               CASE NEW.operator_status
+                   WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+                   WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               END,
+               ''
+           )
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id;
+END;
+
+CREATE TRIGGER task_search_event_delete
+AFTER DELETE ON task_events
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
+END;
+
+CREATE TRIGGER task_search_event_update
+AFTER UPDATE OF event_type, operator_feedback, operator_comment, jira_url,
+                operator_status, task_id ON task_events
+BEGIN
+    DELETE FROM task_search WHERE fragment_ref = 'event:' || OLD.id;
+    INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+    SELECT 'event:' || NEW.id, tasks.id, tasks.workspace_id, workspaces.project_id, '',
+           COALESCE(
+               NEW.operator_feedback,
+               NEW.operator_comment,
+               NEW.jira_url,
+               CASE NEW.operator_status
+                   WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+                   WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+               END,
+               ''
+           )
+    FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+    WHERE tasks.id = NEW.task_id
+      AND NEW.event_type IN (
+          'operator_feedback', 'operator_comment', 'jira_link_updated',
+          'operator_status_updated'
+      );
+END;
+"""
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
 _WAL_LOCK_RETRY_DELAY_SECONDS = 0.02
@@ -1014,6 +1210,262 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             )
             """
         )
+        return
+    if target_version == 13:
+        task_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(tasks)").fetchall()
+            if isinstance(row[1], str)
+        }
+        if "jira_url" not in task_columns:
+            connection.execute(
+                """
+                ALTER TABLE tasks ADD COLUMN jira_url TEXT CHECK (
+                    jira_url IS NULL
+                    OR (jira_url <> '' AND length(CAST(jira_url AS BLOB)) <= 2048)
+                )
+                """
+            )
+        if "operator_status" not in task_columns:
+            connection.execute(
+                """
+                ALTER TABLE tasks ADD COLUMN operator_status TEXT CHECK (
+                    operator_status IS NULL
+                    OR operator_status IN ('deploy_test', 'deploy_prod')
+                )
+                """
+            )
+        for trigger_name in (
+            "task_search_task_insert",
+            "task_search_task_delete",
+            "task_search_task_update",
+            "task_search_checkpoint_insert",
+            "task_search_checkpoint_delete",
+            "task_search_checkpoint_update",
+            "task_search_event_insert",
+            "task_search_event_delete",
+            "task_search_event_update",
+        ):
+            connection.execute(f"DROP TRIGGER {trigger_name}")
+        connection.execute(
+            """
+            CREATE TABLE task_events_v13 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                task_revision INTEGER NOT NULL CHECK (task_revision > 0),
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN (
+                        'created', 'resumed', 'reopened', 'checkpoint',
+                        'accepted', 'operator_feedback', 'operator_comment',
+                        'jira_link_updated', 'operator_status_updated', 'cancelled'
+                    )
+                ),
+                checkpoint_id TEXT UNIQUE,
+                operator_feedback TEXT CHECK (
+                    operator_feedback IS NULL
+                    OR (
+                        operator_feedback <> ''
+                        AND length(CAST(operator_feedback AS BLOB)) <= 1024
+                    )
+                ),
+                operator_comment TEXT CHECK (
+                    operator_comment IS NULL
+                    OR (
+                        operator_comment <> ''
+                        AND length(CAST(operator_comment AS BLOB)) <= 2048
+                    )
+                ),
+                jira_url TEXT CHECK (
+                    jira_url IS NULL
+                    OR (jira_url <> '' AND length(CAST(jira_url AS BLOB)) <= 2048)
+                ),
+                operator_status TEXT CHECK (
+                    operator_status IS NULL
+                    OR operator_status IN ('deploy_test', 'deploy_prod')
+                ),
+                created_at TEXT NOT NULL CHECK (created_at <> ''),
+                CHECK (
+                    (
+                        event_type = 'created'
+                        AND task_revision = 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NULL
+                        AND jira_url IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type IN ('resumed', 'reopened', 'accepted', 'cancelled')
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NULL
+                        AND jira_url IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type = 'checkpoint'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NOT NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NULL
+                        AND jira_url IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type = 'operator_feedback'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NOT NULL
+                        AND operator_comment IS NULL
+                        AND jira_url IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type = 'operator_comment'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NOT NULL
+                        AND jira_url IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type = 'jira_link_updated'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NULL
+                        AND operator_status IS NULL
+                    )
+                    OR (
+                        event_type = 'operator_status_updated'
+                        AND task_revision > 1
+                        AND checkpoint_id IS NULL
+                        AND operator_feedback IS NULL
+                        AND operator_comment IS NULL
+                        AND jira_url IS NULL
+                    )
+                ),
+                FOREIGN KEY (checkpoint_id, task_id, task_revision)
+                    REFERENCES task_checkpoints(id, task_id, task_revision) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events_v13(
+                id, task_id, task_revision, event_type, checkpoint_id,
+                operator_feedback, operator_comment, jira_url, operator_status, created_at
+            )
+            SELECT
+                id, task_id, task_revision, event_type, checkpoint_id,
+                operator_feedback, NULL, NULL, NULL, created_at
+            FROM task_events
+            ORDER BY id
+            """
+        )
+        connection.execute("DROP TABLE task_events")
+        connection.execute("ALTER TABLE task_events_v13 RENAME TO task_events")
+        connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_created_per_task_idx
+            ON task_events(task_id)
+            WHERE event_type = 'created'
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_resumed_per_revision_idx
+            ON task_events(task_id, task_revision)
+            WHERE event_type = 'resumed'
+            """
+        )
+        connection.execute(
+            """
+            CREATE UNIQUE INDEX task_events_one_operator_action_per_revision_idx
+            ON task_events(task_id, task_revision)
+            WHERE event_type IN (
+                'accepted', 'operator_feedback', 'operator_comment', 'jira_link_updated',
+                'operator_status_updated', 'reopened', 'cancelled'
+            )
+            """
+        )
+        connection.execute("DELETE FROM task_search")
+        connection.execute(
+            """
+            INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+            SELECT 'task:' || tasks.id, tasks.id, tasks.workspace_id, workspaces.project_id,
+                   tasks.title, ''
+            FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY tasks.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+            SELECT 'meta:' || tasks.id, tasks.id, tasks.workspace_id, workspaces.project_id, '',
+                   COALESCE(tasks.jira_url, '') || ' ' ||
+                   CASE tasks.operator_status
+                       WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+                       WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+                       ELSE ''
+                   END
+            FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY tasks.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+            SELECT 'baseline:' || tasks.id, tasks.id, tasks.workspace_id, workspaces.project_id,
+                   '', COALESCE(task_baselines.branch, '')
+            FROM task_baselines
+            JOIN tasks ON tasks.id = task_baselines.task_id
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY tasks.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+            SELECT 'checkpoint:' || task_checkpoints.id, tasks.id, tasks.workspace_id,
+                   workspaces.project_id, '',
+                   task_checkpoints.summary || ' ' || COALESCE(task_checkpoints.next_step, '') ||
+                   ' ' || COALESCE(task_checkpoints.current_branch, '')
+            FROM task_checkpoints
+            JOIN tasks ON tasks.id = task_checkpoints.task_id
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY task_checkpoints.id
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_search(fragment_ref, task_id, workspace_id, project_id, title, body)
+            SELECT 'event:' || task_events.id, tasks.id, tasks.workspace_id,
+                   workspaces.project_id, '',
+                   COALESCE(
+                       task_events.operator_feedback,
+                       task_events.operator_comment,
+                       task_events.jira_url,
+                       CASE task_events.operator_status
+                           WHEN 'deploy_test' THEN 'deploy_test деплой на тест'
+                           WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'
+                       END,
+                       ''
+                   )
+            FROM task_events
+            JOIN tasks ON tasks.id = task_events.task_id
+            JOIN workspaces ON workspaces.id = tasks.workspace_id
+            WHERE task_events.event_type IN (
+                'operator_feedback', 'operator_comment', 'jira_link_updated',
+                'operator_status_updated'
+            )
+            ORDER BY task_events.id
+            """
+        )
+        _execute_sql_script_in_transaction(connection, _TASK_SEARCH_V13_TRIGGERS)
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 

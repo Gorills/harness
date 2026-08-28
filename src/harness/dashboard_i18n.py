@@ -3,19 +3,24 @@ from __future__ import annotations
 from harness.registry import VisibilityMode
 from harness.search import SearchMatchKind
 from harness.task_checkpoints import TaskEventType
-from harness.tasks import TaskState, TaskWaitReason
+from harness.tasks import TaskOperatorStatus, TaskState, TaskWaitReason
 
 SKIP_TO_CONTENT = "К содержимому"
 BRAND = "Harness"
+WORKSPACE_HOME = "Рабочий стол"
+PROJECTS_NAV = "Проекты и копии"
+OPEN_NAVIGATION = "Открыть навигацию"
+ALL_PROJECTS = "Все проекты"
+CURRENT_TASK = "Текущая задача"
+PROJECT_OVERVIEW = "Обзор проекта"
+WORKSPACE_OVERVIEW = "Рабочая копия"
+TASK_OVERVIEW = "Карточка задачи"
 LIVE_CONNECTING = "Подключаемся"
 LIVE_REFRESH = "Обновить"
 NAVIGATION = "Навигация"
-BREADCRUMB_PROJECTS = "Проекты"
+BREADCRUMB_PROJECTS = "Все проекты"
 PAGE_PROJECTS = "Проекты"
-PAGE_PROJECTS_LEAD = (
-    "Что сейчас в работе: проекты, Git-состояние, индекс, задачи и операторское ревью "
-    "в одном локальном control plane."
-)
+PAGE_PROJECTS_LEAD = "Проекты, активные задачи и точки внимания — без лишних переходов."
 METRIC_PROJECTS = "Проекты"
 METRIC_ACTIVE = "Активные задачи"
 METRIC_REVIEW = "На ревью"
@@ -28,6 +33,10 @@ EMPTY_PROJECT_WORKSPACES_TITLE = "Пока нет рабочих копий"
 EMPTY_PROJECT_WORKSPACES_HINT = "У этого проекта ещё нет зарегистрированных копий."
 PROJECT_PREFIX = "Проект"
 TASK_FOCUS = "Задача"
+NEXT_STEP = "Следующий шаг"
+OPEN_TASK = "Открыть задачу"
+OPEN_WORKSPACE = "Открыть копию"
+OPEN_PROJECT = "Открыть проект"
 NO_TASK = "Пока нет задачи"
 BRANCH = "Ветка"
 DETACHED_HEAD = "(detached)"
@@ -50,12 +59,28 @@ ACCEPT = "Принять"
 ACTION_REJECTED = "Действие не принято"
 CANCEL = "Отменить"
 CANCEL_TASK = "Отменить задачу"
+REOPEN_TASK = "Открыть заново"
 FEEDBACK_SUMMARY = "Замечание"
 FEEDBACK_LABEL = "Что изменить"
 FEEDBACK_PLACEHOLDER = "Что должен сделать агент дальше"
 FEEDBACK_SUBMIT = "Отправить и продолжить"
+COMMENT_SUMMARY = "Комментарий"
+COMMENT_LABEL = "Комментарий оператора"
+COMMENT_PLACEHOLDER = "Контекст, решение или заметка по задаче"
+COMMENT_SUBMIT = "Добавить комментарий"
+JIRA = "Jira"
+JIRA_LABEL = "Ссылка на задачу Jira"
+JIRA_PLACEHOLDER = "https://jira.example/browse/PROJECT-123"
+JIRA_SAVE = "Сохранить ссылку"
+JIRA_CLEAR = "Удалить ссылку"
+OPERATOR_STATUS = "Операторский статус"
+OPERATOR_STATUS_NONE = "Не задан"
+OPERATOR_STATUS_DEPLOY_TEST = "Деплой на тест"
+OPERATOR_STATUS_DEPLOY_PROD = "Деплой на прод"
+OPERATOR_STATUS_SAVE = "Сохранить статус"
 GIT_UNAVAILABLE = "Git недоступен"
 WORKSPACE_FALLBACK = "копия"
+PRIMARY_WORKSPACE = "Основная копия"
 WORKSPACE_STATE = "Состояние"
 PROJECT = "Проект"
 DIRTY_PATHS = "Изменения"
@@ -65,8 +90,8 @@ TASK = "Задача"
 ACTIONS = "Действия"
 NO_ACTIONS = "Сейчас действий нет"
 SEARCH_SECTION = "Поиск"
-SEARCH_PLACEHOLDER = "Путь, имя файла, идентификатор"
-SEARCH_LABEL = "Поиск по индексу"
+SEARCH_PLACEHOLDER = "Задача, ветка, Jira, комментарий или путь"
+SEARCH_LABEL = "Поиск по задачам и индексу"
 SEARCH = "Найти"
 NO_SEARCH_HITS_TITLE = "Ничего не нашлось"
 RECENT_TASKS = "Задачи"
@@ -83,9 +108,13 @@ TIMELINE = "История"
 NEXT = "Дальше"
 EVENT_CREATED = "Создана"
 EVENT_RESUMED = "Возобновлена"
+EVENT_REOPENED = "Открыта заново"
 EVENT_CHECKPOINT = "Контрольная точка"
 EVENT_ACCEPTED = "Принята"
 EVENT_FEEDBACK = "Замечание"
+EVENT_COMMENT = "Комментарий"
+EVENT_JIRA_UPDATED = "Ссылка Jira изменена"
+EVENT_OPERATOR_STATUS_UPDATED = "Операторский статус изменён"
 EVENT_CANCELLED = "Отменена"
 UNAVAILABLE_TITLE = "Дашборд недоступен"
 UNAVAILABLE_HEADING = "Дашборд недоступен"
@@ -122,10 +151,18 @@ _MATCH_KIND_LABELS = {
 _EVENT_LABELS = {
     TaskEventType.CREATED: EVENT_CREATED,
     TaskEventType.RESUMED: EVENT_RESUMED,
+    TaskEventType.REOPENED: EVENT_REOPENED,
     TaskEventType.CHECKPOINT: EVENT_CHECKPOINT,
     TaskEventType.ACCEPTED: EVENT_ACCEPTED,
     TaskEventType.OPERATOR_FEEDBACK: EVENT_FEEDBACK,
+    TaskEventType.OPERATOR_COMMENT: EVENT_COMMENT,
+    TaskEventType.JIRA_LINK_UPDATED: EVENT_JIRA_UPDATED,
+    TaskEventType.OPERATOR_STATUS_UPDATED: EVENT_OPERATOR_STATUS_UPDATED,
     TaskEventType.CANCELLED: EVENT_CANCELLED,
+}
+_OPERATOR_STATUS_LABELS = {
+    TaskOperatorStatus.DEPLOY_TEST.value: OPERATOR_STATUS_DEPLOY_TEST,
+    TaskOperatorStatus.DEPLOY_PROD.value: OPERATOR_STATUS_DEPLOY_PROD,
 }
 
 
@@ -168,6 +205,12 @@ def event_label(event_type: TaskEventType) -> str:
     return _EVENT_LABELS[event_type]
 
 
+def operator_status_label(status: str | None) -> str:
+    if status is None:
+        return OPERATOR_STATUS_NONE
+    return _OPERATOR_STATUS_LABELS.get(status, status)
+
+
 def workspace_count_label(count: int) -> str:
     noun = ru_plural(count, "рабочая копия", "рабочие копии", "рабочих копий")
     return f"{count} {noun}"
@@ -189,6 +232,11 @@ def more_paths_label(count: int) -> str:
 
 def project_crumb(project_id: str) -> str:
     return f"{PROJECT} {project_id[:8]}"
+
+
+def task_crumb(task_id: str) -> str:
+    del task_id
+    return TASK
 
 
 def document_title(label: str) -> str:

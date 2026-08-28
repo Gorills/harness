@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,7 @@ DEV_UV_SCRIPT = REPO_ROOT / "scripts" / "dev-uv.sh"
 INSTALL_GLOBAL_SCRIPT = REPO_ROOT / "scripts" / "install-global"
 MAKEFILE = REPO_ROOT / "Makefile"
 ISOLATED_DOC = REPO_ROOT / "docs" / "development" / "isolated-development.md"
+CODEX_CONFIG = REPO_ROOT / ".codex" / "config.toml"
 
 
 def _run(
@@ -156,6 +158,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         ".cursor/mcp.json",
         "HARNESS_DEV_ROOT",
         "HARNESS_SKILL_REGISTRY",
+        "UV_CACHE_DIR",
         "refused",
         "uv run --frozen harness",
         "make install-global",
@@ -190,7 +193,8 @@ def test_dev_env_script_keeps_caller_cwd_and_resolves_from_script_location(
             "bash",
             "-c",
             'source "$1" && pwd && printf "%s\\n" "$HARNESS_DEV_ROOT" '
-            '"$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$HARNESS_SKILL_REGISTRY"',
+            '"$XDG_STATE_HOME" "$XDG_RUNTIME_DIR" "$HARNESS_SKILL_REGISTRY" '
+            '"$UV_CACHE_DIR"',
             "bash",
             str(DEV_ENV_SCRIPT),
         ],
@@ -207,8 +211,11 @@ def test_dev_env_script_keeps_caller_cwd_and_resolves_from_script_location(
     assert lines[2] == str(REPO_ROOT / ".harness" / "state")
     assert lines[3] == str(REPO_ROOT / ".harness" / "runtime")
     assert lines[4] == str(REPO_ROOT / ".harness" / "skills")
+    assert lines[5] == str(REPO_ROOT / ".harness" / "uv-cache")
     assert stat.S_IMODE((REPO_ROOT / ".harness" / "state").stat().st_mode) & 0o077 == 0
     assert stat.S_IMODE((REPO_ROOT / ".harness" / "runtime").stat().st_mode) & 0o077 == 0
+    assert (REPO_ROOT / ".harness" / "uv-cache").is_dir()
+    assert stat.S_IMODE((REPO_ROOT / ".harness" / "uv-cache").stat().st_mode) & 0o077 == 0
 
 
 def test_dev_env_script_saves_caller_xdg_once_before_overlay(tmp_path: Path) -> None:
@@ -261,6 +268,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     assert f"XDG_STATE_HOME={REPO_ROOT / '.harness' / 'state'}" in env_result.stdout
     assert f"XDG_RUNTIME_DIR={REPO_ROOT / '.harness' / 'runtime'}" in env_result.stdout
     assert f"HARNESS_SKILL_REGISTRY={REPO_ROOT / '.harness' / 'skills'}" in env_result.stdout
+    assert f"UV_CACHE_DIR={REPO_ROOT / '.harness' / 'uv-cache'}" in env_result.stdout
     assert f"database={REPO_ROOT / '.harness' / 'state' / 'harness' / 'harness.db'}" in (
         env_result.stdout
     )
@@ -392,6 +400,18 @@ def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> No
     assert claude["mcpServers"]["harness"]["command"] == "./scripts/dev"
     assert claude["mcpServers"]["harness"]["args"] == ["harness", "mcp"]
     assert claude["mcpServers"]["harness"]["type"] == "stdio"
+
+
+def test_checkout_codex_overlay_uses_scripts_dev_and_fails_closed() -> None:
+    config = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8"))
+    entry = config["mcp_servers"]["harness-dev"]
+    assert entry == {
+        "command": "./scripts/dev",
+        "args": ["harness", "mcp"],
+        "startup_timeout_sec": 30,
+        "required": True,
+        "env": {"HARNESS_WORKSPACE_ROOT": "."},
+    }
 
 
 def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
@@ -576,20 +596,27 @@ def _plan_fields(stdout: str) -> dict[str, str]:
 
 def test_makefile_routes_global_install_through_the_helper() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
-    assert "HOST ?= cursor" in text
     assert "INSTALL_GLOBAL := ./scripts/install-global" in text
-    assert "$(INSTALL_GLOBAL) --host $(HOST)" in text
+    assert "ifdef HOST" in text
+    assert '$(INSTALL_GLOBAL) --host "$(HOST)"' in text
     assert "$(INSTALL_GLOBAL) --doctor-only" in text
     assert ".DEFAULT_GOAL := help" in text
     help_result = _run(["make", "-C", str(REPO_ROOT), "help"], cwd=REPO_ROOT)
     assert help_result.returncode == 0, help_result.stderr
     assert "make install-global" in help_result.stdout
+    dry_default = _run(
+        ["make", "-C", str(REPO_ROOT), "-n", "install-global"],
+        cwd=REPO_ROOT,
+    )
+    assert dry_default.returncode == 0, dry_default.stderr
+    assert "./scripts/install-global" in dry_default.stdout
+    assert "--host" not in dry_default.stdout
     dry = _run(
         ["make", "-C", str(REPO_ROOT), "-n", "install-global", "HOST=codex"],
         cwd=REPO_ROOT,
     )
     assert dry.returncode == 0, dry.stderr
-    assert "./scripts/install-global --host codex" in dry.stdout
+    assert './scripts/install-global --host "codex"' in dry.stdout
 
 
 def test_install_global_script_does_not_source_overlay_env() -> None:
@@ -638,12 +665,12 @@ def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: P
     assert fields["mode"] == "install"
     assert fields["repo_root"] == str(REPO_ROOT)
     assert fields["uv"] == env["HARNESS_DEV_UV"]
-    assert fields["host"] == "cursor"
+    assert fields["hosts"] == "cursor"
     assert fields["package_command"] == (
         f"{env['HARNESS_DEV_UV']} tool install --force --reinstall --python 3.13 ."
     )
     assert fields["harness"] == str(fake_bin / "harness")
-    assert fields["lifecycle_command"] == f"{fake_bin / 'harness'} install --host cursor"
+    assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host cursor"
     assert fields["HARNESS_DEV_ROOT"] == ""
     assert fields["XDG_STATE_HOME"] == ""
     assert fields["XDG_RUNTIME_DIR"] == ""
@@ -673,11 +700,11 @@ def test_install_global_dry_run_keeps_non_overlay_xdg(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     fields = _plan_fields(result.stdout)
-    assert fields["host"] == "codex"
+    assert fields["hosts"] == "codex"
     assert fields["XDG_STATE_HOME"] == str(custom_state)
     assert fields["XDG_RUNTIME_DIR"] == str(custom_runtime)
     assert fields["HARNESS_DEV_ROOT"] == ""
-    assert fields["lifecycle_command"].endswith(" install --host codex")
+    assert fields["lifecycle_commands"].endswith(" install --host codex")
 
 
 def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> None:
@@ -699,6 +726,12 @@ def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> 
     )
     assert result.returncode == 0, result.stderr
     fields = _plan_fields(result.stdout)
+    fake_bin = Path(env["FAKE_UV_BIN_DIR"])
+    assert fields["hosts"] == "cursor,codex"
+    assert fields["lifecycle_commands"] == (
+        f"{fake_bin / 'harness'} install --host cursor; "
+        f"{fake_bin / 'harness'} install --host codex"
+    )
     assert fields["HARNESS_DEV_ROOT"] == ""
     assert fields["XDG_STATE_HOME"] == str(original_state)
     assert fields["XDG_RUNTIME_DIR"] == str(original_runtime)

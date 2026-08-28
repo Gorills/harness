@@ -348,6 +348,30 @@ def _task_fragment_projection(
             None if summary is None else _truncate_utf8(summary, _SUMMARY_MAX_BYTES),
             f"task:{task_id}",
         )
+    if fragment_ref == f"meta:{task_id}":
+        task = get_task(connection, task_id)
+        values = [value for value in (task.jira_url, task.operator_status) if value is not None]
+        summary = " · ".join(str(value) for value in values) or None
+        return (
+            f"task:{task_id}",
+            "Task Jira link/operator status",
+            summary,
+            task.jira_url or f"task:{task_id}",
+        )
+    if fragment_ref == f"baseline:{task_id}":
+        row = connection.execute(
+            "SELECT branch FROM task_baselines WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if row is None or (row[0] is not None and not isinstance(row[0], str)):
+            raise ProjectRetrievalError("Task search baseline ownership mismatch")
+        branch = row[0]
+        return (
+            f"task:{task_id}",
+            "Task Git branch",
+            branch,
+            f"branch:{branch}" if branch is not None else f"task:{task_id}",
+        )
     if fragment_ref.startswith("checkpoint:"):
         checkpoint_id = fragment_ref.removeprefix("checkpoint:")
         checkpoint = get_task_checkpoint(connection, checkpoint_id)
@@ -355,7 +379,7 @@ def _task_fragment_projection(
             raise ProjectRetrievalError("Task search checkpoint ownership mismatch")
         return (
             f"task:{task_id}#checkpoint:{checkpoint_id}",
-            "Task checkpoint summary/next step",
+            "Task checkpoint summary/next step/branch",
             _truncate_utf8(checkpoint.summary, _SUMMARY_MAX_BYTES),
             f"task:{task_id} · revision {checkpoint.task_revision}",
         )
@@ -363,22 +387,36 @@ def _task_fragment_projection(
         event_id = _parse_positive_int(fragment_ref.removeprefix("event:"), "Task event id")
         row = connection.execute(
             """
-            SELECT task_id, task_revision, event_type, operator_feedback
+            SELECT task_id, task_revision, event_type, operator_feedback,
+                   operator_comment, jira_url, operator_status
             FROM task_events
             WHERE id = ?
             """,
             (event_id,),
         ).fetchone()
-        if row is None or row[0] != task_id or row[2] != "operator_feedback":
+        if (
+            row is None
+            or row[0] != task_id
+            or row[2]
+            not in {
+                "operator_feedback",
+                "operator_comment",
+                "jira_link_updated",
+                "operator_status_updated",
+            }
+        ):
             raise ProjectRetrievalError("Task search event ownership mismatch")
-        feedback = _require_text(row[3], "operator feedback")
+        event_type = _require_text(row[2], "Task event type")
+        raw_summary = next((value for value in row[3:] if isinstance(value, str)), None)
+        if raw_summary is None:
+            raise ProjectRetrievalError("Task search event has no searchable payload")
         revision = row[1]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
             raise ProjectRetrievalError("Task search event revision is invalid")
         return (
             f"task:{task_id}#event:{event_id}",
-            "operator feedback",
-            _truncate_utf8(feedback, _SUMMARY_MAX_BYTES),
+            event_type.replace("_", " "),
+            _truncate_utf8(raw_summary, _SUMMARY_MAX_BYTES),
             f"task:{task_id} · revision {revision}",
         )
     raise ProjectRetrievalError("Task search fragment ref is invalid")
@@ -406,6 +444,8 @@ def _task_context(
         "title": task.title,
         "state": task.state.value,
         "wait_reason": None if task.wait_reason is None else task.wait_reason.value,
+        "jira_url": task.jira_url,
+        "operator_status": (None if task.operator_status is None else task.operator_status.value),
         "revision": task.revision,
         "created_at": task.created_at,
         "updated_at": task.updated_at,
@@ -445,6 +485,14 @@ def _task_context(
                 item["operator_feedback"] = _truncate_utf8(
                     event.operator_feedback, _CONTEXT_TEXT_MAX_BYTES
                 )
+            if event.operator_comment is not None:
+                item["operator_comment"] = _truncate_utf8(
+                    event.operator_comment, _CONTEXT_TEXT_MAX_BYTES
+                )
+            if event.jira_url is not None:
+                item["jira_url"] = _truncate_utf8(event.jira_url, _CONTEXT_TEXT_MAX_BYTES)
+            if event.operator_status is not None:
+                item["operator_status"] = event.operator_status.value
             history.append(item)
         data["recent_history"] = history
     elif fragment.startswith("checkpoint:"):
@@ -498,7 +546,8 @@ def _task_context(
         event_id = _parse_positive_int(fragment.removeprefix("event:"), "selected Task event id")
         row = connection.execute(
             """
-            SELECT task_id, task_revision, event_type, operator_feedback, created_at
+            SELECT task_id, task_revision, event_type, operator_feedback,
+                   operator_comment, jira_url, operator_status, created_at
             FROM task_events
             WHERE id = ?
             """,
@@ -507,17 +556,39 @@ def _task_context(
         if row is None or row[0] != task.task_id:
             raise ProjectRetrievalRefError("selected Task event ref does not belong to Task")
         event_type = _require_text(row[2], "selected Task event type")
-        feedback = row[3]
-        if event_type != "operator_feedback" or not isinstance(feedback, str):
-            raise ProjectRetrievalRefError("selected Task event ref is not semantic feedback")
-        data["selected_event"] = {
+        payload_names = (
+            ("operator_feedback", row[3]),
+            ("operator_comment", row[4]),
+            ("jira_url", row[5]),
+            ("operator_status", row[6]),
+        )
+        payload = next(
+            ((name, value) for name, value in payload_names if isinstance(value, str)),
+            None,
+        )
+        if (
+            event_type
+            not in {
+                "operator_feedback",
+                "operator_comment",
+                "jira_link_updated",
+                "operator_status_updated",
+            }
+            or payload is None
+        ):
+            raise ProjectRetrievalRefError("selected Task event ref is not searchable history")
+        payload_name, payload_value = payload
+        selected_event: dict[str, object] = {
             "event_id": event_id,
             "task_revision": row[1],
             "event_type": event_type,
-            "operator_feedback": _truncate_utf8(feedback, _CONTEXT_TEXT_MAX_BYTES),
-            "operator_feedback_truncated": len(feedback.encode("utf-8")) > _CONTEXT_TEXT_MAX_BYTES,
-            "created_at": row[4],
+            payload_name: _truncate_utf8(payload_value, _CONTEXT_TEXT_MAX_BYTES),
+            f"{payload_name}_truncated": (
+                len(payload_value.encode("utf-8")) > _CONTEXT_TEXT_MAX_BYTES
+            ),
+            "created_at": row[7],
         }
+        data["selected_event"] = selected_event
     else:
         raise ProjectRetrievalRefError("selected Task fragment ref is unsupported")
     return ProjectContextItem(ref=ref, kind=ProjectSearchKind.TASK, data=data)

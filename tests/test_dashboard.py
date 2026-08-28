@@ -153,7 +153,7 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
         assert "Проекты · Harness" in body
-        assert "Что сейчас в работе" in body
+        assert "Проекты, активные задачи и точки внимания" in body
         assert "ревью" in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
         assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body

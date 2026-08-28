@@ -20,12 +20,18 @@ from harness.dashboard_i18n import (
     ACCEPT,
     ACTION_REJECTED,
     ACTIONS,
+    ALL_PROJECTS,
     BRANCH,
     BRAND,
     BREADCRUMB_PROJECTS,
     CANCEL,
     CANCEL_TASK,
+    COMMENT_LABEL,
+    COMMENT_PLACEHOLDER,
+    COMMENT_SUBMIT,
+    COMMENT_SUMMARY,
     CREATED,
+    CURRENT_TASK,
     DETACHED_HEAD,
     DIRTY,
     DIRTY_PATHS,
@@ -41,6 +47,11 @@ from harness.dashboard_i18n import (
     GIT_UNAVAILABLE,
     INDEX,
     INDEXED_PATHS,
+    JIRA,
+    JIRA_CLEAR,
+    JIRA_LABEL,
+    JIRA_PLACEHOLDER,
+    JIRA_SAVE,
     LIVE_CONNECTING,
     LIVE_REFRESH,
     METRIC_ACTIVE,
@@ -51,14 +62,28 @@ from harness.dashboard_i18n import (
     MODE,
     NAVIGATION,
     NEXT,
+    NEXT_STEP,
     NO_ACTIONS,
     NO_SEARCH_HITS_TITLE,
     NO_TASK,
     NO_TASKS_TITLE,
+    OPEN_NAVIGATION,
+    OPEN_PROJECT,
+    OPEN_TASK,
+    OPEN_WORKSPACE,
+    OPERATOR_STATUS,
+    OPERATOR_STATUS_DEPLOY_PROD,
+    OPERATOR_STATUS_DEPLOY_TEST,
+    OPERATOR_STATUS_NONE,
+    OPERATOR_STATUS_SAVE,
     PAGE_PROJECTS,
     PAGE_PROJECTS_LEAD,
+    PRIMARY_WORKSPACE,
     PROJECT,
+    PROJECT_OVERVIEW,
+    PROJECTS_NAV,
     RECENT_TASKS,
+    REOPEN_TASK,
     REVISION,
     SEARCH,
     SEARCH_LABEL,
@@ -71,6 +96,7 @@ from harness.dashboard_i18n import (
     TASK,
     TASK_FACTS,
     TASK_FOCUS,
+    TASK_OVERVIEW,
     TIMELINE,
     UNAVAILABLE_HEADING,
     UNAVAILABLE_TITLE,
@@ -83,6 +109,8 @@ from harness.dashboard_i18n import (
     WAIT_REASON,
     WORKSPACE,
     WORKSPACE_FALLBACK,
+    WORKSPACE_HOME,
+    WORKSPACE_OVERVIEW,
     WORKSPACE_STATE,
     document_title,
     event_count_label,
@@ -90,7 +118,9 @@ from harness.dashboard_i18n import (
     match_kind_label,
     more_paths_label,
     omitted_events_label,
+    operator_status_label,
     project_crumb,
+    task_crumb,
     task_state_label,
     visibility_label,
     wait_reason_label,
@@ -116,6 +146,7 @@ from harness.registry import (
     get_workspace,
     list_workspaces,
 )
+from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project
 from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
 from harness.storage import DatabaseError, connect_database
@@ -128,11 +159,20 @@ from harness.task_checkpoints import (
     list_task_checkpoints,
     list_task_events,
 )
-from harness.task_workflow import task_accept, task_cancel, task_feedback
+from harness.task_workflow import (
+    task_accept,
+    task_cancel,
+    task_comment,
+    task_feedback,
+    task_reopen,
+    task_set_jira_url,
+    task_set_operator_status,
+)
 from harness.tasks import (
     TaskConflictError,
     TaskError,
     TaskNotFoundError,
+    TaskOperatorStatus,
     TaskRecord,
     TaskRevisionConflictError,
     TaskState,
@@ -152,7 +192,7 @@ _DASHBOARD_TOKEN_FILENAME = "dashboard.token"
 _DASHBOARD_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 _DASHBOARD_START_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_STOP_TIMEOUT_SECONDS = 2.0
-_DASHBOARD_FORM_MAX_BYTES = 4096
+_DASHBOARD_FORM_MAX_BYTES = 8192
 _DASHBOARD_FORM_MAX_FIELDS = 5
 _DASHBOARD_SEARCH_LIMIT = 24
 _DASHBOARD_RECENT_TASK_LIMIT = 24
@@ -223,6 +263,8 @@ class DashboardWorkspaceRow:
     task_state: str | None
     task_wait_reason: str | None
     task_revision: int | None
+    task_jira_url: str | None
+    task_operator_status: str | None
     last_activity: str | None
     next_step: str | None
     task_git_branch: DashboardGitBranch | None
@@ -256,6 +298,7 @@ class DashboardWorkspaceDetail:
     recent_tasks: tuple[DashboardTaskRow, ...]
     search_query: str | None
     search_results: tuple[IndexedPathSearchResult, ...]
+    task_search_results: tuple[ProjectSearchHit, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +324,9 @@ class DashboardActionRequest:
     task_id: str
     expected_revision: int
     feedback: str | None = None
+    comment: str | None = None
+    jira_url: str | None = None
+    operator_status: TaskOperatorStatus | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +430,17 @@ def read_dashboard_workspace_detail(
                     limit=_DASHBOARD_SEARCH_LIMIT,
                 )
             )
+            task_results = (
+                ()
+                if search_query is None
+                else search_project(
+                    connection,
+                    workspace_id,
+                    search_query,
+                    scope=ProjectSearchScope.TASKS,
+                    limit=_DASHBOARD_SEARCH_LIMIT,
+                )
+            )
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -396,6 +453,7 @@ def read_dashboard_workspace_detail(
         recent_tasks=recent_tasks,
         search_query=search_query,
         search_results=results,
+        task_search_results=task_results,
     )
 
 
@@ -482,6 +540,10 @@ def _read_workspace_row_persisted(
             None if task is None or task.wait_reason is None else task.wait_reason.value
         ),
         task_revision=None if task is None else task.revision,
+        task_jira_url=None if task is None else task.jira_url,
+        task_operator_status=(
+            None if task is None or task.operator_status is None else task.operator_status.value
+        ),
         last_activity=None if task is None else task.updated_at,
         next_step=None if checkpoint is None else checkpoint.next_step,
         task_git_branch=(
@@ -640,6 +702,42 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 expected_revision=request.expected_revision,
             )
             return
+        if request.action == "reopen":
+            task_reopen(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+            )
+            return
+        if request.action == "comment":
+            assert request.comment is not None
+            task_comment(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                comment=request.comment,
+            )
+            return
+        if request.action == "set_jira":
+            task_set_jira_url(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                jira_url=request.jira_url,
+            )
+            return
+        if request.action == "set_operator_status":
+            task_set_operator_status(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                operator_status=request.operator_status,
+            )
+            return
         raise TaskValidationError("unsupported dashboard Task action")
     finally:
         connection.close()
@@ -701,7 +799,25 @@ def _parse_dashboard_action_form(
     expected = {"action", "workspace_id", "task_id", "expected_revision"}
     if action == "feedback":
         expected.add("feedback")
-    if action not in {"accept", "feedback", "cancel"} or set(fields) != expected:
+    elif action == "comment":
+        expected.add("comment")
+    elif action == "set_jira":
+        expected.add("jira_url")
+    elif action == "set_operator_status":
+        expected.add("operator_status")
+    if (
+        action
+        not in {
+            "accept",
+            "feedback",
+            "cancel",
+            "reopen",
+            "comment",
+            "set_jira",
+            "set_operator_status",
+        }
+        or set(fields) != expected
+    ):
         raise TaskValidationError("dashboard action form does not match the expected schema")
     workspace_id = fields["workspace_id"]
     task_id = fields["task_id"]
@@ -720,12 +836,25 @@ def _parse_dashboard_action_form(
     expected_revision = int(revision_text)
     if expected_revision <= 0:
         raise TaskValidationError("dashboard action expected_revision must be positive")
+    operator_status_text = fields.get("operator_status")
+    if operator_status_text not in {
+        None,
+        "",
+        TaskOperatorStatus.DEPLOY_TEST.value,
+        TaskOperatorStatus.DEPLOY_PROD.value,
+    }:
+        raise TaskValidationError("dashboard operator status is unsupported")
     return DashboardActionRequest(
         action=action,
         workspace_id=workspace_id,
         task_id=task_id,
         expected_revision=expected_revision,
         feedback=fields.get("feedback"),
+        comment=fields.get("comment"),
+        jira_url=fields.get("jira_url") or None,
+        operator_status=(
+            None if not operator_status_text else TaskOperatorStatus(operator_status_text)
+        ),
     )
 
 
@@ -827,6 +956,9 @@ def _render_task_actions(
     state: str,
     wait_reason: str | None,
     revision: int,
+    jira_url: str | None = None,
+    operator_status: str | None = None,
+    detailed: bool = False,
 ) -> str:
     forms: list[str] = []
     if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.OPERATOR_REVIEW.value:
@@ -851,6 +983,63 @@ def _render_task_actions(
             + _task_action_fields(workspace_id, task_id, revision, "cancel")
             + f'<button class="btn btn-danger" type="submit">{escape(CANCEL_TASK)}</button></form></div>'
         )
+    elif state in {TaskState.COMPLETED.value, TaskState.CANCELLED.value}:
+        forms.append(
+            '<div class="action-row"><form method="post" action="">'
+            + _task_action_fields(workspace_id, task_id, revision, "reopen")
+            + f'<button class="btn btn-primary" type="submit">{escape(REOPEN_TASK)}</button>'
+            "</form></div>"
+        )
+    if detailed:
+        status_options = []
+        for value, label in (
+            ("", OPERATOR_STATUS_NONE),
+            (TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
+            (TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
+        ):
+            selected = " selected" if (operator_status or "") == value else ""
+            status_options.append(
+                f'<option value="{escape(value, quote=True)}"{selected}>{escape(label)}</option>'
+            )
+        forms.append(
+            f'<details class="feedback-disclosure"><summary>{escape(COMMENT_SUMMARY)}</summary>'
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "comment")
+            + f'<label for="comment-{escape(task_id, quote=True)}">{escape(COMMENT_LABEL)}</label>'
+            f'<textarea id="comment-{escape(task_id, quote=True)}" name="comment" rows="4" '
+            f'maxlength="2048" required placeholder="{escape(COMMENT_PLACEHOLDER, quote=True)}"></textarea>'
+            f'<button class="btn" type="submit">{escape(COMMENT_SUBMIT)}</button></form></details>'
+        )
+        forms.append(
+            f'<details class="feedback-disclosure"><summary>{escape(JIRA)}</summary>'
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "set_jira")
+            + f'<label for="jira-{escape(task_id, quote=True)}">{escape(JIRA_LABEL)}</label>'
+            f'<input id="jira-{escape(task_id, quote=True)}" name="jira_url" type="url" '
+            f'maxlength="2048" value="{escape(jira_url or "", quote=True)}" '
+            f'placeholder="{escape(JIRA_PLACEHOLDER, quote=True)}">'
+            f'<button class="btn" type="submit">{escape(JIRA_SAVE)}</button></form>'
+            + (
+                '<form method="post" action="" class="action-row">'
+                + _task_action_fields(workspace_id, task_id, revision, "set_jira")
+                + '<input type="hidden" name="jira_url" value="">'
+                + f'<button class="btn" type="submit">{escape(JIRA_CLEAR)}</button></form>'
+                if jira_url is not None
+                else ""
+            )
+            + "</details>"
+        )
+        forms.append(
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "set_operator_status")
+            + f'<label for="operator-status-{escape(task_id, quote=True)}">'
+            + escape(OPERATOR_STATUS)
+            + "</label>"
+            + f'<select id="operator-status-{escape(task_id, quote=True)}" name="operator_status">'
+            + "".join(status_options)
+            + "</select>"
+            + f'<button class="btn" type="submit">{escape(OPERATOR_STATUS_SAVE)}</button></form>'
+        )
     return '<div class="action-panel">' + "".join(forms) + "</div>" if forms else ""
 
 
@@ -870,8 +1059,6 @@ def _state_pill(state: str | None, wait_reason: str | None = None) -> str:
 
 
 def _url(base_path: str, kind: str, identity: str | None = None) -> str:
-    if kind == "projects":
-        return base_path
     assert identity is not None
     return f"{base_path}{kind}/{quote(identity, safe='')}/"
 
@@ -896,6 +1083,88 @@ def _events_url(
     return f"{base_path}events?{urlencode(params)}"
 
 
+def _project_display_name(rows: tuple[DashboardWorkspaceRow, ...], project_id: str) -> str:
+    project_rows = tuple(row for row in rows if row.project_id == project_id)
+    if not project_rows:
+        return project_crumb(project_id)
+    common_dir = project_rows[0].git_common_dir
+    candidate = common_dir.parent.name if common_dir.name == ".git" else common_dir.name
+    return candidate.removesuffix(".git") or project_crumb(project_id)
+
+
+def _group_navigation_rows(
+    rows: tuple[DashboardWorkspaceRow, ...],
+) -> tuple[tuple[str, tuple[DashboardWorkspaceRow, ...]], ...]:
+    grouped: dict[str, list[DashboardWorkspaceRow]] = {}
+    for row in rows:
+        grouped.setdefault(row.project_id, []).append(row)
+    return tuple((project_id, tuple(project_rows)) for project_id, project_rows in grouped.items())
+
+
+def _workspace_navigation_name(row: DashboardWorkspaceRow, project_name: str) -> str:
+    workspace_name = row.workspace_root.name or WORKSPACE_FALLBACK
+    return PRIMARY_WORKSPACE if workspace_name == project_name else workspace_name
+
+
+def _render_project_navigation(
+    rows: tuple[DashboardWorkspaceRow, ...],
+    *,
+    base_path: str,
+    current_project_id: str | None,
+    current_workspace_id: str | None,
+    current_task_id: str | None,
+) -> str:
+    overview_current = current_project_id is None
+    parts = [
+        f'<nav class="project-navigation" aria-label="{escape(PROJECTS_NAV, quote=True)}">',
+        f'<a class="overview-link{" is-current" if overview_current else ""}" '
+        f'href="{escape(base_path, quote=True)}"'
+        + (' aria-current="page"' if overview_current else "")
+        + f'><span class="nav-overview-icon" aria-hidden="true">⌂</span><span>{escape(ALL_PROJECTS)}</span></a>',
+        f'<p class="nav-label">{escape(PROJECTS_NAV)}</p>',
+    ]
+    for project_id, project_rows in _group_navigation_rows(rows):
+        project_current = project_id == current_project_id
+        project_url = _url(base_path, "projects", project_id)
+        project_name = _project_display_name(rows, project_id)
+        parts.append(
+            f'<section class="nav-project{" is-context" if project_current else ""}">'
+            f'<a class="nav-project-link" href="{escape(project_url, quote=True)}"'
+            + (' aria-current="page"' if project_current and current_workspace_id is None else "")
+            + f'><span class="nav-project-name">{escape(project_name)}</span>'
+            f'<span class="nav-project-id mono">{escape(project_id[:8])}</span></a>'
+            '<div class="nav-workspaces">'
+        )
+        for row in project_rows:
+            workspace_current = row.workspace_id == current_workspace_id
+            workspace_name = _workspace_navigation_name(row, project_name)
+            workspace_url = _url(base_path, "workspaces", row.workspace_id)
+            state = row.task_state or "idle"
+            parts.append(
+                f'<a class="nav-workspace{" is-current" if workspace_current and current_task_id is None else ""}" '
+                f'href="{escape(workspace_url, quote=True)}"'
+                + (' aria-current="page"' if workspace_current and current_task_id is None else "")
+                + f'><span class="nav-state" data-state="{escape(state, quote=True)}" aria-hidden="true"></span>'
+                '<span class="nav-workspace-copy">'
+                f'<span class="nav-workspace-name">{escape(workspace_name)}</span>'
+                f'<span class="nav-workspace-meta">{escape(row.branch or EM_DASH)}</span></span></a>'
+            )
+            if row.task_id is not None:
+                task_current = row.task_id == current_task_id
+                task_url = _url(base_path, "tasks", row.task_id)
+                parts.append(
+                    f'<a class="nav-task{" is-current" if task_current else ""}" '
+                    f'href="{escape(task_url, quote=True)}"'
+                    + (' aria-current="page"' if task_current else "")
+                    + f"><span>{escape(row.task_title or row.task_id)}</span></a>"
+                )
+        parts.append("</div></section>")
+    if not rows:
+        parts.append(f'<p class="nav-empty">{escape(EMPTY_WORKSPACES_TITLE)}</p>')
+    parts.append("</nav>")
+    return "".join(parts)
+
+
 def _render_shell(
     *,
     base_path: str,
@@ -903,15 +1172,26 @@ def _render_shell(
     breadcrumbs: tuple[tuple[str, str | None], ...],
     events_url: str,
     content: str,
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] = (),
+    current_project_id: str | None = None,
+    current_workspace_id: str | None = None,
+    current_task_id: str | None = None,
 ) -> str:
     breadcrumb_html: list[str] = []
-    for index, (label, href) in enumerate(breadcrumbs):
-        if index:
-            breadcrumb_html.append('<span class="sep">/</span>')
+    for label, href in breadcrumbs:
         if href is None:
-            breadcrumb_html.append(f"<span>{escape(label)}</span>")
+            breadcrumb_html.append(f'<li aria-current="page"><span>{escape(label)}</span></li>')
         else:
-            breadcrumb_html.append(f'<a href="{escape(href, quote=True)}">{escape(label)}</a>')
+            breadcrumb_html.append(
+                f'<li><a href="{escape(href, quote=True)}">{escape(label)}</a></li>'
+            )
+    navigation = _render_project_navigation(
+        navigation_rows,
+        base_path=base_path,
+        current_project_id=current_project_id,
+        current_workspace_id=current_workspace_id,
+        current_task_id=current_task_id,
+    )
     css_url = f"{base_path}assets/dashboard.css"
     js_url = f"{base_path}assets/dashboard.js"
     return (
@@ -922,18 +1202,29 @@ def _render_shell(
         "</head>"
         f'<body data-events-url="{escape(events_url, quote=True)}">'
         f'<a class="skip-link" href="#main">{escape(SKIP_TO_CONTENT)}</a>'
-        '<div class="shell"><header class="topbar">'
+        '<div class="app-layout"><aside class="app-sidebar">'
         f'<a class="brand" href="{escape(base_path, quote=True)}">'
-        f'<span class="brand-mark" aria-hidden="true">H</span><span>{escape(BRAND)}</span></a>'
-        '<div class="topbar-meta">'
+        f'<span class="brand-mark" aria-hidden="true">H</span><span class="brand-copy">'
+        f"<strong>{escape(BRAND)}</strong><small>{escape(WORKSPACE_HOME)}</small></span></a>"
+        f"{navigation}"
+        '<div class="sidebar-footer">'
         '<span class="live-indicator" data-live-indicator data-state="reconnecting">'
         '<span class="live-dot" aria-hidden="true"></span>'
         f'<span class="live-copy" data-live-copy>{escape(LIVE_CONNECTING)}</span>'
         f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button>'
-        "</span></div></header>"
-        f'<nav class="breadcrumbs" aria-label="{escape(NAVIGATION, quote=True)}">'
-        f"{''.join(breadcrumb_html)}</nav>"
-        f'<main id="main">{content}</main></div>'
+        '</span></div></aside><div class="app-stage"><header class="context-header">'
+        '<details class="mobile-navigation"><summary>'
+        f'<span class="brand-mark" aria-hidden="true">H</span><span>{escape(OPEN_NAVIGATION)}</span>'
+        '<span class="mobile-chevron" aria-hidden="true">⌄</span></summary>'
+        f'<div class="mobile-navigation-panel">{navigation}</div></details>'
+        f'<nav class="breadcrumbs" aria-label="{escape(NAVIGATION, quote=True)}"><ol>'
+        f"{''.join(breadcrumb_html)}</ol></nav>"
+        '<span class="header-live-indicator live-indicator" data-header-live-indicator '
+        'data-state="reconnecting"><span class="live-dot" aria-hidden="true"></span>'
+        f'<span class="live-copy">{escape(LIVE_CONNECTING)}</span>'
+        f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button></span>'
+        '</header><main id="main"><div class="content-frame">'
+        f"{content}</div></main></div></div>"
         f'<script defer src="{escape(js_url, quote=True)}"></script>'
         "</body></html>"
     )
@@ -985,7 +1276,17 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
     task_branch = (
         "" if row.task_git_branch is None else _render_task_git_branch(row.task_git_branch)
     )
-    next_step = "" if row.next_step is None else f'<p class="next-step">{escape(row.next_step)}</p>'
+    operator_marker = (
+        ""
+        if row.task_operator_status is None
+        else f'<span class="task-marker">{escape(operator_status_label(row.task_operator_status))}</span>'
+    )
+    jira_link = (
+        ""
+        if row.task_jira_url is None
+        else f'<a class="task-jira" href="{escape(row.task_jira_url, quote=True)}" '
+        f'target="_blank" rel="noreferrer noopener">{escape(JIRA)}</a>'
+    )
     live_branch = _display_live_status(row.branch, row)
     live_dirty = _display_live_status(row.dirty_path_count, row)
     actions = ""
@@ -996,33 +1297,81 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
             state=row.task_state,
             wait_reason=row.task_wait_reason,
             revision=row.task_revision,
+            jira_url=row.task_jira_url,
+            operator_status=row.task_operator_status,
         )
     return (
-        '<article class="workspace-card"><div class="card-main">'
-        f'<div class="card-kicker">{_state_pill(row.task_state, row.task_wait_reason)}</div>'
-        f'<h2 class="workspace-name"><a href="{escape(workspace_url, quote=True)}">'
-        f"{escape(row.workspace_root.name or str(row.workspace_root))}</a></h2>"
-        f'<p class="workspace-path">{escape(str(row.workspace_root))}</p>'
-        f'<div class="task-focus"><div class="task-focus-label">{escape(TASK_FOCUS)}</div>'
-        f'<p class="task-focus-title">{focus}</p>{task_branch}{next_step}</div></div>'
-        '<aside class="card-side"><div class="mini-stats">'
+        f'<article class="workspace-card" data-state="{escape(row.task_state or "idle", quote=True)}">'
+        '<div class="workspace-card-main"><header class="workspace-card-head"><div>'
+        f'<p class="workspace-card-label">{escape(WORKSPACE_OVERVIEW)}</p>'
+        f'<h3 class="workspace-name"><a href="{escape(workspace_url, quote=True)}">'
+        f"{escape(row.workspace_root.name or str(row.workspace_root))}</a></h3>"
+        f'<p class="workspace-path">{escape(str(row.workspace_root))}</p></div>'
+        f"{_state_pill(row.task_state, row.task_wait_reason)}</header>"
+        f'<div class="task-focus"><div class="task-focus-head"><span class="task-focus-label">{escape(TASK_FOCUS)}</span>'
+        f'<span class="task-focus-links">{operator_marker}{jira_link}</span></div>'
+        f'<p class="task-focus-title">{focus}</p>{task_branch}'
+        + (
+            f'<div class="next-step"><span>{escape(NEXT_STEP)}</span><p>{escape(row.next_step)}</p></div>'
+            if row.next_step is not None
+            else ""
+        )
+        + '</div><a class="text-link" href="'
+        + escape(workspace_url, quote=True)
+        + f'">{escape(OPEN_WORKSPACE)} <span aria-hidden="true">→</span></a></div>'
+        '<aside class="workspace-card-side"><div class="mini-stats">'
         f'<div class="mini-stat"><span>{escape(BRANCH)}</span><strong>{escape(live_branch)}</strong></div>'
         f'<div class="mini-stat"><span>{escape(DIRTY)}</span><strong>{escape(live_dirty)}</strong></div>'
         f'<div class="mini-stat"><span>{escape(INDEX)}</span><strong>{row.indexed_file_count}</strong></div>'
         f'<div class="mini-stat"><span>{escape(MODE)}</span>'
         f"<strong>{escape(visibility_label(row.visibility_mode))}</strong></div>"
-        f"</div>{_render_visibility_form(row.project_id, row.visibility_mode, action=base_path, compact=True)}"
-        f"{actions}</aside></article>"
+        f"</div>{actions}</aside></article>"
+    )
+
+
+def _render_project_section(
+    project_id: str,
+    rows: tuple[DashboardWorkspaceRow, ...],
+    *,
+    base_path: str,
+    visibility_action: str,
+) -> str:
+    project_url = _url(base_path, "projects", project_id)
+    name = _project_display_name(rows, project_id)
+    return (
+        f'<section class="project-section" data-project="{escape(project_id, quote=True)}">'
+        '<header class="project-section-head"><div class="project-heading">'
+        f'<p class="project-kicker">{escape(PROJECT_OVERVIEW)} · '
+        f'<span class="mono">{escape(project_id[:8])}</span></p>'
+        f'<h2 class="project-title"><a href="{escape(project_url, quote=True)}">'
+        f"{escape(name)}</a></h2>"
+        f'<p class="project-meta">{escape(workspace_count_label(len(rows)))}</p></div>'
+        '<div class="project-controls">'
+        f'<a class="text-link" href="{escape(project_url, quote=True)}">{escape(OPEN_PROJECT)} '
+        '<span aria-hidden="true">→</span></a>'
+        + _render_visibility_form(
+            project_id,
+            rows[0].visibility_mode,
+            action=visibility_action,
+            compact=True,
+        )
+        + '</div></header><div class="workspace-list">'
+        + "".join(_render_workspace_card(row, base_path) for row in rows)
+        + "</div></section>"
     )
 
 
 def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: str = "/") -> str:
     """Render the capability-scoped Projects overview with navigation and live refresh hints."""
     if rows:
-        workspace_html = (
-            '<div class="workspace-grid">'
-            + "".join(_render_workspace_card(row, base_path) for row in rows)
-            + "</div>"
+        workspace_html = "".join(
+            _render_project_section(
+                project_id,
+                project_rows,
+                base_path=base_path,
+                visibility_action=base_path,
+            )
+            for project_id, project_rows in _group_navigation_rows(rows)
         )
     else:
         workspace_html = (
@@ -1030,12 +1379,14 @@ def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: 
             f"<span>{escape(EMPTY_WORKSPACES_HINT)}</span></div>"
         )
     content = (
-        '<section class="hero compact"><div>'
-        f"<h1>{escape(PAGE_PROJECTS)}</h1>"
+        '<section class="page-intro"><div>'
+        f'<p class="eyebrow">{escape(PAGE_PROJECTS)}</p>'
+        f"<h1>{escape(WORKSPACE_HOME)}</h1>"
         f'<p class="hero-copy">{escape(PAGE_PROJECTS_LEAD)}</p></div></section>'
         + _render_metrics(rows)
-        + '<section class="section"><div class="section-head"><div>'
-        f'<h2 class="section-title">{escape(SECTION_WORKSPACES)}</h2></div></div>'
+        + '<section class="project-stack" aria-label="'
+        + escape(SECTION_WORKSPACES, quote=True)
+        + '">'
         + workspace_html
         + "</section>"
     )
@@ -1049,15 +1400,28 @@ def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: 
             snapshot=_snapshot_fingerprint(rows),
         ),
         content=content,
+        navigation_rows=rows,
     )
 
 
-def render_project_page(detail: DashboardProjectDetail, *, base_path: str) -> str:
+def render_project_page(
+    detail: DashboardProjectDetail,
+    *,
+    base_path: str,
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = None,
+) -> str:
     rows = detail.workspaces
+    project_id = detail.project.project_id
+    nav_rows = rows if navigation_rows is None else navigation_rows
+    project_name = _project_display_name(nav_rows, project_id)
+    visibility_action = f"{base_path}projects/{quote(project_id, safe='')}/"
     workspace_html = (
-        '<div class="workspace-grid">'
+        '<section class="project-section"><header class="project-section-head">'
+        f'<div><p class="project-kicker">{escape(SECTION_WORKSPACES)}</p>'
+        f'<h2 class="project-title">{escape(workspace_count_label(len(rows)))}</h2></div></header>'
+        '<div class="workspace-list">'
         + "".join(_render_workspace_card(row, base_path) for row in rows)
-        + "</div>"
+        + "</div></section>"
         if rows
         else (
             f'<div class="empty-state"><strong>{escape(EMPTY_PROJECT_WORKSPACES_TITLE)}</strong>'
@@ -1065,34 +1429,35 @@ def render_project_page(detail: DashboardProjectDetail, *, base_path: str) -> st
         )
     )
     content = (
-        '<section class="hero compact"><div>'
-        f"<h1>{escape(detail.project.project_id[:12])}</h1></div>"
-        '<div class="hero-aside">'
-        f'<div class="identity-line">{escape(detail.project.project_id)}</div>'
-        f'<div class="identity-line">{escape(visibility_label(detail.project.visibility_mode.value))}</div>'
+        '<section class="page-intro compact"><div>'
+        f'<p class="eyebrow">{escape(PROJECT_OVERVIEW)}</p>'
+        f"<h1>{escape(project_name)}</h1>"
+        f'<p class="hero-copy identity-line">{escape(project_id)}</p></div>'
+        '<div class="page-intro-actions">'
         + _render_visibility_form(
-            detail.project.project_id,
+            project_id,
             detail.project.visibility_mode,
-            action=f"{base_path}projects/{quote(detail.project.project_id, safe='')}/",
+            action=visibility_action,
         )
         + "</div></section>"
         + _render_metrics(rows)
-        + '<section class="section"><div class="section-head"><div>'
-        f'<h2 class="section-title">{escape(workspace_count_label(len(rows)))}</h2>'
-        "</div></div>" + workspace_html + "</section>"
+        + workspace_html
     )
-    project_id = detail.project.project_id
     return _render_shell(
         base_path=base_path,
-        page_title=document_title(project_crumb(project_id)),
-        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (project_crumb(project_id), None)),
+        page_title=document_title(project_name),
+        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (project_name, None)),
         events_url=_events_url(
             base_path,
             view="project",
             identity=project_id,
-            snapshot=_snapshot_fingerprint(detail),
+            snapshot=_snapshot_fingerprint(
+                detail if navigation_rows is None else (detail, navigation_rows)
+            ),
         ),
         content=content,
+        navigation_rows=nav_rows,
+        current_project_id=project_id,
     )
 
 
@@ -1104,34 +1469,58 @@ def _render_recent_tasks(tasks: tuple[DashboardTaskRow, ...], base_path: str) ->
         task = row.task
         task_url = _url(base_path, "tasks", task.task_id)
         wait_reason = None if task.wait_reason is None else task.wait_reason.value
+        operator_status = (
+            ""
+            if task.operator_status is None
+            else f'<span class="task-marker">{escape(operator_status_label(task.operator_status.value))}</span>'
+        )
+        jira = (
+            ""
+            if task.jira_url is None
+            else f'<a class="task-jira" href="{escape(task.jira_url, quote=True)}" '
+            f'target="_blank" rel="noreferrer noopener">{escape(JIRA)}</a>'
+        )
         parts.append(
-            '<article class="task-row"><div>'
+            f'<article class="task-row" data-state="{escape(task.state.value, quote=True)}"><div>'
             f'<p class="task-row-title"><a href="{escape(task_url, quote=True)}">{escape(task.title)}</a></p>'
             '<div class="task-row-meta">'
             f'<span class="mono">{escape(task.task_id[:10])}</span>'
             f"<span>{escape(REVISION)} {task.revision}</span>"
             f'<span>{escape(BRANCH)} <span class="mono">'
             f"{escape(_display_recorded_branch(row.git_branch))}</span></span>"
-            f"<span>{escape(task.updated_at)}</span></div></div>"
-            f"{_state_pill(task.state.value, wait_reason)}</article>"
+            f"<span>{escape(task.updated_at)}</span>{operator_status}{jira}</div></div>"
+            f'<div class="task-row-aside">{_state_pill(task.state.value, wait_reason)}'
+            f'<span class="row-arrow" aria-hidden="true">→</span></div></article>'
         )
     parts.append("</div>")
     return "".join(parts)
 
 
-def _render_search(detail: DashboardWorkspaceDetail) -> str:
+def _render_search(detail: DashboardWorkspaceDetail, base_path: str) -> str:
     query = detail.search_query or ""
     result_html = ""
     if detail.search_query is not None:
-        if detail.search_results:
+        if detail.search_results or detail.task_search_results:
             hits = []
-            for hit in detail.search_results:
+            for task_hit in detail.task_search_results:
+                task_id = task_hit.ref.removeprefix("task:").partition("#")[0]
+                task_url = _url(base_path, "tasks", task_id)
+                summary = "" if task_hit.short_summary is None else f" · {task_hit.short_summary}"
                 hits.append(
                     '<div class="search-hit"><div class="search-hit-path">'
-                    + escape(hit.relative_path)
+                    f'<a href="{escape(task_url, quote=True)}">{escape(task_hit.title)}</a>'
+                    f'<div class="section-note">{escape(task_hit.location)}{escape(summary)}</div>'
+                    '</div><div class="search-hit-meta">задача · '
+                    + escape(task_hit.match_reason)
+                    + "</div></div>"
+                )
+            for path_hit in detail.search_results:
+                hits.append(
+                    '<div class="search-hit"><div class="search-hit-path">'
+                    + escape(path_hit.relative_path)
                     + '</div><div class="search-hit-meta">'
-                    + escape(match_kind_label(hit.match_kind.value))
-                    + f" · {hit.size_bytes} B</div></div>"
+                    + escape(match_kind_label(path_hit.match_kind.value))
+                    + f" · {path_hit.size_bytes} B</div></div>"
                 )
             result_html = (
                 '<div class="search-results" aria-live="polite">' + "".join(hits) + "</div>"
@@ -1150,7 +1539,54 @@ def _render_search(detail: DashboardWorkspaceDetail) -> str:
     )
 
 
-def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -> str:
+def _render_workspace_current_task(
+    row: DashboardWorkspaceRow,
+    *,
+    base_path: str,
+    actions: str,
+) -> str:
+    if row.task_id is None:
+        return (
+            '<section class="panel focus-panel"><div class="panel-head">'
+            f'<div><p class="panel-kicker">{escape(CURRENT_TASK)}</p>'
+            f"<h2>{escape(NO_TASK)}</h2></div>{_state_pill(None)}</div></section>"
+        )
+    task_url = _url(base_path, "tasks", row.task_id)
+    branch = (
+        EM_DASH if row.task_git_branch is None else _display_recorded_branch(row.task_git_branch)
+    )
+    next_step = (
+        ""
+        if row.next_step is None
+        else f'<div class="next-step"><span>{escape(NEXT_STEP)}</span><p>{escape(row.next_step)}</p></div>'
+    )
+    markers = ""
+    if row.task_operator_status is not None:
+        markers += f'<span class="task-marker">{escape(operator_status_label(row.task_operator_status))}</span>'
+    if row.task_jira_url is not None:
+        markers += (
+            f'<a class="task-jira" href="{escape(row.task_jira_url, quote=True)}" '
+            f'target="_blank" rel="noreferrer noopener">{escape(JIRA)}</a>'
+        )
+    return (
+        '<section class="panel focus-panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(CURRENT_TASK)}</p>'
+        f'<h2><a href="{escape(task_url, quote=True)}">{escape(row.task_title or row.task_id)}</a></h2>'
+        f"</div>{_state_pill(row.task_state, row.task_wait_reason)}</div>"
+        '<div class="panel-body"><div class="task-primary-meta">'
+        f'<span class="mono">{escape(row.task_id[:10])}</span>'
+        f'<span>{escape(BRANCH)} <strong class="mono">{escape(branch)}</strong></span>{markers}</div>'
+        f'{next_step}<a class="text-link" href="{escape(task_url, quote=True)}">{escape(OPEN_TASK)} '
+        f'<span aria-hidden="true">→</span></a>{actions}</div></section>'
+    )
+
+
+def render_workspace_page(
+    detail: DashboardWorkspaceDetail,
+    *,
+    base_path: str,
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = None,
+) -> str:
     row = detail.workspace
     workspace_url = _url(base_path, "workspaces", row.workspace_id)
     live_branch = _display_live_status(row.branch, row)
@@ -1163,54 +1599,66 @@ def render_workspace_page(detail: DashboardWorkspaceDetail, *, base_path: str) -
             state=row.task_state,
             wait_reason=row.task_wait_reason,
             revision=row.task_revision,
+            jira_url=row.task_jira_url,
+            operator_status=row.task_operator_status,
         )
     workspace_name = row.workspace_root.name or WORKSPACE_FALLBACK
-    action_html = (
-        _render_visibility_form(row.project_id, row.visibility_mode, action=workspace_url) + actions
+    project_url = _url(base_path, "projects", row.project_id)
+    navigation = (row,) if navigation_rows is None else navigation_rows
+    project_name = _project_display_name(navigation, row.project_id)
+    breadcrumb_workspace_name = (
+        WORKSPACE_OVERVIEW if workspace_name == project_name else workspace_name
     )
     content = (
-        '<section class="hero compact"><div>'
+        '<section class="page-intro compact"><div>'
+        f'<p class="eyebrow">{escape(WORKSPACE_OVERVIEW)}</p>'
         f"<h1>{escape(workspace_name)}</h1>"
         f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div></section>'
-        '<section class="detail-grid"><div class="panel">'
-        f'<div class="panel-head"><h2>{escape(WORKSPACE_STATE)}</h2>'
-        f'{_state_pill(row.task_state, row.task_wait_reason)}</div><div class="panel-body">'
+        '<section class="panel search-panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(SEARCH_LABEL)}</h2>'
+        '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
+        + _render_search(detail, base_path)
+        + '</div></section><section class="workspace-layout"><div class="workspace-main">'
+        + _render_workspace_current_task(row, base_path=base_path, actions=actions)
+        + '<section class="panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(RECENT_TASKS)}</p><h2>{escape(RECENT_TASKS)}</h2></div></div>'
+        '<div class="panel-body">'
+        + _render_recent_tasks(detail.recent_tasks, base_path)
+        + '</div></section></div><aside class="workspace-aside"><section class="panel sticky-panel">'
+        f'<div class="panel-head"><div><p class="panel-kicker">{escape(WORKSPACE_STATE)}</p>'
+        f'<h2>{escape(WORKSPACE_OVERVIEW)}</h2></div></div><div class="panel-body">'
         '<dl class="fact-list">'
+        f'<div class="fact"><dt>{escape(PROJECT)}</dt><dd><a href="{escape(project_url, quote=True)}">{escape(project_name)}</a></dd></div>'
         f'<div class="fact"><dt>{escape(BRANCH)}</dt><dd class="mono">{escape(live_branch)}</dd></div>'
         f'<div class="fact"><dt>{escape(DIRTY_PATHS)}</dt><dd>{escape(live_dirty)}</dd></div>'
         f'<div class="fact"><dt>{escape(INDEXED_PATHS)}</dt><dd>{row.indexed_file_count}</dd></div>'
-        f'<div class="fact"><dt>{escape(VISIBILITY)}</dt>'
-        f"<dd>{escape(visibility_label(row.visibility_mode))}</dd></div>"
+        f'<div class="fact"><dt>{escape(VISIBILITY)}</dt><dd>{escape(visibility_label(row.visibility_mode))}</dd></div>'
         f'<div class="fact"><dt>{escape(TASK)}</dt><dd class="mono">{escape(_display_task(row))}</dd></div>'
-        "</dl></div></div>"
-        f'<aside class="panel"><div class="panel-head"><h2>{escape(ACTIONS)}</h2></div>'
-        f'<div class="panel-body">{action_html}</div></aside></section>'
-        '<section class="section"><div class="section-head"><div>'
-        f'<h2 class="section-title">{escape(SEARCH_SECTION)}</h2></div></div>'
-        '<div class="panel"><div class="panel-body">'
-        + _render_search(detail)
-        + "</div></div></section>"
-        '<section class="section"><div class="section-head"><div>'
-        f'<h2 class="section-title">{escape(RECENT_TASKS)}</h2></div></div>'
-        '<div class="panel"><div class="panel-body">'
-        + _render_recent_tasks(detail.recent_tasks, base_path)
-        + "</div></div></section>"
+        '</dl><div class="settings-divider"></div>'
+        + _render_visibility_form(row.project_id, row.visibility_mode, action=workspace_url)
+        + "</div></section></aside></section>"
     )
     return _render_shell(
         base_path=base_path,
         page_title=document_title(workspace_name),
         breadcrumbs=(
             (BREADCRUMB_PROJECTS, base_path),
-            (workspace_name, None),
+            (project_name, project_url),
+            (breadcrumb_workspace_name, None),
         ),
         events_url=_events_url(
             base_path,
             view="workspace",
             identity=row.workspace_id,
             search_query=detail.search_query,
-            snapshot=_snapshot_fingerprint(detail),
+            snapshot=_snapshot_fingerprint(
+                detail if navigation_rows is None else (detail, navigation_rows)
+            ),
         ),
         content=content,
+        navigation_rows=navigation,
+        current_project_id=row.project_id,
+        current_workspace_id=row.workspace_id,
     )
 
 
@@ -1254,6 +1702,25 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
             content.append(
                 f'<blockquote class="feedback-quote">{escape(event.operator_feedback)}</blockquote>'
             )
+        if event.operator_comment is not None:
+            content.append(
+                f'<blockquote class="feedback-quote">{escape(event.operator_comment)}</blockquote>'
+            )
+        if event.event_type is TaskEventType.JIRA_LINK_UPDATED:
+            content.append(
+                escape(JIRA_CLEAR)
+                if event.jira_url is None
+                else f'<a href="{escape(event.jira_url, quote=True)}" target="_blank" '
+                f'rel="noreferrer noopener">{escape(event.jira_url)}</a>'
+            )
+        if event.event_type is TaskEventType.OPERATOR_STATUS_UPDATED:
+            content.append(
+                escape(
+                    operator_status_label(
+                        None if event.operator_status is None else event.operator_status.value
+                    )
+                )
+            )
         content_html = (
             '<div class="timeline-content">' + "".join(content) + "</div>" if content else ""
         )
@@ -1274,7 +1741,12 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
     return "".join(items)
 
 
-def render_task_page(detail: DashboardTaskDetail, *, base_path: str) -> str:
+def render_task_page(
+    detail: DashboardTaskDetail,
+    *,
+    base_path: str,
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = None,
+) -> str:
     row = detail.workspace
     task = detail.task
     workspace_url = _url(base_path, "workspaces", row.workspace_id)
@@ -1286,61 +1758,104 @@ def render_task_page(detail: DashboardTaskDetail, *, base_path: str) -> str:
         state=task.state.value,
         wait_reason=wait_reason,
         revision=task.revision,
+        jira_url=task.jira_url,
+        operator_status=(None if task.operator_status is None else task.operator_status.value),
+        detailed=True,
     )
     workspace_name = row.workspace_root.name or WORKSPACE_FALLBACK
+    navigation = (row,) if navigation_rows is None else navigation_rows
+    project_name = _project_display_name(navigation, row.project_id)
     no_actions = f'<p class="section-note">{escape(NO_ACTIONS)}</p>'
     stack = (
         EM_DASH
         if not detail.stack_hints
         else " · ".join(escape(item) for item in detail.stack_hints)
     )
+    latest_checkpoint = detail.checkpoints[-1] if detail.checkpoints else None
+    latest_update = ""
+    if latest_checkpoint is not None:
+        next_step = (
+            ""
+            if latest_checkpoint.next_step is None
+            else f'<div class="next-step"><span>{escape(NEXT_STEP)}</span><p>{escape(latest_checkpoint.next_step)}</p></div>'
+        )
+        latest_update = (
+            '<section class="task-update"><p class="panel-kicker">'
+            + escape(UPDATED)
+            + f'</p><p class="task-update-summary">{escape(latest_checkpoint.summary)}</p>'
+            + next_step
+            + "</section>"
+        )
     content = (
-        '<section class="hero compact"><div>'
-        f'<h1 class="task-title">{escape(task.title)}</h1></div>'
-        '<div class="hero-aside">'
+        '<section class="page-intro task-intro"><div>'
+        f'<p class="eyebrow">{escape(TASK_OVERVIEW)}</p>'
+        f'<h1 class="task-title">{escape(task.title)}</h1>'
+        '<div class="task-intro-meta">'
         f"{_state_pill(task.state.value, wait_reason)}"
-        f'<div class="identity-line">{escape(task.task_id)}</div>'
-        f'<div class="identity-line">{escape(REVISION)} {task.revision}</div></div></section>'
-        f'<section class="detail-grid"><div class="panel"><div class="panel-head"><h2>{escape(TASK_FACTS)}</h2></div>'
+        f'<span class="mono">{escape(task.task_id)}</span>'
+        f"<span>{escape(REVISION)} {task.revision}</span>"
+        f'<span>{escape(BRANCH)} <strong class="mono">{escape(_display_recorded_branch(detail.git_branch))}</strong></span>'
+        '</div></div></section><section class="task-layout"><div class="task-main">'
+        + latest_update
+        + '<section class="panel timeline-panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(TIMELINE)}</p><h2>{escape(TIMELINE)}</h2></div>'
+        f'<p class="section-note">{escape(event_count_label(detail.event_count))}</p></div>'
+        '<div class="panel-body">'
+        + _render_timeline(detail)
+        + '</div></section></div><aside class="task-aside">'
+        f'<section class="panel action-card"><div class="panel-head"><div><p class="panel-kicker">{escape(ACTIONS)}</p>'
+        f'<h2>{escape(ACTIONS)}</h2></div></div><div class="panel-body">{actions if actions else no_actions}</div></section>'
+        f'<section class="panel facts-card"><div class="panel-head"><div><p class="panel-kicker">{escape(TASK_FACTS)}</p>'
+        f"<h2>{escape(TASK_FACTS)}</h2></div></div>"
         '<div class="panel-body"><dl class="fact-list">'
         f'<div class="fact"><dt>{escape(WORKSPACE)}</dt>'
-        f'<dd><a href="{escape(workspace_url, quote=True)}" class="mono">{escape(task.workspace_id)}</a></dd></div>'
+        f'<dd><a href="{escape(workspace_url, quote=True)}">{escape(workspace_name)}</a></dd></div>'
         f'<div class="fact"><dt>{escape(PROJECT)}</dt>'
-        f'<dd><a href="{escape(project_url, quote=True)}" class="mono">{escape(row.project_id)}</a></dd></div>'
+        f'<dd><a href="{escape(project_url, quote=True)}">{escape(project_name)}</a></dd></div>'
         f'<div class="fact"><dt>{escape(BRANCH)}</dt>'
         f'<dd class="mono">{escape(_display_recorded_branch(detail.git_branch))}</dd></div>'
         f'<div class="fact"><dt>{escape(STATE)}</dt>'
         f"<dd>{escape(task_state_label(task.state.value, wait_reason))}</dd></div>"
+        f'<div class="fact"><dt>{escape(OPERATOR_STATUS)}</dt>'
+        f"<dd>{escape(operator_status_label(None if task.operator_status is None else task.operator_status.value))}</dd></div>"
+        f'<div class="fact"><dt>{escape(JIRA)}</dt><dd>'
+        + (
+            escape(EM_DASH)
+            if task.jira_url is None
+            else f'<a href="{escape(task.jira_url, quote=True)}" target="_blank" '
+            f'rel="noreferrer noopener">{escape(task.jira_url)}</a>'
+        )
+        + "</dd></div>"
         f'<div class="fact"><dt>{escape(WAIT_REASON)}</dt><dd>{escape(wait_reason_label(wait_reason))}</dd></div>'
         f'<div class="fact"><dt>{escape(STACK_HINTS)}</dt><dd class="mono">{stack}</dd></div>'
         f'<div class="fact"><dt>{escape(CREATED)}</dt><dd>{escape(task.created_at)}</dd></div>'
         f'<div class="fact"><dt>{escape(UPDATED)}</dt><dd>{escape(task.updated_at)}</dd></div>'
-        "</dl></div></div>"
-        f'<aside class="panel"><div class="panel-head"><h2>{escape(ACTIONS)}</h2></div>'
-        f'<div class="panel-body">{actions if actions else no_actions}</div></aside></section>'
-        '<section class="section"><div class="section-head"><div>'
-        f'<h2 class="section-title">{escape(TIMELINE)}</h2></div>'
-        f'<p class="section-note">{escape(event_count_label(detail.event_count))}</p></div>'
-        '<div class="panel"><div class="panel-body">'
-        + _render_timeline(detail)
-        + "</div></div></section>"
+        "</dl></div></section></aside></section>"
     )
+    task_breadcrumbs: list[tuple[str, str | None]] = [
+        (BREADCRUMB_PROJECTS, base_path),
+        (project_name, project_url),
+    ]
+    if workspace_name != project_name:
+        task_breadcrumbs.append((workspace_name, workspace_url))
+    task_breadcrumbs.append((task_crumb(task.task_id), None))
     return _render_shell(
         base_path=base_path,
         page_title=document_title(task.title),
-        breadcrumbs=(
-            (BREADCRUMB_PROJECTS, base_path),
-            (project_crumb(row.project_id), project_url),
-            (workspace_name, workspace_url),
-            (task.title, None),
-        ),
+        breadcrumbs=tuple(task_breadcrumbs),
         events_url=_events_url(
             base_path,
             view="task",
             identity=task.task_id,
-            snapshot=_snapshot_fingerprint(detail),
+            snapshot=_snapshot_fingerprint(
+                detail if navigation_rows is None else (detail, navigation_rows)
+            ),
         ),
         content=content,
+        navigation_rows=navigation,
+        current_project_id=row.project_id,
+        current_workspace_id=row.workspace_id,
+        current_task_id=task.task_id,
     )
 
 
@@ -1411,9 +1926,10 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
 
 
 def _render_page(database_path: Path, base_path: str, request: _DashboardPageRequest) -> str:
+    navigation_rows = read_dashboard_workspace_rows(database_path)
     if request.kind == "projects":
         return render_projects_page(
-            read_dashboard_workspace_rows(database_path),
+            navigation_rows,
             base_path=base_path,
         )
     assert request.identity is not None
@@ -1421,6 +1937,7 @@ def _render_page(database_path: Path, base_path: str, request: _DashboardPageReq
         return render_project_page(
             read_dashboard_project_detail(database_path, request.identity),
             base_path=base_path,
+            navigation_rows=navigation_rows,
         )
     if request.kind == "workspace":
         return render_workspace_page(
@@ -1430,11 +1947,13 @@ def _render_page(database_path: Path, base_path: str, request: _DashboardPageReq
                 search_query=request.search_query,
             ),
             base_path=base_path,
+            navigation_rows=navigation_rows,
         )
     if request.kind == "task":
         return render_task_page(
             read_dashboard_task_detail(database_path, request.identity),
             base_path=base_path,
+            navigation_rows=navigation_rows,
         )
     raise DashboardError("dashboard page kind is unsupported")
 
@@ -1509,6 +2028,8 @@ def _view_fingerprint(
         value = read_dashboard_task_detail(database_path, identity)
     else:
         raise DashboardError("unsupported dashboard fingerprint view")
+    if view != "projects":
+        value = (value, read_dashboard_workspace_rows(database_path))
     return _snapshot_fingerprint(value)
 
 

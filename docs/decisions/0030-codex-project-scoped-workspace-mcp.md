@@ -73,6 +73,14 @@ slice.
    entry and Hidden developer instructions are already exact. Codex still has no proven hard
    SCM-write denial, so operator diagnostics must report the policy as hygiene-effective rather
    than enforced.
+10. The Harness source checkout has a separate tracked development overlay at
+    `.codex/config.toml`, named `harness-dev`. It launches `./scripts/dev harness mcp` without a
+    production `HARNESS_HOST_PROFILE`, uses the project process working directory as its relative
+    Workspace root, allows 30 seconds for the checkout uv/Python cold start, and is required so a
+    broken local daemon fails Codex startup visibly. `scripts/dev-env.sh` keeps `UV_CACHE_DIR`
+    under the ignored writable `.harness/` tree because Codex may expose the user uv cache
+    read-only. This overlay is not a production Codex registration and never uses canonical
+    per-user Harness state.
 
 ## Consequences
 
@@ -91,6 +99,8 @@ slice.
 - Real-host acceptance must prove project config discovery, trust/restart behavior, the five-tool
   catalog, correct worktree identity, and cross-client continuity. Core tests cannot prove Codex's
   internal tool-ranking behavior.
+- Agents working on the Harness source itself use `harness-dev` and the checkout daemon even when
+  the separately installed production profile is absent or stale.
 
 ## Verification
 
@@ -108,6 +118,8 @@ Automated tests must prove:
   roots resolve to their distinct Workspace IDs;
 - installed-wheel upgrade refreshes every owned Workspace config to the new Python executable and
   partial uninstall preserves other active hosts and shared skill projections.
+- the tracked source-checkout Codex overlay has the bounded required launch contract, and the
+  checkout wrapper uses a private writable uv cache under `.harness/`;
 - three-host skill admission fails before intent/config mutation; Codex Hidden installation and
   transitions preserve `AGENTS.md`, reconcile exact developer instructions, and fail before mutation
   on unsafe/manual config collisions.

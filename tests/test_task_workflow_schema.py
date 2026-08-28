@@ -173,7 +173,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 12
+    assert status.schema_version == SCHEMA_VERSION == 13
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

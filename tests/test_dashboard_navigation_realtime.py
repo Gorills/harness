@@ -133,6 +133,13 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "dashboard.js" in overview
         assert "Проекты" in overview
         assert 'lang="ru"' in overview
+        assert 'class="app-sidebar"' in overview
+        assert 'class="project-navigation"' in overview
+        assert f"projects/{quote(project_id, safe='')}/" in overview
+        assert '<nav class="breadcrumbs"' in overview
+        assert "<ol>" in overview
+        assert 'aria-current="page"' in overview
+        assert "LOCAL CONTROL PLANE" not in overview
         assert 'class="task-git-branch"' in overview
         assert '<strong class="mono">main</strong>' in overview
         parser = _DashboardButtonParser()
@@ -144,7 +151,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         status, css_headers, css = _read(base_url + "assets/dashboard.css")
         assert status == 200
         assert css_headers["Content-Type"].startswith("text/css")
-        assert "--accent: #8b7cff" in css
+        assert "--accent: #748cff" in css
         assert "prefers-reduced-motion" in css
 
         status, js_headers, javascript = _read(base_url + "assets/dashboard.js")
@@ -161,6 +168,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert status == 200
         assert project_id in project_page
         assert workspace_id in project_page
+        assert 'class="nav-project is-context"' in project_page
 
         status, _headers, workspace_page = _read(
             workspace_url + "?" + urlencode({"q": "feature flag"})
@@ -171,6 +179,8 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "ENABLED = True" not in workspace_page
         assert task.task_id[:10] in workspace_page
         assert 'Ветка <span class="mono">main</span>' in workspace_page
+        assert "Текущая задача" in workspace_page
+        assert "Рабочая копия" in workspace_page
 
         status, _headers, task_page = _read(task_url)
         assert status == 200
@@ -181,6 +191,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "<b>dashboard</b>" not in task_page
         assert "<mark>needs escaping</mark>" not in task_page
         assert ">Принять<" in task_page
+        assert "<span>Задача</span>" in task_page
         assert '<dt>Ветка</dt><dd class="mono">main</dd>' in task_page
         assert (
             '<div class="timeline-branch"><strong>Ветка</strong> '

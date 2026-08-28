@@ -12,7 +12,8 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 # shellcheck source=scripts/dev-uv.sh
 source "$script_dir/dev-uv.sh"
 
-HOST="cursor"
+DEFAULT_HOSTS=(cursor codex)
+HOSTS=()
 DRY_RUN=0
 RUN_DOCTOR=1
 DOCTOR_ONLY=0
@@ -22,14 +23,15 @@ usage() {
 Refresh the user-global Harness install from this checkout.
 
 Usage:
-  scripts/install-global [--host cursor|claude-code|codex] [--no-doctor]
+  scripts/install-global [--host cursor|claude-code|codex[,...]] [--no-doctor]
   scripts/install-global --doctor-only
   scripts/install-global --dry-run [--host ...]
 
 This command:
   1. leaves isolated-development overlay environment (HARNESS_DEV_ROOT / .harness XDG)
   2. reinstalls the current tree with `uv tool install --force --reinstall --python 3.13 .`
-  3. runs that tool-installed `harness install --host <host>` (default: cursor)
+  3. runs that tool-installed `harness install --host <host>` for each selected profile
+     (default: cursor and codex)
   4. runs that same `harness doctor` unless --no-doctor
 
 It never uses scripts/dev, checkout `.venv/bin/harness`, or overlay XDG paths.
@@ -37,9 +39,9 @@ Checkout agents must not run this; operators use `make install-global`.
 
 The tracked `.cursor/mcp.json` overlay in this repository is the intended
 checkout-local server (`harness-dev`). Production Codex and Cursor MCP are
-project-only. This helper refreshes the selected profile and does not touch
+project-only. This helper refreshes the selected profiles and does not touch
 checkout `.harness/` overlay state. Test the global install from another Git
-worktree, then restart the selected host if project MCP config changed.
+worktree, then restart the affected hosts if project MCP config changed.
 EOF
 }
 
@@ -134,14 +136,50 @@ leave_isolated_overlay() {
     fi
 }
 
-validate_host() {
-    case "$HOST" in
-        cursor | claude-code | codex) return 0 ;;
-        *)
-            echo "scripts/install-global: --host must be cursor, claude-code, or codex (got: $HOST)" >&2
+append_hosts() {
+    local value="$1"
+    local host
+    local IFS=,
+    for host in $value; do
+        if [[ -z "$host" ]]; then
+            echo "scripts/install-global: --host requires cursor, claude-code, or codex" >&2
             return 1
-            ;;
-    esac
+        fi
+        HOSTS+=("$host")
+    done
+}
+
+validate_hosts() {
+    local host
+    for host in "${HOSTS[@]}"; do
+        case "$host" in
+            cursor | claude-code | codex) ;;
+            *)
+                echo "scripts/install-global: --host must be cursor, claude-code, or codex (got: $host)" >&2
+                return 1
+                ;;
+        esac
+    done
+}
+
+hosts_plan_value() {
+    local host
+    local value=""
+    for host in "${HOSTS[@]}"; do
+        value="${value:+$value,}$host"
+    done
+    printf '%s\n' "$value"
+}
+
+lifecycle_commands_plan_value() {
+    local uv_bin="$1"
+    local harness_bin="$2"
+    local host
+    local value=""
+    for host in "${HOSTS[@]}"; do
+        value="${value:+$value; }$harness_bin install --host $host"
+    done
+    printf '%s\n' "$value"
 }
 
 print_plan() {
@@ -160,8 +198,8 @@ uv=$uv_bin
 python=$REQUIRED_PYTHON
 package_command=$uv_bin tool install --force --reinstall --python $REQUIRED_PYTHON .
 harness=$harness_bin
-host=$HOST
-lifecycle_command=$harness_bin install --host $HOST
+hosts=$(hosts_plan_value)
+lifecycle_commands=$(lifecycle_commands_plan_value "$uv_bin" "$harness_bin")
 doctor_command=$harness_bin doctor
 HARNESS_DEV_ROOT=${HARNESS_DEV_ROOT-}
 XDG_STATE_HOME=${XDG_STATE_HOME-}
@@ -181,7 +219,7 @@ while [[ $# -gt 0 ]]; do
                 echo "scripts/install-global: --host requires cursor, claude-code, or codex" >&2
                 exit 1
             fi
-            HOST="$2"
+            append_hosts "$2" || exit 1
             shift 2
             ;;
         --dry-run)
@@ -209,7 +247,10 @@ if [[ "$DOCTOR_ONLY" -eq 1 && "$RUN_DOCTOR" -eq 0 ]]; then
     exit 1
 fi
 
-validate_host
+if [[ ${#HOSTS[@]} -eq 0 ]]; then
+    HOSTS=("${DEFAULT_HOSTS[@]}")
+fi
+validate_hosts
 leave_isolated_overlay
 
 UV_BIN=""
@@ -248,8 +289,10 @@ if [[ "$DOCTOR_ONLY" -eq 0 ]]; then
         echo "Check that uv tool dir --bin is on this account and retry." >&2
         exit 1
     fi
-    echo "Updating user-global host registration (--host $HOST)" >&2
-    "$HARNESS_BIN" install --host "$HOST"
+    for host in "${HOSTS[@]}"; do
+        echo "Updating user-global host registration (--host $host)" >&2
+        "$HARNESS_BIN" install --host "$host"
+    done
 fi
 
 if [[ "$RUN_DOCTOR" -eq 1 || "$DOCTOR_ONLY" -eq 1 ]]; then
@@ -266,5 +309,5 @@ Global Harness now uses $HARNESS_BIN from this checkout.
 Production Cursor MCP is project-only \`.cursor/mcp.json\` harness, enabled with
 \`agent mcp enable harness\`; Codex MCP is project-only \`.codex/config.toml\`.
 This checkout overlay remains harness-dev and is not rewritten. Test the global
-install from another Git worktree and restart the selected host after changes.
+install from another Git worktree and restart the affected hosts after changes.
 EOF

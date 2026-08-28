@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import PurePosixPath
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from harness.knowledge import (
@@ -21,6 +22,7 @@ from harness.task_changes import (
 )
 from harness.tasks import (
     TaskError,
+    TaskOperatorStatus,
     TaskRecord,
     TaskRevisionConflictError,
     TaskState,
@@ -40,6 +42,8 @@ from harness.verification import (
 MAX_CHECKPOINT_SUMMARY_BYTES = 4096
 MAX_CHECKPOINT_NEXT_STEP_BYTES = 2048
 MAX_OPERATOR_FEEDBACK_BYTES = 1024
+MAX_OPERATOR_COMMENT_BYTES = 2048
+MAX_JIRA_URL_BYTES = 2048
 
 
 class TaskCheckpointError(TaskError):
@@ -55,9 +59,13 @@ class TaskEventType(StrEnum):
 
     CREATED = "created"
     RESUMED = "resumed"
+    REOPENED = "reopened"
     CHECKPOINT = "checkpoint"
     ACCEPTED = "accepted"
     OPERATOR_FEEDBACK = "operator_feedback"
+    OPERATOR_COMMENT = "operator_comment"
+    JIRA_LINK_UPDATED = "jira_link_updated"
+    OPERATOR_STATUS_UPDATED = "operator_status_updated"
     CANCELLED = "cancelled"
 
 
@@ -102,6 +110,9 @@ class TaskEventRecord:
     event_type: TaskEventType
     checkpoint_id: str | None
     operator_feedback: str | None
+    operator_comment: str | None
+    jira_url: str | None
+    operator_status: TaskOperatorStatus | None
     created_at: str
 
 
@@ -377,7 +388,8 @@ def list_task_events(
     rows = connection.execute(
         f"""
         SELECT
-            id, task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at
+            id, task_id, task_revision, event_type, checkpoint_id, operator_feedback,
+            operator_comment, jira_url, operator_status, created_at
         FROM task_events
         WHERE task_id = ?
         {order}
@@ -539,6 +551,9 @@ def _insert_checkpoint_event(
         event_type=TaskEventType.CHECKPOINT,
         checkpoint_id=checkpoint.checkpoint_id,
         operator_feedback=None,
+        operator_comment=None,
+        jira_url=None,
+        operator_status=None,
         created_at=checkpoint.created_at,
     )
 
@@ -666,6 +681,9 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         event_type,
         checkpoint_id,
         operator_feedback,
+        operator_comment,
+        jira_url,
+        operator_status,
         created_at,
     ) = row
     if (
@@ -680,6 +698,9 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         or not isinstance(event_type, str)
         or (checkpoint_id is not None and (not isinstance(checkpoint_id, str) or not checkpoint_id))
         or (operator_feedback is not None and not isinstance(operator_feedback, str))
+        or (operator_comment is not None and not isinstance(operator_comment, str))
+        or (jira_url is not None and not isinstance(jira_url, str))
+        or (operator_status is not None and not isinstance(operator_status, str))
         or not isinstance(created_at, str)
         or not created_at
     ):
@@ -688,20 +709,29 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         parsed_event_type = TaskEventType(event_type)
     except ValueError as exc:
         raise TaskCheckpointError(f"task event has unsupported type: {event_type!r}") from exc
+    payloads = (operator_feedback, operator_comment, jira_url, operator_status)
+    parsed_operator_status: TaskOperatorStatus | None = None
     if parsed_event_type is TaskEventType.CREATED:
-        if task_revision != 1 or checkpoint_id is not None or operator_feedback is not None:
+        if task_revision != 1 or checkpoint_id is not None or any(v is not None for v in payloads):
             raise TaskCheckpointError("created Task event has invalid persisted linkage")
-    elif parsed_event_type is TaskEventType.RESUMED:
-        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is not None:
-            raise TaskCheckpointError("resumed Task event has invalid persisted linkage")
+    elif parsed_event_type in {
+        TaskEventType.RESUMED,
+        TaskEventType.REOPENED,
+        TaskEventType.ACCEPTED,
+        TaskEventType.CANCELLED,
+    }:
+        if task_revision <= 1 or checkpoint_id is not None or any(v is not None for v in payloads):
+            raise TaskCheckpointError("lifecycle Task event has invalid persisted linkage")
     elif parsed_event_type is TaskEventType.CHECKPOINT:
-        if task_revision <= 1 or checkpoint_id is None or operator_feedback is not None:
+        if task_revision <= 1 or checkpoint_id is None or any(v is not None for v in payloads):
             raise TaskCheckpointError("checkpoint Task event has invalid persisted linkage")
-    elif parsed_event_type in {TaskEventType.ACCEPTED, TaskEventType.CANCELLED}:
-        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is not None:
-            raise TaskCheckpointError("operator Task event has invalid persisted linkage")
-    else:
-        if task_revision <= 1 or checkpoint_id is not None or operator_feedback is None:
+    elif parsed_event_type is TaskEventType.OPERATOR_FEEDBACK:
+        if (
+            task_revision <= 1
+            or checkpoint_id is not None
+            or operator_feedback is None
+            or any(v is not None for v in (operator_comment, jira_url, operator_status))
+        ):
             raise TaskCheckpointError("operator feedback event has invalid persisted linkage")
         normalized_feedback = _validate_text(
             operator_feedback,
@@ -711,6 +741,43 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         )
         assert normalized_feedback is not None
         operator_feedback = normalized_feedback
+    elif parsed_event_type is TaskEventType.OPERATOR_COMMENT:
+        if (
+            task_revision <= 1
+            or checkpoint_id is not None
+            or operator_comment is None
+            or any(v is not None for v in (operator_feedback, jira_url, operator_status))
+        ):
+            raise TaskCheckpointError("operator comment event has invalid persisted linkage")
+        operator_comment = _validate_text(
+            operator_comment,
+            label="operator comment",
+            maximum_bytes=MAX_OPERATOR_COMMENT_BYTES,
+            required=True,
+        )
+        assert operator_comment is not None
+    elif parsed_event_type is TaskEventType.JIRA_LINK_UPDATED:
+        if (
+            task_revision <= 1
+            or checkpoint_id is not None
+            or any(v is not None for v in (operator_feedback, operator_comment, operator_status))
+        ):
+            raise TaskCheckpointError("Jira link event has invalid persisted linkage")
+        if jira_url is not None:
+            jira_url = _validate_jira_url(jira_url)
+    else:
+        if (
+            task_revision <= 1
+            or checkpoint_id is not None
+            or any(v is not None for v in (operator_feedback, operator_comment, jira_url))
+        ):
+            raise TaskCheckpointError("operator status event has invalid persisted linkage")
+        try:
+            parsed_operator_status = (
+                TaskOperatorStatus(operator_status) if operator_status is not None else None
+            )
+        except ValueError as exc:
+            raise TaskCheckpointError("operator status event has invalid persisted value") from exc
     return TaskEventRecord(
         event_id=event_id,
         task_id=task_id,
@@ -718,8 +785,37 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         event_type=parsed_event_type,
         checkpoint_id=checkpoint_id,
         operator_feedback=operator_feedback,
+        operator_comment=operator_comment,
+        jira_url=jira_url,
+        operator_status=parsed_operator_status,
         created_at=created_at,
     )
+
+
+def _validate_jira_url(value: str) -> str:
+    normalized = _validate_text(
+        value,
+        label="Jira URL",
+        maximum_bytes=MAX_JIRA_URL_BYTES,
+        required=True,
+    )
+    assert normalized is not None
+    if any(character.isspace() or ord(character) < 0x20 for character in normalized):
+        raise TaskCheckpointError("Jira URL event has invalid persisted URL")
+    try:
+        parsed = urlsplit(normalized)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise TaskCheckpointError("Jira URL event has invalid persisted URL") from exc
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise TaskCheckpointError("Jira URL event has invalid persisted URL")
+    return normalized
 
 
 def _validate_expected_revision(expected_revision: int) -> None:

@@ -31,7 +31,7 @@ def test_schema_v10_operator_event_constraints(tmp_path: Path) -> None:
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
-        assert SCHEMA_VERSION == 12
+        assert SCHEMA_VERSION == 13
         _seed_task(connection)
         connection.execute(
             """
@@ -171,7 +171,7 @@ def test_schema_v9_migrates_events_to_v10_without_fabricating_operator_history(
         connection.close()
 
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 12
+    assert status.schema_version == SCHEMA_VERSION == 13
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

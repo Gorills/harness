@@ -298,7 +298,7 @@ def test_dashboard_rejects_malformed_and_oversized_mutation_bodies(tmp_path: Pat
         connection.close()
 
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
-        oversized = b"x" * 4097
+        oversized = b"x" * 8193
         connection.request(
             "POST",
             parsed.path,
@@ -318,6 +318,91 @@ def test_dashboard_rejects_malformed_and_oversized_mutation_bodies(tmp_path: Pat
             assert get_task(db, waiting.task_id) == waiting
         finally:
             db.close()
+    finally:
+        manager.close()
+
+
+def test_dashboard_operator_tracking_and_reopen_use_same_origin_revision_cas(
+    tmp_path: Path,
+) -> None:
+    _root, database, workspace_id = _database(tmp_path)
+    connection = connect_database(database)
+    try:
+        task = task_start(connection, workspace_id, "Track release")
+    finally:
+        connection.close()
+
+    manager = DashboardServerManager(database)
+    try:
+        url = manager.get_url()
+        parsed = urlsplit(url)
+        origin = f"http://127.0.0.1:{parsed.port}"
+
+        for action, field, value in (
+            ("set_jira", "jira_url", "https://jira.example/browse/HAR-42"),
+            ("set_operator_status", "operator_status", "deploy_test"),
+            ("comment", "comment", "Ready for rollout"),
+        ):
+            fields: dict[str, str | int] = {
+                "action": action,
+                "workspace_id": workspace_id,
+                "task_id": task.task_id,
+                "expected_revision": task.revision,
+                field: value,
+            }
+            status, headers, _payload = _post(url, fields, origin=origin)
+            assert status == 303
+            _assert_hardened(headers)
+            connection = connect_database(database)
+            try:
+                task = get_task(connection, task.task_id)
+            finally:
+                connection.close()
+
+        connection = connect_database(database)
+        try:
+            completed = task_checkpoint(
+                connection,
+                workspace_id,
+                task.task_id,
+                expected_revision=task.revision,
+                state=TaskState.COMPLETED,
+                summary="Done",
+            ).task
+        finally:
+            connection.close()
+
+        status, headers, _payload = _post(
+            url,
+            {
+                "action": "reopen",
+                "workspace_id": workspace_id,
+                "task_id": completed.task_id,
+                "expected_revision": completed.revision,
+            },
+            origin=origin,
+        )
+        assert status == 303
+        _assert_hardened(headers)
+
+        connection = connect_database(database)
+        try:
+            reopened = get_task(connection, completed.task_id)
+            assert reopened.state is TaskState.WORKING
+            assert reopened.jira_url == "https://jira.example/browse/HAR-42"
+            assert reopened.operator_status is not None
+            assert reopened.operator_status.value == "deploy_test"
+            assert tuple(event.event_type for event in list_task_events(connection, task.task_id))[
+                -5:
+            ] == (
+                TaskEventType.JIRA_LINK_UPDATED,
+                TaskEventType.OPERATOR_STATUS_UPDATED,
+                TaskEventType.OPERATOR_COMMENT,
+                TaskEventType.CHECKPOINT,
+                TaskEventType.REOPENED,
+            )
+        finally:
+            connection.close()
     finally:
         manager.close()
 
