@@ -1,0 +1,349 @@
++    assert _ids(resolve_skills(definitions, empty, task_hints=("complex-change",))) == (
++        "architecture-decisions",
++        "complex-change-planning",
++        "independent-review",
++        "spec-audit",
++        "testing-strategy",
++    )
++
++
++def test_builtin_pack_refuses_foreign_collision_without_mutation(tmp_path: Path) -> None:
++    registry = tmp_path / "skills"
++    foreign = registry / "backend-security"
++    foreign.mkdir(parents=True)
++    (foreign / "SKILL.md").write_text("user skill\n")
++    (foreign / "harness.yaml").write_text("id: backend-security\n")
++    before = {p.name: p.read_bytes() for p in foreign.iterdir()}
++    with pytest.raises(BuiltinSkillCollisionError):
++        sync_builtin_skills(registry)
++    assert {p.name: p.read_bytes() for p in foreign.iterdir()} == before
++    assert not (registry / ".harness-builtin-skills.json").exists()
++
++
++def test_builtin_pack_refuses_dangling_symlink_collision(tmp_path: Path) -> None:
++    registry = tmp_path / "skills"
++    registry.mkdir()
++    (registry / "backend-security").symlink_to(tmp_path / "missing", target_is_directory=True)
++    with pytest.raises(BuiltinSkillCollisionError, match="unsafe"):
++        sync_builtin_skills(registry)
++
++
++def test_builtin_pack_updates_only_manifest_owned_unmodified_skill(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    registry = tmp_path / "skills"
++    sync_builtin_skills(registry)
++    original = next(s for s in BUILTIN_SKILLS if s.skill_id == "observability")
++    changed = replace(
++        original, body=original.body + "\n- Prefer bounded cardinality for metric labels.\n"
++    )
++    monkeypatch.setattr(
++        builtin_module,
++        "BUILTIN_SKILLS",
++        tuple(changed if s.skill_id == changed.skill_id else s for s in BUILTIN_SKILLS),
++    )
++    result = sync_builtin_skills(registry)
++    assert result.updated == 1
++    assert "bounded cardinality" in (registry / "observability" / "SKILL.md").read_text()
++
++
++def test_builtin_pack_refuses_update_after_user_modifies_owned_skill(tmp_path: Path) -> None:
++    registry = tmp_path / "skills"
++    sync_builtin_skills(registry)
++    target = registry / "testing-strategy" / "SKILL.md"
++    target.write_text(target.read_text() + "\nUser customization.\n")
++    with pytest.raises(BuiltinSkillCollisionError):
++        sync_builtin_skills(registry)
+diff --git a/tests/test_entrypoints.py b/tests/test_entrypoints.py
+index c4feee9..e11a591 100644
+--- a/tests/test_entrypoints.py
++++ b/tests/test_entrypoints.py
+@@ -636,3 +636,20 @@ def test_harness_skills_list_reads_canonical_registry_without_mutation(
+         "python-helper\tUse Python conventions.",
+     ]
+     assert (skill / "SKILL.md").read_bytes() == before
++
++
++def test_harness_skills_sync_and_validate_builtin_quality_pack(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
++) -> None:
++    registry = tmp_path / "skills"
++    monkeypatch.setattr(entrypoints, "default_skill_registry", lambda: registry)
++    monkeypatch.setattr(sys, "argv", ["harness", "skills", "sync"])
++    assert harness_main() == 0
++    out = capsys.readouterr().out
++    assert "Built-in skills: 12" in out
++    assert "Installed: 12" in out
++    monkeypatch.setattr(sys, "argv", ["harness", "skills", "validate"])
++    assert harness_main() == 0
++    out = capsys.readouterr().out
++    assert "Host profiles: claude-code, cursor" in out
++    assert "Skill validation: OK" in out
+diff --git a/tests/test_installation_cli.py b/tests/test_installation_cli.py
+index 96aa7d5..259e340 100644
+--- a/tests/test_installation_cli.py
++++ b/tests/test_installation_cli.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+ 
+ import json
+ import os
++import shutil
+ import stat
+ import subprocess
+ import sys
+@@ -116,6 +117,8 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
+     assert harness_main() == 0
+     install_output = capsys.readouterr().out
+     assert "MCP registration: changed" in install_output
++    assert "Built-in skills: 12 (installed 12, updated 0)" in install_output
++    assert (home / ".harness" / "skills" / "backend-security" / "SKILL.md").is_file()
+     assert "Harness install: OK" in install_output
+     registration = json.loads(claude_state.read_text(encoding="utf-8"))
+     assert registration == {
+@@ -323,7 +326,8 @@ def test_purge_preflight_refuses_unsafe_skill_registry_before_uninstall_mutation
+     sentinel = outside / "user.txt"
+     sentinel.write_text("keep\n", encoding="utf-8")
+     harness_home = home / ".harness"
+-    harness_home.mkdir()
++    harness_home.mkdir(exist_ok=True)
++    shutil.rmtree(harness_home / "skills")
+     (harness_home / "skills").symlink_to(outside, target_is_directory=True)
+ 
+     monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--purge"])
+diff --git a/tests/test_knowledge_schema.py b/tests/test_knowledge_schema.py
+index bfaf55a..0d4383a 100644
+--- a/tests/test_knowledge_schema.py
++++ b/tests/test_knowledge_schema.py
+@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
+     initialize_database(database)
+     connection = connect_database(database)
+     try:
+-        assert SCHEMA_VERSION == 11
++        assert SCHEMA_VERSION == 12
+         connection.execute("INSERT INTO projects(id) VALUES ('project')")
+ 
+         with pytest.raises(sqlite3.IntegrityError):
+@@ -124,6 +124,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+         connection.execute("DROP TABLE task_search")
+         connection.execute("DROP TABLE knowledge_search")
++        connection.execute("DROP TABLE task_checkpoint_verification")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 8")
+         connection.commit()
+     finally:
+@@ -131,7 +132,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
+ 
+     status = initialize_database(database)
+ 
+-    assert status.schema_version == SCHEMA_VERSION == 11
++    assert status.schema_version == SCHEMA_VERSION == 12
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute("SELECT id, revision FROM tasks").fetchall() == [("task", 2)]
+diff --git a/tests/test_mcp_bridge.py b/tests/test_mcp_bridge.py
+index 4d40235..d9887d9 100644
+--- a/tests/test_mcp_bridge.py
++++ b/tests/test_mcp_bridge.py
+@@ -596,6 +596,9 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
+                 task_start_schema = by_name["task_start"]["inputSchema"]
+                 assert "stack_hints" in task_start_schema["properties"]
+                 checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
++                assert (
++                    checkpoint_schema["$defs"]["VerificationInput"]["additionalProperties"] is False
++                )
+                 assert checkpoint_schema["$defs"]["KnowledgeInput"]["additionalProperties"] is False
+                 assert (
+                     checkpoint_schema["$defs"]["KnowledgeAnchorInput"]["additionalProperties"]
+@@ -1106,11 +1109,19 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
+                     "state": "working",
+                     "summary": "Persisted before bridge restart",
+                     "next_step": "Resume from this exact checkpoint",
++                    "verification": [
++                        {
++                            "name": "focused tests",
++                            "status": "passed",
++                            "evidence": "pytest target: passed",
++                        }
++                    ],
+                 },
+             )
+             assert checkpoint.is_error is False
+             assert checkpoint.structured_content is not None
+             assert checkpoint.structured_content["revision"] == 2
++            assert checkpoint.structured_content["verification_count"] == 1
+ 
+         async with Client(stdio_client(params)) as second_client:
+             status = await second_client.call_tool("project_status")
+@@ -1126,6 +1137,9 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
+             }
+             assert status.structured_content["relevant_waiting_task"] is None
+             assert status.structured_content["next_step"] == "Resume from this exact checkpoint"
++            assert status.structured_content["last_checkpoint"]["verification"] == [
++                {"name": "focused tests", "status": "passed"}
++            ]
+             resumed = await second_client.call_tool("task_start", {"task_id": task_id})
+             assert resumed.is_error is False
+             assert resumed.structured_content is not None
+diff --git a/tests/test_project_retrieval.py b/tests/test_project_retrieval.py
+index 0318a7d..6e8c74f 100644
+--- a/tests/test_project_retrieval.py
++++ b/tests/test_project_retrieval.py
+@@ -100,6 +100,14 @@ def _task_history(
+         """,
+         (task_id, checkpoint_id),
+     )
++    connection.execute(
++        """
++        INSERT INTO task_checkpoint_verification(
++            checkpoint_id, position, name, status, evidence, source
++        ) VALUES (?, 0, 'focused tests', 'passed', 'pytest target: passed', 'agent_reported')
++        """,
++        (checkpoint_id,),
++    )
+     cursor = connection.execute(
+         """
+         INSERT INTO task_events(task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at)
+@@ -271,6 +279,7 @@ def test_project_context_expands_only_selected_refs_and_fails_closed_cross_proje
+         assert "Selected semantic body" in serialized
+         assert "historical_clue': True" in serialized
+         assert "Selected checkpoint semantic detail" in serialized
++        assert "pytest target: passed" in serialized
+         assert "Selected operator feedback" in serialized
+         assert "Unrelated invariant" not in serialized
+         assert "Cross Project secret" not in serialized
+@@ -338,6 +347,19 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
+                 """,
+                 (checkpoint_id, f"src/{index}/" + ("x" * 500)),
+             )
++        connection.execute(
++            "DELETE FROM task_checkpoint_verification WHERE checkpoint_id = ?",
++            (checkpoint_id,),
++        )
++        for index in range(12):
++            connection.execute(
++                """
++                INSERT INTO task_checkpoint_verification(
++                    checkpoint_id, position, name, status, evidence, source
++                ) VALUES (?, ?, ?, 'passed', ?, 'agent_reported')
++                """,
++                (checkpoint_id, index, f"verification-{index}", "E" * 2048),
++            )
+ 
+         knowledge_item = read_project_context(connection, workspace_id, ("knowledge:large-card",))[
+             0
+@@ -357,6 +379,10 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
+         assert selected["next_step_truncated"] is True
+         assert selected["changed_path_count"] == 12
+         assert selected["changed_paths_truncated"] is True
++        assert selected["verification_count"] == 12
++        assert selected["verification_truncated"] is True
++        assert len(selected["verification"]) == 4
++        assert all(item["evidence_truncated"] is True for item in selected["verification"])
+         assert len(json.dumps(task_item.data, ensure_ascii=False).encode("utf-8")) < 8192
+     finally:
+         connection.close()
+diff --git a/tests/test_storage.py b/tests/test_storage.py
+index ca18a59..c6b19ae 100644
+--- a/tests/test_storage.py
++++ b/tests/test_storage.py
+@@ -136,7 +136,20 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
+         versions = connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+         ).fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+         tables = {
+             row[0]
+             for row in connection.execute(
+@@ -152,6 +165,7 @@ def test_initialize_database_creates_wal_schema_and_reports_capabilities(tmp_pat
+             "task_baseline_dirty_paths",
+             "task_checkpoints",
+             "task_checkpoint_changed_paths",
++            "task_checkpoint_verification",
+             "task_events",
+         } <= tables
+     finally:
+@@ -170,7 +184,20 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
+         versions = connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+         ).fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+     finally:
+         connection.close()
+ 
+@@ -207,7 +234,20 @@ def test_initialize_database_serializes_concurrent_migrations(
+         versions = connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+         ).fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+     finally:
+         connection.close()
+ 
+@@ -244,7 +284,20 @@ def test_initialize_database_migrates_existing_version_zero_database(tmp_path: P
+         versions = connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+         ).fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+     finally:
+         connection.close()
+ 
+@@ -271,7 +324,20 @@ def test_initialize_database_migrates_existing_version_one_database(tmp_path: Pa
+         versions = connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+         ).fetchall()
+-        assert versions == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]

@@ -98,3 +98,52 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+
+
+  exact-tree-transport-publish:
+    if: github.event_name == 'pull_request' && github.head_ref == 'transport/quality-discipline-20260828'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact transport PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+          persist-credentials: false
+
+      - name: Verify and assemble content-addressed patch
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PATCH_SHA256: 6f157bb3350557c471c0a3717a39d9f708cdad0ded3cd7f394ff60fb03a9549d
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PR_HEAD_SHA"
+          cat .harness-transport/part-*.patch > "$RUNNER_TEMP/candidate.patch"
+          printf '%s  %s\n' "$PATCH_SHA256" "$RUNNER_TEMP/candidate.patch" | sha256sum -c -
+
+      - name: Check out exact canonical base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 2dc1c4ead544bbfa134ff5ceee8aaec401d1cec6
+          path: candidate
+          persist-credentials: false
+
+      - name: Reconstruct verified tree and publish feature branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: 2dc1c4ead544bbfa134ff5ceee8aaec401d1cec6
+          EXPECTED_TREE: 697e8f0ee80da603a07a93681bd4360da2842a2f
+          FEATURE_BRANCH: feat/quality-discipline-verification
+        run: |
+          set -euo pipefail
+          cd candidate
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git apply --index "$RUNNER_TEMP/candidate.patch"
+          git diff --cached --check
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          python scripts/publish_git_data.py publish \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --branch "$FEATURE_BRANCH" \
+            --message "Implement Harness quality discipline and verification"

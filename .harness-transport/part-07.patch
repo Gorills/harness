@@ -1,0 +1,300 @@
++        assert versions == [
++            (1,),
++            (2,),
++            (3,),
++            (4,),
++            (5,),
++            (6,),
++            (7,),
++            (8,),
++            (9,),
++            (10,),
++            (11,),
++            (12,),
++        ]
+         assert connection.execute("SELECT value FROM legacy_fixture").fetchone() == ("preserved",)
+         for table in (
+             "projects",
+@@ -340,7 +406,7 @@ def test_initialize_database_migrates_existing_version_two_database(tmp_path: Pa
+         assert connection.execute("SELECT id FROM workspaces").fetchall() == [("workspace",)]
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+         for table in (
+             "indexed_files",
+             "tasks",
+@@ -430,7 +496,7 @@ def test_initialize_database_migrates_existing_version_three_database(tmp_path:
+         ]
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+         for table in (
+             "tasks",
+             "task_baselines",
+@@ -552,7 +618,7 @@ def test_initialize_database_migrates_existing_version_four_database(tmp_path: P
+         ]
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (0,)
+         assert connection.execute("SELECT COUNT(*) FROM task_baseline_dirty_paths").fetchone() == (
+             0,
+@@ -569,7 +635,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
+     try:
+         connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+         connection.execute(
+-            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12)"
++            "INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11), (12), (13)"
+         )
+         connection.commit()
+         before = connection.execute("PRAGMA journal_mode").fetchone()
+@@ -596,6 +662,7 @@ def test_initialize_database_rejects_newer_schema_without_changing_journal_mode(
+             (10,),
+             (11,),
+             (12,),
++            (13,),
+         ]
+     finally:
+         connection.close()
+@@ -660,6 +727,7 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+         connection.execute("DROP TABLE task_search")
+         connection.execute("DROP TABLE knowledge_search")
++        connection.execute("DROP TABLE task_checkpoint_verification")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 6")
+         connection.commit()
+     finally:
+@@ -678,7 +746,7 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
+         ).fetchone() == ("task-v5", "main")
+         assert connection.execute(
+             "SELECT version FROM schema_migrations ORDER BY version"
+-        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,)]
++        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,), (7,), (8,), (9,), (10,), (11,), (12,)]
+         assert connection.execute("SELECT COUNT(*) FROM task_checkpoints").fetchone() == (0,)
+         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+     finally:
+diff --git a/tests/test_task_checkpoint_schema.py b/tests/test_task_checkpoint_schema.py
+index 273973a..b2ce7f0 100644
+--- a/tests/test_task_checkpoint_schema.py
++++ b/tests/test_task_checkpoint_schema.py
+@@ -61,6 +61,13 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
+             VALUES ('checkpoint', 'src/app.py')
+             """
+         )
++        connection.execute(
++            "INSERT INTO task_checkpoint_verification(checkpoint_id,position,name,status,evidence,source) VALUES ('checkpoint',0,'tests','passed','pytest: passed','agent_reported')"
++        )
++        with pytest.raises(sqlite3.IntegrityError):
++            connection.execute(
++                "INSERT INTO task_checkpoint_verification(checkpoint_id,position,name,status,evidence,source) VALUES ('checkpoint',1,'bad','unknown','none','agent_reported')"
++            )
+         with pytest.raises(sqlite3.IntegrityError):
+             connection.execute(
+                 """
+@@ -81,13 +88,16 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
+         assert connection.execute(
+             "SELECT COUNT(*) FROM task_checkpoint_changed_paths"
+         ).fetchone() == (0,)
++        assert connection.execute(
++            "SELECT COUNT(*) FROM task_checkpoint_verification"
++        ).fetchone() == (0,)
+         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+     finally:
+         connection.close()
+ 
+ 
+ def test_schema_version_includes_knowledge_schema() -> None:
+-    assert SCHEMA_VERSION == 11
++    assert SCHEMA_VERSION == 12
+ 
+ 
+ def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
+diff --git a/tests/test_task_checkpoints.py b/tests/test_task_checkpoints.py
+index f05d740..e308337 100644
+--- a/tests/test_task_checkpoints.py
++++ b/tests/test_task_checkpoints.py
+@@ -31,6 +31,13 @@ from harness.tasks import (
+     create_task_with_baseline,
+     get_task,
+ )
++from harness.verification import (
++    VerificationDraft,
++    VerificationSource,
++    VerificationStatus,
++    VerificationValidationError,
++    list_checkpoint_verification,
++)
+ 
+ 
+ def _git(cwd: Path, *arguments: str) -> None:
+@@ -378,3 +385,45 @@ def test_checkpoint_text_is_bounded_utf8(tmp_path: Path) -> None:
+         assert get_task(connection, created.task.task_id).revision == 1
+     finally:
+         connection.close()
++
++
++def test_checkpoint_persists_bounded_agent_reported_verification_atomically(tmp_path: Path) -> None:
++    _root, _database, connection, workspace_id = _registered(tmp_path)
++    try:
++        created = create_task_with_baseline(connection, workspace_id, "Verified checkpoint")
++        result = checkpoint_task(
++            connection,
++            created.task.task_id,
++            expected_revision=1,
++            state=TaskState.WORKING,
++            summary="Verification recorded",
++            verification=(
++                VerificationDraft(
++                    "focused tests", VerificationStatus.PASSED, "pytest target: passed"
++                ),
++                VerificationDraft(
++                    "real host acceptance",
++                    VerificationStatus.NOT_RUN,
++                    "Proprietary host unavailable",
++                ),
++            ),
++        )
++        persisted = list_checkpoint_verification(connection, result.checkpoint.checkpoint_id)
++        assert result.verification == persisted
++        assert all(item.source is VerificationSource.AGENT_REPORTED for item in persisted)
++        with pytest.raises(VerificationValidationError, match="unique"):
++            checkpoint_task(
++                connection,
++                created.task.task_id,
++                expected_revision=2,
++                state=TaskState.WORKING,
++                summary="duplicate",
++                verification=(
++                    VerificationDraft("Tests", VerificationStatus.PASSED, "ok"),
++                    VerificationDraft(" tests ", VerificationStatus.FAILED, "failed"),
++                ),
++            )
++        assert get_task(connection, created.task.task_id).revision == 2
++        assert len(list_task_checkpoints(connection, created.task.task_id)) == 1
++    finally:
++        connection.close()
+diff --git a/tests/test_task_ipc.py b/tests/test_task_ipc.py
+index fa0856f..9f07135 100644
+--- a/tests/test_task_ipc.py
++++ b/tests/test_task_ipc.py
+@@ -173,6 +173,13 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
+                     "summary": "Recorded one invariant",
+                     "next_step": None,
+                     "wait_reason": None,
++                    "verification": [
++                        {
++                            "name": "focused tests",
++                            "status": "passed",
++                            "evidence": "pytest target passed",
++                        }
++                    ],
+                     "knowledge": [
+                         {
+                             "kind": "invariant",
+@@ -194,6 +201,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
+             "wait_reason",
+             "revision",
+             "checkpoint_id",
++            "verification_count",
+             "knowledge_ids",
+         }
+         assert checkpoint_result["schema_version"] == SCHEMA_VERSION
+@@ -202,6 +210,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
+         assert checkpoint_result["state"] == "working"
+         assert checkpoint_result["wait_reason"] is None
+         assert checkpoint_result["revision"] == 2
++        assert checkpoint_result["verification_count"] == 1
+         checkpoint_id = checkpoint_result["checkpoint_id"]
+         knowledge_ids = checkpoint_result["knowledge_ids"]
+         assert isinstance(checkpoint_id, str) and checkpoint_id
+@@ -210,6 +219,7 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
+         checkpoint_serialized = json.dumps(checkpoint_raw, sort_keys=True)
+         for forbidden in (
+             secret_body,
++            "pytest target passed",
+             "anchors",
+             "changed_paths",
+             "baseline_head",
+diff --git a/tests/test_task_operator_review_schema.py b/tests/test_task_operator_review_schema.py
+index f289684..88493b6 100644
+--- a/tests/test_task_operator_review_schema.py
++++ b/tests/test_task_operator_review_schema.py
+@@ -31,7 +31,7 @@ def test_schema_v10_operator_event_constraints(tmp_path: Path) -> None:
+     connection = sqlite3.connect(database)
+     connection.execute("PRAGMA foreign_keys = ON")
+     try:
+-        assert SCHEMA_VERSION == 11
++        assert SCHEMA_VERSION == 12
+         _seed_task(connection)
+         connection.execute(
+             """
+@@ -164,13 +164,14 @@ def test_schema_v9_migrates_events_to_v10_without_fabricating_operator_history(
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+         connection.execute("DROP TABLE task_search")
+         connection.execute("DROP TABLE knowledge_search")
++        connection.execute("DROP TABLE task_checkpoint_verification")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 10")
+         connection.commit()
+     finally:
+         connection.close()
+ 
+     status = initialize_database(database)
+-    assert status.schema_version == SCHEMA_VERSION == 11
++    assert status.schema_version == SCHEMA_VERSION == 12
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute(
+diff --git a/tests/test_task_stack_hints_schema.py b/tests/test_task_stack_hints_schema.py
+index c846ada..3e9b1f1 100644
+--- a/tests/test_task_stack_hints_schema.py
++++ b/tests/test_task_stack_hints_schema.py
+@@ -13,7 +13,7 @@ def test_schema_v9_task_stack_hint_constraints_and_cascade(tmp_path: Path) -> No
+     initialize_database(database)
+     connection = connect_database(database)
+     try:
+-        assert SCHEMA_VERSION == 11
++        assert SCHEMA_VERSION == 12
+         connection.execute("INSERT INTO projects(id) VALUES ('project')")
+         connection.execute(
+             """
+@@ -82,6 +82,7 @@ def test_schema_v8_migrates_to_v9_without_losing_tasks(tmp_path: Path) -> None:
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+         connection.execute("DROP TABLE task_search")
+         connection.execute("DROP TABLE knowledge_search")
++        connection.execute("DROP TABLE task_checkpoint_verification")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 9")
+         connection.commit()
+     finally:
+@@ -89,7 +90,7 @@ def test_schema_v8_migrates_to_v9_without_losing_tasks(tmp_path: Path) -> None:
+ 
+     status = initialize_database(database)
+ 
+-    assert status.schema_version == SCHEMA_VERSION == 11
++    assert status.schema_version == SCHEMA_VERSION == 12
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute("SELECT id, title FROM tasks").fetchall() == [("task", "Task")]
+diff --git a/tests/test_task_workflow_schema.py b/tests/test_task_workflow_schema.py
+index b8a93b5..237a479 100644
+--- a/tests/test_task_workflow_schema.py
++++ b/tests/test_task_workflow_schema.py
+@@ -165,6 +165,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+         connection.execute("DROP TABLE task_search")
+         connection.execute("DROP TABLE knowledge_search")
++        connection.execute("DROP TABLE task_checkpoint_verification")
+         connection.execute("DELETE FROM schema_migrations WHERE version >= 7")
+         connection.commit()
+     finally:
+@@ -172,7 +173,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
+ 
+     status = initialize_database(database)
+ 
+-    assert status.schema_version == SCHEMA_VERSION == 11
++    assert status.schema_version == SCHEMA_VERSION == 12
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute(

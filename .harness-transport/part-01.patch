@@ -1,0 +1,214 @@
+ The installed CLI also exposes `harness mcp`, implemented with the official `mcp==2.0.0` SDK and the MCP 2026-07-28 sessionless protocol path. It serves exactly `project_status`, `project_search`, `project_context`, `task_start`, and `task_checkpoint` over stdio and delegates durable state to `harnessd`. Production launches with `HARNESS_HOST_PROFILE` list no tools and refuse calls when their documented Workspace-root hint interpolates to the Harness source checkout's isolated-development overlay, including when Cursor injects `WORKSPACE_FOLDER_PATHS`; the tracked `harness-dev` overlay (`scripts/dev harness mcp` without that profile marker) still serves the five tools. A Cursor-profile process without interpolated `HARNESS_WORKSPACE_ROOT` lists no tools. The stdio boundary rejects oversized or concurrently duplicated JSON-RPC request identities before dispatch and bounds every serialized outbound frame, so untrusted envelope fields cannot bypass model-facing byte budgets or trigger a Task mutation whose response cannot be correlated safely. Request-ID collision checks use the official SDK correlation semantics, so integer IDs and their stringified forms share one in-flight identity. A Harness-owned Claude Code registration marks the bridge with `HARNESS_HOST_PROFILE=claude-code`; for that profile the adapter uses Claude Code's documented `CLAUDE_PROJECT_DIR` as an exact Workspace-root hint and fails closed if it is absent. Generic/manual launches retain the existing `HARNESS_WORKSPACE_ROOT` exact-root override and otherwise use the current process directory as a location hint. `project_status` includes the current working Task, or the most recently updated relevant waiting Task, plus its latest checkpoint identity and `next_step`, so a new bridge process can resume the same durable Task using the returned `task_id` and `revision`. `project_search` now searches bounded current-Workspace code/docs plus Project-scoped durable Knowledge and Task-history semantic fragments. Candidate lookup uses local rebuildable FTS5 indexes, while model-visible results and `project_context` are reconstructed from authoritative index/Knowledge/Task tables under one daemon-owned Workspace→Project read boundary. `project_context` accepts only explicit bounded refs, preserves metadata-only code/doc expansion, exposes stale Knowledge as a historical clue rather than a current fact, and never returns stored source hashes or raw source. Working Sets, symbol/graph retrieval, and embeddings are not claimed yet.
+ 
+diff --git a/docs/decisions/0029-quality-discipline-verification-and-response-economy.md b/docs/decisions/0029-quality-discipline-verification-and-response-economy.md
+new file mode 100644
+index 0000000..8c8d706
+--- /dev/null
++++ b/docs/decisions/0029-quality-discipline-verification-and-response-economy.md
+@@ -0,0 +1,29 @@
++# ADR-0029: Quality discipline is a compact built-in skill pack plus durable verification
++
++## Status
++Accepted.
++
++## Context
++Harness already owns durable Task state, Knowledge, stack-aware skill selection, host-native projection, and compact MCP tools. A reusable agent-rules kit supplied useful engineering discipline: specification audit, independent review, testing/security/infrastructure guidance, anti-duplication project conventions, and explicit verification. The kit also carried its own `PROJECT_STATUS.md`, epic directories, trigger-generation scripts, and host-specific rule mirrors.
++
++Importing that structure literally would create a second source of Task truth, duplicate Harness projection, increase model-visible instructions, and move Harness toward an orchestration/workflow DSL. MCP responses are bounded but native hosts still own model inference and final chat output, so Harness can shape response economy through instructions but cannot honestly enforce a final-output token cap without becoming a model proxy.
++
++The product specification already defines checkpoint verification as `name`, `status`, `evidence`, with `passed`, `failed`, and `not_run`, and allows `agent_reported` as the v1 source.
++
++## Decision
++1. Harness ships a compact 12-skill built-in quality pack as product-owned seed content for the canonical external skill registry.
++2. Built-in skills use hyphenated portable ids/frontmatter and existing `task_hints`; Harness does not add a composition DSL.
++3. `harness install` reconciles the pack before host/runtime mutation. `harness skills sync` provides explicit reconciliation and `harness skills validate` checks every currently supported host surface.
++4. Reconciliation never overwrites unknown same-id content. A registry-root ownership manifest records exact installed hashes; owned skills update only while current bytes still match the recorded hash. Exact current built-ins may be adopted. Failures roll back in-process replacements.
++5. Harness does not import `PROJECT_STATUS.md`, `STACK.md`, epic state, trigger wrappers, or host rule mirrors. Task/checkpoint state remains in Harness; mechanically detectable stack facts remain in the Structural Index; only non-mechanical project conventions belong in durable Knowledge.
++6. Checkpoint verification becomes durable schema state. A checkpoint may carry bounded ordered `agent_reported` entries with `name`, `status`, and `evidence`, written atomically with Task revision/checkpoint/Knowledge/event. `project_status` returns compact name/status; selected Task context may return bounded evidence/source.
++7. Operator chat follows a response-economy contract: checkpoints own durable continuity; chat is only the human-relevant delta. Server instructions require governing-contract inspection before risky cross-boundary implementation and independent complete-change review plus repository gates before publication.
++8. Response economy remains a soft host instruction. Harness does not add a model proxy or claim a hard final-output token limit.
++
++## Consequences
++- Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
++- Task hints compose relevant skills while the existing visible-skill budget remains authoritative.
++- Verification survives host/session changes and need not be repeated verbatim in chat.
++- User-modified or same-id custom skills fail closed instead of being silently replaced.
++- Future observed hooks may add `source=observed` without changing the v1 agent-reported shape.
++- Real-host compliance with response instructions remains acceptance evidence, not an enforcement claim.
+diff --git a/docs/specification.md b/docs/specification.md
+index 0e3d817..49a3089 100644
+--- a/docs/specification.md
++++ b/docs/specification.md
+@@ -1720,8 +1720,11 @@ existing project knowledge. Read and edit source using native host tools.
+ Prefer Harness over repository-wide discovery, while targeted native
+ search remains allowed when needed. Start or resume a Harness task before
+ meaningful changes and checkpoint meaningful completed or waiting work.
+-Reply to the operator briefly: lead with the result; cite code, do not
+-paste unchanged source or recap diffs.
++Use checkpoints for durable continuity; operator chat is only the human-relevant delta.
++Reply briefly: lead with the result; do not restate the Task/checkpoint, paste unchanged
++source, or recap diffs/file lists. Report only material decisions, risks, blockers, and
++verification unless the operator asks for detail. This is a soft native-host instruction,
++not a hard output-token guarantee.
+ 
+ ```
+ 
+@@ -1780,6 +1783,12 @@ godot/
+ 
+ ---
+ 
++# 73.1 Built-in quality pack
++
++Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует существующие `task_hints`, без отдельного workflow DSL.
++
++---
++
+ # 74. Skill principle
+ 
+ Никогда не materialize все skills глобально.
+@@ -2301,6 +2310,8 @@ harness status [path]
+ harness dashboard
+ 
+ harness skills list
++harness skills sync
++harness skills validate
+ 
+ ```
+ 
+diff --git a/src/harness/builtin_skills.py b/src/harness/builtin_skills.py
+new file mode 100644
+index 0000000..fb37a7d
+--- /dev/null
++++ b/src/harness/builtin_skills.py
+@@ -0,0 +1,483 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import shutil
++import stat
++import tempfile
++from collections.abc import Sequence
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Final
++
++from harness.skills import SKILL_FILE_NAME, SKILL_METADATA_FILE_NAME
++
++_BUILTIN_MANIFEST_NAME: Final[str] = ".harness-builtin-skills.json"
++_BUILTIN_MANIFEST_VERSION: Final[int] = 1
++_BUILTIN_FILE_MODE: Final[int] = 0o600
++_BUILTIN_DIR_MODE: Final[int] = 0o700
++
++
++class BuiltinSkillError(RuntimeError):
++    """Raised when the Harness-owned quality skill pack cannot be reconciled safely."""
++
++
++class BuiltinSkillCollisionError(BuiltinSkillError):
++    """Raised when a built-in id collides with unknown or user-modified registry content."""
++
++
++@dataclass(frozen=True, slots=True)
++class BuiltinSkill:
++    skill_id: str
++    description: str
++    task_hints: tuple[str, ...]
++    body: str
++    applies_languages: tuple[str, ...] = ()
++    applies_dependencies: tuple[str, ...] = ()
++    applies_manifests: tuple[str, ...] = ()
++
++    def files(self) -> dict[str, bytes]:
++        frontmatter = f"---\nname: {self.skill_id}\ndescription: {self.description}\n---\n\n"
++        metadata = [f"id: {self.skill_id}"]
++        applies = (
++            ("languages", self.applies_languages),
++            ("dependencies", self.applies_dependencies),
++            ("manifests", self.applies_manifests),
++        )
++        if any(values for _, values in applies):
++            metadata.append("applies:")
++            for field, values in applies:
++                if values:
++                    metadata.append(f"  {field}:")
++                    metadata.extend(f"    - {value}" for value in values)
++        metadata.append("task_hints:")
++        metadata.extend(f"  - {hint}" for hint in self.task_hints)
++        return {
++            SKILL_FILE_NAME: (frontmatter + self.body.strip() + "\n").encode(),
++            SKILL_METADATA_FILE_NAME: ("\n".join(metadata) + "\n").encode(),
++        }
++
++
++@dataclass(frozen=True, slots=True)
++class BuiltinSkillSyncResult:
++    installed: int
++    updated: int
++    unchanged: int
++    adopted: int
++    skill_ids: tuple[str, ...]
++
++
++@dataclass(frozen=True, slots=True)
++class _Replacement:
++    target: Path
++    backup: Path | None
++
++
++BUILTIN_SKILLS: Final[tuple[BuiltinSkill, ...]] = (
++    BuiltinSkill(
++        "architecture-decisions",
++        "Capture durable architectural decisions without turning routine edits into paperwork.",
++        ("architecture", "adr", "auth", "database-migration", "schema-change", "complex-change"),
++        """
++# Architecture decisions
++Use this skill when a change alters a durable boundary, data model, protocol, security model, or operational contract.
++- Read existing architecture docs and ADRs before designing.
++- Prefer the smallest design that preserves existing invariants.
++- Record an ADR only for durable decisions, not routine implementation detail.
++- State context, decision, alternatives rejected, consequences, migration/rollback implications, and verification boundary.
++- Keep code, docs, and ADR terminology consistent. Do not invent behavior that authoritative evidence does not establish.
++""",
++    ),
++    BuiltinSkill(
++        "testing-strategy",
++        "Choose focused tests during iteration and repository-required gates before publication.",
++        ("test", "testing", "bugfix", "refactor", "auth", "database-migration", "complex-change"),
++        """
++# Testing strategy
++- Reproduce failures or define a falsifiable acceptance check before changing behavior when practical.
++- During iteration, run the smallest relevant unit/integration checks that can catch the change.
++- Add regression coverage for the actual failure mode and important negative paths.
++- Mock network/external systems at explicit boundaries; prefer real local domain/storage behavior where cheap.
++- Before publication or merge, run every repository-mandated quality gate for the exact candidate. A targeted green test never substitutes for required CI.
++- After repeated failed attempts, stop changing code, restate the evidence and current hypothesis, and inspect the boundary before trying another fix.
++- Report only checks that actually ran; distinguish failed, not run, and environment-blocked verification.
++""",
++        applies_manifests=("pyproject.toml", "package.json", "cargo.toml", "go.mod"),
++    ),
++    BuiltinSkill(
++        "backend-security",
++        "Review backend changes against current authentication, validation, secrets, and data-safety boundaries.",
++        ("security", "auth", "authentication", "authorization", "api", "session", "secrets"),
++        """
++# Backend security
++- Treat authentication and authorization as separate checks; enforce authorization server-side at the resource boundary.
++- Validate untrusted input structurally and use parameterized database access. Encode output for its destination context.
++- Prefer HttpOnly and Secure cookies for browser sessions when appropriate; choose SameSite for the actual flow, including OAuth/OIDC redirects.
++- Store passwords with a current memory-hard password KDF such as Argon2id, or a deliberately tuned supported alternative.
++- Keep secrets out of source, logs, errors, and generated artifacts; environment variables and managed/mounted secret stores are acceptable deployment mechanisms.
++- Fail closed on permission ambiguity and avoid exposing production stack traces or sensitive payloads.
++""",
++        applies_dependencies=("fastapi", "django", "flask", "express", "@nestjs/core"),
++    ),
++    BuiltinSkill(
++        "container-infrastructure",
++        "Keep Docker and local infrastructure reproducible, bounded to the current project, and production-conscious.",
++        ("docker", "container", "compose", "infrastructure", "dev-infra"),
++        """
++# Container infrastructure
++- Operate only on this project's declared containers, compose files, networks, and volumes.
++- Reuse the repository task runner and existing service names before adding another entry point.
++- Prefer deterministic builds, multi-stage images where useful, non-root runtime users, explicit health checks, and bounded resources for production paths.

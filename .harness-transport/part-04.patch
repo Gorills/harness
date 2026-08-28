@@ -1,0 +1,325 @@
++            raise IpcProtocolError("task checkpoint verification item has invalid fields")
++        name = item["name"]
++        status = item["status"]
++        evidence = item["evidence"]
++        _validate_task_text(name, "verification name", MAX_VERIFICATION_NAME_BYTES, required=True)
++        _validate_task_text(
++            evidence, "verification evidence", MAX_VERIFICATION_EVIDENCE_BYTES, required=True
++        )
++        if not isinstance(status, str):
++            raise IpcProtocolError("verification status must be text")
++        try:
++            parsed = VerificationStatus(status)
++        except ValueError as exc:
++            raise IpcProtocolError("verification status is unsupported") from exc
++        drafts.append(VerificationDraft(cast(str, name), parsed, cast(str, evidence)))
++    try:
++        return normalize_verification_drafts(drafts)
++    except VerificationValidationError as exc:
++        raise IpcProtocolError("task checkpoint verification is invalid") from exc
++
++
+ def _knowledge_to_wire(knowledge: Sequence[KnowledgeDraft]) -> list[dict[str, object]]:
+     if len(knowledge) > MAX_KNOWLEDGE_CARDS_PER_CHECKPOINT:
+         raise IpcProtocolError("task checkpoint knowledge exceeds card limit")
+@@ -2258,6 +2328,7 @@ def _workspace_task_status_from_response(
+             "state",
+             "wait_reason",
+             "next_step",
++            "verification",
+         }:
+             raise IpcProtocolError(
+                 "daemon workspace task status checkpoint does not match the IPC schema"
+@@ -2281,12 +2352,36 @@ def _workspace_task_status_from_response(
+             next_step = _bounded_response_string(
+                 next_step, "next_step", MAX_CHECKPOINT_NEXT_STEP_BYTES
+             )
++        raw_verification = raw_checkpoint["verification"]
++        if (
++            not isinstance(raw_verification, list)
++            or len(raw_verification) > MAX_VERIFICATIONS_PER_CHECKPOINT
++        ):
++            raise IpcProtocolError("daemon workspace task status verification has invalid shape")
++        verification = []
++        for item in raw_verification:
++            if not isinstance(item, dict) or set(item) != {"name", "status"}:
++                raise IpcProtocolError(
++                    "daemon workspace task status verification item has invalid fields"
++                )
++            name = _bounded_response_string(
++                item["name"], "verification name", MAX_VERIFICATION_NAME_BYTES
++            )
++            raw_status = item["status"]
++            if not isinstance(raw_status, str):
++                raise IpcProtocolError("daemon verification status has invalid type")
++            try:
++                status = VerificationStatus(raw_status)
++            except ValueError as exc:
++                raise IpcProtocolError("daemon verification status is unsupported") from exc
++            verification.append(WorkspaceVerificationSummary(name, status))
+         checkpoint = WorkspaceTaskCheckpointSummary(
+             checkpoint_id,
+             task_revision,
+             state,
+             wait_reason,
+             cast(str | None, next_step),
++            tuple(verification),
+         )
+     pending_operator_feedback = result["pending_operator_feedback"]
+     if pending_operator_feedback is not None:
+@@ -2768,15 +2863,22 @@ def _task_checkpoint_from_response(
+         "wait_reason",
+         "revision",
+         "checkpoint_id",
++        "verification_count",
+         "knowledge_ids",
+     }
+     if set(result) != expected_fields:
+         raise IpcProtocolError("daemon task_checkpoint result does not match the IPC schema")
+     schema_version = result["schema_version"]
+     revision = result["revision"]
+-    if any(
+-        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+-        for value in (schema_version, revision)
++    verification_count = result["verification_count"]
++    if (
++        any(
++            isinstance(value, bool) or not isinstance(value, int) or value <= 0
++            for value in (schema_version, revision)
++        )
++        or isinstance(verification_count, bool)
++        or not isinstance(verification_count, int)
++        or not 0 <= verification_count <= MAX_VERIFICATIONS_PER_CHECKPOINT
+     ):
+         raise IpcProtocolError("daemon task_checkpoint result has invalid integer fields")
+     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+@@ -2800,6 +2902,7 @@ def _task_checkpoint_from_response(
+         wait_reason,
+         revision,
+         checkpoint_id,
++        verification_count,
+         knowledge_ids,
+     )
+ 
+diff --git a/src/harness/mcp_bridge.py b/src/harness/mcp_bridge.py
+index e22cb55..bfce551 100644
+--- a/src/harness/mcp_bridge.py
++++ b/src/harness/mcp_bridge.py
+@@ -50,19 +50,22 @@ from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKin
+ from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchScope
+ from harness.runtime_paths import default_runtime_paths
+ from harness.tasks import TaskState, TaskWaitReason
++from harness.verification import VerificationDraft, VerificationStatus
+ from harness.workspace_resolution import WorkspaceHint
+ 
+ _OPERATOR_LANGUAGE = "Russian"
+ _SERVER_INSTRUCTIONS = (
+     "Write every operator-facing Task title, summary, next_step, and Knowledge title/body in "
+     f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
+-    "project_search across code, docs, Knowledge, and Task history; expand only selected refs "
+-    "with project_context, then read/edit repository files with native host tools. Start or "
+-    "resume a Harness task before meaningful changes and checkpoint meaningful progress. Address "
+-    "pending operator feedback before continuing reviewed work. Targeted native search remains "
+-    "allowed. Reply to the operator briefly: lead with the result; cite code, do not paste "
+-    "unchanged source or recap diffs. When visibility_mode is hidden, do not perform durable "
+-    "SCM mutations."
++    "project_search across code, docs, Knowledge, and Task history; expand selected refs with "
++    "project_context, then use native host tools. Start/resume a Harness task before meaningful "
++    "changes; checkpoint meaningful progress and address operator feedback. Before risky "
++    "cross-boundary work, inspect governing contracts/specs. Before publication, independently "
++    "review the complete change and run repository gates. Targeted native search remains allowed. "
++    "Reply briefly: result first; use checkpoints for continuity; no task restatement, unchanged "
++    "source, or file-by-file recap diffs. Mention only material decisions, risks, blockers, and "
++    "verification unless detail is requested. In hidden visibility, do not perform durable SCM "
++    "mutations."
+ )
+ _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
+     "Production Harness MCP is refused against the Harness source checkout overlay. "
+@@ -112,6 +115,7 @@ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+             "summary",
+             "next_step",
+             "wait_reason",
++            "verification",
+             "knowledge",
+         }
+     ),
+@@ -122,6 +126,14 @@ class _StrictInputModel(BaseModel):
+     model_config = ConfigDict(extra="forbid", frozen=True)
+ 
+ 
++class VerificationInput(_StrictInputModel):
++    """Strict model-facing Task verification input."""
++
++    name: str
++    status: Literal["passed", "failed", "not_run"]
++    evidence: str
++
++
+ class KnowledgeAnchorInput(_StrictInputModel):
+     """Strict model-facing Knowledge anchor input."""
+ 
+@@ -358,6 +370,10 @@ def build_mcp_server() -> MCPServer:
+                             if last_checkpoint.wait_reason is not None
+                             else None
+                         ),
++                        "verification": [
++                            {"name": item.name, "status": item.status.value}
++                            for item in last_checkpoint.verification
++                        ],
+                     }
+                 ),
+                 "next_step": last_checkpoint.next_step if last_checkpoint is not None else None,
+@@ -492,6 +508,7 @@ def build_mcp_server() -> MCPServer:
+         summary: str,
+         next_step: str | None = None,
+         wait_reason: Literal["operator_review", "operator_input", "external"] | None = None,
++        verification: list[VerificationInput] | None = None,
+         knowledge: list[KnowledgeInput] | None = None,
+     ) -> dict[str, Any]:
+         result = request_task_checkpoint(
+@@ -503,6 +520,7 @@ def build_mcp_server() -> MCPServer:
+             summary=summary,
+             next_step=next_step,
+             wait_reason=TaskWaitReason(wait_reason) if wait_reason is not None else None,
++            verification=_verification_drafts(verification or []),
+             knowledge=_knowledge_drafts(knowledge or []),
+         )
+         return _bounded(
+@@ -529,6 +547,13 @@ def _workspace_hints() -> tuple[WorkspaceHint, ...]:
+     return workspace_hints_from_environment()
+ 
+ 
++def _verification_drafts(items: list[VerificationInput]) -> tuple[VerificationDraft, ...]:
++    return tuple(
++        VerificationDraft(item.name, VerificationStatus(item.status), item.evidence)
++        for item in items
++    )
++
++
+ def _knowledge_drafts(items: list[KnowledgeInput]) -> tuple[KnowledgeDraft, ...]:
+     return tuple(
+         KnowledgeDraft(
+@@ -572,6 +597,7 @@ def _task_checkpoint_payload(result: TaskCheckpointResult) -> dict[str, Any]:
+         "wait_reason": result.wait_reason.value if result.wait_reason is not None else None,
+         "revision": result.revision,
+         "checkpoint_id": result.checkpoint_id,
++        "verification_count": result.verification_count,
+         "knowledge_ids": list(result.knowledge_ids),
+     }
+ 
+diff --git a/src/harness/retrieval.py b/src/harness/retrieval.py
+index c3bdc6a..428a31a 100644
+--- a/src/harness/retrieval.py
++++ b/src/harness/retrieval.py
+@@ -24,12 +24,15 @@ from harness.search import (
+ )
+ from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
+ from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
++from harness.verification import list_checkpoint_verification
+ 
+ _DEFAULT_CANDIDATE_LIMIT = 96
+ _MAX_CANDIDATE_LIMIT = 384
+ _SUMMARY_MAX_BYTES = 384
+ _CONTEXT_HISTORY_LIMIT = 4
+ _CONTEXT_TEXT_MAX_BYTES = 1024
++_CONTEXT_VERIFICATION_LIMIT = 4
++_CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES = 512
+ _CONTEXT_KNOWLEDGE_ANCHOR_LIMIT = 4
+ _CONTEXT_KNOWLEDGE_ANCHOR_BYTES = 2048
+ _CONTEXT_STACK_HINT_LIMIT = 8
+@@ -431,6 +434,13 @@ def _task_context(
+                     if checkpoint.next_step is None
+                     else _truncate_utf8(checkpoint.next_step, _CONTEXT_TEXT_MAX_BYTES)
+                 )
++                verification = list_checkpoint_verification(connection, checkpoint.checkpoint_id)
++                item["verification"] = [
++                    {"name": record.name, "status": record.status.value}
++                    for record in verification[:_CONTEXT_VERIFICATION_LIMIT]
++                ]
++                item["verification_count"] = len(verification)
++                item["verification_truncated"] = len(verification) > _CONTEXT_VERIFICATION_LIMIT
+             if event.operator_feedback is not None:
+                 item["operator_feedback"] = _truncate_utf8(
+                     event.operator_feedback, _CONTEXT_TEXT_MAX_BYTES
+@@ -452,6 +462,7 @@ def _task_context(
+             if checkpoint.next_step is None
+             else _truncate_utf8(checkpoint.next_step, _CONTEXT_TEXT_MAX_BYTES)
+         )
++        verification_records = list_checkpoint_verification(connection, checkpoint.checkpoint_id)
+         data["selected_checkpoint"] = {
+             "checkpoint_id": checkpoint.checkpoint_id,
+             "task_revision": checkpoint.task_revision,
+@@ -465,6 +476,23 @@ def _task_context(
+             "changed_paths": list(changed_paths),
+             "changed_path_count": len(checkpoint.changed_paths),
+             "changed_paths_truncated": len(changed_paths) < len(checkpoint.changed_paths),
++            "verification": [
++                {
++                    "name": record.name,
++                    "status": record.status.value,
++                    "evidence": _truncate_utf8(
++                        record.evidence, _CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES
++                    ),
++                    "evidence_truncated": (
++                        len(record.evidence.encode("utf-8"))
++                        > _CONTEXT_VERIFICATION_EVIDENCE_MAX_BYTES
++                    ),
++                    "source": record.source.value,
++                }
++                for record in verification_records[:_CONTEXT_VERIFICATION_LIMIT]
++            ],
++            "verification_count": len(verification_records),
++            "verification_truncated": len(verification_records) > _CONTEXT_VERIFICATION_LIMIT,
+         }
+     elif fragment.startswith("event:"):
+         event_id = _parse_positive_int(fragment.removeprefix("event:"), "selected Task event id")
+diff --git a/src/harness/skill_runtime.py b/src/harness/skill_runtime.py
+index 1d94c3e..8862386 100644
+--- a/src/harness/skill_runtime.py
++++ b/src/harness/skill_runtime.py
+@@ -13,6 +13,7 @@ from harness.host_adapters import (
+ )
+ from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
+ from harness.skills import (
++    SkillDefinition,
+     SkillError,
+     SkillProjectionInspection,
+     SkillProjectionResult,
+@@ -23,6 +24,7 @@ from harness.skills import (
+     load_skill_registry,
+     plan_skill_projection,
+     resolve_workspace_skills,
++    validate_skill_projection_compatibility,
+ )
+ 
+ _SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "cursor"})
+@@ -62,6 +64,13 @@ def supported_skill_profiles() -> frozenset[str]:
+     return _SUPPORTED_PROFILES
+ 
+ 
++def validate_skill_definitions_for_profiles(
++    definitions: Sequence[SkillDefinition], profiles: Sequence[str]
++) -> None:
++    """Validate canonical skill metadata for the selected supported host profiles."""
++    validate_skill_projection_compatibility(definitions, _surfaces_for_profiles(profiles))
++
++
+ def reconcile_workspace_skills(
+     connection: sqlite3.Connection,
+     workspace_id: str,
+diff --git a/src/harness/skills.py b/src/harness/skills.py
+index e73acff..aaea15c 100644
+--- a/src/harness/skills.py
++++ b/src/harness/skills.py
+@@ -444,45 +444,46 @@ def resolve_skills(
+     return tuple(item[1] for item in selected)
+ 
+ 
+-def plan_skill_projection(
+-    workspace_root: Path,
+-    resolved_skills: Sequence[ResolvedSkill],
++def validate_skill_projection_compatibility(
++    definitions: Sequence[SkillDefinition],
+     surfaces: Sequence[SkillProjectionSurface],
+-) -> SkillProjectionPlan:
+-    """Choose a minimal duplicate-free set of native roots for all active host profiles."""

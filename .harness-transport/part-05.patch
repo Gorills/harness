@@ -1,0 +1,378 @@
+-    root = _require_real_directory(workspace_root, "Workspace root")
+-    if not surfaces:
+-        return SkillProjectionPlan(root, (), ())
++) -> None:
++    """Validate portable skill metadata against model-visible host surface contracts."""
+     profiles = [surface.profile for surface in surfaces]
+     if len(set(profiles)) != len(profiles):
+         raise SkillProjectionError("skill projection profiles must be unique")
+     for surface in surfaces:
+         required = set(surface.required_frontmatter_fields)
+-        for resolved in resolved_skills:
+-            definition = resolved.definition
++        for definition in definitions:
+             missing = sorted(required - definition.frontmatter_fields)
+             if missing:
+                 raise SkillProjectionError(
+-                    f"skill {definition.skill_id!r} is incompatible with "
+-                    f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing "
+-                    f"required fields: {', '.join(missing)}"
++                    f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter is missing required fields: {', '.join(missing)}"
+                 )
+             if surface.frontmatter_name_must_match_skill_id:
+                 name = dict(definition.frontmatter_text_fields).get("name")
+                 if name != definition.skill_id:
+                     raise SkillProjectionError(
+-                        f"skill {definition.skill_id!r} is incompatible with "
+-                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name must "
+-                        "match the projected skill directory"
++                        f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter name must match the projected skill directory"
+                     )
+             if surface.frontmatter_name_pattern is not None:
+                 name = dict(definition.frontmatter_text_fields).get("name")
+                 if name is None or re.fullmatch(surface.frontmatter_name_pattern, name) is None:
+                     raise SkillProjectionError(
+-                        f"skill {definition.skill_id!r} is incompatible with "
+-                        f"{surface.profile!r}: {SKILL_FILE_NAME} frontmatter name has "
+-                        "an unsupported format"
++                        f"skill {definition.skill_id!r} is incompatible with {surface.profile!r}: {SKILL_FILE_NAME} frontmatter name has an unsupported format"
+                     )
++
++
++def plan_skill_projection(
++    workspace_root: Path,
++    resolved_skills: Sequence[ResolvedSkill],
++    surfaces: Sequence[SkillProjectionSurface],
++) -> SkillProjectionPlan:
++    """Choose a minimal duplicate-free set of native roots for all active host profiles."""
++    root = _require_real_directory(workspace_root, "Workspace root")
++    if not surfaces:
++        return SkillProjectionPlan(root, (), ())
++    validate_skill_projection_compatibility(tuple(r.definition for r in resolved_skills), surfaces)
+     candidates = tuple(sorted({surface.target_root for surface in surfaces}, key=str))
+     valid: list[tuple[int, tuple[str, ...], tuple[PurePosixPath, ...]]] = []
+     for count in range(1, len(candidates) + 1):
+diff --git a/src/harness/storage.py b/src/harness/storage.py
+index 049526e..deaa0a5 100644
+--- a/src/harness/storage.py
++++ b/src/harness/storage.py
+@@ -7,7 +7,7 @@ from dataclasses import dataclass
+ from pathlib import Path
+ from time import sleep
+ 
+-SCHEMA_VERSION = 11
++SCHEMA_VERSION = 12
+ _MIGRATIONS_TABLE = "schema_migrations"
+ _FTS5_PROBE_TABLE = "__harness_fts5_probe"
+ _WAL_LOCK_RETRY_ATTEMPTS = 5
+@@ -993,6 +993,22 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
+             """,
+         )
+         return
++    if target_version == 12:
++        connection.execute(
++            """
++            CREATE TABLE task_checkpoint_verification (
++                checkpoint_id TEXT NOT NULL REFERENCES task_checkpoints(id) ON DELETE CASCADE,
++                position INTEGER NOT NULL CHECK (position >= 0 AND position < 12),
++                name TEXT NOT NULL CHECK (name <> '' AND length(CAST(name AS BLOB)) <= 256),
++                status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'not_run')),
++                evidence TEXT NOT NULL CHECK (evidence <> '' AND length(CAST(evidence AS BLOB)) <= 2048),
++                source TEXT NOT NULL CHECK (source IN ('agent_reported', 'observed')),
++                PRIMARY KEY (checkpoint_id, position),
++                UNIQUE (checkpoint_id, name)
++            )
++            """
++        )
++        return
+     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
+ 
+ 
+diff --git a/src/harness/task_checkpoints.py b/src/harness/task_checkpoints.py
+index ef8197f..4a127fb 100644
+--- a/src/harness/task_checkpoints.py
++++ b/src/harness/task_checkpoints.py
+@@ -30,6 +30,12 @@ from harness.tasks import (
+     TaskWorkspaceConflictError,
+     get_task,
+ )
++from harness.verification import (
++    VerificationDraft,
++    VerificationRecord,
++    normalize_verification_drafts,
++    persist_checkpoint_verification,
++)
+ 
+ MAX_CHECKPOINT_SUMMARY_BYTES = 4096
+ MAX_CHECKPOINT_NEXT_STEP_BYTES = 2048
+@@ -101,12 +107,13 @@ class TaskEventRecord:
+ 
+ @dataclass(frozen=True, slots=True)
+ class TaskCheckpointMutation:
+-    """Atomic checkpoint result including any Knowledge created by this checkpoint."""
++    """Atomic checkpoint result including semantic evidence created by this checkpoint."""
+ 
+     task: TaskRecord
+     checkpoint: TaskCheckpointRecord
+     event: TaskEventRecord
+     knowledge_cards: tuple[KnowledgeCardRecord, ...]
++    verification: tuple[VerificationRecord, ...]
+ 
+ 
+ def checkpoint_task(
+@@ -119,6 +126,7 @@ def checkpoint_task(
+     summary: str,
+     next_step: str | None = None,
+     wait_reason: TaskWaitReason | None = None,
++    verification: Sequence[VerificationDraft] = (),
+     knowledge: Sequence[KnowledgeDraft] = (),
+     now: datetime | None = None,
+ ) -> TaskCheckpointMutation:
+@@ -138,6 +146,7 @@ def checkpoint_task(
+         maximum_bytes=MAX_CHECKPOINT_NEXT_STEP_BYTES,
+         required=False,
+     )
++    normalized_verification = normalize_verification_drafts(verification)
+     normalized_knowledge = normalize_knowledge_drafts(knowledge)
+ 
+     connection.execute("BEGIN IMMEDIATE")
+@@ -190,6 +199,9 @@ def checkpoint_task(
+             timestamp=timestamp,
+             mechanical=mechanical,
+         )
++        verification_records = persist_checkpoint_verification(
++            connection, checkpoint.checkpoint_id, normalized_verification
++        )
+         knowledge_cards = persist_checkpoint_knowledge(
+             connection,
+             current,
+@@ -205,6 +217,7 @@ def checkpoint_task(
+             checkpoint=checkpoint,
+             event=event,
+             knowledge_cards=knowledge_cards,
++            verification=verification_records,
+         )
+     except Exception:
+         if connection.in_transaction:
+diff --git a/src/harness/task_workflow.py b/src/harness/task_workflow.py
+index a1dc265..18a414f 100644
+--- a/src/harness/task_workflow.py
++++ b/src/harness/task_workflow.py
+@@ -30,6 +30,7 @@ from harness.tasks import (
+     _validate_expected_revision,
+     get_task,
+ )
++from harness.verification import VerificationDraft
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -122,6 +123,7 @@ def task_checkpoint(
+     summary: str,
+     next_step: str | None = None,
+     wait_reason: TaskWaitReason | None = None,
++    verification: Sequence[VerificationDraft] = (),
+     knowledge: Sequence[KnowledgeDraft] = (),
+     now: datetime | None = None,
+ ) -> TaskCheckpointMutation:
+@@ -135,6 +137,7 @@ def task_checkpoint(
+         summary=summary,
+         next_step=next_step,
+         wait_reason=wait_reason,
++        verification=verification,
+         knowledge=knowledge,
+         now=now,
+     )
+diff --git a/src/harness/verification.py b/src/harness/verification.py
+new file mode 100644
+index 0000000..2cd32e8
+--- /dev/null
++++ b/src/harness/verification.py
+@@ -0,0 +1,142 @@
++from __future__ import annotations
++
++import sqlite3
++from collections.abc import Sequence
++from dataclasses import dataclass
++from enum import StrEnum
++
++MAX_VERIFICATIONS_PER_CHECKPOINT = 12
++MAX_VERIFICATION_NAME_BYTES = 256
++MAX_VERIFICATION_EVIDENCE_BYTES = 2048
++
++
++class VerificationError(RuntimeError):
++    pass
++
++
++class VerificationValidationError(VerificationError):
++    pass
++
++
++class VerificationStatus(StrEnum):
++    PASSED = "passed"
++    FAILED = "failed"
++    NOT_RUN = "not_run"
++
++
++class VerificationSource(StrEnum):
++    AGENT_REPORTED = "agent_reported"
++    OBSERVED = "observed"
++
++
++@dataclass(frozen=True, slots=True)
++class VerificationDraft:
++    name: str
++    status: VerificationStatus
++    evidence: str
++
++
++@dataclass(frozen=True, slots=True)
++class VerificationRecord:
++    checkpoint_id: str
++    position: int
++    name: str
++    status: VerificationStatus
++    evidence: str
++    source: VerificationSource
++
++
++def normalize_verification_drafts(
++    drafts: Sequence[VerificationDraft],
++) -> tuple[VerificationDraft, ...]:
++    if len(drafts) > MAX_VERIFICATIONS_PER_CHECKPOINT:
++        raise VerificationValidationError(
++            f"verification exceeds {MAX_VERIFICATIONS_PER_CHECKPOINT} entries"
++        )
++    out = []
++    seen = set()
++    for d in drafts:
++        if not isinstance(d, VerificationDraft) or not isinstance(d.status, VerificationStatus):
++            raise VerificationValidationError("verification item has invalid type")
++        name = _normalize_text(d.name, "verification name", MAX_VERIFICATION_NAME_BYTES)
++        evidence = _normalize_text(
++            d.evidence, "verification evidence", MAX_VERIFICATION_EVIDENCE_BYTES
++        )
++        key = name.casefold()
++        if key in seen:
++            raise VerificationValidationError("verification names must be unique per checkpoint")
++        seen.add(key)
++        out.append(VerificationDraft(name, d.status, evidence))
++    return tuple(out)
++
++
++def persist_checkpoint_verification(
++    connection: sqlite3.Connection, checkpoint_id: str, drafts: Sequence[VerificationDraft]
++) -> tuple[VerificationRecord, ...]:
++    normalized = normalize_verification_drafts(drafts)
++    records = tuple(
++        VerificationRecord(
++            checkpoint_id, i, d.name, d.status, d.evidence, VerificationSource.AGENT_REPORTED
++        )
++        for i, d in enumerate(normalized)
++    )
++    connection.executemany(
++        "INSERT INTO task_checkpoint_verification(checkpoint_id,position,name,status,evidence,source) VALUES (?,?,?,?,?,?)",
++        (
++            (r.checkpoint_id, r.position, r.name, r.status.value, r.evidence, r.source.value)
++            for r in records
++        ),
++    )
++    return records
++
++
++def list_checkpoint_verification(
++    connection: sqlite3.Connection, checkpoint_id: str
++) -> tuple[VerificationRecord, ...]:
++    rows = connection.execute(
++        "SELECT checkpoint_id,position,name,status,evidence,source FROM task_checkpoint_verification WHERE checkpoint_id=? ORDER BY position",
++        (checkpoint_id,),
++    ).fetchall()
++    out = []
++    for cid, pos, name, status, evidence, source in rows:
++        if (
++            cid != checkpoint_id
++            or isinstance(pos, bool)
++            or not isinstance(pos, int)
++            or pos < 0
++            or not all(isinstance(x, str) for x in (name, status, evidence, source))
++        ):
++            raise VerificationError("verification row has invalid persisted types")
++        try:
++            st = VerificationStatus(status)
++            src = VerificationSource(source)
++        except ValueError as exc:
++            raise VerificationError("verification row has unsupported persisted enum") from exc
++        out.append(
++            VerificationRecord(
++                cid,
++                pos,
++                _normalize_text(name, "verification name", MAX_VERIFICATION_NAME_BYTES),
++                st,
++                _normalize_text(evidence, "verification evidence", MAX_VERIFICATION_EVIDENCE_BYTES),
++                src,
++            )
++        )
++    if tuple(r.position for r in out) != tuple(range(len(out))):
++        raise VerificationError("verification positions are not contiguous")
++    return tuple(out)
++
++
++def _normalize_text(value: str, label: str, maximum_bytes: int) -> str:
++    if not isinstance(value, str):
++        raise VerificationValidationError(f"{label} must be text")
++    value = value.strip()
++    if not value or "\x00" in value:
++        raise VerificationValidationError(f"{label} must be non-empty text")
++    try:
++        size = len(value.encode())
++    except UnicodeEncodeError as exc:
++        raise VerificationValidationError(f"{label} must be valid UTF-8 text") from exc
++    if size > maximum_bytes:
++        raise VerificationValidationError(f"{label} exceeds {maximum_bytes} UTF-8 bytes")
++    return value
+diff --git a/tests/test_builtin_skills.py b/tests/test_builtin_skills.py
+new file mode 100644
+index 0000000..84f010b
+--- /dev/null
++++ b/tests/test_builtin_skills.py
+@@ -0,0 +1,96 @@
++from __future__ import annotations
++
++from collections.abc import Sequence
++from dataclasses import replace
++from pathlib import Path
++
++import pytest
++
++import harness.builtin_skills as builtin_module
++from harness.builtin_skills import BUILTIN_SKILLS, BuiltinSkillCollisionError, sync_builtin_skills
++from harness.skill_runtime import supported_skill_profiles, validate_skill_definitions_for_profiles
++from harness.skills import DetectedProjectStack, ResolvedSkill, load_skill_registry, resolve_skills
++
++
++def _ids(items: Sequence[ResolvedSkill]) -> tuple[str, ...]:
++    return tuple(item.definition.skill_id for item in items)
++
++
++def test_builtin_pack_sync_is_idempotent_and_host_compatible(tmp_path: Path) -> None:
++    registry = tmp_path / "skills"
++    first = sync_builtin_skills(registry)
++    second = sync_builtin_skills(registry)
++    definitions = load_skill_registry(registry)
++    validate_skill_definitions_for_profiles(definitions, tuple(sorted(supported_skill_profiles())))
++    assert first.installed == len(BUILTIN_SKILLS)
++    assert second.unchanged == len(BUILTIN_SKILLS)
++    assert len(definitions) == len(BUILTIN_SKILLS)
++    assert all("_" not in d.skill_id for d in definitions)
++
++
++def test_builtin_pack_uses_task_hints_for_bounded_composition(tmp_path: Path) -> None:
++    registry = tmp_path / "skills"
++    sync_builtin_skills(registry)
++    definitions = load_skill_registry(registry)
++    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
++    assert _ids(resolve_skills(definitions, empty, task_hints=("auth",))) == (
++        "architecture-decisions",
++        "backend-security",
++        "testing-strategy",
++    )

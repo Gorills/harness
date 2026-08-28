@@ -1,0 +1,390 @@
++def _require_real_skill_directory(path: Path) -> None:
++    try:
++        m = path.lstat()
++    except OSError as exc:
++        raise BuiltinSkillError(f"skill directory cannot be inspected: {path.name}") from exc
++    if stat.S_ISLNK(m.st_mode) or not stat.S_ISDIR(m.st_mode):
++        raise BuiltinSkillCollisionError(f"skill registry entry is unsafe: {path.name}")
++
++
++def _directory_sha256(path: Path) -> str:
++    _require_real_skill_directory(path)
++    files = {}
++    try:
++        children = sorted(path.iterdir(), key=lambda x: x.name)
++    except OSError as exc:
++        raise BuiltinSkillError(f"skill directory cannot be listed: {path.name}") from exc
++    for child in children:
++        try:
++            m = child.lstat()
++        except OSError as exc:
++            raise BuiltinSkillError(f"skill entry cannot be inspected: {path.name}") from exc
++        if stat.S_ISLNK(m.st_mode) or not stat.S_ISREG(m.st_mode):
++            raise BuiltinSkillCollisionError(
++                f"built-in skill contains unexpected non-file content: {path.name}"
++            )
++        try:
++            files[child.name] = child.read_bytes()
++        except OSError as exc:
++            raise BuiltinSkillError(
++                f"skill entry cannot be read: {path.name}/{child.name}"
++            ) from exc
++    return _tree_sha256(files)
++
++
++def _tree_sha256(files: dict[str, bytes]) -> str:
++    d = hashlib.sha256()
++    for name, payload in sorted(files.items()):
++        e = name.encode()
++        d.update(len(e).to_bytes(4, "big"))
++        d.update(e)
++        d.update(len(payload).to_bytes(8, "big"))
++        d.update(payload)
++    return d.hexdigest()
+diff --git a/src/harness/daemon.py b/src/harness/daemon.py
+index 4751fab..fe56ee3 100644
+--- a/src/harness/daemon.py
++++ b/src/harness/daemon.py
+@@ -55,6 +55,7 @@ from harness.ipc import (
+     WorkspaceTaskCheckpointSummary,
+     WorkspaceTaskStatusResult,
+     WorkspaceTaskSummary,
++    WorkspaceVerificationSummary,
+     receive_request,
+     send_dashboard_url_response,
+     send_error_response,
+@@ -125,6 +126,7 @@ from harness.tasks import (
+     TaskWorkspaceConflictError,
+     get_relevant_task,
+ )
++from harness.verification import list_checkpoint_verification
+ from harness.visibility import set_project_visibility
+ from harness.watcher import (
+     DEFAULT_WATCH_DEBOUNCE_SECONDS,
+@@ -317,6 +319,11 @@ def read_workspace_task_status(
+             if task is not None
+             else None
+         )
++        verification = (
++            list_checkpoint_verification(connection, checkpoint.checkpoint_id)
++            if checkpoint is not None
++            else ()
++        )
+         pending_operator_feedback = (
+             get_operator_feedback_for_revision(connection, task.task_id, task.revision)
+             if task is not None and task.state is TaskState.WORKING
+@@ -351,6 +358,9 @@ def read_workspace_task_status(
+             state=checkpoint.state,
+             wait_reason=checkpoint.wait_reason,
+             next_step=checkpoint.next_step,
++            verification=tuple(
++                WorkspaceVerificationSummary(item.name, item.status) for item in verification
++            ),
+         )
+     )
+     return WorkspaceTaskStatusResult(
+@@ -629,6 +639,7 @@ def mutate_task_checkpoint(
+         summary=request.summary,
+         next_step=request.next_step,
+         wait_reason=request.wait_reason,
++        verification=request.verification,
+         knowledge=request.knowledge,
+     )
+     return TaskCheckpointResult(
+@@ -639,6 +650,7 @@ def mutate_task_checkpoint(
+         wait_reason=mutation.task.wait_reason,
+         revision=mutation.task.revision,
+         checkpoint_id=mutation.checkpoint.checkpoint_id,
++        verification_count=len(mutation.verification),
+         knowledge_ids=tuple(card.knowledge_id for card in mutation.knowledge_cards),
+     )
+ 
+diff --git a/src/harness/entrypoints.py b/src/harness/entrypoints.py
+index ea7d3d0..4b8cca0 100644
+--- a/src/harness/entrypoints.py
++++ b/src/harness/entrypoints.py
+@@ -7,6 +7,7 @@ from signal import SIGINT, SIGTERM, getsignal, signal
+ from threading import Event
+ from types import FrameType
+ 
++from harness.builtin_skills import BuiltinSkillError, sync_builtin_skills
+ from harness.cursor_adapter import (
+     CursorProjectRuntimeStatus,
+     cursor_project_enable_command,
+@@ -43,6 +44,7 @@ from harness.runtime_paths import (
+     ensure_private_state_directory,
+ )
+ from harness.search import DEFAULT_SEARCH_LIMIT
++from harness.skill_runtime import supported_skill_profiles, validate_skill_definitions_for_profiles
+ from harness.skills import SkillError, default_skill_registry, load_skill_registry
+ from harness.storage import DatabaseError
+ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
+@@ -251,6 +253,37 @@ def _run_skills_list() -> int:
+     return 0
+ 
+ 
++def _run_skills_sync() -> int:
++    registry = default_skill_registry()
++    try:
++        result = sync_builtin_skills(registry)
++    except BuiltinSkillError as exc:
++        return _skills_failure(str(exc))
++    print(f"Skill registry: {registry}")
++    print(f"Built-in skills: {len(result.skill_ids)}")
++    print(f"Installed: {result.installed}")
++    print(f"Updated: {result.updated}")
++    print(f"Unchanged: {result.unchanged}")
++    if result.adopted:
++        print(f"Adopted exact built-ins: {result.adopted}")
++    return 0
++
++
++def _run_skills_validate() -> int:
++    registry = default_skill_registry()
++    try:
++        definitions = load_skill_registry(registry)
++        profiles = tuple(sorted(supported_skill_profiles()))
++        validate_skill_definitions_for_profiles(definitions, profiles)
++    except SkillError as exc:
++        return _skills_failure(str(exc))
++    print(f"Skill registry: {registry}")
++    print(f"Skills: {len(definitions)}")
++    print(f"Host profiles: {', '.join(profiles)}")
++    print("Skill validation: OK")
++    return 0
++
++
+ def _canonical_socket() -> Path:
+     defaults = default_runtime_paths()
+     ensure_canonical_daemon(defaults)
+@@ -460,6 +493,11 @@ def _run_install(*, host: str) -> int:
+         return _install_failure(str(exc))
+     print(f"Harness host: {result.host_profile}")
+     print(f"MCP registration: {result.registration_change.value}")
++    print(
++        "Built-in skills: "
++        f"{len(result.builtin_skills.skill_ids)} "
++        f"(installed {result.builtin_skills.installed}, updated {result.builtin_skills.updated})"
++    )
+     if len(result.hosts) > 1:
+         for item in result.hosts:
+             print(
+@@ -790,6 +828,16 @@ def harness_main() -> int:
+         help="list canonical Harness skills",
+         description="List canonical skill ids and portable descriptions in stable order.",
+     )
++    skills_subparsers.add_parser(
++        "sync",
++        help="install or update Harness built-in quality skills",
++        description="Reconcile the Harness-owned built-in quality pack without overwriting unknown or user-modified skill ids.",
++    )
++    skills_subparsers.add_parser(
++        "validate",
++        help="validate canonical skills against supported host surfaces",
++        description="Load the canonical registry strictly and validate portable frontmatter against every currently supported Harness host skill surface.",
++    )
+ 
+     dashboard_parser = subparsers.add_parser(
+         "dashboard",
+@@ -830,6 +878,10 @@ def harness_main() -> int:
+     if args.command == "skills":
+         if args.skills_command == "list":
+             return _run_skills_list()
++        if args.skills_command == "sync":
++            return _run_skills_sync()
++        if args.skills_command == "validate":
++            return _run_skills_validate()
+         skills_parser.print_help()
+         return 0
+     if args.command == "dashboard":
+diff --git a/src/harness/installation.py b/src/harness/installation.py
+index 956b71c..6b704de 100644
+--- a/src/harness/installation.py
++++ b/src/harness/installation.py
+@@ -9,6 +9,7 @@ from dataclasses import dataclass
+ from pathlib import Path
+ from time import monotonic, sleep
+ 
++from harness.builtin_skills import BuiltinSkillError, BuiltinSkillSyncResult, sync_builtin_skills
+ from harness.cursor_adapter import (
+     CursorAdapter,
+     CursorProjectRuntimeStatus,
+@@ -83,6 +84,7 @@ class InstallResult:
+     host_profile: str
+     registration_change: IntegrationChange
+     daemon_status: RuntimeDiagnosticsResult
++    builtin_skills: BuiltinSkillSyncResult
+     hosts: tuple[HostInstallResult, ...] = ()
+ 
+ 
+@@ -122,6 +124,10 @@ def install_harness(
+ 
+     paths = _runtime_paths(environment)
+     _require_safe_database_state(paths)
++    try:
++        builtin_skills = sync_builtin_skills(_skill_registry_path(environment))
++    except BuiltinSkillError as exc:
++        raise InstallationError("Harness built-in skills could not be reconciled") from exc
+     preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
+     for adapter in selected:
+         if isinstance(adapter, CursorAdapter):
+@@ -190,6 +196,7 @@ def install_harness(
+         host_profile=host,
+         registration_change=overall,
+         daemon_status=daemon_status,
++        builtin_skills=builtin_skills,
+         hosts=tuple(results),
+     )
+ 
+diff --git a/src/harness/ipc.py b/src/harness/ipc.py
+index f960740..494d070 100644
+--- a/src/harness/ipc.py
++++ b/src/harness/ipc.py
+@@ -45,6 +45,15 @@ from harness.tasks import (
+     TaskState,
+     TaskWaitReason,
+ )
++from harness.verification import (
++    MAX_VERIFICATION_EVIDENCE_BYTES,
++    MAX_VERIFICATION_NAME_BYTES,
++    MAX_VERIFICATIONS_PER_CHECKPOINT,
++    VerificationDraft,
++    VerificationStatus,
++    VerificationValidationError,
++    normalize_verification_drafts,
++)
+ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
+ 
+ PROTOCOL_VERSION = 1
+@@ -148,6 +157,14 @@ class WorkspaceTaskSummary:
+     revision: int
+ 
+ 
++@dataclass(frozen=True, slots=True)
++class WorkspaceVerificationSummary:
++    """Compact verification evidence exposed by project_status continuity."""
++
++    name: str
++    status: VerificationStatus
++
++
+ @dataclass(frozen=True, slots=True)
+ class WorkspaceTaskCheckpointSummary:
+     """Bounded latest-checkpoint identity/state exposed for status continuity."""
+@@ -157,6 +174,7 @@ class WorkspaceTaskCheckpointSummary:
+     state: TaskState
+     wait_reason: TaskWaitReason | None
+     next_step: str | None
++    verification: tuple[WorkspaceVerificationSummary, ...]
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -295,6 +313,7 @@ class TaskCheckpointRequestData:
+     summary: str
+     next_step: str | None
+     wait_reason: TaskWaitReason | None
++    verification: tuple[VerificationDraft, ...]
+     knowledge: tuple[KnowledgeDraft, ...]
+ 
+ 
+@@ -321,6 +340,7 @@ class TaskCheckpointResult:
+     wait_reason: TaskWaitReason | None
+     revision: int
+     checkpoint_id: str
++    verification_count: int
+     knowledge_ids: tuple[str, ...]
+ 
+ 
+@@ -717,6 +737,7 @@ def request_task_checkpoint(
+     summary: str,
+     next_step: str | None = None,
+     wait_reason: TaskWaitReason | None = None,
++    verification: Sequence[VerificationDraft] = (),
+     knowledge: Sequence[KnowledgeDraft] = (),
+     timeout: float = _TASK_REQUEST_TIMEOUT_SECONDS,
+ ) -> TaskCheckpointResult:
+@@ -729,6 +750,7 @@ def request_task_checkpoint(
+         summary=summary,
+         next_step=next_step,
+         wait_reason=wait_reason,
++        verification=verification,
+         knowledge=knowledge,
+     )
+     request_id = uuid4().hex
+@@ -1052,6 +1074,10 @@ def send_workspace_task_status_response(
+                                 else None
+                             ),
+                             "next_step": checkpoint.next_step,
++                            "verification": [
++                                {"name": item.name, "status": item.status.value}
++                                for item in checkpoint.verification
++                            ],
+                         }
+                     ),
+                     "pending_operator_feedback": status.pending_operator_feedback,
+@@ -1327,6 +1353,7 @@ def send_task_checkpoint_response(
+                     ),
+                     "revision": result.revision,
+                     "checkpoint_id": result.checkpoint_id,
++                    "verification_count": result.verification_count,
+                     "knowledge_ids": list(result.knowledge_ids),
+                 },
+             }
+@@ -1636,6 +1663,7 @@ def _task_checkpoint_params_to_wire(
+     summary: str,
+     next_step: str | None,
+     wait_reason: TaskWaitReason | None,
++    verification: Sequence[VerificationDraft],
+     knowledge: Sequence[KnowledgeDraft],
+ ) -> dict[str, object]:
+     _validate_task_id(task_id)
+@@ -1659,6 +1687,7 @@ def _task_checkpoint_params_to_wire(
+         "summary": summary,
+         "next_step": next_step,
+         "wait_reason": wait_reason.value if wait_reason is not None else None,
++        "verification": _verification_to_wire(verification),
+         "knowledge": _knowledge_to_wire(knowledge),
+     }
+ 
+@@ -1672,6 +1701,7 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
+         "summary",
+         "next_step",
+         "wait_reason",
++        "verification",
+         "knowledge",
+     }
+     if not isinstance(value, dict) or set(value) != expected_fields:
+@@ -1707,6 +1737,7 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
+             raise IpcProtocolError("task checkpoint wait_reason is unsupported") from exc
+     else:
+         raise IpcProtocolError("task checkpoint wait_reason has invalid type")
++    verification = _verification_from_wire(value["verification"])
+     knowledge = _knowledge_from_wire(value["knowledge"])
+     return TaskCheckpointRequestData(
+         hints,
+@@ -1716,10 +1747,49 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
+         cast(str, summary),
+         cast(str | None, next_step),
+         wait_reason,
++        verification,
+         knowledge,
+     )
+ 
+ 
++def _verification_to_wire(verification: Sequence[VerificationDraft]) -> list[dict[str, str]]:
++    try:
++        normalized = normalize_verification_drafts(verification)
++    except VerificationValidationError as exc:
++        raise IpcProtocolError("task checkpoint verification is invalid") from exc
++    return [
++        {"name": item.name, "status": item.status.value, "evidence": item.evidence}
++        for item in normalized
++    ]
++
++
++def _verification_from_wire(value: object) -> tuple[VerificationDraft, ...]:
++    if not isinstance(value, list) or len(value) > MAX_VERIFICATIONS_PER_CHECKPOINT:
++        raise IpcProtocolError("task checkpoint verification exceeds entry limit")
++    drafts = []
++    for item in value:
++        if not isinstance(item, dict) or set(item) != {"name", "status", "evidence"}:
