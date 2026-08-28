@@ -574,6 +574,9 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "title" in instructions[:512]
                 assert "next_step" in instructions[:512]
                 assert "durable SCM mutations" in instructions
+                assert "briefly" in instructions
+                assert "unchanged source" in instructions
+                assert "recap diffs" in instructions
                 assert "scm_write" not in instructions
                 assert "info/exclude" not in instructions
             else:

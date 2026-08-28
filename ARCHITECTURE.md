@@ -243,6 +243,8 @@ Keep server-wide guidance short and front-loaded. Codex documents use of MCP ser
 
 Front-load that operator-facing Task `title`, checkpoint `summary`/`next_step`, and Knowledge title/body are written in Russian for the dashboard. Tool names, field names, and enums stay English. Harness stores the supplied UTF-8 as-is and does not language-detect.
 
+Keep operator-facing chat short: lead with the result; cite code instead of pasting unchanged source or recapping diffs. Hosts decide how naturally they follow server instructions, same as the rest of the bootstrap.
+
 ## 9. Local IPC
 
 Use a platform-specific local IPC transport owned by the daemon subsystem:

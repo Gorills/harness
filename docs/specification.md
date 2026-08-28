@@ -1720,6 +1720,8 @@ existing project knowledge. Read and edit source using native host tools.
 Prefer Harness over repository-wide discovery, while targeted native
 search remains allowed when needed. Start or resume a Harness task before
 meaningful changes and checkpoint meaningful completed or waiting work.
+Reply to the operator briefly: lead with the result; cite code, do not
+paste unchanged source or recap diffs.
 
 ```
 
