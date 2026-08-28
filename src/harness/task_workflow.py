@@ -30,6 +30,7 @@ from harness.tasks import (
     _validate_expected_revision,
     get_task,
 )
+from harness.verification import VerificationDraft
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +123,7 @@ def task_checkpoint(
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
+    verification: Sequence[VerificationDraft] = (),
     knowledge: Sequence[KnowledgeDraft] = (),
     now: datetime | None = None,
 ) -> TaskCheckpointMutation:
@@ -135,6 +137,7 @@ def task_checkpoint(
         summary=summary,
         next_step=next_step,
         wait_reason=wait_reason,
+        verification=verification,
         knowledge=knowledge,
         now=now,
     )

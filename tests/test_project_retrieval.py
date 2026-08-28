@@ -100,6 +100,14 @@ def _task_history(
         """,
         (task_id, checkpoint_id),
     )
+    connection.execute(
+        """
+        INSERT INTO task_checkpoint_verification(
+            checkpoint_id, position, name, status, evidence, source
+        ) VALUES (?, 0, 'focused tests', 'passed', 'pytest target: passed', 'agent_reported')
+        """,
+        (checkpoint_id,),
+    )
     cursor = connection.execute(
         """
         INSERT INTO task_events(task_id, task_revision, event_type, checkpoint_id, operator_feedback, created_at)
@@ -271,6 +279,7 @@ def test_project_context_expands_only_selected_refs_and_fails_closed_cross_proje
         assert "Selected semantic body" in serialized
         assert "historical_clue': True" in serialized
         assert "Selected checkpoint semantic detail" in serialized
+        assert "pytest target: passed" in serialized
         assert "Selected operator feedback" in serialized
         assert "Unrelated invariant" not in serialized
         assert "Cross Project secret" not in serialized
@@ -338,6 +347,19 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
                 """,
                 (checkpoint_id, f"src/{index}/" + ("x" * 500)),
             )
+        connection.execute(
+            "DELETE FROM task_checkpoint_verification WHERE checkpoint_id = ?",
+            (checkpoint_id,),
+        )
+        for index in range(12):
+            connection.execute(
+                """
+                INSERT INTO task_checkpoint_verification(
+                    checkpoint_id, position, name, status, evidence, source
+                ) VALUES (?, ?, ?, 'passed', ?, 'agent_reported')
+                """,
+                (checkpoint_id, index, f"verification-{index}", "E" * 2048),
+            )
 
         knowledge_item = read_project_context(connection, workspace_id, ("knowledge:large-card",))[
             0
@@ -357,6 +379,10 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
         assert selected["next_step_truncated"] is True
         assert selected["changed_path_count"] == 12
         assert selected["changed_paths_truncated"] is True
+        assert selected["verification_count"] == 12
+        assert selected["verification_truncated"] is True
+        assert len(selected["verification"]) == 4
+        assert all(item["evidence_truncated"] is True for item in selected["verification"])
         assert len(json.dumps(task_item.data, ensure_ascii=False).encode("utf-8")) < 8192
     finally:
         connection.close()

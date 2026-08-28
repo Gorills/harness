@@ -1720,8 +1720,11 @@ existing project knowledge. Read and edit source using native host tools.
 Prefer Harness over repository-wide discovery, while targeted native
 search remains allowed when needed. Start or resume a Harness task before
 meaningful changes and checkpoint meaningful completed or waiting work.
-Reply to the operator briefly: lead with the result; cite code, do not
-paste unchanged source or recap diffs.
+Use checkpoints for durable continuity; operator chat is only the human-relevant delta.
+Reply briefly: lead with the result; do not restate the Task/checkpoint, paste unchanged
+source, or recap diffs/file lists. Report only material decisions, risks, blockers, and
+verification unless the operator asks for detail. This is a soft native-host instruction,
+not a hard output-token guarantee.
 
 ```
 
@@ -1777,6 +1780,12 @@ godot/
     harness.yaml
 
 ```
+
+---
+
+# 73.1 Built-in quality pack
+
+Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует существующие `task_hints`, без отдельного workflow DSL.
 
 ---
 
@@ -2301,6 +2310,8 @@ harness status [path]
 harness dashboard
 
 harness skills list
+harness skills sync
+harness skills validate
 
 ```
 

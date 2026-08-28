@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic, sleep
 
+from harness.builtin_skills import BuiltinSkillError, BuiltinSkillSyncResult, sync_builtin_skills
 from harness.cursor_adapter import (
     CursorAdapter,
     CursorProjectRuntimeStatus,
@@ -83,6 +84,7 @@ class InstallResult:
     host_profile: str
     registration_change: IntegrationChange
     daemon_status: RuntimeDiagnosticsResult
+    builtin_skills: BuiltinSkillSyncResult
     hosts: tuple[HostInstallResult, ...] = ()
 
 
@@ -122,6 +124,10 @@ def install_harness(
 
     paths = _runtime_paths(environment)
     _require_safe_database_state(paths)
+    try:
+        builtin_skills = sync_builtin_skills(_skill_registry_path(environment))
+    except BuiltinSkillError as exc:
+        raise InstallationError("Harness built-in skills could not be reconciled") from exc
     preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
     for adapter in selected:
         if isinstance(adapter, CursorAdapter):
@@ -190,6 +196,7 @@ def install_harness(
         host_profile=host,
         registration_change=overall,
         daemon_status=daemon_status,
+        builtin_skills=builtin_skills,
         hosts=tuple(results),
     )
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _MIGRATIONS_TABLE = "schema_migrations"
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
 _WAL_LOCK_RETRY_ATTEMPTS = 5
@@ -991,6 +991,22 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                     AND NEW.event_type = 'operator_feedback';
             END;
             """,
+        )
+        return
+    if target_version == 12:
+        connection.execute(
+            """
+            CREATE TABLE task_checkpoint_verification (
+                checkpoint_id TEXT NOT NULL REFERENCES task_checkpoints(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL CHECK (position >= 0 AND position < 12),
+                name TEXT NOT NULL CHECK (name <> '' AND length(CAST(name AS BLOB)) <= 256),
+                status TEXT NOT NULL CHECK (status IN ('passed', 'failed', 'not_run')),
+                evidence TEXT NOT NULL CHECK (evidence <> '' AND length(CAST(evidence AS BLOB)) <= 2048),
+                source TEXT NOT NULL CHECK (source IN ('agent_reported', 'observed')),
+                PRIMARY KEY (checkpoint_id, position),
+                UNIQUE (checkpoint_id, name)
+            )
+            """
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

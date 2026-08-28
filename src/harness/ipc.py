@@ -45,6 +45,15 @@ from harness.tasks import (
     TaskState,
     TaskWaitReason,
 )
+from harness.verification import (
+    MAX_VERIFICATION_EVIDENCE_BYTES,
+    MAX_VERIFICATION_NAME_BYTES,
+    MAX_VERIFICATIONS_PER_CHECKPOINT,
+    VerificationDraft,
+    VerificationStatus,
+    VerificationValidationError,
+    normalize_verification_drafts,
+)
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 PROTOCOL_VERSION = 1
@@ -149,6 +158,14 @@ class WorkspaceTaskSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkspaceVerificationSummary:
+    """Compact verification evidence exposed by project_status continuity."""
+
+    name: str
+    status: VerificationStatus
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceTaskCheckpointSummary:
     """Bounded latest-checkpoint identity/state exposed for status continuity."""
 
@@ -157,6 +174,7 @@ class WorkspaceTaskCheckpointSummary:
     state: TaskState
     wait_reason: TaskWaitReason | None
     next_step: str | None
+    verification: tuple[WorkspaceVerificationSummary, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +313,7 @@ class TaskCheckpointRequestData:
     summary: str
     next_step: str | None
     wait_reason: TaskWaitReason | None
+    verification: tuple[VerificationDraft, ...]
     knowledge: tuple[KnowledgeDraft, ...]
 
 
@@ -321,6 +340,7 @@ class TaskCheckpointResult:
     wait_reason: TaskWaitReason | None
     revision: int
     checkpoint_id: str
+    verification_count: int
     knowledge_ids: tuple[str, ...]
 
 
@@ -717,6 +737,7 @@ def request_task_checkpoint(
     summary: str,
     next_step: str | None = None,
     wait_reason: TaskWaitReason | None = None,
+    verification: Sequence[VerificationDraft] = (),
     knowledge: Sequence[KnowledgeDraft] = (),
     timeout: float = _TASK_REQUEST_TIMEOUT_SECONDS,
 ) -> TaskCheckpointResult:
@@ -729,6 +750,7 @@ def request_task_checkpoint(
         summary=summary,
         next_step=next_step,
         wait_reason=wait_reason,
+        verification=verification,
         knowledge=knowledge,
     )
     request_id = uuid4().hex
@@ -1052,6 +1074,10 @@ def send_workspace_task_status_response(
                                 else None
                             ),
                             "next_step": checkpoint.next_step,
+                            "verification": [
+                                {"name": item.name, "status": item.status.value}
+                                for item in checkpoint.verification
+                            ],
                         }
                     ),
                     "pending_operator_feedback": status.pending_operator_feedback,
@@ -1327,6 +1353,7 @@ def send_task_checkpoint_response(
                     ),
                     "revision": result.revision,
                     "checkpoint_id": result.checkpoint_id,
+                    "verification_count": result.verification_count,
                     "knowledge_ids": list(result.knowledge_ids),
                 },
             }
@@ -1636,6 +1663,7 @@ def _task_checkpoint_params_to_wire(
     summary: str,
     next_step: str | None,
     wait_reason: TaskWaitReason | None,
+    verification: Sequence[VerificationDraft],
     knowledge: Sequence[KnowledgeDraft],
 ) -> dict[str, object]:
     _validate_task_id(task_id)
@@ -1659,6 +1687,7 @@ def _task_checkpoint_params_to_wire(
         "summary": summary,
         "next_step": next_step,
         "wait_reason": wait_reason.value if wait_reason is not None else None,
+        "verification": _verification_to_wire(verification),
         "knowledge": _knowledge_to_wire(knowledge),
     }
 
@@ -1672,6 +1701,7 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
         "summary",
         "next_step",
         "wait_reason",
+        "verification",
         "knowledge",
     }
     if not isinstance(value, dict) or set(value) != expected_fields:
@@ -1707,6 +1737,7 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
             raise IpcProtocolError("task checkpoint wait_reason is unsupported") from exc
     else:
         raise IpcProtocolError("task checkpoint wait_reason has invalid type")
+    verification = _verification_from_wire(value["verification"])
     knowledge = _knowledge_from_wire(value["knowledge"])
     return TaskCheckpointRequestData(
         hints,
@@ -1716,8 +1747,47 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
         cast(str, summary),
         cast(str | None, next_step),
         wait_reason,
+        verification,
         knowledge,
     )
+
+
+def _verification_to_wire(verification: Sequence[VerificationDraft]) -> list[dict[str, str]]:
+    try:
+        normalized = normalize_verification_drafts(verification)
+    except VerificationValidationError as exc:
+        raise IpcProtocolError("task checkpoint verification is invalid") from exc
+    return [
+        {"name": item.name, "status": item.status.value, "evidence": item.evidence}
+        for item in normalized
+    ]
+
+
+def _verification_from_wire(value: object) -> tuple[VerificationDraft, ...]:
+    if not isinstance(value, list) or len(value) > MAX_VERIFICATIONS_PER_CHECKPOINT:
+        raise IpcProtocolError("task checkpoint verification exceeds entry limit")
+    drafts = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"name", "status", "evidence"}:
+            raise IpcProtocolError("task checkpoint verification item has invalid fields")
+        name = item["name"]
+        status = item["status"]
+        evidence = item["evidence"]
+        _validate_task_text(name, "verification name", MAX_VERIFICATION_NAME_BYTES, required=True)
+        _validate_task_text(
+            evidence, "verification evidence", MAX_VERIFICATION_EVIDENCE_BYTES, required=True
+        )
+        if not isinstance(status, str):
+            raise IpcProtocolError("verification status must be text")
+        try:
+            parsed = VerificationStatus(status)
+        except ValueError as exc:
+            raise IpcProtocolError("verification status is unsupported") from exc
+        drafts.append(VerificationDraft(cast(str, name), parsed, cast(str, evidence)))
+    try:
+        return normalize_verification_drafts(drafts)
+    except VerificationValidationError as exc:
+        raise IpcProtocolError("task checkpoint verification is invalid") from exc
 
 
 def _knowledge_to_wire(knowledge: Sequence[KnowledgeDraft]) -> list[dict[str, object]]:
@@ -2258,6 +2328,7 @@ def _workspace_task_status_from_response(
             "state",
             "wait_reason",
             "next_step",
+            "verification",
         }:
             raise IpcProtocolError(
                 "daemon workspace task status checkpoint does not match the IPC schema"
@@ -2281,12 +2352,36 @@ def _workspace_task_status_from_response(
             next_step = _bounded_response_string(
                 next_step, "next_step", MAX_CHECKPOINT_NEXT_STEP_BYTES
             )
+        raw_verification = raw_checkpoint["verification"]
+        if (
+            not isinstance(raw_verification, list)
+            or len(raw_verification) > MAX_VERIFICATIONS_PER_CHECKPOINT
+        ):
+            raise IpcProtocolError("daemon workspace task status verification has invalid shape")
+        verification = []
+        for item in raw_verification:
+            if not isinstance(item, dict) or set(item) != {"name", "status"}:
+                raise IpcProtocolError(
+                    "daemon workspace task status verification item has invalid fields"
+                )
+            name = _bounded_response_string(
+                item["name"], "verification name", MAX_VERIFICATION_NAME_BYTES
+            )
+            raw_status = item["status"]
+            if not isinstance(raw_status, str):
+                raise IpcProtocolError("daemon verification status has invalid type")
+            try:
+                status = VerificationStatus(raw_status)
+            except ValueError as exc:
+                raise IpcProtocolError("daemon verification status is unsupported") from exc
+            verification.append(WorkspaceVerificationSummary(name, status))
         checkpoint = WorkspaceTaskCheckpointSummary(
             checkpoint_id,
             task_revision,
             state,
             wait_reason,
             cast(str | None, next_step),
+            tuple(verification),
         )
     pending_operator_feedback = result["pending_operator_feedback"]
     if pending_operator_feedback is not None:
@@ -2768,15 +2863,22 @@ def _task_checkpoint_from_response(
         "wait_reason",
         "revision",
         "checkpoint_id",
+        "verification_count",
         "knowledge_ids",
     }
     if set(result) != expected_fields:
         raise IpcProtocolError("daemon task_checkpoint result does not match the IPC schema")
     schema_version = result["schema_version"]
     revision = result["revision"]
-    if any(
-        isinstance(value, bool) or not isinstance(value, int) or value <= 0
-        for value in (schema_version, revision)
+    verification_count = result["verification_count"]
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (schema_version, revision)
+        )
+        or isinstance(verification_count, bool)
+        or not isinstance(verification_count, int)
+        or not 0 <= verification_count <= MAX_VERIFICATIONS_PER_CHECKPOINT
     ):
         raise IpcProtocolError("daemon task_checkpoint result has invalid integer fields")
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
@@ -2800,6 +2902,7 @@ def _task_checkpoint_from_response(
         wait_reason,
         revision,
         checkpoint_id,
+        verification_count,
         knowledge_ids,
     )
 

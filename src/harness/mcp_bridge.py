@@ -50,19 +50,22 @@ from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKin
 from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchScope
 from harness.runtime_paths import default_runtime_paths
 from harness.tasks import TaskState, TaskWaitReason
+from harness.verification import VerificationDraft, VerificationStatus
 from harness.workspace_resolution import WorkspaceHint
 
 _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
     "Write every operator-facing Task title, summary, next_step, and Knowledge title/body in "
     f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
-    "project_search across code, docs, Knowledge, and Task history; expand only selected refs "
-    "with project_context, then read/edit repository files with native host tools. Start or "
-    "resume a Harness task before meaningful changes and checkpoint meaningful progress. Address "
-    "pending operator feedback before continuing reviewed work. Targeted native search remains "
-    "allowed. Reply to the operator briefly: lead with the result; cite code, do not paste "
-    "unchanged source or recap diffs. When visibility_mode is hidden, do not perform durable "
-    "SCM mutations."
+    "project_search across code, docs, Knowledge, and Task history; expand selected refs with "
+    "project_context, then use native host tools. Start/resume a Harness task before meaningful "
+    "changes; checkpoint meaningful progress and address operator feedback. Before risky "
+    "cross-boundary work, inspect governing contracts/specs. Before publication, independently "
+    "review the complete change and run repository gates. Targeted native search remains allowed. "
+    "Reply briefly: result first; use checkpoints for continuity; no task restatement, unchanged "
+    "source, or file-by-file recap diffs. Mention only material decisions, risks, blockers, and "
+    "verification unless detail is requested. In hidden visibility, do not perform durable SCM "
+    "mutations."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -112,6 +115,7 @@ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
             "summary",
             "next_step",
             "wait_reason",
+            "verification",
             "knowledge",
         }
     ),
@@ -120,6 +124,14 @@ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
 
 class _StrictInputModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class VerificationInput(_StrictInputModel):
+    """Strict model-facing Task verification input."""
+
+    name: str
+    status: Literal["passed", "failed", "not_run"]
+    evidence: str
 
 
 class KnowledgeAnchorInput(_StrictInputModel):
@@ -358,6 +370,10 @@ def build_mcp_server() -> MCPServer:
                             if last_checkpoint.wait_reason is not None
                             else None
                         ),
+                        "verification": [
+                            {"name": item.name, "status": item.status.value}
+                            for item in last_checkpoint.verification
+                        ],
                     }
                 ),
                 "next_step": last_checkpoint.next_step if last_checkpoint is not None else None,
@@ -492,6 +508,7 @@ def build_mcp_server() -> MCPServer:
         summary: str,
         next_step: str | None = None,
         wait_reason: Literal["operator_review", "operator_input", "external"] | None = None,
+        verification: list[VerificationInput] | None = None,
         knowledge: list[KnowledgeInput] | None = None,
     ) -> dict[str, Any]:
         result = request_task_checkpoint(
@@ -503,6 +520,7 @@ def build_mcp_server() -> MCPServer:
             summary=summary,
             next_step=next_step,
             wait_reason=TaskWaitReason(wait_reason) if wait_reason is not None else None,
+            verification=_verification_drafts(verification or []),
             knowledge=_knowledge_drafts(knowledge or []),
         )
         return _bounded(
@@ -527,6 +545,13 @@ def _socket_path() -> Path:
 
 def _workspace_hints() -> tuple[WorkspaceHint, ...]:
     return workspace_hints_from_environment()
+
+
+def _verification_drafts(items: list[VerificationInput]) -> tuple[VerificationDraft, ...]:
+    return tuple(
+        VerificationDraft(item.name, VerificationStatus(item.status), item.evidence)
+        for item in items
+    )
 
 
 def _knowledge_drafts(items: list[KnowledgeInput]) -> tuple[KnowledgeDraft, ...]:
@@ -572,6 +597,7 @@ def _task_checkpoint_payload(result: TaskCheckpointResult) -> dict[str, Any]:
         "wait_reason": result.wait_reason.value if result.wait_reason is not None else None,
         "revision": result.revision,
         "checkpoint_id": result.checkpoint_id,
+        "verification_count": result.verification_count,
         "knowledge_ids": list(result.knowledge_ids),
     }
 

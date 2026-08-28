@@ -636,3 +636,20 @@ def test_harness_skills_list_reads_canonical_registry_without_mutation(
         "python-helper\tUse Python conventions.",
     ]
     assert (skill / "SKILL.md").read_bytes() == before
+
+
+def test_harness_skills_sync_and_validate_builtin_quality_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry = tmp_path / "skills"
+    monkeypatch.setattr(entrypoints, "default_skill_registry", lambda: registry)
+    monkeypatch.setattr(sys, "argv", ["harness", "skills", "sync"])
+    assert harness_main() == 0
+    out = capsys.readouterr().out
+    assert "Built-in skills: 12" in out
+    assert "Installed: 12" in out
+    monkeypatch.setattr(sys, "argv", ["harness", "skills", "validate"])
+    assert harness_main() == 0
+    out = capsys.readouterr().out
+    assert "Host profiles: claude-code, cursor" in out
+    assert "Skill validation: OK" in out

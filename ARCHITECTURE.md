@@ -196,6 +196,7 @@ But the implementation is explicitly workspace-domain based and write-safe:
 - Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
 - Read-only calls may derive relevance/display defaults from Workspace + current Task and expose the current Task revision where a subsequent mutation may depend on it.
 - `task_checkpoint` is a mutating operation and therefore MUST include both the intended Harness `task_id` and `expected_revision`.
+- Agent-reported checkpoint verification is bounded semantic evidence (`name`, `passed|failed|not_run`, `evidence`) persisted atomically with the checkpoint; mechanical Git evidence remains Harness-derived.
 - The daemon verifies Task/Workspace ownership and transition validity, then applies an existing-Task mutation only when the stored revision equals `expected_revision`; success increments and returns the new revision.
 - Revision mismatch or a required-but-missing `expected_revision` is a bounded conflict/error with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
 - A stale call for Task A must never be retargeted to whichever Task is current when the request executes, and a stale writer for Task A must never overwrite a newer checkpoint for Task A.
@@ -243,7 +244,7 @@ Keep server-wide guidance short and front-loaded. Codex documents use of MCP ser
 
 Front-load that operator-facing Task `title`, checkpoint `summary`/`next_step`, and Knowledge title/body are written in Russian for the dashboard. Tool names, field names, and enums stay English. Harness stores the supplied UTF-8 as-is and does not language-detect.
 
-Keep operator-facing chat short: lead with the result; cite code instead of pasting unchanged source or recapping diffs. Hosts decide how naturally they follow server instructions, same as the rest of the bootstrap.
+Keep operator-facing chat short. Checkpoints own durable continuity; chat carries only the human-relevant delta. Lead with the result, do not restate the Task/checkpoint or recap diffs/file lists, and report only material decisions, risks, blockers, and verification unless detail is requested. This is a soft native-host instruction, not a claimed hard output-token limit or model proxy.
 
 ## 9. Local IPC
 
@@ -336,7 +337,7 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 
 ## 14. Skills architecture
 
-Canonical Harness skill registry lives outside repositories. The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration.
+Canonical Harness skill registry lives outside repositories. The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Same-id unknown or user-modified canonical content is never overwritten.
 
 Projection is host-native and owned by adapters.
 
