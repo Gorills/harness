@@ -1,0 +1,44 @@
+name: Apply verified daemon concurrency patch
+
+on:
+  push:
+    branches:
+      - fix/daemon-concurrent-ipc-20260831
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out staging branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Apply exact verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/.daemon-concurrency/part-* > "$RUNNER_TEMP/daemon-concurrency.patch"
+          echo "0be0ba1dcb043f87b23210bbe1757846355d8b88d1c4be26eb63097111ed0d94  $RUNNER_TEMP/daemon-concurrency.patch" | sha256sum -c -
+          git apply --check "$RUNNER_TEMP/daemon-concurrency.patch"
+          git apply "$RUNNER_TEMP/daemon-concurrency.patch"
+          test "$(git hash-object src/harness/daemon.py)" = "8c94802c0dfd376a7d00d8daca7c350197b51335"
+          test "$(git hash-object tests/test_daemon_ipc.py)" = "0ef5d022e6b777e21abc09977899018615508b57"
+          test "$(git hash-object ARCHITECTURE.md)" = "510e99cf65a8ec0bf1b66e55796c35e2db9bbe15"
+          test "$(git hash-object docs/decisions/0035-daemon-bounded-concurrent-ipc.md)" = "d875cc69e1c4d09cda4efb19bb8d6cf3b55b6598"
+          rm -rf .github/.daemon-concurrency .github/workflows/apply-daemon-concurrency.yml
+          git diff --check
+          git status --short
+
+      - name: Commit exact change set
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Make daemon IPC concurrently bounded"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
