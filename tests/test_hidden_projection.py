@@ -11,8 +11,8 @@ from threading import Event
 
 import pytest
 
-from harness.daemon import serve_daemon
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
+from harness.daemon import serve_daemon
 from harness.hidden_projection import (
     CLAUDE_HIDDEN_RULE_RELATIVE,
     CURSOR_HIDDEN_MARKER_RELATIVE,

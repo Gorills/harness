@@ -376,10 +376,9 @@ def codex_owned_hidden_instructions_active(workspace_root: Path) -> bool:
     if raw is None:
         return False
     value = _parse_toml(raw, path)
-    return (
-        _config_is_owned_shape(value, root)
-        and value.get("developer_instructions") == codex_developer_instructions(hidden=True)
-    )
+    return _config_is_owned_shape(value, root) and value.get(
+        "developer_instructions"
+    ) == codex_developer_instructions(hidden=True)
 
 
 def codex_developer_instructions(*, hidden: bool = False) -> str:
@@ -495,15 +494,11 @@ def _config_is_desired(
 def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     if set(value) not in ({"mcp_servers"}, {"developer_instructions", "mcp_servers"}):
         return False
-    if (
-        "developer_instructions" in value
-        and value["developer_instructions"]
-        not in {
-            CODEX_BOOTSTRAP_INSTRUCTION_BODY,
-            HIDDEN_INSTRUCTION_BODY,
-            codex_developer_instructions(hidden=True),
-        }
-    ):
+    if "developer_instructions" in value and value["developer_instructions"] not in {
+        CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        HIDDEN_INSTRUCTION_BODY,
+        codex_developer_instructions(hidden=True),
+    }:
         return False
     servers = value.get("mcp_servers")
     if not isinstance(servers, dict) or set(servers) != {_SERVER_NAME}:
