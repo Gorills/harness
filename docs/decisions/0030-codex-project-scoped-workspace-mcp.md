@@ -10,7 +10,8 @@
 Codex officially supports local stdio MCP servers and loads them from the user
 `~/.codex/config.toml` or a trusted project's `.codex/config.toml`. The ChatGPT desktop app,
 Codex CLI, and Codex IDE extension share this configuration. The MCP configuration schema
-supports an explicit server `cwd` plus static `env` values.
+supports an explicit server `cwd`, static `env` values, and `env_vars` names that Codex forwards
+from its own local environment into the stdio server process.
 
 The current official documentation does not establish a universal per-call active-Workspace
 signal for a user-scoped stdio process. Harness cannot infer Workspace identity from MCP
@@ -34,6 +35,10 @@ slice.
    Workspace uses `.codex/config.toml` with `[mcp_servers.harness]`, the installed Python
    executable, `-m harness.mcp_process`, the canonical Workspace root as `cwd`, and exact
    `HARNESS_HOST_PROFILE=codex` plus `HARNESS_WORKSPACE_ROOT=<canonical-root>` environment values.
+   It also forwards `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, and
+   `HARNESS_SKILL_REGISTRY` through Codex `env_vars`. These values select the same canonical daemon,
+   database, Git executable, and optional skill registry that the local Codex host can access;
+   without them a reduced stdio environment can silently select fallback Harness paths.
 2. A Codex-profile MCP bridge requires that explicit `HARNESS_WORKSPACE_ROOT` and treats it as an
    exact `ROOT` hint. It must list no tools and refuse calls when the root is absent or invalid.
    Process cwd and self-reported client metadata are not Codex Workspace identity.
@@ -106,7 +111,8 @@ slice.
 
 Automated tests must prove:
 
-- exact Normal/Hidden generated TOML fields, modes, ownership marker, and root-anchored Git exclusions;
+- exact Normal/Hidden generated TOML fields, forwarded environment names, modes, ownership marker,
+  and root-anchored Git exclusions;
 - idempotent reconcile and marker-owned installed-Python update;
 - exact tracked/manual adoption without mutation or automatic removal;
 - refusal of user-owned TOML, foreign same-name entries, tracked mutation, malformed/symlink state,
@@ -129,6 +135,9 @@ Automated tests must prove:
   and five calls through the official MCP SDK before optionally deriving model-selected five-tool
   proof from Codex JSONL MCP events; verifies cleanup; and detects any byte change to user Codex
   config.
+- local-only real-host preflight launches the MCP wire process with only its static `env` values
+  plus the local values named by generated `env_vars`, so it detects a missing runtime/state
+  forwarding contract instead of inheriting the acceptance runner's complete environment.
 
 Real-host acceptance must additionally prove:
 
@@ -150,3 +159,25 @@ Real-host acceptance must additionally prove:
 - https://learn.chatgpt.com/docs/config-file/config-reference
 - https://learn.chatgpt.com/docs/config-file/config-advanced#project-instructions-discovery
 - https://developers.openai.com/codex/build-skills
+
+## 2026-08-30 amendment: agent-operated machine acceptance is state-isolated
+
+An absolute ban on agent-operated global package installation prevented the checkout from proving
+the actual user-global executable and local POSIX IPC boundary. It also encouraged ad hoc tests in
+real Projects, where synthetic registry rows and host projections could mix with user state.
+
+Harness therefore separates package replacement, synthetic acceptance, and live activation:
+
+1. Explicitly authorized machine acceptance may replace the user-global uv-tool package.
+2. Every synthetic install, scan, daemon, MCP call, Codex trust record, skill projection, Task, and
+   Project uses one temporary XDG/Codex/Workspace root and is removed after success or failure.
+3. The runner verifies the user Codex config is byte-unchanged. Synthetic Projects never enter the
+   canonical Harness database, so cleanup does not depend on deleting rows from live state.
+4. Live daemon/host activation is a distinct explicitly authorized command naming one profile. It
+   may reconcile real registered Workspace configurations but must not create test Workspaces.
+5. Ordinary source-checkout commands and MCP continue to use `scripts/dev` and `harness-dev`.
+
+This amendment changes the development/acceptance authority boundary, not Codex Workspace
+identity: production MCP remains project-scoped with explicit `cwd` and
+`HARNESS_WORKSPACE_ROOT`, plus the bounded local environment forwarding required to reach the
+canonical user daemon and state.

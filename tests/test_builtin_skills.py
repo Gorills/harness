@@ -20,7 +20,13 @@ from harness.skill_runtime import (
     supported_skill_profiles,
     validate_skill_definitions_for_profiles,
 )
-from harness.skills import DetectedProjectStack, ResolvedSkill, load_skill_registry, resolve_skills
+from harness.skills import (
+    DetectedProjectStack,
+    ResolvedSkill,
+    SkillResolutionPolicy,
+    load_skill_registry,
+    resolve_skills,
+)
 
 
 def _ids(items: Sequence[ResolvedSkill]) -> tuple[str, ...]:
@@ -75,6 +81,7 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         "legacy-preservation",
         "project-architecture",
         "public-frontend",
+        "frontend-design",
         "secure-by-design",
         "mobile-application",
         "server-application",
@@ -105,7 +112,12 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         frozenset({"software-project", "web-frontend"}),
     )
     frontend_ids = set(_ids(resolve_skills(definitions, frontend)))
-    assert {"language-engineering", "public-frontend", "testing-strategy"} <= frontend_ids
+    assert {
+        "frontend-design",
+        "language-engineering",
+        "public-frontend",
+        "testing-strategy",
+    } <= frontend_ids
 
     static_frontend = DetectedProjectStack(
         frozenset({"css", "html"}),
@@ -113,7 +125,9 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         frozenset(),
         frozenset({"software-project", "web-frontend"}),
     )
-    assert "public-frontend" in _ids(resolve_skills(definitions, static_frontend))
+    assert {"frontend-design", "public-frontend"} <= set(
+        _ids(resolve_skills(definitions, static_frontend))
+    )
 
     mobile = DetectedProjectStack(
         frozenset({"typescript"}),
@@ -122,7 +136,12 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         frozenset({"mobile-app", "software-project"}),
     )
     mobile_ids = set(_ids(resolve_skills(definitions, mobile)))
-    assert {"language-engineering", "mobile-application", "secure-by-design"} <= mobile_ids
+    assert {
+        "frontend-design",
+        "language-engineering",
+        "mobile-application",
+        "secure-by-design",
+    } <= mobile_ids
     assert "public-frontend" not in mobile_ids
 
     stack_specific = DetectedProjectStack(
@@ -211,6 +230,7 @@ def test_builtin_pack_focuses_polyglot_workspace_on_current_task(tmp_path: Path)
         )
     )
     assert apk_task == {
+        "frontend-design",
         "language-engineering",
         "mobile-application",
         "secure-by-design",
@@ -235,6 +255,62 @@ def test_builtin_pack_focuses_polyglot_workspace_on_current_task(tmp_path: Path)
         "testing-strategy",
     } <= api_migration_task
     assert "mobile-application" not in api_migration_task
+
+
+def test_frontend_design_accompanies_every_builtin_frontend_signal(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+    by_id = {definition.skill_id: definition for definition in definitions}
+    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
+
+    for surface_skill_id in ("public-frontend", "mobile-application"):
+        surface = by_id[surface_skill_id]
+        for hint in surface.task_hints:
+            selected = set(_ids(resolve_skills(definitions, empty, task_hints=(hint,))))
+            assert surface_skill_id in selected, hint
+            assert "frontend-design" in selected, hint
+            minimal = _ids(
+                resolve_skills(
+                    definitions,
+                    empty,
+                    task_hints=(hint,),
+                    policy=SkillResolutionPolicy(max_visible_skills=1),
+                )
+            )
+            assert minimal == ("frontend-design",), hint
+
+    for facet in ("web-frontend", "mobile-app"):
+        stack = DetectedProjectStack(
+            frozenset(),
+            frozenset(),
+            frozenset(),
+            frozenset({facet}),
+        )
+        assert "frontend-design" in _ids(resolve_skills(definitions, stack)), facet
+        assert _ids(
+            resolve_skills(
+                definitions,
+                stack,
+                policy=SkillResolutionPolicy(max_visible_skills=1),
+            )
+        ) == ("frontend-design",), facet
+
+
+def test_frontend_design_routes_surface_guidance_and_visual_review(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definition = next(
+        item for item in load_skill_registry(registry) if item.skill_id == "frontend-design"
+    )
+
+    assert definition.portable_files == (
+        PurePosixPath("SKILL.md"),
+        PurePosixPath("references/marketing-sites.md"),
+        PurePosixPath("references/product-interfaces.md"),
+        PurePosixPath("references/visual-language.md"),
+        PurePosixPath("references/visual-review.md"),
+    )
 
 
 def test_builtin_descriptions_state_their_activation_boundary() -> None:

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import BinaryIO, cast
 
 import pytest
 
@@ -88,13 +89,11 @@ def test_canonical_autostart_starts_package_module_when_runtime_directory_is_mis
 
     def spawn(command: list[str], **kwargs: object) -> object:
         commands.append(command)
-        assert kwargs == {
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "close_fds": True,
-            "start_new_session": True,
-        }
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert hasattr(kwargs["stdout"], "write")
+        assert kwargs["stderr"] == subprocess.STDOUT
+        assert kwargs["close_fds"] is True
+        assert kwargs["start_new_session"] is True
         paths.socket.parent.mkdir(mode=0o700)
         paths.socket.parent.chmod(0o700)
         return object()
@@ -222,3 +221,35 @@ def test_canonical_autostart_reports_spawn_failure(
 
     with pytest.raises(DaemonAutostartError, match="could not be started"):
         ensure_canonical_daemon(paths)
+
+
+def test_canonical_autostart_reports_bounded_child_startup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    outputs: list[BinaryIO] = []
+
+    class FailedProcess:
+        @staticmethod
+        def poll() -> int:
+            return 17
+
+    def spawn(_command: list[str], **kwargs: object) -> FailedProcess:
+        output = cast(BinaryIO, kwargs["stdout"])
+        output.write(b"Harness daemon: FAIL (database schema 99 is unsupported)\n")
+        output.flush()
+        outputs.append(output)
+        return FailedProcess()
+
+    monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
+    monkeypatch.setattr(autostart, "_DAEMON_START_TIMEOUT_SECONDS", 0.0)
+
+    with pytest.raises(
+        DaemonAutostartError,
+        match=r"exited before becoming ready \(exit 17\).*database schema 99",
+    ):
+        ensure_canonical_daemon(paths)
+
+    assert len(outputs) == 1
+    assert outputs[0].closed is True

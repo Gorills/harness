@@ -618,9 +618,11 @@ def _plan_fields(stdout: str) -> dict[str, str]:
 def test_makefile_routes_global_install_through_the_helper() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     assert "INSTALL_GLOBAL := ./scripts/install-global" in text
+    assert "ACCEPT_CODEX := ./scripts/dev python scripts/accept_codex.py" in text
     assert "ifdef HOST" in text
     assert '$(INSTALL_GLOBAL) --host "$(HOST)"' in text
     assert "$(INSTALL_GLOBAL) --doctor-only" in text
+    assert "accept-global-codex" in text
     assert ".DEFAULT_GOAL := help" in text
     help_result = _run(["make", "-C", str(REPO_ROOT), "help"], cwd=REPO_ROOT)
     assert help_result.returncode == 0, help_result.stderr
@@ -638,6 +640,12 @@ def test_makefile_routes_global_install_through_the_helper() -> None:
     )
     assert dry.returncode == 0, dry.stderr
     assert './scripts/install-global --host "codex"' in dry.stdout
+    acceptance = _run(
+        ["make", "-C", str(REPO_ROOT), "-n", "accept-global-codex"],
+        cwd=REPO_ROOT,
+    )
+    assert acceptance.returncode == 0, acceptance.stderr
+    assert "--global-install --preflight-only" in acceptance.stdout
 
 
 def test_install_global_script_does_not_source_overlay_env() -> None:
@@ -700,6 +708,35 @@ def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: P
     log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
     assert "tool install" not in log
     assert "python install" not in log
+
+
+def test_install_global_package_only_dry_run_has_no_live_lifecycle(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--package-only"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    assert fields["mode"] == "package-only"
+    assert fields["hosts"] == ""
+    assert fields["lifecycle_commands"] == ""
+    assert "dry-run: no package or host MCP mutation" in result.stdout
+    log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
+    assert "tool install" not in log
+    assert "python install" not in log
+
+
+def test_install_global_package_only_rejects_live_options(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--package-only", "--host", "codex"],
+        cwd=tmp_path,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "cannot be combined" in result.stderr
 
 
 def test_install_global_dry_run_keeps_non_overlay_xdg(tmp_path: Path) -> None:

@@ -12,7 +12,7 @@ from threading import Event
 import pytest
 
 from harness.daemon import serve_daemon
-from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
 from harness.hidden_projection import (
     CLAUDE_HIDDEN_RULE_RELATIVE,
     CURSOR_HIDDEN_MARKER_RELATIVE,
@@ -296,7 +296,7 @@ def test_codex_hidden_uses_project_developer_instructions_without_overwriting_ag
         assert (root / "AGENTS.md").read_bytes() == agents_before
         config_path = root / ".codex" / "config.toml"
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        assert config["developer_instructions"] == HIDDEN_INSTRUCTION_BODY
+        assert config["developer_instructions"] == codex_developer_instructions(hidden=True)
         assert _git(root, "check-ignore", "-q", ".codex/config.toml").returncode == 0
 
         normal = set_project_visibility(
@@ -307,7 +307,7 @@ def test_codex_hidden_uses_project_developer_instructions_without_overwriting_ag
         )
         assert normal.project.visibility_mode is VisibilityMode.NORMAL
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-        assert "developer_instructions" not in config
+        assert config["developer_instructions"] == CODEX_BOOTSTRAP_INSTRUCTION_BODY
         assert (root / "AGENTS.md").read_bytes() == agents_before
     finally:
         connection.close()

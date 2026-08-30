@@ -27,7 +27,7 @@ The bounded behavior is:
 
 If the canonical runtime directory does not yet exist, that absence is treated as a first-run state: the client launches the daemon and waits for the daemon to create and secure the directory. An existing insecure/symlinked/untrusted runtime directory still fails closed and is never repaired or replaced by the client.
 
-The child redirects stdin/stdout/stderr to the null device, closes inherited file descriptors, and starts a new POSIX session so it can outlive the short client process. Daemon singleton and database locks from ADR-0008 remain the authority under concurrent autostart attempts: multiple clients may race to launch, but only one daemon may own the canonical endpoint/database.
+The child redirects stdin to the null device, closes unrelated inherited file descriptors, and starts a new POSIX session so it can outlive the short client process. Startup stdout/stderr share an anonymous temporary file. The client closes its handle as soon as readiness succeeds; when the child exits and the endpoint remains absent through the readiness deadline, the error includes only a bounded 2 KiB whitespace-normalized startup detail. No persistent log or project content is created. Daemon singleton and database locks from ADR-0008 remain the authority under concurrent autostart attempts: multiple clients may race to launch, but only one daemon may own the canonical endpoint/database.
 
 ### Explicit socket overrides
 
@@ -72,5 +72,6 @@ Automated tests must prove:
 - unclassified transport failures fail closed without spawning;
 - an existing insecure runtime directory fails closed without spawning;
 - process creation failures are reported as bounded autostart errors;
+- an exited child reports its bounded startup diagnostic instead of only the generic readiness timeout, while a still-running child retains the generic timeout;
 - canonical `status` and `scan` paths invoke the autostart boundary;
 - explicit `--socket` status/scan paths never invoke canonical autostart.

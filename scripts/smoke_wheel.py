@@ -117,11 +117,12 @@ def _require_codex_config(
         "HARNESS_WORKSPACE_ROOT": expected_root,
     }:
         raise RuntimeError(f"installed Codex config has wrong Workspace identity: {path}")
-    has_hidden = "developer_instructions" in config
+    instructions = config.get("developer_instructions")
+    if not isinstance(instructions, str) or "project_status" not in instructions:
+        raise RuntimeError(f"installed Codex config has no bootstrap instructions: {path}")
+    has_hidden = "Durable SCM publication is human-owned" in instructions
     if has_hidden != hidden:
         raise RuntimeError(f"installed Codex config has wrong Hidden policy: {path}")
-    if hidden and "Durable SCM publication is human-owned" not in config["developer_instructions"]:
-        raise RuntimeError(f"installed Codex config has unexpected Hidden instructions: {path}")
 
 
 async def _cross_host_mcp_async(

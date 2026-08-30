@@ -97,7 +97,7 @@ the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex
 writes user trust/config. A local-only preflight passed on 2026-08-28 with `codex-cli 0.147.0`,
 including project MCP discovery, exact configured stdio launch through the official MCP SDK, all
 five schemas and successful tool calls in two simultaneous repositories, distinct exact Workspace
-identities, one relevant/no irrelevant or duplicate generated skill, `doctor` with zero failures,
+identities, the exact relevant/no irrelevant or duplicate generated skill set, `doctor` with zero failures,
 untrusted-project refusal without created trust/config, owned cleanup, and byte-unchanged user
 config. Codex model arbitration, IDE
 extension, and desktop acceptance remain open.
@@ -154,7 +154,8 @@ For every supported host/profile and supported OS family where behavior differs,
 applicable Normal-mode items below. Verify Hidden items only for profiles that claim Hidden
 support; Codex claims only ADR-0028 hygiene-effective support until real-host enforcement is proven.
 
-- [ ] Harness global/user or project-scoped MCP registration is discovered according to the adapter contract.
+- [ ] Harness global/user or project-scoped MCP registration is discovered according to the adapter
+  contract, including bounded host-environment forwarding required by local stdio servers.
 - [ ] `harness mcp` launches successfully.
 - [ ] The five tool names and schemas are visible.
 - [ ] Current Workspace is resolved to the correct worktree/repository.

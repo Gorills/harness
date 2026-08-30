@@ -8,13 +8,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from accept_codex import (
+    EXPECTED_GENERATED_SKILLS,
     CodexAcceptanceError,
     _acceptance_prompt,
+    _global_install_environment,
+    _installed_python_from_console_script,
     _isolated_environment,
     _prepare_temporary_codex_home,
     _validate_wire_tools,
     completed_harness_tool_calls,
     main,
+    project_actions_before_harness_status,
 )
 
 
@@ -27,6 +31,39 @@ def test_codex_acceptance_scopes_api_key_away_from_local_commands(
     environment = _isolated_environment(tmp_path, tmp_path / "codex")
 
     assert "CODEX_API_KEY" not in environment
+
+
+def test_codex_global_install_scopes_api_key_and_pythonpath_away(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CODEX_API_KEY", "acceptance-secret")
+    monkeypatch.setenv("PYTHONPATH", "/untrusted/source")
+
+    environment = _global_install_environment()
+
+    assert "CODEX_API_KEY" not in environment
+    assert "PYTHONPATH" not in environment
+
+
+def test_codex_global_runtime_resolves_console_script_interpreter(tmp_path: Path) -> None:
+    physical_python = tmp_path / "python3.13"
+    physical_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    physical_python.chmod(0o755)
+    python = tmp_path / "python"
+    python.symlink_to(physical_python.name)
+    harness = tmp_path / "harness"
+    harness.write_text(f"#!{python}\n", encoding="utf-8")
+    harness.chmod(0o755)
+
+    assert _installed_python_from_console_script(harness) == python
+
+
+def test_codex_global_runtime_rejects_console_script_without_shebang(tmp_path: Path) -> None:
+    harness = tmp_path / "harness"
+    harness.write_text("not a console script\n", encoding="utf-8")
+
+    with pytest.raises(CodexAcceptanceError, match="no shebang"):
+        _installed_python_from_console_script(harness)
 
 
 def test_codex_acceptance_extracts_only_successful_completed_harness_calls() -> None:
@@ -71,6 +108,24 @@ def test_codex_acceptance_rejects_failed_harness_call() -> None:
         completed_harness_tool_calls(events)
 
 
+def test_codex_acceptance_detects_project_actions_before_harness_status() -> None:
+    events = [
+        {"type": "item.completed", "item": {"type": "command_execution"}},
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_status",
+                "status": "completed",
+            },
+        },
+        {"type": "item.completed", "item": {"type": "command_execution"}},
+    ]
+
+    assert project_actions_before_harness_status(events) == ("command_execution",)
+
+
 def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     properties = {
         "project_status": (),
@@ -104,11 +159,22 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     assert _validate_wire_tools(tools) == tuple(properties)
 
 
-def test_codex_acceptance_prompt_uses_searchable_fixture_and_complete_verification() -> None:
+def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints() -> None:
     prompt = _acceptance_prompt()
 
-    assert "project_search for pyproject with scope code" in prompt
-    assert "with evidence 'Codex CLI completed all five Harness MCP calls'" in prompt
+    assert "normal repository task" in prompt
+    assert "pyproject.toml" in prompt
+    assert "README.md" in prompt
+    assert "Harness" not in prompt
+    for tool_name in (
+        "project_status",
+        "project_search",
+        "project_context",
+        "task_start",
+        "task_checkpoint",
+    ):
+        assert tool_name not in prompt
+    assert EXPECTED_GENERATED_SKILLS == ("secure-by-design", "testing-strategy")
 
 
 def test_codex_acceptance_uses_private_temporary_trust(tmp_path: Path) -> None:

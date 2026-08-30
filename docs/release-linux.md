@@ -37,9 +37,10 @@ Cursor's current MCP documentation requires restarting Cursor after changing `mc
 `harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
 
 When Codex intent is active, scan creates/updates only the ignored marker-owned project
-`.codex/config.toml`, with an absolute Workspace `cwd` and `HARNESS_WORKSPACE_ROOT`. Harness never
-writes project trust or `~/.codex/config.toml`. Restart Codex and verify from the trusted Workspace
-with `codex mcp get harness --json`. For Hidden Projects the same marker-owned config carries exact
+`.codex/config.toml`, with an absolute Workspace `cwd`, `HARNESS_WORKSPACE_ROOT`, and bounded
+`env_vars` forwarding for the local Harness runtime/state. Harness never writes project trust or
+`~/.codex/config.toml`. Restart Codex and verify from the trusted Workspace with
+`codex mcp get harness --json`. For Hidden Projects the same marker-owned config carries exact
 `developer_instructions`; install and transitions preserve user `AGENTS.md`. Doctor reports that
 this is hygiene-effective policy and does not claim Codex host-blocks Git or pull requests.
 
@@ -99,9 +100,13 @@ Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and 
 
 `scripts/quality.py` remains the exact-head repository gate. Its installed-wheel smoke installs Codex against an existing Cursor Hidden Project without changing `AGENTS.md`, restores Normal, refreshes owned Codex configs across Python environments and independent/linked Workspaces, and verifies Claude → Codex → Cursor Task continuity, doctor, partial cleanup, Cursor lifecycle, uninstall-all, and purge.
 
-## Human-only Cursor refresh
+## Explicitly authorized Cursor refresh
 
-Checkout agents must not run `make install-global`. After this project-only Cursor change lands, an operator should:
+Checkout agents ordinarily remain isolated. After explicit user authorization they may first run
+`make accept-global-codex`, which replaces only the global package and tests it against temporary
+Harness/Codex/Workspace state. Live activation still requires
+`make install-global HOST=<profile>`. After this project-only Cursor change lands, an operator
+should:
 
 1. Run `make install-global` from the Harness checkout; repeat with `HOST=claude-code` or `HOST=codex` for each compatible active profile.
 2. Confirm leftover `~/.cursor/mcp.json` `mcpServers.harness` is absent.
@@ -109,10 +114,12 @@ Checkout agents must not run `make install-global`. After this project-only Curs
 4. In two working repositories at once (for example Alia and Mangazeya), confirm `agent mcp list-tools harness` shows the five tools and that `project_status` roots/tasks are distinct.
 5. In the Harness source checkout, confirm only `harness-dev` is the connected overlay and that production `harness` is not enabled there.
 
-## Human-only Codex acceptance
+## Explicitly authorized Codex acceptance
 
-Checkout agents must not mutate the user-global installation or Codex trust. An operator performs
-this acceptance from two ordinary Git Workspaces, not from the Harness checkout:
+Ordinary checkout work must not mutate the user-global installation or Codex trust. The automated
+preflight below uses two temporary Git Workspaces and temporary trust. An agent may run its
+`--global-install` form outside the sandbox only after explicit user authorization; live project
+trust and UI restart remain operator-controlled:
 
 For the CLI half, the repository provides an opt-in isolated runner. First inspect its disclosure
 without using a model:
@@ -126,6 +133,12 @@ Then run the local-only preflight, which does not contact the model service:
 ```bash
 scripts/dev python scripts/accept_codex.py --preflight-only \
   --evidence /tmp/harness-codex-cli-preflight.json
+```
+
+To prove the user-global uv-tool executable without mixing test Projects into canonical state:
+
+```bash
+make accept-global-codex
 ```
 
 After the operator explicitly approves the stated OpenAI destination, fixture/MCP payload, and
@@ -142,7 +155,7 @@ temporary Git Workspaces containing only fixture README/pyproject text, isolates
 skills, and uses the official MCP SDK to launch the exact configured stdio command and call all five
 tools during local-only preflight. Model mode additionally requires the real Codex CLI to select and
 complete all five MCP calls from JSONL evidence. Both modes verify schemas, distinct simultaneous
-Workspace identities, exactly one relevant/no irrelevant generated skill, doctor, and owned
+Workspace identities, the exact relevant/no irrelevant generated skill set, doctor, and owned
 cleanup, and fail if `~/.codex/config.toml` changes. The runner gives Codex project
 trust only through a temporary `CODEX_HOME`, does not use saved Codex authentication, and removes
 that temporary state after the run. It does not prove IDE or desktop behavior.
@@ -151,7 +164,9 @@ that temporary state after the run. It does not prove IDE or desktop behavior.
 2. Trust each Workspace through Codex's own UI and fully restart the Codex client under test.
 3. From each Workspace root, require `codex mcp get harness --json` to show the absolute local
    `cwd`, matching `HARNESS_WORKSPACE_ROOT`, `HARNESS_HOST_PROFILE=codex`, and the current installed
-   Python. Confirm no user-level `~/.codex/config.toml` Harness server was added.
+   Python, plus exact `env_vars` forwarding for `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`,
+   and `HARNESS_SKILL_REGISTRY`. Confirm no user-level `~/.codex/config.toml` Harness server was
+   added.
 4. In fresh Codex CLI processes, call all five Harness tools and confirm `project_status` returns
    the correct distinct Workspace ID/root for simultaneous repositories and linked worktrees.
 5. Start/checkpoint a Task and Knowledge in one Codex process; restart Codex and then switch to a

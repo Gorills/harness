@@ -83,6 +83,22 @@ second, host-native progressive-disclosure layer when several genuinely relevant
 projected. Detailed language references remain canonical portable resources, but the entrypoint tells
 the host agent to read only the references for languages crossed by the current change.
 
+## 2026-08-30 amendment: frontend design quality is a surface invariant
+
+Functional frontend guidance did not give weaker models a sufficiently explicit visual decision
+process. Public web work received discoverability, semantics, accessibility, and performance rules,
+while native mobile work received platform/lifecycle rules; neither surface guaranteed a coherent
+art direction, non-templated composition, or rendered visual review.
+
+The built-in pack therefore adds `frontend-design` for both `web-frontend` and `mobile-app` facets.
+Its Task hints cover the public-web and mobile surface hints so Task-focused projection cannot retain
+one of those surface skills while silently dropping design guidance. Explicit project exclusions
+remain authoritative. The entrypoint is intentionally executable by weaker models: inspect the
+incumbent system, settle one compact design contract, load only the applicable marketing/editorial
+or product/mobile reference, implement from semantic tokens and complete states, then run one batched
+visual inspection and at most one confirmation pass. Named anti-patterns reject unjustified model
+defaults without turning valid brand choices into universal bans.
+
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
 - High-precision facets prevent ambiguous ecosystem dependencies from selecting the wrong surface
@@ -91,5 +107,7 @@ the host agent to read only the references for languages crossed by the current 
   visible-skill budget remain authoritative; unknown hints fall back to stack evidence.
 - Verification survives host/session changes and need not be repeated verbatim in chat.
 - User-modified or same-id custom skills fail closed instead of being silently replaced.
+- Recognized user-facing frontend work receives one portable design-quality baseline across web and
+  mobile without merging SEO, native delivery, and visual-design concerns into one giant skill.
 - Future observed hooks may add `source=observed` without changing the v1 agent-reported shape.
 - Real-host compliance with response instructions remains acceptance evidence, not an enforcement claim.

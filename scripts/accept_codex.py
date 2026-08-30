@@ -16,6 +16,11 @@ import anyio
 from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from harness.codex_adapter import (
+    CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    CODEX_MCP_FORWARD_ENV_VARS,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TOOLS = (
     "project_status",
@@ -24,6 +29,7 @@ EXPECTED_TOOLS = (
     "task_start",
     "task_checkpoint",
 )
+EXPECTED_GENERATED_SKILLS = ("secure-by-design", "testing-strategy")
 EXPECTED_TOOL_INPUT_PROPERTIES = {
     "project_status": frozenset(),
     "project_search": frozenset({"query", "scope", "limit"}),
@@ -56,6 +62,13 @@ _MODEL_USAGE_DISCLOSURE = (
     "and Task data live under one temporary directory and are removed after the run. The runner "
     "uses a temporary trusted CODEX_HOME, does not read saved Codex authentication or write user "
     "trust/~/.codex/config.toml, and fails if that user config's bytes change."
+)
+_GLOBAL_INSTALL_DISCLOSURE = (
+    "Machine effect: replace the user-global uv-tool Harness executable with the exact current "
+    "checkout before acceptance. Canonical Harness database/socket/skills and real project "
+    "Codex configuration are not used by the synthetic test; those operations receive temporary "
+    "XDG, Harness, Codex, and Git Workspace roots. Live daemon/host activation is a separate "
+    "explicit command.\n"
 )
 
 
@@ -154,7 +167,8 @@ def _init_repository(
 ) -> None:
     path.mkdir()
     (path / "README.md").write_text(
-        "# Harness Codex real-host acceptance\n\nTemporary acceptance fixture.\n",
+        "# Temporary Python package\n\n"
+        "Business requirement: the package version is 0.0.0 and it requires Python 3.13.\n",
         encoding="utf-8",
     )
     (path / "pyproject.toml").write_text(
@@ -179,26 +193,43 @@ def _init_repository(
     )
 
 
-def _verify_project_config(path: Path, python: Path, workspace: Path) -> None:
+def _verify_project_config(
+    path: Path,
+    python: Path,
+    workspace: Path,
+    local_environment: Mapping[str, str],
+) -> dict[str, str]:
     try:
         value = tomllib.loads(path.read_text(encoding="utf-8"))
         entry = value["mcp_servers"]["harness"]
     except (FileNotFoundError, KeyError, tomllib.TOMLDecodeError) as exc:
         raise CodexAcceptanceError(f"generated Codex project config is invalid: {path}") from exc
     expected_root = str(workspace.resolve())
-    expected = {
+    if value.get("developer_instructions") != CODEX_BOOTSTRAP_INSTRUCTION_BODY:
+        raise CodexAcceptanceError(
+            f"generated Codex project config has no exact Harness bootstrap instructions: {path}"
+        )
+    static_environment: dict[str, str] = {
+        "HARNESS_HOST_PROFILE": "codex",
+        "HARNESS_WORKSPACE_ROOT": expected_root,
+    }
+    expected: dict[str, object] = {
         "command": str(python.absolute()),
         "args": ["-m", "harness.mcp_process"],
+        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
         "cwd": expected_root,
-        "env": {
-            "HARNESS_HOST_PROFILE": "codex",
-            "HARNESS_WORKSPACE_ROOT": expected_root,
-        },
+        "env": static_environment,
     }
     if entry != expected:
         raise CodexAcceptanceError(
             f"generated Codex project config does not match the acceptance runtime: {entry!r}"
         )
+    server_environment = static_environment.copy()
+    for name in CODEX_MCP_FORWARD_ENV_VARS:
+        forwarded_value = local_environment.get(name)
+        if forwarded_value is not None:
+            server_environment[name] = forwarded_value
+    return server_environment
 
 
 def _verify_codex_inspection(payload: object, python: Path, workspace: Path) -> None:
@@ -213,7 +244,7 @@ def _verify_codex_inspection(payload: object, python: Path, workspace: Path) -> 
             "HARNESS_HOST_PROFILE": "codex",
             "HARNESS_WORKSPACE_ROOT": expected_root,
         },
-        "env_vars": [],
+        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
         "cwd": expected_root,
     }
     if payload.get("name") != "harness" or payload.get("transport") != expected_transport:
@@ -293,6 +324,29 @@ def completed_harness_tool_calls(events: Sequence[Mapping[str, Any]]) -> tuple[s
             raise CodexAcceptanceError(f"Harness MCP tool call failed: {item!r}")
         calls.append(tool)
     return tuple(calls)
+
+
+def project_actions_before_harness_status(
+    events: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return repository/tool actions completed before the first Harness project_status call."""
+    actions: list[str] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "mcp_tool_call":
+            server = item.get("server") or item.get("server_name")
+            tool = item.get("tool") or item.get("name")
+            if server == "harness" and tool == "project_status":
+                return tuple(actions)
+            actions.append(f"mcp:{server}:{tool}")
+        elif item_type in {"command_execution", "file_change"}:
+            actions.append(str(item_type))
+    return tuple(actions)
 
 
 def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
@@ -419,6 +473,41 @@ async def _verify_mcp_wire_async(
         return names, workspace_id
 
 
+async def _verify_mcp_read_only_async(
+    python: Path,
+    workspace: Path,
+    environment: Mapping[str, str],
+) -> tuple[tuple[str, ...], str]:
+    """Verify the production catalog and status without creating Task or Project state."""
+    parameters = StdioServerParameters(
+        command=str(python.absolute()),
+        args=["-m", "harness.mcp_process"],
+        env=dict(environment),
+        cwd=str(workspace.resolve()),
+    )
+    async with Client(stdio_client(parameters)) as client:
+        listed = await client.list_tools()
+        tools = tuple(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
+        names = _validate_wire_tools(tools)
+        status = _structured_result("project_status", await client.call_tool("project_status"))
+        workspace_id = status.get("workspace_id")
+        if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
+            workspace_id, str
+        ):
+            raise CodexAcceptanceError(
+                f"installed MCP resolved the wrong Workspace identity: {status!r}"
+            )
+        return names, workspace_id
+
+
+def verify_mcp_read_only(
+    python: Path,
+    workspace: Path,
+    environment: Mapping[str, str],
+) -> tuple[tuple[str, ...], str]:
+    return anyio.run(_verify_mcp_read_only_async, python, workspace, environment)
+
+
 def _verify_mcp_wire(
     python: Path,
     workspace: Path,
@@ -429,17 +518,14 @@ def _verify_mcp_wire(
 
 def _acceptance_prompt() -> str:
     return (
-        "Perform a real-host acceptance of the configured Harness MCP server. Do not run shell "
-        "commands, do not edit files, and do not use any non-Harness tool. Call these Harness "
-        "tools through MCP: (1) project_status; (2) project_search for pyproject with scope code and "
-        "limit 5; (3) project_context for the first ref returned by project_search; (4) task_start "
-        "with Russian title 'Проверка Codex real-host' and stack_hints ['python']; (5) "
-        "task_checkpoint for the returned task_id and exact revision, state completed, Russian "
-        "summary 'Пять MCP-инструментов Harness проверены реальным Codex CLI', next_step null, "
-        "and one passed verification named 'Codex CLI MCP acceptance' with evidence "
-        "'Codex CLI completed all five Harness MCP calls'. After all five real calls, "
-        "return one short JSON object summarizing the observed workspace_id, workspace_root, "
-        "task_id, and final revision. Never invent a result if a tool call fails."
+        "Audit this temporary Python package as a normal repository task. Determine whether "
+        "pyproject.toml matches the business requirement in README.md. Do not edit files. Use the "
+        "project's configured context and continuity mechanisms exactly as you would in normal "
+        "work: inspect current state, find and expand the relevant project context, create a "
+        "Russian-titled work record with only the affected stack hint, and complete it with a "
+        "passed verification. Return one short JSON object with the observed workspace identity, "
+        "work-record identity, final revision, and audit result. Never invent a result if a tool "
+        "call fails."
     )
 
 
@@ -479,6 +565,64 @@ def _build_installed_wheel(
     return scripts / ("harness.exe" if os.name == "nt" else "harness"), python
 
 
+def _global_install_environment() -> dict[str, str]:
+    values = os.environ.copy()
+    values.pop("CODEX_API_KEY", None)
+    values.pop("PYTHONPATH", None)
+    return values
+
+
+def _installed_python_from_console_script(script: Path) -> Path:
+    try:
+        first_line = script.read_bytes().splitlines()[0]
+    except (IndexError, OSError) as exc:
+        raise CodexAcceptanceError(
+            f"global Harness console script could not be inspected: {script}"
+        ) from exc
+    prefix = b"#!"
+    if not first_line.startswith(prefix):
+        raise CodexAcceptanceError(f"global Harness console script has no shebang: {script}")
+    try:
+        python = Path(os.fsdecode(first_line.removeprefix(prefix)))
+    except UnicodeError as exc:
+        raise CodexAcceptanceError(
+            f"global Harness console script has an unusable interpreter: {script}"
+        ) from exc
+    if not python.is_absolute():
+        raise CodexAcceptanceError(
+            f"global Harness console script interpreter is not absolute: {python}"
+        )
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise CodexAcceptanceError(f"global Harness interpreter is not executable: {python}")
+    return python
+
+
+def _install_and_resolve_global_runtime(
+    uv: Path,
+    environment: Mapping[str, str],
+) -> tuple[Path, Path]:
+    if os.name == "nt":
+        raise CodexAcceptanceError("global Harness machine acceptance currently requires POSIX")
+    _run(
+        (str(PROJECT_ROOT / "scripts" / "install-global"), "--package-only"),
+        cwd=PROJECT_ROOT,
+        environment=environment,
+        timeout=300,
+    )
+    tool_dir = _run(
+        (str(uv), "tool", "dir", "--bin"),
+        cwd=PROJECT_ROOT,
+        environment=environment,
+        show_output=False,
+    ).stdout.strip()
+    if not tool_dir:
+        raise CodexAcceptanceError("uv returned no user-global tool bin directory")
+    harness = Path(tool_dir) / "harness"
+    if not harness.is_file() or not os.access(harness, os.X_OK):
+        raise CodexAcceptanceError(f"global Harness executable is missing: {harness}")
+    return harness, _installed_python_from_console_script(harness)
+
+
 def run_acceptance(
     *,
     codex: Path,
@@ -487,13 +631,23 @@ def run_acceptance(
     model: str | None,
     evidence_path: Path | None,
     run_model: bool,
+    global_install: bool = False,
 ) -> dict[str, object]:
     user_config = _codex_user_config(os.environ)
     user_config_before = _optional_bytes(user_config)
+    global_runtime = (
+        _install_and_resolve_global_runtime(uv, _global_install_environment())
+        if global_install
+        else None
+    )
     with tempfile.TemporaryDirectory(prefix="harness-codex-real-host-") as temporary:
         root = Path(temporary)
         environment = _isolated_environment(root, codex)
-        harness, python = _build_installed_wheel(root, uv, environment)
+        harness, python = (
+            global_runtime
+            if global_runtime is not None
+            else _build_installed_wheel(root, uv, environment)
+        )
         workspaces = (root / "workspace-a", root / "workspace-b")
         for index, workspace in enumerate(workspaces, start=1):
             _init_repository(
@@ -525,14 +679,19 @@ def run_acceptance(
                 if workspace == primary_workspace:
                     _verify_untrusted_project_fail_closed(codex, workspace, environment)
                 config = workspace / ".codex" / "config.toml"
-                _verify_project_config(config, python, workspace)
+                mcp_environment = _verify_project_config(
+                    config,
+                    python,
+                    workspace,
+                    environment,
+                )
                 skills = tuple(
                     sorted(
                         path.parent.name
                         for path in (workspace / ".agents" / "skills").glob("*/SKILL.md")
                     )
                 )
-                if skills != ("testing-strategy",):
+                if skills != EXPECTED_GENERATED_SKILLS:
                     raise CodexAcceptanceError(
                         f"Codex received unexpected relevant/irrelevant project skills: {skills!r}"
                     )
@@ -563,7 +722,11 @@ def run_acceptance(
                     raise CodexAcceptanceError("codex mcp get emitted invalid JSON") from exc
                 _verify_codex_inspection(inspection_payload, python, workspace)
 
-                observed_calls, wire_workspace_id = _verify_mcp_wire(python, workspace, environment)
+                observed_calls, wire_workspace_id = _verify_mcp_wire(
+                    python,
+                    workspace,
+                    mcp_environment,
+                )
                 if wire_calls and observed_calls != wire_calls:
                     raise CodexAcceptanceError("installed MCP catalogs differ across Workspaces")
                 wire_calls = observed_calls
@@ -603,6 +766,16 @@ def run_acceptance(
                 )
                 events = _parse_json_lines(executed.stdout)
                 model_calls = completed_harness_tool_calls(events)
+                premature_actions = project_actions_before_harness_status(events)
+                if premature_actions:
+                    raise CodexAcceptanceError(
+                        "Codex performed project actions before Harness project_status: "
+                        f"{premature_actions!r}"
+                    )
+                if not model_calls or model_calls[0] != "project_status":
+                    raise CodexAcceptanceError(
+                        f"Codex did not use Harness project_status first: {model_calls!r}"
+                    )
                 missing = [name for name in EXPECTED_TOOLS if name not in model_calls]
                 if missing:
                     observed_types = sorted(
@@ -634,6 +807,7 @@ def run_acceptance(
             ).stdout.strip()
             report = {
                 "schema_version": 2,
+                "runtime_source": "user-global-uv-tool" if global_install else "temporary-wheel",
                 "codex_version": version,
                 "workspace_identities": [str(workspace.resolve()) for workspace in workspaces],
                 "wire_workspace_ids": wire_workspace_ids,
@@ -715,6 +889,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--codex", type=Path, help="Codex CLI executable (default: PATH)")
     parser.add_argument("--uv", type=Path, help="uv executable (default: PATH)")
+    parser.add_argument(
+        "--global-install",
+        action="store_true",
+        help=(
+            "replace the user-global uv-tool package, then run acceptance with temporary "
+            "Harness/Codex/Workspace state"
+        ),
+    )
     parser.add_argument("--model", help="optional exact Codex model override")
     parser.add_argument(
         "--timeout",
@@ -751,6 +933,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.timeout <= 0:
         print("Codex real-host acceptance: FAIL (--timeout must be positive)", flush=True)
         return 1
+    if args.global_install:
+        print(_GLOBAL_INSTALL_DISCLOSURE, flush=True)
     try:
         report = run_acceptance(
             codex=Path(codex_value).resolve(),
@@ -759,6 +943,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             model=args.model,
             evidence_path=args.evidence,
             run_model=args.run_model,
+            global_install=args.global_install,
         )
     except (CodexAcceptanceError, OSError) as exc:
         print(f"Codex real-host acceptance: FAIL ({exc})", flush=True)

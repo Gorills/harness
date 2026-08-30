@@ -4,7 +4,9 @@
 # This is the human-operated counterpart to isolated `scripts/dev`. It must not
 # source scripts/dev-env.sh. It unsets HARNESS_DEV_ROOT, restores pre-overlay
 # XDG saved by that file, and drops checkout `.venv/bin` so `harness install`
-# mutates the canonical per-user daemon and host MCP.
+# mutates the canonical per-user daemon and host MCP. `--package-only` is the
+# bounded machine-acceptance path: it replaces only the uv-tool package and
+# deliberately leaves canonical Harness state and host configuration untouched.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +19,7 @@ HOSTS=()
 DRY_RUN=0
 RUN_DOCTOR=1
 DOCTOR_ONLY=0
+PACKAGE_ONLY=0
 
 usage() {
     cat <<'EOF'
@@ -24,6 +27,7 @@ Refresh the user-global Harness install from this checkout.
 
 Usage:
   scripts/install-global [--host cursor|claude-code|codex[,...]] [--no-doctor]
+  scripts/install-global --package-only
   scripts/install-global --doctor-only
   scripts/install-global --dry-run [--host ...]
 
@@ -34,8 +38,14 @@ This command:
      (default: cursor and codex)
   4. runs that same `harness doctor` unless --no-doctor
 
+`--package-only` performs only step 2. It is intended for the agent-operated
+machine acceptance runner, which tests the installed executable with temporary
+XDG, Harness, Codex, and Git Workspace state before any live activation.
+
 It never uses scripts/dev, checkout `.venv/bin/harness`, or overlay XDG paths.
-Checkout agents must not run this; operators use `make install-global`.
+Checkout agents may run `--package-only` only through the repository acceptance
+target after explicit user authorization. Live host activation remains
+`make install-global` and also requires explicit user authorization for agents.
 
 The tracked `.cursor/mcp.json` overlay in this repository is the intended
 checkout-local server (`harness-dev`). Production Codex and Cursor MCP are
@@ -186,7 +196,9 @@ print_plan() {
     local uv_bin="$1"
     local harness_bin="$2"
     local mode
-    if [[ "$DOCTOR_ONLY" -eq 1 ]]; then
+    if [[ "$PACKAGE_ONLY" -eq 1 ]]; then
+        mode="package-only"
+    elif [[ "$DOCTOR_ONLY" -eq 1 ]]; then
         mode="doctor-only"
     else
         mode="install"
@@ -234,6 +246,10 @@ while [[ $# -gt 0 ]]; do
             DOCTOR_ONLY=1
             shift
             ;;
+        --package-only)
+            PACKAGE_ONLY=1
+            shift
+            ;;
         *)
             echo "scripts/install-global: unknown argument: $1" >&2
             usage >&2
@@ -247,7 +263,15 @@ if [[ "$DOCTOR_ONLY" -eq 1 && "$RUN_DOCTOR" -eq 0 ]]; then
     exit 1
 fi
 
-if [[ ${#HOSTS[@]} -eq 0 ]]; then
+if [[ "$PACKAGE_ONLY" -eq 1 ]]; then
+    if [[ "$DOCTOR_ONLY" -eq 1 || "$RUN_DOCTOR" -eq 0 || ${#HOSTS[@]} -ne 0 ]]; then
+        echo "scripts/install-global: --package-only cannot be combined with --host, --doctor-only, or --no-doctor" >&2
+        exit 1
+    fi
+    RUN_DOCTOR=0
+fi
+
+if [[ ${#HOSTS[@]} -eq 0 && "$PACKAGE_ONLY" -eq 0 ]]; then
     HOSTS=("${DEFAULT_HOSTS[@]}")
 fi
 validate_hosts
@@ -289,10 +313,12 @@ if [[ "$DOCTOR_ONLY" -eq 0 ]]; then
         echo "Check that uv tool dir --bin is on this account and retry." >&2
         exit 1
     fi
-    for host in "${HOSTS[@]}"; do
-        echo "Updating user-global host registration (--host $host)" >&2
-        "$HARNESS_BIN" install --host "$host"
-    done
+    if [[ "$PACKAGE_ONLY" -eq 0 ]]; then
+        for host in "${HOSTS[@]}"; do
+            echo "Updating user-global host registration (--host $host)" >&2
+            "$HARNESS_BIN" install --host "$host"
+        done
+    fi
 fi
 
 if [[ "$RUN_DOCTOR" -eq 1 || "$DOCTOR_ONLY" -eq 1 ]]; then
@@ -305,7 +331,7 @@ if [[ "$RUN_DOCTOR" -eq 1 || "$DOCTOR_ONLY" -eq 1 ]]; then
 fi
 
 cat <<EOF
-Global Harness now uses $HARNESS_BIN from this checkout.
+Global Harness package now uses $HARNESS_BIN from this checkout.
 Production Cursor MCP is project-only \`.cursor/mcp.json\` harness, enabled with
 \`agent mcp enable harness\`; Codex MCP is project-only \`.codex/config.toml\`.
 This checkout overlay remains harness-dev and is not rewritten. Test the global

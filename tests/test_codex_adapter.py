@@ -11,6 +11,8 @@ import pytest
 
 import harness.codex_adapter as codex_module
 from harness.codex_adapter import (
+    CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    CODEX_MCP_FORWARD_ENV_VARS,
     CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
     CodexAdapter,
     codex_profile_missing_workspace_root,
@@ -71,11 +73,17 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
     assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
 
     value = tomllib.loads(_config(root).read_text(encoding="utf-8"))
+    instructions = value.pop("developer_instructions")
+    assert "project_status" in instructions
+    assert "deferred" in instructions
+    assert "initial visible tool list" in instructions
+    assert HIDDEN_INSTRUCTION_BODY not in instructions
     assert value == {
         "mcp_servers": {
             "harness": {
                 "command": "/venv/bin/python",
                 "args": ["-m", "harness.mcp_process"],
+                "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
                 "cwd": str(root),
                 "env": {
                     "HARNESS_HOST_PROFILE": "codex",
@@ -98,6 +106,14 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
     assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == ""
 
 
+def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> None:
+    assert len(CODEX_BOOTSTRAP_INSTRUCTION_BODY.encode("utf-8")) < 1024
+    first_512 = CODEX_BOOTSTRAP_INSTRUCTION_BODY[:512]
+    assert "project_status" in first_512
+    assert "deferred" in first_512
+    assert "initial visible tool list" in first_512
+
+
 def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: Path) -> None:
     root = _repository(tmp_path / "repo")
     agents = root / "AGENTS.md"
@@ -105,16 +121,20 @@ def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: P
     adapter = _adapter()
 
     assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    normal_instructions = tomllib.loads(_config(root).read_text(encoding="utf-8"))[
+        "developer_instructions"
+    ]
     assert adapter.reconcile_project(root, hidden=True) is IntegrationChange.CHANGED
     hidden = tomllib.loads(_config(root).read_text(encoding="utf-8"))
-    assert hidden["developer_instructions"] == HIDDEN_INSTRUCTION_BODY
+    assert hidden["developer_instructions"].startswith(normal_instructions)
+    assert hidden["developer_instructions"].endswith(HIDDEN_INSTRUCTION_BODY)
     assert adapter.project_registration_state(root, hidden=True) is HostRegistrationState.CURRENT
     assert adapter.project_registration_state(root) is HostRegistrationState.STALE_OWNED
     assert agents.read_text(encoding="utf-8") == "# User project instructions\n"
 
     assert adapter.reconcile_project(root, hidden=False) is IntegrationChange.CHANGED
     normal = tomllib.loads(_config(root).read_text(encoding="utf-8"))
-    assert "developer_instructions" not in normal
+    assert normal["developer_instructions"] == normal_instructions
     assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
     assert agents.read_text(encoding="utf-8") == "# User project instructions\n"
 
@@ -138,6 +158,60 @@ def test_codex_project_reconcile_updates_only_marker_owned_config(tmp_path: Path
         ]
         == "/new/python"
     )
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
+    tmp_path: Path,
+    hidden: bool,
+) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    path = _config(root)
+    legacy = "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("env_vars = ")
+    )
+    path.write_text(legacy + "\n", encoding="utf-8")
+
+    diagnostic = adapter.project_registration_diagnostic(root, hidden=hidden)
+    assert diagnostic.state is HostRegistrationState.STALE_OWNED
+    assert diagnostic.preflight_error is None
+
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    entry = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"]
+    assert entry["env_vars"] == list(CODEX_MCP_FORWARD_ENV_VARS)
+    instructions = tomllib.loads(path.read_text(encoding="utf-8"))["developer_instructions"]
+    assert instructions.startswith(CODEX_BOOTSTRAP_INSTRUCTION_BODY)
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_codex_project_reconcile_migrates_legacy_instruction_shape(
+    tmp_path: Path,
+    hidden: bool,
+) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    path = _config(root)
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("developer_instructions = ")
+    ]
+    if hidden:
+        lines.insert(1, f"developer_instructions = {json.dumps(HIDDEN_INSTRUCTION_BODY)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    diagnostic = adapter.project_registration_diagnostic(root, hidden=hidden)
+    assert diagnostic.state is HostRegistrationState.STALE_OWNED
+    assert diagnostic.preflight_error is None
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    instructions = tomllib.loads(path.read_text(encoding="utf-8"))["developer_instructions"]
+    assert instructions.startswith(CODEX_BOOTSTRAP_INSTRUCTION_BODY)
+    assert (HIDDEN_INSTRUCTION_BODY in instructions) is hidden
 
 
 def test_codex_project_reconcile_heals_missing_owned_exclude_block(tmp_path: Path) -> None:
@@ -250,6 +324,29 @@ def test_codex_tracked_config_without_exact_entry_is_never_modified(tmp_path: Pa
     with pytest.raises(HostIntegrationError, match=r"tracked \.codex/config\.toml"):
         _adapter().reconcile_project(root)
     assert path.read_text(encoding="utf-8") == 'model = "gpt-5"\n'
+
+
+def test_codex_tracked_manual_entry_without_bootstrap_is_not_adopted(tmp_path: Path) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    path = _config(root)
+    without_bootstrap = "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("developer_instructions = ")
+    )
+    path.write_text(without_bootstrap + "\n", encoding="utf-8")
+    _marker(root).unlink()
+    _exclude(root).write_text("", encoding="utf-8")
+    _git(root, "add", ".codex/config.toml")
+
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.state is HostRegistrationState.FOREIGN
+    assert diagnostic.preflight_error is not None
+    assert "bootstrap developer instructions" in diagnostic.preflight_error
+    with pytest.raises(HostIntegrationError, match="bootstrap developer instructions"):
+        adapter.reconcile_project(root)
 
 
 def test_codex_owned_config_refuses_unknown_user_content(tmp_path: Path) -> None:
@@ -443,6 +540,6 @@ def test_installed_codex_cli_loads_generated_trusted_project_mcp(tmp_path: Path)
             "HARNESS_HOST_PROFILE": "codex",
             "HARNESS_WORKSPACE_ROOT": str(root),
         },
-        "env_vars": [],
+        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
         "cwd": str(root),
     }

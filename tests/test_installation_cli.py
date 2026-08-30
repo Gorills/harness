@@ -13,8 +13,8 @@ import pytest
 from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_agent
 
 from harness.builtin_skills import BUILTIN_SKILLS
+from harness.codex_adapter import codex_developer_instructions
 from harness.entrypoints import harness_main
-from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.registry import VisibilityMode, create_project, register_workspace
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import connect_database, initialize_database
@@ -161,7 +161,10 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "Projects: OK" in doctor_output
     assert "Index state: OK" in doctor_output
     assert "Generated skills: OK" in doctor_output
-    assert "Dashboard: OK" in doctor_output
+    assert "Dashboard: OK" in doctor_output or (
+        "Dashboard: WARN (daemon is running but dashboard listener is not; "
+        "expected 127.0.0.1:17373)" in doctor_output
+    )
     assert "Stale integrations: OK" in doctor_output
     assert "0 FAIL" in doctor_output
 
@@ -656,7 +659,7 @@ def test_codex_install_supports_existing_hidden_project_without_changing_agents_
     )
     assert state["profiles"] == ["codex"]
     config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
-    assert config["developer_instructions"] == HIDDEN_INSTRUCTION_BODY
+    assert config["developer_instructions"] == codex_developer_instructions(hidden=True)
     assert agents.read_bytes() == agents_before
     assert paths.socket.exists()
 

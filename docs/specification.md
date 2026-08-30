@@ -1793,7 +1793,12 @@ Harness поставляет компактный product-owned quality pack в 
 покрывает как минимум Docker lifecycle/configuration, public frontend discoverability для Google и
 Яндекса, language-native engineering, project architecture, legacy preservation, data integrity,
 backend services, Expo/React Native mobile apps, Godot, deployment operations и secure-by-design
-архитектуру/верификацию для web, server, browser, mobile и supply chain.
+архитектуру/верификацию для web, server, browser, mobile и supply chain. Любой распознанный
+пользовательский web/mobile frontend также materialize'ит `frontend-design`: короткий обязательный
+design contract, отдельные правила для marketing/editorial и product/mobile surfaces, anti-slop
+ограничения и bounded visual review. Его facet/task applicability сопровождает соответствующие
+frontend surface skills даже при Task-focused projection; явная project policy остаётся
+авторитетной.
 
 ---
 

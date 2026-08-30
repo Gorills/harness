@@ -8,11 +8,13 @@ This checkout must not share process, database, socket, MCP, or host configurati
 
 - Run CLI/daemon commands through `scripts/dev` (or `source scripts/dev-env.sh` then `uv run --frozen`). Do not invoke `harness` / `harnessd` from `PATH`.
 - `uv run --frozen harness …` without `scripts/dev-env.sh` uses checkout code against the global daemon. Never do that in this repository.
-- Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user `harness.sock`) for work in this repository.
+- Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user `harness.sock`) during ordinary checkout work.
 - Do not run `harness install` or `harness uninstall` from this environment. Those commands mutate user-global host MCP and are refused while `HARNESS_DEV_ROOT` is set.
-- Do not run `make install-global`, `make doctor-global`, or `scripts/install-global`. Those refresh the user-global `uv tool` install and host MCP. Point the operator at `make install-global` instead.
+- Machine acceptance is the only agent-operated exception. After the user explicitly requests global installation or real-host acceptance, an agent may run `make accept-global-codex` with sandbox escalation. That target may replace the user-global uv-tool package, but all synthetic Harness/Codex/Workspace state must remain under its temporary roots and be cleaned on failure as well as success.
+- Live activation is separate from synthetic acceptance. After the same explicit authorization, an agent may run `make install-global HOST=<explicit-profile>` and the corresponding read-only `make doctor-global` with sandbox escalation. Never default to multiple profiles, never create synthetic Workspaces in canonical state, and report which real registered Workspace configurations the live install reconciled.
+- Do not invoke `scripts/install-global` directly except through those Make targets. Do not run global `harness uninstall --purge`, and do not delete or rewrite canonical per-user state to recover a failed acceptance.
 - Tracked `.cursor/mcp.json` names `harness-dev` and launches `${workspaceFolder}/scripts/dev harness mcp`. `.mcp.json` still names `harness` for Claude Code. Those are the checkout-local daemon under `.harness/`, not the global install. Prefer reading this repository over those tools when implementing Harness.
-- Never invoke a user-level / global Harness MCP namespace (`user-harness` or equivalent). Enable project `harness-dev` in Cursor Customize for this checkout. If leftover production tools appear against this overlay, do not call them.
+- Never invoke a user-level / global Harness MCP namespace (`user-harness` or equivalent) from this source checkout. The machine acceptance target may exercise the production `harness` namespace only from its temporary trusted Git Workspaces. Enable project `harness-dev` in Cursor Customize for ordinary checkout work.
 - Ignore globally installed Harness skills if they appear in the host.
 
 See [`docs/development/isolated-development.md`](docs/development/isolated-development.md).

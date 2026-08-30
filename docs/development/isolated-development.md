@@ -108,9 +108,23 @@ uv run --frozen python scripts/quality.py
 
 `scripts/dev` must be used for development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. `uv run --frozen harness` from this checkout without sourcing `scripts/dev-env.sh` is the same mix: checkout code plus the global daemon, and must not be used here. A system `harness scan` of this source checkout is refused because the tracked overlay marks it as isolated-development only. Overlay detection requires `scripts/dev harness mcp` plus `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and no `HARNESS_HOST_PROFILE`; extra host JSON keys do not drop that isolation.
 
-## 6. Refresh the user-global install (human-only)
+## 6. Machine acceptance and user-global activation
 
-Isolated `scripts/dev harness install` is refused on purpose. To copy this checkout into the user-global `uv tool` install and update host MCP, operators run:
+Isolated `scripts/dev harness install` is refused on purpose. Synthetic machine acceptance is a
+separate, explicitly authorized lane:
+
+```bash
+make accept-global-codex
+```
+
+This replaces only the user-global uv-tool package, then runs that installed executable with
+temporary XDG state/runtime, Harness skills, Codex home/trust, and Git Workspaces. Test Projects
+never enter the canonical database. Cleanup runs after success and failure, and the target verifies
+that the user Codex config is byte-unchanged. Agents may run this target outside the sandbox only
+after the user explicitly requests global installation or real-host acceptance.
+
+Live activation is deliberately separate. To update host MCP, an operator—or an explicitly
+authorized agent—runs:
 
 ```bash
 make install-global
@@ -118,9 +132,9 @@ make install-global HOST=codex
 make doctor-global
 ```
 
-`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=claude-code` and `HOST=codex` select those profiles; install each compatible active profile separately because the three-profile skill graph is rejected. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=claude-code` and `HOST=codex` select those profiles; explicitly authorized agents must always name one profile. Codex reconciliation writes the exact forwarded local-variable list `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, and `HARNESS_SKILL_REGISTRY`, preventing the host's reduced stdio environment from selecting a fallback daemon or database. `scripts/install-global --package-only` is reserved for the acceptance target and never runs host lifecycle or doctor. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
 
-This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Production Cursor MCP is project-only and is never rewritten here. Checkout agents must not call leftover `user-harness`. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated overlay root lists no tools, including when `WORKSPACE_FOLDER_PATHS` names a working repository. After `make install-global`, the installed Harness migrates leftover `user-harness`, re-approves project configs, and does not touch checkout `.harness/`. The global install is tested from another Git worktree, not from agents in this checkout. Checkout agents must not run `make install-global`.
+This repository's tracked `.cursor/mcp.json` is the intended checkout-local overlay (`harness-dev` launching `scripts/dev harness mcp`). Production Cursor MCP is project-only and is never rewritten here. Checkout agents must not call leftover `user-harness`. Enable `harness-dev` in Cursor Customize for this checkout. Production MCP with an interpolated overlay root lists no tools, including when `WORKSPACE_FOLDER_PATHS` names a working repository. After live `make install-global`, the installed Harness migrates leftover `user-harness`, re-approves project configs, and does not touch checkout `.harness/`. Synthetic machine acceptance uses temporary Git Workspaces outside this checkout. An explicitly authorized agent may activate one named live profile only after isolated machine acceptance succeeds.
 
 Codex uses the tracked `.codex/config.toml` checkout overlay named `harness-dev`. It launches
 `./scripts/dev harness mcp`, allows 30 seconds for first startup, and is required so a broken

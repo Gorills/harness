@@ -756,6 +756,285 @@ Official platform guidance:
         ),
     ),
     BuiltinSkill(
+        "frontend-design",
+        "Use when creating, changing, or reviewing any user-facing web or mobile interface; exclude backend-only and non-visual work.",
+        (
+            "frontend-design",
+            "ui",
+            "ux",
+            "interface",
+            "design",
+            "redesign",
+            "public-frontend",
+            "web-frontend",
+            "website",
+            "landing-page",
+            "marketing-site",
+            "seo",
+            "accessibility",
+            "web-performance",
+            "react-web",
+            "next",
+            "vue",
+            "nuxt",
+            "astro",
+            "svelte",
+            "angular",
+            "gatsby",
+            "remix",
+            "solid",
+            "qwik",
+            "mobile",
+            "mobile-app",
+            "native-app",
+            "mobile-ui",
+            "expo",
+            "react-native",
+            "android",
+            "ios",
+            "eas",
+            "apk",
+            "aab",
+        ),
+        """
+# Frontend design
+Apply this skill whenever the changed output includes a user-facing interface. Functional code is
+not finished while its hierarchy, visual language, responsive behavior, or interaction states are
+generic, inconsistent, or unverified.
+
+## Make a design contract first
+Inspect the existing screens, tokens, components, brand assets, copy, and platform conventions. If
+they form a coherent system, extend it instead of silently rebranding the product. When direction
+is missing, infer a defensible direction from the subject, audience, and job instead of falling back
+to the model's favorite style.
+
+Before implementation, settle this compact contract:
+
+1. **User and job:** who is here, what they need, and the one primary action or outcome.
+2. **Content hierarchy:** what must be noticed first, second, and only on demand.
+3. **Visual direction:** one sentence tied to the subject's real world, with three character words
+   and one explicitly rejected direction.
+4. **Signature:** one memorable compositional, typographic, material, or interaction idea. Spend
+   boldness here and keep the rest disciplined.
+5. **System:** named color roles, type roles, spacing rhythm, shape/depth rule, content width,
+   density, compact-layout behavior, and motion rule.
+
+Do not show a long design essay unless the user asks. The contract exists to keep the implementation
+coherent. Read [visual language](references/visual-language.md) for every design task, then read
+exactly the applicable surface guide: [marketing and editorial sites](references/marketing-sites.md)
+or [product and mobile interfaces](references/product-interfaces.md). A mixed product may need both.
+
+## Build from hierarchy, not decoration
+- Put real content and the primary task into the layout before polishing surfaces. Copy, images,
+  data, and state are design material; generic filler produces a generic composition.
+- Encode the contract as existing project tokens or a small semantic token layer. Derive component
+  values from those roles instead of scattering arbitrary colors, radii, shadows, and spacing.
+- Design wide and compact layouts together. Responsive behavior is a change in grouping, priority,
+  navigation, and interaction where necessary, not merely smaller text and stacked columns.
+- Prefer familiar controls and clear affordances. Originality belongs in visual voice and
+  composition, not in making standard actions hard to recognize.
+- Complete the real states: default, hover where available, focus-visible, active, selected,
+  disabled, loading, empty, error, success, long content, and permission/offline states that the
+  product can reach.
+- Preserve repository architecture and the established design system. A design task does not
+  authorize framework replacement, route churn, destructive rewrites, invented claims, or unrelated
+  copy changes.
+
+## Reject model defaults unless the brief earns them
+Do not emit a purple/blue gradient hero, centered headline above three equal feature cards, card
+inside card, glass panels, floating blurred orbs, universal pill shapes, identical rounded boxes,
+decorative 01/02/03 labels, emoji as product icons, or glow on every important element merely
+because they are easy defaults. Any one of these can be valid when it follows from the brand,
+content, or interaction; without that reason, choose a structure specific to this subject.
+
+Do not replace one fashion with another. Cream editorial pages, black pages with an acid accent,
+brutalist grids, bento layouts, giant type, and excessive whitespace are also generic when selected
+without a brief-specific reason. Do not fabricate testimonials, customer logos, ratings, usage
+numbers, people, product screenshots, or photographic evidence. Use supplied/licensed assets,
+clearly marked placeholders, or honest copy.
+
+## Verify the rendered result
+Before handoff, read and execute [visual review](references/visual-review.md). Inspect the rendered
+interface at representative compact and wide sizes, fix the highest-impact problems as one batch,
+and confirm once more. If rendering is unavailable, say that visual verification was not run; source
+inspection alone is not proof of design quality.
+""",
+        applies_facets=("mobile-app", "web-frontend"),
+        references=(
+            (
+                "visual-language.md",
+                """
+# Visual language
+
+## Derive a direction from the subject
+Start with the product rather than a style catalog. Name three concrete nouns from its world—tools,
+materials, places, artifacts, behaviors, or cultural references—and translate them into visual
+decisions. A direction such as "a field geologist's annotated specimen drawer: precise, tactile,
+quiet" is actionable; "modern, clean, premium" is not.
+
+State what the design must not become. This prevents drift while leaving room for judgment. Preserve
+an established brand direction unless the user asked to change it.
+
+## Define a small semantic system
+- **Color:** name roles such as canvas, surface, strong text, muted text, border, accent, and semantic
+  states. Prefer one primary accent and tinted neutrals. Color must communicate hierarchy or state;
+  decoration alone is not a role. Check contrast in every state and theme.
+- **Typography:** define display/title, body, label, and data/mono roles only when needed. Marketing
+  surfaces may justify a distinctive display/body pairing; task-heavy product UI often works better
+  with one well-tuned family. Use a deliberate scale, few weights, readable line height, and roughly
+  45-75 characters for prose. Never choose a font only because models commonly do.
+- **Spacing:** use a named rhythm instead of isolated values. A practical starting scale is
+  4, 8, 12, 16, 24, 32, 48, 64, adjusted to the incumbent system. Related items sit closer than
+  unrelated groups; section gaps must be visibly larger than component gaps.
+- **Layout:** choose a content width, column logic, alignment anchors, and density. Break a grid only
+  to reinforce hierarchy. Asymmetry without alignment looks accidental; perfect symmetry without a
+  reason looks templated.
+- **Shape and depth:** choose one radius vocabulary and one depth mechanism: borders, tonal layers,
+  shadows, overlap, or a deliberate combination. Cards are for grouped or actionable units, not a
+  default wrapper for every paragraph.
+- **Imagery and icons:** use a coherent visual source, crop, aspect-ratio family, and icon family.
+  Prefer real or purpose-built assets. Keep icon stroke, optical size, and alignment consistent;
+  pair unfamiliar icons with labels.
+- **Motion:** assign motion to orientation, feedback, state change, or one expressive signature.
+  Most product transitions should feel immediate; marketing may use a longer orchestrated moment.
+  Animate transform/opacity when practical, avoid scattered perpetual motion, and provide a useful
+  reduced-motion result.
+
+## Create hierarchy on purpose
+Each screen needs one dominant element, a small supporting layer, and quiet detail. Achieve contrast
+with scale, weight, space, placement, color, and content—not by making every element louder. A user
+should understand the page purpose and next action from a blurred or squinted view.
+
+Structural decoration must carry meaning. Use numbering only for real sequence, badges only for
+status/category, dividers only for grouping, and labels only when they clarify a value. Remove any
+ornament whose rationale would fit an unrelated product equally well.
+""",
+            ),
+            (
+                "marketing-sites.md",
+                """
+# Marketing and editorial sites
+
+## Design the conversion argument
+Give each page one commercial or editorial job. The first screen should make the audience, offer,
+outcome, and next action understandable without slogans that could describe any competitor. The hero
+is the page's thesis, not a mandatory centered headline block.
+
+Order sections by the visitor's actual questions and objections. A useful sequence might establish
+relevance, demonstrate the mechanism, prove the claim, handle risk, explain the offer, and close the
+decision—but do not force every brief into hero → logo row → three features → testimonials → pricing
+→ FAQ → CTA. Change rhythm, scale, density, and media according to the content.
+
+## Make persuasion credible
+- Use one primary CTA phrase consistently through the journey and a quieter secondary action only
+  when it serves a different readiness level. Buttons state the outcome: "Start free trial" is
+  clearer than "Get started."
+- Put proof next to the claim it supports. Use real product evidence, demonstrations, sourced facts,
+  customer material, policies, or concrete process detail. Never invent social proof.
+- Make pricing, constraints, eligibility, delivery, cancellation, and form expectations clear before
+  commitment. Conversion quality does not justify dark patterns, hidden costs, false urgency,
+  preselected consent, or a visually suppressed alternative.
+- Replace generic benefit stacks with specific situations, outcomes, and differentiators. Use strong
+  headlines, short supporting prose, and scannable evidence rather than decorative micro-labels on
+  every section.
+- Use imagery when it communicates product, craft, people, place, or result. Do not add stock photos
+  as mood filler or fake a product screenshot with meaningless rectangles.
+
+## Build a distinctive page rhythm
+Choose a macrostructure that fits the argument: demonstration-led, narrative scroll, editorial
+index, comparison-led, case-study-led, catalog, manifesto, or another content-derived form. Let one
+signature moment carry the personality. Alternate dense evidence with quieter comprehension space;
+do not make every section the same height, alignment, and card grid.
+
+Keep navigation proportional to page complexity. A short campaign may need only identity and one
+action; a deep product site needs clear information architecture. The closing section should resolve
+the page's argument and repeat the real next action, not merely add another gradient banner.
+""",
+            ),
+            (
+                "product-interfaces.md",
+                """
+# Product and mobile interfaces
+
+## Optimize for the task
+Product UI should disappear into the user's work. Start with the primary task, current state, and
+next safe action. Keep navigation, terminology, save behavior, and control placement consistent with
+the product's existing mental model. Do not trade recognition for novelty.
+
+- Use standard controls for standard behaviors. Make the whole control target interactive, give it a
+  visible label or accessible name, and keep destructive or irreversible actions visually distinct
+  without making them the loudest element by default.
+- Use progressive disclosure for advanced or infrequent choices. Density should follow frequency and
+  expertise: dashboards and operations tools can be compact; onboarding and high-risk flows need more
+  guidance and breathing room.
+- Keep the primary action obvious but not repeated in every panel. Accent color denotes action,
+  selection, or state rather than decorating large areas indiscriminately.
+- Forms need persistent labels, help at the point of uncertainty, sensible grouping, forgiving input,
+  inline validation, an error summary for long forms, and preservation of valid work after failure.
+- Tables and data views need meaningful defaults, readable alignment, stable column semantics, units,
+  sorting/filter state, overflow strategy, empty/loading/error states, and a compact-screen alternative
+  based on user priority—not a blind stack of every cell.
+- Empty states explain why the space is empty and offer the next relevant action. Loading preserves
+  layout where possible. Errors say what happened, what remains safe, and how to recover.
+
+## Treat mobile as a distinct composition
+Respect platform navigation, safe areas, keyboards, system bars, back behavior, permissions, and
+dynamic type. Place frequent actions within comfortable reach without obscuring content. Primary
+touch controls should usually be at least 44 x 44 logical pixels; never go below the applicable
+accessibility minimum or rely on tiny adjacent targets.
+
+Mobile is not desktop squeezed into one column. Reorder by priority, collapse secondary controls,
+replace hover-only behavior, choose deliberate sheet/dialog/navigation patterns, and preserve context
+through interruption, rotation, backgrounding, offline use, and process restoration where relevant.
+
+## Complete the interaction grammar
+For each reusable control, specify default, hover when supported, focus, pressed/active, selected,
+disabled, loading, success, and error behavior that applies. Use the same component for the same
+meaning. Motion should confirm cause and effect in roughly 150-250 ms for ordinary product actions;
+longer choreography must never delay task completion and must respect reduced-motion preferences.
+""",
+            ),
+            (
+                "visual-review.md",
+                """
+# Visual review
+
+Do not review only the component you remember changing. Review the complete affected path and its
+neighbors so local polish does not hide broken hierarchy or system drift.
+
+## Render a bounded evidence set
+1. Capture the actual target size plus at least one compact viewport around 390 px wide and one wide
+   viewport around 1440 px when web responsiveness is in scope. For native UI, use representative
+   supported devices and text scaling.
+2. Include realistic content: longest expected title/label, empty and populated data, validation
+   error, loading/disabled state, and localization expansion when relevant.
+3. Inspect keyboard order and visible focus, pointer/touch targets, contrast, reduced motion, zoom or
+   dynamic text, clipping, overflow, sticky/overlay collisions, image crop, and layout shift.
+4. Fix all material findings in one batch, then capture one confirmation pass. Stop after the bounded
+   confirmation unless a remaining defect is visible.
+
+## Ask these questions against the screenshots
+- Can a person identify the screen's purpose, current state, and primary action in five seconds?
+- Does the eye land where the design contract said it should, or do equal cards, badges, borders,
+  colors, and buttons compete at the same volume?
+- Is the direction specific to this subject, or would the same structure, palette, copy, and
+  decoration fit ten unrelated products?
+- Is there exactly one controlled signature idea, and does it survive at compact size without
+  hiding content or interaction?
+- Are spacing, alignment, type roles, radii, shadows, icon style, and state colors visibly coherent?
+- Is every visible element real, truthful, and useful? Remove filler copy, meaningless chips,
+  decorative metrics, unsupported claims, fake logos, and redundant containers.
+- Do compact layouts feel intentionally recomposed rather than shrunken or mechanically stacked?
+- Are controls recognizable and complete across interaction, failure, and accessibility states?
+
+Source review catches invalid tokens and component drift; screenshots catch visual truth. Require
+both when the environment supports rendering. Record any platform, viewport, state, or assistive
+behavior that could not be verified instead of silently claiming completion.
+""",
+            ),
+        ),
+    ),
+    BuiltinSkill(
         "server-application",
         "Use when changing a backend service, HTTP API, worker, webhook, queue consumer, or server framework lifecycle.",
         (
