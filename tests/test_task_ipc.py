@@ -29,6 +29,7 @@ from harness.ipc import (
 )
 from harness.knowledge import KnowledgeDraft, KnowledgeKind
 from harness.registry import create_project, register_workspace
+from harness.skill_runtime import reconcile_workspace_skills
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.tasks import TaskState, TaskWaitReason, get_task_stack_hints
 from harness.workspace_resolution import WorkspaceHint
@@ -321,6 +322,87 @@ def test_task_stack_hints_trigger_project_skill_projection(
                 raise AssertionError("Task stack hints did not trigger skill projection")
             time.sleep(0.02)
         assert "Build FastAPI services" in projected.read_text(encoding="utf-8")
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
+def test_task_stack_hints_remove_unrelated_stack_only_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(root, "add", "app.py")
+    _git(
+        root,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "commit",
+        "-m",
+        "add python stack",
+    )
+    registry = tmp_path / "skills"
+    language = registry / "language"
+    language.mkdir(parents=True)
+    (language / "SKILL.md").write_text(
+        "---\nname: language\ndescription: Python engineering.\n---\n\n# Language\n",
+        encoding="utf-8",
+    )
+    (language / "harness.yaml").write_text(
+        "id: language\napplies:\n  languages:\n    - python\n",
+        encoding="utf-8",
+    )
+    mobile = registry / "mobile"
+    mobile.mkdir()
+    (mobile / "SKILL.md").write_text(
+        "---\nname: mobile\ndescription: Expo engineering.\n---\n\n# Mobile\n",
+        encoding="utf-8",
+    )
+    (mobile / "harness.yaml").write_text(
+        "id: mobile\ntask_hints:\n  - expo\n",
+        encoding="utf-8",
+    )
+    integration_state = database.parent / "host-integrations.json"
+    integration_state.write_text(
+        json.dumps({"version": 1, "profiles": ["codex"]}) + "\n",
+        encoding="utf-8",
+    )
+    integration_state.chmod(0o600)
+    monkeypatch.setenv("HARNESS_SKILL_REGISTRY", str(registry))
+
+    connection = connect_database(database)
+    try:
+        scan_workspace(connection, workspace_id)
+        baseline = reconcile_workspace_skills(
+            connection,
+            workspace_id,
+            ("codex",),
+            registry_root=registry,
+        )
+    finally:
+        connection.close()
+    assert baseline.selected_skill_ids == ("language",)
+    language_projection = root / ".agents" / "skills" / "language"
+    mobile_projection = root / ".agents" / "skills" / "mobile"
+    assert language_projection.is_dir()
+
+    socket_path = tmp_path / "s"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        request_task_start(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            title="Fix Expo APK",
+            stack_hints=("expo",),
+        )
+        deadline = time.monotonic() + 5.0
+        while not mobile_projection.is_dir() or language_projection.exists():
+            if future.done():
+                future.result()
+            if time.monotonic() >= deadline:
+                raise AssertionError("Task focus did not replace the stack-only skill projection")
+            time.sleep(0.02)
     finally:
         _stop_server(stop_event, executor, future)
 

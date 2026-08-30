@@ -92,6 +92,7 @@ class InstallResult:
     daemon_status: RuntimeDiagnosticsResult
     builtin_skills: BuiltinSkillSyncResult
     hosts: tuple[HostInstallResult, ...] = ()
+    unavailable_workspaces: tuple[WorkspaceRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +109,7 @@ class UninstallResult:
     skill_cleanup: SkillCleanupResult
     purged: bool
     hosts: tuple[HostUninstallResult, ...] = ()
+    unavailable_workspaces: tuple[WorkspaceRecord, ...] = ()
 
 
 def install_harness(
@@ -160,10 +162,11 @@ def install_harness(
             "remove one of Claude Code, Codex, or Cursor before installing the other two"
         ) from exc
     preflight_workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
-    hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
+    live_preflight, _unavailable_preflight = _partition_registered_workspaces(preflight_workspaces)
+    hidden_workspace_roots = _live_hidden_workspace_roots(paths)
     for adapter in selected:
         if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            for workspace in preflight_workspaces:
+            for workspace in live_preflight:
                 if isinstance(adapter, CodexAdapter):
                     adapter.preflight_project_reconcile(
                         workspace.workspace_root,
@@ -183,10 +186,11 @@ def install_harness(
         raise InstallationError("Harness daemon could not be prepared") from exc
 
     workspaces = _registered_workspaces(paths)
-    hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
+    live_workspaces, unavailable_workspaces = _partition_registered_workspaces(workspaces)
+    hidden_workspace_roots = _live_hidden_workspace_roots(paths)
     for adapter in selected:
         if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            for workspace in workspaces:
+            for workspace in live_workspaces:
                 if isinstance(adapter, CodexAdapter):
                     adapter.preflight_project_reconcile(
                         workspace.workspace_root,
@@ -206,7 +210,7 @@ def install_harness(
         runtime_manual = 0
         manual_commands: list[str] = []
         if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            for workspace in workspaces:
+            for workspace in live_workspaces:
                 if isinstance(adapter, CodexAdapter):
                     project_change = adapter.reconcile_project(
                         workspace.workspace_root,
@@ -216,7 +220,7 @@ def install_harness(
                     project_change = adapter.reconcile_project(workspace.workspace_root)
                 project_changes += int(project_change is IntegrationChange.CHANGED)
         if isinstance(adapter, CursorAdapter):
-            for workspace in workspaces:
+            for workspace in live_workspaces:
                 runtime = adapter.enable_and_verify_project_mcp(
                     workspace.workspace_root, environment=environment
                 )
@@ -250,8 +254,8 @@ def install_harness(
         profiles_after_install = tuple(
             profile for profile in _SUPPORTED_HOSTS if profile in active_after_install
         )
-        if workspaces and profiles_after_install:
-            _reconcile_remaining_profiles(paths, workspaces, profiles_after_install)
+        if live_workspaces and profiles_after_install:
+            _reconcile_remaining_profiles(paths, live_workspaces, profiles_after_install)
             for hidden_root in _hidden_project_representative_roots(paths):
                 request_set_visibility(paths.socket, hidden_root, "hidden")
     except (HostIntegrationError, IpcError) as exc:
@@ -272,6 +276,7 @@ def install_harness(
         daemon_status=daemon_status,
         builtin_skills=builtin_skills,
         hosts=tuple(results),
+        unavailable_workspaces=unavailable_workspaces,
     )
 
 
@@ -305,9 +310,10 @@ def uninstall_harness(
         _preflight_skill_registry_purge(environment)
 
     workspaces = _registered_workspaces(paths) if paths.database.exists() else ()
+    live_workspaces, unavailable_workspaces = _partition_registered_workspaces(workspaces)
     for adapter in selected:
         if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            for workspace in workspaces:
+            for workspace in live_workspaces:
                 adapter.preflight_project_remove(workspace.workspace_root)
 
     active = _active_profiles(
@@ -330,7 +336,7 @@ def uninstall_harness(
             environment=environment,
             python_executable=python_executable,
         )
-        for workspace in workspaces:
+        for workspace in live_workspaces:
             state = remaining_cursor.project_registration_state(workspace.workspace_root)
             if state is not HostRegistrationState.CURRENT:
                 raise InstallationError(
@@ -347,8 +353,8 @@ def uninstall_harness(
             raise InstallationError(
                 "remaining Codex host cannot be verified because the Codex CLI was not found on PATH"
             )
-        hidden_workspace_roots = _registered_hidden_workspace_roots(paths)
-        for workspace in workspaces:
+        hidden_workspace_roots = _live_hidden_workspace_roots(paths)
+        for workspace in live_workspaces:
             state = remaining_codex.project_registration_state(
                 workspace.workspace_root,
                 hidden=workspace.workspace_root in hidden_workspace_roots,
@@ -383,13 +389,14 @@ def uninstall_harness(
                 HostUninstallResult(adapter.profile, IntegrationChange.UNCHANGED)
                 for adapter in selected
             ),
+            unavailable_workspaces=unavailable_workspaces,
         )
 
     try:
         _ensure_current_daemon(paths, environment)
         cleanup = request_skill_cleanup(paths.socket, tuple(sorted(active or selected_profiles)))
         if remaining:
-            reconciled = _reconcile_remaining_profiles(paths, workspaces, remaining)
+            reconciled = _reconcile_remaining_profiles(paths, live_workspaces, remaining)
             cleanup = _combined_cleanup(cleanup, reconciled)
     except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
         raise InstallationError(
@@ -401,7 +408,7 @@ def uninstall_harness(
         if not isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
             continue
         project_changes = 0
-        for workspace in workspaces:
+        for workspace in live_workspaces:
             project_changes += int(
                 adapter.remove_project(workspace.workspace_root) is IntegrationChange.CHANGED
             )
@@ -446,6 +453,7 @@ def uninstall_harness(
         skill_cleanup=cleanup,
         purged=purge,
         hosts=tuple(results),
+        unavailable_workspaces=unavailable_workspaces,
     )
 
 
@@ -560,16 +568,58 @@ def _registered_workspaces(paths: RuntimePaths) -> tuple[WorkspaceRecord, ...]:
         raise InstallationError("registered Workspaces could not be enumerated") from exc
 
 
+def _live_workspace_root(path: Path) -> Path | None:
+    """Return the resolved directory for a registered root, or None when it is gone."""
+    try:
+        root = path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not root.is_dir():
+        return None
+    return root
+
+
+def _partition_registered_workspaces(
+    workspaces: tuple[WorkspaceRecord, ...],
+) -> tuple[tuple[WorkspaceRecord, ...], tuple[WorkspaceRecord, ...]]:
+    """Split registered rows into live directories versus unavailable roots.
+
+    Install/uninstall mutate project config only on live checkouts. Missing roots stay
+    in the registry for doctor to report as unavailable; they must not fail host refresh.
+    """
+    live: list[WorkspaceRecord] = []
+    unavailable: list[WorkspaceRecord] = []
+    for workspace in workspaces:
+        if _live_workspace_root(workspace.workspace_root) is None:
+            unavailable.append(workspace)
+        else:
+            live.append(workspace)
+    return tuple(live), tuple(unavailable)
+
+
+def _live_hidden_workspace_roots(paths: RuntimePaths) -> frozenset[Path]:
+    """Return currently resolvable Hidden Workspace roots."""
+    return frozenset(
+        root
+        for root in _registered_hidden_workspace_roots(paths)
+        if _live_workspace_root(root) is not None
+    )
+
+
 def _registered_hidden_workspace_roots(paths: RuntimePaths) -> frozenset[Path]:
-    """Return live registration roots whose Project is already Hidden."""
+    """Return registered Workspace roots whose Project is already Hidden."""
     return frozenset(root for _, root in _registered_hidden_project_roots(paths))
 
 
 def _hidden_project_representative_roots(paths: RuntimePaths) -> tuple[Path, ...]:
-    """Return one deterministic Workspace root for each registered Hidden Project."""
+    """Return one deterministic live Workspace root for each registered Hidden Project."""
     representatives: dict[str, Path] = {}
     for project_id, root in _registered_hidden_project_roots(paths):
-        representatives.setdefault(project_id, root)
+        if project_id in representatives:
+            continue
+        if _live_workspace_root(root) is None:
+            continue
+        representatives[project_id] = root
     return tuple(representatives.values())
 
 

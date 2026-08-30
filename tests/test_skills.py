@@ -92,6 +92,7 @@ def _write_skill(
     languages: tuple[str, ...] = (),
     dependencies: tuple[str, ...] = (),
     manifests: tuple[str, ...] = (),
+    facets: tuple[str, ...] = (),
     task_hints: tuple[str, ...] = (),
     skill_text: str | None = None,
     extra_files: dict[str, str] | None = None,
@@ -103,12 +104,13 @@ def _write_skill(
         encoding="utf-8",
     )
     lines = [f"id: {skill_id}"]
-    if languages or dependencies or manifests:
+    if languages or dependencies or manifests or facets:
         lines.append("applies:")
         for key, values in (
             ("languages", languages),
             ("dependencies", dependencies),
             ("manifests", manifests),
+            ("facets", facets),
         ):
             if values:
                 lines.append(f"  {key}:")
@@ -155,6 +157,7 @@ def test_default_registry_and_strict_metadata_loading(tmp_path: Path) -> None:
         languages=("python",),
         dependencies=("fastapi",),
         manifests=("pyproject.toml",),
+        facets=("backend-service",),
         task_hints=("fastapi", "python-api"),
         extra_files={"references/notes.md": "details\n"},
     )
@@ -167,6 +170,7 @@ def test_default_registry_and_strict_metadata_loading(tmp_path: Path) -> None:
     assert definition.applies.languages == ("python",)
     assert definition.applies.dependencies == ("fastapi",)
     assert definition.applies.manifests == ("pyproject.toml",)
+    assert definition.applies.facets == ("backend-service",)
     assert definition.task_hints == ("fastapi", "python-api")
     assert definition.portable_files == (
         PurePosixPath("SKILL.md"),
@@ -220,6 +224,156 @@ def test_resolver_selects_only_relevant_legacy_stack(tmp_path: Path) -> None:
     assert _ids(resolved) == ("nextjs", "playwright", "postgres")
 
 
+def test_stack_detection_recognizes_static_frontend_sources(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "index.html": "<main>Home</main>\n",
+            "styles/site.scss": "main { display: block; }\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert stack.languages == frozenset({"css", "html"})
+    assert {"software-project", "web-frontend"} <= stack.facets
+
+
+def test_stack_detection_classifies_expo_as_mobile_not_web(tmp_path: Path) -> None:
+    package = {
+        "dependencies": {
+            "expo": "55.0.0",
+            "react": "19.0.0",
+            "react-dom": "19.0.0",
+            "react-native": "0.83.0",
+            "react-native-web": "0.22.0",
+        }
+    }
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "mobile/package.json": json.dumps(package),
+            "mobile/src/global.css": "body { color: black; }\n",
+            "mobile/stitch_design/code.html": "<main>design export</main>\n",
+            "mobile/src/app.tsx": "export default function App() { return null }\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {"expo", "react-dom", "react-native"} <= stack.dependencies
+    assert {"mobile-app", "software-project"} <= stack.facets
+    assert "web-frontend" not in stack.facets
+
+
+def test_stack_detection_keeps_web_and_mobile_facets_for_real_monorepo(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "apps/mobile/package.json": json.dumps(
+                {"dependencies": {"expo": "55", "react-native": "0.83", "react-dom": "19"}}
+            ),
+            "apps/site/package.json": json.dumps(
+                {"dependencies": {"next": "16", "react": "19", "react-dom": "19"}}
+            ),
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {"mobile-app", "software-project", "web-frontend"} <= stack.facets
+
+
+def test_stack_detection_reads_composer_and_detects_laravel_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "composer.json": json.dumps(
+                {
+                    "require": {
+                        "php": "^8.4",
+                        "laravel/framework": "^12",
+                    },
+                    "require-dev": {"phpunit/phpunit": "^12"},
+                }
+            ),
+            "app/Http/Controllers/HomeController.php": "<?php\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {"laravel/framework", "phpunit/phpunit"} <= stack.dependencies
+    assert {"backend-service", "database-backed", "software-project"} <= stack.facets
+
+
+def test_stack_detection_uses_normalized_go_modules_for_backend_facets(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "go.mod": """\
+module example.invalid/service
+
+go 1.25
+
+require (
+    github.com/go-chi/chi/v5 v5.2.2
+    github.com/jackc/pgx/v5 v5.9.2
+)
+""",
+            "cmd/api/main.go": "package main\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "github-com/go-chi/chi/v5",
+        "github-com/jackc/pgx/v5",
+    } <= stack.dependencies
+    assert {"backend-service", "database-backed", "software-project"} <= stack.facets
+
+
+def test_stack_detection_recognizes_godot_shell_ci_and_deployment_facets(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "project.godot": '[application]\nconfig/name="Game"\n',
+            "src/player.gd": "extends Node\n",
+            "scripts/export.sh": "#!/bin/sh\nexit 0\n",
+            ".github/workflows/ci.yml": "name: ci\n",
+            "deploy/nginx.conf": "events {}\n",
+            "deploy/game.service": "[Service]\nExecStart=/srv/game\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {"gdscript", "shell"} <= stack.languages
+    assert {
+        "ci-pipeline",
+        "deployment-ops",
+        "godot-project",
+        "software-project",
+    } <= stack.facets
+
+
 def test_greenfield_task_hints_activate_skills_before_manifest_exists(tmp_path: Path) -> None:
     _, connection, workspace_id = _registered_workspace(tmp_path, {"README.md": "greenfield\n"})
     registry = tmp_path / "registry"
@@ -240,6 +394,48 @@ def test_greenfield_task_hints_activate_skills_before_manifest_exists(tmp_path: 
 
     assert hints == ("fastapi", "postgres")
     assert _ids(resolved) == ("fastapi", "postgres")
+
+
+def test_recognized_task_hints_suppress_unrelated_stack_only_skills(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    _write_skill(
+        registry,
+        "mobile",
+        facets=("mobile-app",),
+        task_hints=("expo", "android"),
+    )
+    _write_skill(
+        registry,
+        "server",
+        facets=("backend-service",),
+        task_hints=("fastapi",),
+    )
+    _write_skill(registry, "testing", facets=("software-project",))
+    definitions = load_skill_registry(registry)
+    stack = DetectedProjectStack(
+        languages=frozenset({"python", "typescript"}),
+        dependencies=frozenset({"expo", "fastapi"}),
+        manifests=frozenset({"package.json", "pyproject.toml"}),
+        facets=frozenset({"backend-service", "mobile-app", "software-project"}),
+    )
+
+    assert _ids(resolve_skills(definitions, stack)) == ("mobile", "server", "testing")
+    assert _ids(resolve_skills(definitions, stack, task_hints=("expo",))) == ("mobile",)
+    assert _ids(
+        resolve_skills(
+            definitions,
+            stack,
+            task_hints=("expo",),
+            explicit_include=("server",),
+        )
+    ) == ("server", "mobile")
+
+    # Novel hints must not accidentally remove the applicable project baseline.
+    assert _ids(resolve_skills(definitions, stack, task_hints=("apk-signing",))) == (
+        "mobile",
+        "server",
+        "testing",
+    )
 
 
 def test_manifest_detection_fails_closed_when_index_is_stale(tmp_path: Path) -> None:

@@ -341,7 +341,29 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 
 ## 14. Skills architecture
 
-Canonical Harness skill registry lives outside repositories. The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Same-id unknown or user-modified canonical content is never overwritten.
+Canonical Harness skill registry lives outside repositories. The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten.
+
+The quality baseline includes explicit local/test/production container operations, Google/Yandex
+public-route discoverability and web performance, project architecture, legacy compatibility,
+language-native correctness/tooling, and durable data integrity. Stack-derived applicability keeps
+language and domain guidance automatic after manifests/source appear; Task hints cover greenfield
+and intent-only work before deterministic stack evidence exists. Dependency matching retains the
+existing portable exact-token contract, while deterministic derived facets capture cross-signal
+project roles such as `web-frontend`, `mobile-app`, `backend-service`, `godot-project`, and
+`deployment-ops`. Facets are calculated with manifest locality where needed: an Expo/React Native
+package is mobile even when its compatibility dependencies include React DOM, and it does not make
+`public-frontend` relevant unless independent web evidence exists. `secure-by-design` applies to
+detected software projects and progressively routes to web/backend, browser, mobile,
+infrastructure/supply-chain, and verification controls; it reduces risk but never claims that a
+system cannot be compromised.
+
+Stack evidence describes the whole Workspace, not necessarily the current change. When at least one
+non-excluded skill recognizes the current Task `stack_hints`, the resolver treats those matches as a
+focus boundary: it projects the task-matched skills plus explicit inclusions and omits unrelated
+stack-only matches. If no skill recognizes the hints, it retains the stack-derived baseline rather
+than accidentally projecting nothing for a novel hint. Built-in descriptions state when the host
+should load each projected skill, so host-native progressive disclosure remains discriminating even
+inside the focused subset.
 
 Projection is host-native and owned by adapters.
 
@@ -409,7 +431,7 @@ Responsibilities:
 
 Adapters must be idempotent and preserve unknown user configuration.
 
-The implemented Linux/POSIX installation slice supports Claude Code, local Codex CLI/IDE/desktop project config, and local Cursor IDE/CLI. `harness install --host claude-code|codex|cursor|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` remains Claude Code. `--host all` install is rejected because the three-host skill graph is incompatible; uninstall-all remains supported. Claude uses the official `claude mcp` CLI and `CLAUDE_PROJECT_DIR`. Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with explicit absolute `cwd` and `HARNESS_WORKSPACE_ROOT`; Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Codex/Cursor processes without their required root list no tools. Tracked project configs are manual-adoption/removal only; generated configs and markers use Git-local exclusions. The Harness source checkout has tracked `harness-dev` overlays for Codex and Cursor; both launch `scripts/dev harness mcp` against checkout-local state, and production lifecycle never rewrites them.
+The implemented Linux/POSIX installation slice supports Claude Code, local Codex CLI/IDE/desktop project config, and local Cursor IDE/CLI. `harness install --host claude-code|codex|cursor|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` remains Claude Code. `--host all` install is rejected because the three-host skill graph is incompatible; uninstall-all remains supported. Claude uses the official `claude mcp` CLI and `CLAUDE_PROJECT_DIR`. Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with explicit absolute `cwd` and `HARNESS_WORKSPACE_ROOT`; Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Codex/Cursor processes without their required root list no tools. Tracked project configs are manual-adoption/removal only; generated configs and markers use Git-local exclusions. The Harness source checkout has tracked `harness-dev` overlays for Codex and Cursor; both launch `scripts/dev harness mcp` against checkout-local state, and production lifecycle never rewrites them.
 
 `harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Claude registration, Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio and installed-wheel tests prove Claude → Codex → Cursor continuity and cross-interpreter project-config refresh; proprietary-host acceptance remains a separate gate.
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import harness.entrypoints as entrypoints
+from harness.builtin_skills import BUILTIN_SKILLS
 from harness.doctor import DoctorCheck, DoctorReport, DoctorSeverity, SystemDoctorReport
 from harness.entrypoints import harness_main, harnessd_main
 from harness.ipc import (
@@ -646,8 +647,8 @@ def test_harness_skills_sync_and_validate_builtin_quality_pack(
     monkeypatch.setattr(sys, "argv", ["harness", "skills", "sync"])
     assert harness_main() == 0
     out = capsys.readouterr().out
-    assert "Built-in skills: 12" in out
-    assert "Installed: 12" in out
+    assert f"Built-in skills: {len(BUILTIN_SKILLS)}" in out
+    assert f"Installed: {len(BUILTIN_SKILLS)}" in out
     monkeypatch.setattr(sys, "argv", ["harness", "skills", "validate"])
     assert harness_main() == 0
     out = capsys.readouterr().out

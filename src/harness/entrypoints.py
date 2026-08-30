@@ -39,6 +39,7 @@ from harness.ipc import (
     request_workspace_skills_reconcile,
     request_workspace_status,
 )
+from harness.registry import WorkspaceRecord
 from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
@@ -553,6 +554,14 @@ def _run_visibility(
     return 0
 
 
+def _print_unavailable_workspaces(workspaces: tuple[WorkspaceRecord, ...]) -> None:
+    if not workspaces:
+        return
+    print(f"Unavailable workspaces skipped: {len(workspaces)}")
+    for workspace in workspaces:
+        print(f"  {workspace.workspace_id} ({workspace.workspace_root})")
+
+
 def _run_install(*, host: str) -> int:
     blocked = _isolated_development_host_lifecycle_error()
     if blocked is not None:
@@ -601,6 +610,7 @@ def _run_install(*, host: str) -> int:
         or codex_result.project_change_count
     ):
         _print_codex_reload_guidance(expect_harness=True)
+    _print_unavailable_workspaces(result.unavailable_workspaces)
     print("Harness install: OK")
     return 0
 
@@ -641,6 +651,7 @@ def _run_uninstall(*, host: str, purge: bool) -> int:
         or codex_result.project_change_count
     ):
         _print_codex_reload_guidance(expect_harness=False)
+    _print_unavailable_workspaces(result.unavailable_workspaces)
     print("Harness uninstall: OK")
     return 0
 

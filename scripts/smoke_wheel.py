@@ -859,7 +859,7 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 1" not in scan_a.stdout:
+            if "Relevant skills: 4" not in scan_a.stdout:
                 raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
 
             independent_project = workspace / "installed-independent-project"
@@ -869,7 +869,7 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 1" not in scan_c.stdout:
+            if "Relevant skills: 4" not in scan_c.stdout:
                 raise RuntimeError(
                     f"installed independent Workspace scan was unexpected: {scan_c.stdout!r}"
                 )
@@ -927,13 +927,16 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 1" not in scan_b.stdout:
+            if "Relevant skills: 4" not in scan_b.stdout:
                 raise RuntimeError(f"installed worktree-B scan was unexpected: {scan_b.stdout!r}")
             codex_project_b = lifecycle_worktree / ".codex" / "config.toml"
             _require_codex_config(codex_project_b, python, lifecycle_worktree)
             codex_projected_skill = lifecycle_project / ".agents" / "skills" / "python-helper"
             if not (codex_projected_skill / "SKILL.md").is_file():
                 raise RuntimeError("Codex skill projection is missing")
+            codex_language_skill = lifecycle_project / ".agents" / "skills" / "language-engineering"
+            if not (codex_language_skill / "references" / "python.md").is_file():
+                raise RuntimeError("Codex language reference projection is missing")
 
             upgrade_venv = workspace / "upgrade-venv"
             _run(
@@ -982,6 +985,11 @@ raise SystemExit(2)
             lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
             if not (lifecycle_projected_skill / "SKILL.md").is_file():
                 raise RuntimeError("Claude skill projection is missing")
+            claude_language_skill = (
+                lifecycle_project / ".claude" / "skills" / "language-engineering"
+            )
+            if not (claude_language_skill / "references" / "python.md").is_file():
+                raise RuntimeError("Claude language reference projection is missing")
             lifecycle_harness = upgraded_harness
 
             _cross_host_mcp(

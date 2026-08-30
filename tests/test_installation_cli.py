@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_agent
 
+from harness.builtin_skills import BUILTIN_SKILLS
 from harness.entrypoints import harness_main
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.registry import VisibilityMode, create_project, register_workspace
@@ -122,7 +123,8 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert harness_main() == 0
     install_output = capsys.readouterr().out
     assert "MCP registration: changed" in install_output
-    assert "Built-in skills: 12 (installed 12, updated 0)" in install_output
+    expected = len(BUILTIN_SKILLS)
+    assert f"Built-in skills: {expected} (installed {expected}, updated 0)" in install_output
     assert (home / ".harness" / "skills" / "backend-security" / "SKILL.md").is_file()
     assert "Harness install: OK" in install_output
     registration = json.loads(claude_state.read_text(encoding="utf-8"))
@@ -142,8 +144,14 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
-    assert "Relevant skills: 1" in scan_output
+    assert "Relevant skills: 4" in scan_output
     assert (repo / ".claude" / "skills" / "python-helper" / "SKILL.md").exists()
+    language_skill = repo / ".claude" / "skills" / "language-engineering"
+    assert (language_skill / "references" / "python.md").exists()
+    secure_skill = repo / ".claude" / "skills" / "secure-by-design"
+    assert (secure_skill / "references" / "verification.md").exists()
+    testing_skill = repo / ".claude" / "skills" / "testing-strategy"
+    assert (testing_skill / "SKILL.md").exists()
 
     monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
     assert harness_main() == 0
@@ -164,11 +172,14 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall"])
     assert harness_main() == 0
     uninstall_output = capsys.readouterr().out
-    assert "Generated skills removed: 1" in uninstall_output
+    assert "Generated skills removed: 4" in uninstall_output
     assert "Project Intelligence: preserved" in uninstall_output
     assert not claude_state.exists()
     assert not integration_state.exists()
     assert not (repo / ".claude" / "skills" / "python-helper").exists()
+    assert not language_skill.exists()
+    assert not secure_skill.exists()
+    assert not testing_skill.exists()
     assert paths.database.exists()
     assert not paths.socket.exists()
 
@@ -942,6 +953,69 @@ def test_cursor_install_enables_independent_workspaces_and_linked_worktree(
     assert "Cursor project MCP overrides: OK" in doctor_output
     assert "Cursor project MCP tools: OK" in doctor_output
     assert "no user-harness" in doctor_output
+
+
+def test_cursor_install_skips_deleted_registered_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude_state = tmp_path / "claude-state.json"
+    _fake_claude(fake_bin, claude_state)
+    agent_state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, agent_state)
+    _skill_registry(home)
+    kept = tmp_path / "kept"
+    gone = tmp_path / "gone"
+    _repo(kept)
+    _repo(gone)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("FAKE_CLAUDE_STATE", str(claude_state))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(agent_state))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    gone_workspace_id = ""
+    for root in (kept, gone):
+        monkeypatch.setattr(sys, "argv", ["harness", "scan", str(root)])
+        assert harness_main() == 0
+        scan_output = capsys.readouterr().out
+        if root == gone:
+            for line in scan_output.splitlines():
+                if line.startswith("Workspace: "):
+                    gone_workspace_id = line.split()[1]
+                    break
+    shutil.rmtree(gone)
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    install_output = capsys.readouterr().out
+    assert "Unavailable workspaces skipped: 1" in install_output
+    assert gone_workspace_id
+    assert f"{gone_workspace_id} ({gone.resolve()})" in install_output
+    assert "Harness install: OK" in install_output
+    assert (kept / ".cursor" / "mcp.json").is_file()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "cursor"])
+    assert harness_main() == 0
+    uninstall_output = capsys.readouterr().out
+    assert "Unavailable workspaces skipped: 1" in uninstall_output
+    assert "Harness uninstall: OK" in uninstall_output
+    assert not (kept / ".cursor" / "mcp.json").exists()
 
 
 def test_uninstall_claude_reprojects_skills_for_remaining_cursor(

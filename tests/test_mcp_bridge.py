@@ -573,6 +573,8 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "Russian" in instructions[:512]
                 assert "title" in instructions[:512]
                 assert "next_step" in instructions[:512]
+                assert "stack_hints" in instructions[:512]
+                assert "task-focused" in instructions[:512]
                 assert "durable SCM mutations" in instructions
                 assert "briefly" in instructions
                 assert "unchanged source" in instructions
@@ -592,6 +594,7 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                     assert tool["inputSchema"]["additionalProperties"] is False
                 by_name = {tool["name"]: tool for tool in tools}
                 assert "Russian" in by_name["task_start"]["description"]
+                assert "affected technologies" in by_name["task_start"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]

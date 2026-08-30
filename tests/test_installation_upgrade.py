@@ -9,6 +9,7 @@ import harness.installation as installation
 import harness.storage as storage
 from harness.installation import InstallationError
 from harness.ipc import IpcRemoteError, RuntimeDiagnosticsResult, ShutdownResult, StatusResult
+from harness.registry import WorkspaceRecord
 from harness.runtime_identity import RuntimeIdentity
 from harness.runtime_paths import RuntimePaths
 from harness.storage import SCHEMA_VERSION, initialize_database
@@ -281,3 +282,40 @@ def test_registered_workspaces_returns_empty_before_workspaces_table_exists(
     )
 
     assert workspaces == ()
+
+
+def test_partition_registered_workspaces_skips_unresolvable_roots(tmp_path: Path) -> None:
+    live_root = tmp_path / "live"
+    live_root.mkdir()
+    missing_root = tmp_path / "missing"
+    file_root = tmp_path / "not-a-dir"
+    file_root.write_text("file\n", encoding="utf-8")
+    live = WorkspaceRecord("live-id", "project", live_root, live_root)
+    missing = WorkspaceRecord("missing-id", "project", missing_root, missing_root)
+    as_file = WorkspaceRecord("file-id", "project", file_root, file_root)
+
+    live_workspaces, unavailable = installation._partition_registered_workspaces(
+        (live, missing, as_file)
+    )
+
+    assert live_workspaces == (live,)
+    assert unavailable == (missing, as_file)
+
+
+def test_hidden_project_representative_roots_prefers_live_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = tmp_path / "live"
+    live.mkdir()
+    missing = tmp_path / "missing"
+    monkeypatch.setattr(
+        installation,
+        "_registered_hidden_project_roots",
+        lambda _paths: (("project", missing), ("project", live), ("gone", missing)),
+    )
+
+    roots = installation._hidden_project_representative_roots(
+        RuntimePaths(tmp_path / "db", tmp_path / "sock")
+    )
+
+    assert roots == (live,)

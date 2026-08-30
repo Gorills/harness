@@ -43,11 +43,15 @@ _YAML_BLOCK_SCALAR_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s
 _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".c": "c",
     ".cc": "cpp",
+    ".css": "css",
     ".cpp": "cpp",
     ".cs": "csharp",
     ".cxx": "cpp",
     ".go": "go",
+    ".gd": "gdscript",
     ".h": "c",
+    ".htm": "html",
+    ".html": "html",
     ".hpp": "cpp",
     ".java": "java",
     ".js": "javascript",
@@ -61,11 +65,111 @@ _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".pyi": "python",
     ".rb": "ruby",
     ".rs": "rust",
+    ".sass": "css",
+    ".scss": "css",
+    ".sh": "shell",
     ".sql": "sql",
     ".swift": "swift",
     ".ts": "typescript",
     ".tsx": "typescript",
+    ".vue": "vue",
+    ".svelte": "svelte",
 }
+
+_MOBILE_DEPENDENCIES = frozenset(
+    {
+        "@capacitor/core",
+        "@ionic/react",
+        "@ionic/vue",
+        "expo",
+        "flutter",
+        "react-native",
+    }
+)
+_NATIVE_UI_DEPENDENCIES = frozenset({"expo", "react-native"})
+_WEB_FRAMEWORK_DEPENDENCIES = frozenset(
+    {
+        "@angular/core",
+        "@builder.io/qwik",
+        "@remix-run/react",
+        "@sveltejs/kit",
+        "astro",
+        "gatsby",
+        "lit",
+        "next",
+        "nuxt",
+        "preact",
+        "solid-js",
+        "svelte",
+        "vue",
+    }
+)
+_GENERIC_WEB_DEPENDENCIES = frozenset(
+    {
+        "@vitejs/plugin-react",
+        "@vue/cli-service",
+        "laravel-mix",
+        "react-dom",
+        "react-scripts",
+        "vite",
+        "webpack",
+    }
+)
+_BACKEND_DEPENDENCIES = frozenset(
+    {
+        "@nestjs/core",
+        "aiohttp",
+        "django",
+        "express",
+        "fastapi",
+        "fastify",
+        "flask",
+        "github-com/go-chi/chi/v5",
+        "github-com/gofiber/fiber/v2",
+        "github-com/labstack/echo/v4",
+        "github-com/gin-gonic/gin",
+        "laravel/framework",
+        "litestar",
+        "rails",
+        "sanic",
+        "sinatra",
+        "starlette",
+        "symfony/framework-bundle",
+    }
+)
+_DATABASE_DEPENDENCIES = frozenset(
+    {
+        "@prisma/client",
+        "alembic",
+        "django",
+        "drizzle-orm",
+        "github-com/golang-migrate/migrate/v4",
+        "github-com/jackc/pgx/v5",
+        "gorm-io/gorm",
+        "laravel/framework",
+        "mongodb",
+        "mongoose",
+        "mysqlclient",
+        "pg",
+        "prisma",
+        "psycopg",
+        "psycopg2",
+        "redis",
+        "sequelize",
+        "sqlalchemy",
+        "typeorm",
+    }
+)
+_SOFTWARE_MANIFEST_NAMES = frozenset(
+    {
+        "cargo.toml",
+        "composer.json",
+        "go.mod",
+        "package.json",
+        "project.godot",
+        "pyproject.toml",
+    }
+)
 
 
 class SkillError(RuntimeError):
@@ -93,6 +197,7 @@ class SkillApplicability:
     languages: tuple[str, ...]
     dependencies: tuple[str, ...]
     manifests: tuple[str, ...]
+    facets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +217,7 @@ class DetectedProjectStack:
     languages: frozenset[str]
     dependencies: frozenset[str]
     manifests: frozenset[str]
+    facets: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +415,8 @@ def detect_workspace_stack(
     languages: set[str] = set()
     dependencies: set[str] = set()
     manifests: set[str] = set()
+    facets: set[str] = set()
+    has_web_source = False
 
     for record in records:
         _require_resolution_deadline(deadline)
@@ -317,26 +425,45 @@ def detect_workspace_stack(
         language = _LANGUAGE_SUFFIXES.get(suffix)
         if language is not None:
             languages.add(language)
+            has_web_source = has_web_source or language in {
+                "css",
+                "html",
+                "svelte",
+                "vue",
+            }
         manifests.add(path.as_posix().casefold())
         manifests.add(path.name.casefold())
+        facets.update(_path_facets(path))
         if record.kind is not IndexedFileKind.FILE:
             continue
         name = path.name.casefold()
+        manifest_dependencies: set[str] = set()
         if name == "package.json":
-            dependencies.update(_package_json_dependencies(workspace, record, deadline=deadline))
+            manifest_dependencies = _package_json_dependencies(workspace, record, deadline=deadline)
+            facets.update(_package_json_facets(manifest_dependencies))
         elif name == "pyproject.toml":
-            dependencies.update(_pyproject_dependencies(workspace, record, deadline=deadline))
+            manifest_dependencies = _pyproject_dependencies(workspace, record, deadline=deadline)
         elif name.startswith("requirements") and name.endswith(".txt"):
-            dependencies.update(_requirements_dependencies(workspace, record, deadline=deadline))
+            manifest_dependencies = _requirements_dependencies(workspace, record, deadline=deadline)
         elif name == "cargo.toml":
-            dependencies.update(_cargo_dependencies(workspace, record, deadline=deadline))
+            manifest_dependencies = _cargo_dependencies(workspace, record, deadline=deadline)
         elif name == "go.mod":
-            dependencies.update(_go_mod_dependencies(workspace, record, deadline=deadline))
+            manifest_dependencies = _go_mod_dependencies(workspace, record, deadline=deadline)
+        elif name == "composer.json":
+            manifest_dependencies = _composer_dependencies(workspace, record, deadline=deadline)
+        dependencies.update(manifest_dependencies)
+        facets.update(_dependency_facets(manifest_dependencies))
+
+    if has_web_source and "mobile-app" not in facets:
+        facets.add("web-frontend")
+    if languages:
+        facets.add("software-project")
 
     return DetectedProjectStack(
         languages=frozenset(languages),
         dependencies=frozenset(dependencies),
         manifests=frozenset(manifests),
+        facets=frozenset(facets),
     )
 
 
@@ -382,7 +509,14 @@ def resolve_skills(
     explicit_exclude: Iterable[str] = (),
     policy: SkillResolutionPolicy | None = None,
 ) -> tuple[ResolvedSkill, ...]:
-    """Select a deterministic bounded relevant subset from the canonical registry."""
+    """Select a deterministic bounded relevant subset from the canonical registry.
+
+    A Task hint is direct evidence about the current work, while detected stack is only evidence
+    that a skill could be useful somewhere in the Workspace. Once at least one non-excluded skill
+    recognizes the current Task hints, keep that task-focused set plus explicit inclusions instead
+    of projecting every unrelated surface in a polyglot Workspace. If no skill recognizes the
+    hints, retain stack-based resolution so an incomplete or novel hint cannot empty the baseline.
+    """
     effective_policy = SkillResolutionPolicy() if policy is None else policy
     by_id = {definition.skill_id: definition for definition in definitions}
     if len(by_id) != len(definitions):
@@ -401,7 +535,7 @@ def resolve_skills(
     if len(include) > effective_policy.max_visible_skills:
         raise SkillResolutionError("explicit skills exceed the configured model-visible budget")
 
-    matched: list[tuple[tuple[int, int, int, int, int], ResolvedSkill]] = []
+    matched: list[tuple[tuple[int, int, int, int, int, int], ResolvedSkill]] = []
     for definition in definitions:
         if definition.skill_id in exclude:
             continue
@@ -409,26 +543,37 @@ def resolve_skills(
         dependency_matches = sorted(set(definition.applies.dependencies) & stack.dependencies)
         manifest_matches = sorted(set(definition.applies.manifests) & stack.manifests)
         language_matches = sorted(set(definition.applies.languages) & stack.languages)
+        facet_matches = sorted(set(definition.applies.facets) & stack.facets)
         explicit = definition.skill_id in include
         if not (
-            explicit or task_matches or dependency_matches or manifest_matches or language_matches
+            explicit
+            or task_matches
+            or facet_matches
+            or dependency_matches
+            or manifest_matches
+            or language_matches
         ):
             continue
         reasons: list[str] = []
         if explicit:
             reasons.append("explicit")
         reasons.extend(f"task_hint:{value}" for value in task_matches)
+        reasons.extend(f"facet:{value}" for value in facet_matches)
         reasons.extend(f"dependency:{value}" for value in dependency_matches)
         reasons.extend(f"manifest:{value}" for value in manifest_matches)
         reasons.extend(f"language:{value}" for value in language_matches)
         priority = (
             1 if explicit else 0,
             len(task_matches),
+            len(facet_matches),
             len(dependency_matches),
             len(manifest_matches),
             len(language_matches),
         )
         matched.append((priority, ResolvedSkill(definition, tuple(reasons))))
+
+    if hints and any(priority[1] > 0 for priority, _ in matched):
+        matched = [item for item in matched if item[0][0] > 0 or item[0][1] > 0]
 
     matched.sort(
         key=lambda item: (
@@ -437,6 +582,7 @@ def resolve_skills(
             -item[0][2],
             -item[0][3],
             -item[0][4],
+            -item[0][5],
             item[1].definition.skill_id,
         )
     )
@@ -944,7 +1090,12 @@ def _parse_metadata(
     text: str, directory_name: str
 ) -> tuple[str, SkillApplicability, tuple[str, ...]]:
     skill_id: str | None = None
-    applies: dict[str, list[str]] = {"languages": [], "dependencies": [], "manifests": []}
+    applies: dict[str, list[str]] = {
+        "languages": [],
+        "dependencies": [],
+        "manifests": [],
+        "facets": [],
+    }
     task_hints: list[str] = []
     section: str | None = None
     subsection: str | None = None
@@ -1010,10 +1161,11 @@ def _parse_metadata(
     languages = _normalize_unique_tokens(applies["languages"], "language")
     dependencies = _normalize_unique_tokens(applies["dependencies"], "dependency")
     manifests = _normalize_unique_manifests(applies["manifests"])
+    facets = _normalize_unique_tokens(applies["facets"], "facet")
     normalized_hints = _normalize_unique_tokens(task_hints, "task hint")
     return (
         skill_id,
-        SkillApplicability(languages, dependencies, manifests),
+        SkillApplicability(languages, dependencies, manifests, facets),
         normalized_hints,
     )
 
@@ -1072,6 +1224,86 @@ def _portable_tree_sha256(directory: Path, files: Sequence[PurePosixPath]) -> st
         digest.update(len(payload).to_bytes(8, "big"))
         digest.update(payload)
     return digest.hexdigest()
+
+
+def _path_facets(path: PurePosixPath) -> set[str]:
+    normalized = path.as_posix().casefold()
+    name = path.name.casefold()
+    suffix = path.suffix.casefold()
+    parts = {part.casefold() for part in path.parts}
+    facets: set[str] = set()
+    if (
+        name in _SOFTWARE_MANIFEST_NAMES
+        or (name.startswith("requirements") and name.endswith(".txt"))
+        or suffix in {".csproj", ".fsproj", ".sln"}
+    ):
+        facets.add("software-project")
+    if name == "project.godot":
+        facets.add("godot-project")
+    if name in {
+        "containerfile",
+        "docker-compose.yaml",
+        "docker-compose.yml",
+        "dockerfile",
+        "compose.yaml",
+        "compose.yml",
+    }:
+        facets.add("containerized")
+    if (
+        name == ".gitlab-ci.yml"
+        or name == "jenkinsfile"
+        or name == "azure-pipelines.yml"
+        or normalized.startswith(".github/workflows/")
+    ):
+        facets.add("ci-pipeline")
+    if (
+        name == "ansible.cfg"
+        or name == "nginx.conf"
+        or name.startswith("traefik")
+        or ("nginx" in parts and (suffix in {".conf", ".template"} or "nginx.conf" in name))
+        or ("traefik" in parts and suffix in {".toml", ".yaml", ".yml"})
+        or suffix == ".service"
+        or ("playbook" in name and suffix in {".yaml", ".yml"})
+    ):
+        facets.add("deployment-ops")
+    if (
+        name in {"androidmanifest.xml", "app.config.js", "app.config.ts", "eas.json"}
+        or suffix == ".xcodeproj"
+        or ".xcodeproj/" in normalized
+        or ("/android/" in f"/{normalized}" and name in {"build.gradle", "build.gradle.kts"})
+    ):
+        facets.add("mobile-app")
+    if facets & {
+        "ci-pipeline",
+        "containerized",
+        "deployment-ops",
+        "godot-project",
+        "mobile-app",
+    }:
+        facets.add("software-project")
+    return facets
+
+
+def _dependency_facets(dependencies: set[str]) -> set[str]:
+    facets: set[str] = set()
+    if dependencies & _BACKEND_DEPENDENCIES:
+        facets.add("backend-service")
+    if dependencies & _DATABASE_DEPENDENCIES:
+        facets.add("database-backed")
+    return facets
+
+
+def _package_json_facets(dependencies: set[str]) -> set[str]:
+    facets: set[str] = set()
+    mobile = bool(dependencies & _MOBILE_DEPENDENCIES)
+    native_ui = bool(dependencies & _NATIVE_UI_DEPENDENCIES)
+    if mobile:
+        facets.add("mobile-app")
+    if dependencies & _WEB_FRAMEWORK_DEPENDENCIES:
+        facets.add("web-frontend")
+    elif not native_ui and dependencies & _GENERIC_WEB_DEPENDENCIES:
+        facets.add("web-frontend")
+    return facets
 
 
 def _package_json_dependencies(
@@ -1242,6 +1474,41 @@ def _go_mod_dependencies(
         )
         if candidate:
             name = candidate.split()[0]
+            dependencies.add(_normalize_dependency(name))
+    return dependencies
+
+
+def _composer_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SkillResolutionError(
+            f"indexed composer.json is malformed: {record.relative_path}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise SkillResolutionError(
+            f"indexed composer.json is not an object: {record.relative_path}"
+        )
+    dependencies: set[str] = set()
+    for key in ("require", "require-dev"):
+        section = value.get(key, {})
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            raise SkillResolutionError(
+                f"composer.json {key} must be an object: {record.relative_path}"
+            )
+        for name in section:
+            if not isinstance(name, str):
+                raise SkillResolutionError(
+                    f"composer.json dependency name must be text: {record.relative_path}"
+                )
             dependencies.add(_normalize_dependency(name))
     return dependencies
 

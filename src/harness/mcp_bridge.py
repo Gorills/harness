@@ -63,8 +63,9 @@ _SERVER_INSTRUCTIONS = (
     f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
     "project_search across code, docs, Knowledge, and Task history; expand selected refs with "
     "project_context, then use native host tools. Start/resume a Harness task before meaningful "
-    "changes; checkpoint meaningful progress and address operator feedback. Before risky "
-    "cross-boundary work, inspect governing contracts/specs. Before publication, independently "
+    "changes; for a new Task pass only affected technologies and work kinds as stack_hints so "
+    "skills stay task-focused. Checkpoint meaningful progress and address operator feedback. "
+    "Before risky cross-boundary work, inspect governing contracts/specs. Before publication, independently "
     "review the complete change and run repository gates. Targeted native search remains allowed. "
     "Reply briefly: result first; use checkpoints for continuity; no task restatement, unchanged "
     "source, or file-by-file recap diffs. Mention only material decisions, risks, blockers, and "
@@ -487,7 +488,9 @@ def build_mcp_server() -> MCPServer:
         description=(
             "Create a new durable Harness task, or explicitly resume an existing task. A new "
             f"title is operator-facing {_OPERATOR_LANGUAGE}. Existing task mutations use "
-            "revision compare-and-set when required."
+            "revision compare-and-set when required. For a new Task, stack_hints should name "
+            "only affected technologies and work kinds (for example fastapi, alembic, expo, "
+            "apk, bugfix) so native skill projection stays task-focused."
         )
     )
     def task_start(

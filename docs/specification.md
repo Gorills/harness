@@ -1787,6 +1787,14 @@ godot/
 
 Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует существующие `task_hints`, без отдельного workflow DSL.
 
+Количество canonical built-ins не равно model-visible budget: resolver по-прежнему выбирает только
+релевантный bounded subset. Подробные stack/domain инструкции могут жить в portable
+`references/` и должны читаться skill'ом только для затронутого языка или режима. Quality pack
+покрывает как минимум Docker lifecycle/configuration, public frontend discoverability для Google и
+Яндекса, language-native engineering, project architecture, legacy preservation, data integrity,
+backend services, Expo/React Native mobile apps, Godot, deployment operations и secure-by-design
+архитектуру/верификацию для web, server, browser, mobile и supply chain.
+
 ---
 
 # 74. Skill principle
@@ -1816,6 +1824,9 @@ applies:
   manifests:
     - pyproject.toml
 
+  facets:
+    - backend-service
+
 task_hints:
   - fastapi
   - python-api
@@ -1836,6 +1847,19 @@ current Task stack_hints
 explicit project configuration
 
 ```
+
+`detected project stack` включает raw languages/dependencies/manifests и детерминированные derived
+facets. Facet объединяет несколько контекстных сигналов, когда один dependency неоднозначен.
+Например, `react-dom` внутри package с `expo`/`react-native` не классифицирует native app как
+`web-frontend`; отдельный web package в monorepo классифицирует Workspace одновременно как mobile и
+web. Facets не являются ручным workflow DSL и не заменяют `task_hints` для greenfield intent.
+
+Stack evidence описывает весь Workspace, а не обязательно текущую работу. Если хотя бы один
+неисключённый skill распознаёт `current Task stack_hints`, resolver оставляет task-matched skills и
+явные project inclusions, но не дополняет их нерелевантными stack-only skills из других частей
+polyglot/monorepo Workspace. Если ни один skill не распознал hints, resolver сохраняет stack-derived
+baseline: новый или неполный hint не должен случайно обнулить projection. Portable skill
+description должен кратко указывать, когда skill следует загружать host'у.
 
 ---
 
@@ -2628,6 +2652,33 @@ Unity
 FastAPI
 
 ```
+
+## 121.1 Contextual mobile/web relevance acceptance
+
+Expo/React Native package:
+
+```text
+expo
+react
+react-dom
+react-native
+react-native-web
+
+```
+
+и даже сохранённые CSS/HTML design artifacts не должны сами по себе активировать
+`public-frontend`. Resolver активирует `mobile-application`. Если отдельный package того же
+Workspace содержит однозначный web framework (например Next/Nuxt/SvelteKit), Workspace получает
+одновременно `mobile-app` и `web-frontend`, и оба surface skill остаются релевантными.
+
+## 121.2 Task-focused polyglot relevance acceptance
+
+Workspace одновременно содержит Expo/Android frontend и FastAPI/Alembic backend. Без распознанных
+Task hints resolver может materialize bounded stack baseline для обеих частей. Task с
+`stack_hints=[expo, android, apk, bugfix]` не должен получать server/data skills. Task с
+`stack_hints=[fastapi, alembic, database-migration]` не должен получать mobile skill. Явно
+включённый project skill остаётся выбранным, а полностью неизвестный hint возвращает безопасный
+stack baseline вместо пустого набора.
 
 ---
 
