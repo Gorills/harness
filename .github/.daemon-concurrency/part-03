@@ -1,6 +1,0 @@
-+- a deliberately blocked client handler does not prevent an independent `status` request from completing;
-+- a deliberately blocked `scan_workspace` does not prevent `status` from reading the same WAL database through a separate connection;
-+- the same regression tests fail against the former synchronous accept-loop implementation;
-+- an unexpected exception escaping a client handler surfaces as daemon failure rather than being swallowed by the worker pool;
-+- existing IPC protocol, scan, watcher, installation/shutdown, singleton, and installed-wheel smoke tests remain green;
-+- strict mypy and Ruff continue to pass without relaxing the repository quality contract.

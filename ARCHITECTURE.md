@@ -262,6 +262,8 @@ IPC requirements:
 - bounded message sizes;
 - protocol versioning between bridge and daemon;
 - cancellation/timeouts;
+- bounded concurrent client handling so one slow request does not head-of-line block unrelated callers;
+- one SQLite connection per accepted IPC worker rather than sharing a connection across threads;
 - no source/context logging by default;
 - reconnect behavior that does not mutate Task state implicitly.
 

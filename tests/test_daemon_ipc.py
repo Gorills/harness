@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import stat
 import subprocess
 import time
@@ -13,7 +14,9 @@ from typing import cast
 
 import pytest
 
+import harness.daemon as daemon_module
 from harness.daemon import (
+    DaemonError,
     InsecureSocketDirectoryError,
     SocketPathInUseError,
     serve_daemon,
@@ -26,11 +29,13 @@ from harness.ipc import (
     IpcRemoteError,
     RuntimeDiagnosticsResult,
     StatusResult,
+    WorkspaceScanResult,
     WorkspaceStatusResult,
     _receive_frame,
     _status_from_response,
     request_runtime_diagnostics,
     request_status,
+    request_workspace_scan,
     request_workspace_status,
 )
 from harness.registry import create_project, register_workspace
@@ -470,6 +475,108 @@ def test_disconnected_client_does_not_stop_daemon(tmp_path: Path) -> None:
         assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)
+
+
+def test_slow_client_does_not_block_independent_status_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    first_status_started = Event()
+    release_first_status = Event()
+    original_serve_global_status = daemon_module._serve_global_status
+
+    def blocking_first_status(
+        client: socket.socket, database_connection: sqlite3.Connection, request_id: str
+    ) -> None:
+        if not first_status_started.is_set():
+            first_status_started.set()
+            if not release_first_status.wait(timeout=2):
+                raise AssertionError("first IPC status handler was not released")
+        original_serve_global_status(client, database_connection, request_id)
+
+    monkeypatch.setattr(daemon_module, "_serve_global_status", blocking_first_status)
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as slow_client:
+            slow_client.settimeout(2)
+            slow_client.connect(str(socket_path))
+            slow_client.sendall(b'{"version":1,"request_id":"slow","method":"status"}\n')
+            assert first_status_started.wait(timeout=1)
+
+            with ThreadPoolExecutor(max_workers=1) as client_executor:
+                status_future = client_executor.submit(request_status, socket_path)
+                assert status_future.result(timeout=1) == StatusResult(SCHEMA_VERSION, 0, 0)
+
+            release_first_status.set()
+            response = bytearray()
+            while not response.endswith(b"\n"):
+                response.extend(slow_client.recv(4096))
+            assert json.loads(response.decode("utf-8"))["ok"] is True
+    finally:
+        release_first_status.set()
+        _stop_server(stop_event, executor, future)
+
+
+def test_slow_scan_does_not_block_status_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, _project_id, workspace_id, _git_identity = _registered_workspace_database(
+        tmp_path
+    )
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    scan_started = Event()
+    release_scan = Event()
+    original_scan_workspace_path = daemon_module.scan_workspace_path
+
+    def blocking_scan_workspace_path(
+        connection: sqlite3.Connection, path: Path, *, deadline: float | None = None
+    ) -> WorkspaceScanResult:
+        scan_started.set()
+        if not release_scan.wait(timeout=2):
+            raise AssertionError("slow Workspace scan was not released")
+        return original_scan_workspace_path(connection, path, deadline=deadline)
+
+    monkeypatch.setattr(daemon_module, "scan_workspace_path", blocking_scan_workspace_path)
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as client_executor:
+            scan_future = client_executor.submit(request_workspace_scan, socket_path, root)
+            assert scan_started.wait(timeout=1)
+
+            status_future = client_executor.submit(request_status, socket_path)
+            assert status_future.result(timeout=1) == StatusResult(SCHEMA_VERSION, 1, 1)
+
+            release_scan.set()
+            assert scan_future.result(timeout=3).workspace_id == workspace_id
+    finally:
+        release_scan.set()
+        _stop_server(stop_event, executor, future)
+
+
+def test_unexpected_client_worker_failure_stops_daemon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    worker_started = Event()
+
+    def fail_client(*_args: object, **_kwargs: object) -> None:
+        worker_started.set()
+        raise RuntimeError("synthetic client worker failure")
+
+    monkeypatch.setattr(daemon_module, "_serve_client", fail_client)
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.connect(str(socket_path))
+            client.sendall(b'{"version":1,"request_id":"boom","method":"status"}\n')
+        assert worker_started.wait(timeout=1)
+        with pytest.raises(DaemonError, match="IPC client worker stopped unexpectedly"):
+            future.result(timeout=2)
+    finally:
+        stop_event.set()
+        executor.shutdown(wait=True)
 
 
 def test_client_rejects_boolean_protocol_version() -> None:

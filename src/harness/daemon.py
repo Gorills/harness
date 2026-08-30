@@ -7,10 +7,11 @@ import sqlite3
 import stat
 import sys
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty, SimpleQueue
-from threading import Event, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -159,6 +160,7 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
 _SCAN_DEADLINE_SECONDS = 30.0
+_MAX_CLIENT_WORKERS = 8
 
 
 class WorkspaceIndexEntryNotFoundError(RuntimeError):
@@ -729,10 +731,13 @@ def serve_daemon(
     socket_lock_fd = _acquire_daemon_lock(socket_path)
 
     database_lock_fd: int | None = None
-    database: sqlite3.Connection | None = None
     server: socket.socket | None = None
     socket_identity: tuple[int, int] | None = None
     scan_lock = Lock()
+    dashboard_lock = Lock()
+    client_slots = BoundedSemaphore(_MAX_CLIENT_WORKERS)
+    client_workers: ThreadPoolExecutor | None = None
+    client_failures: SimpleQueue[BaseException] = SimpleQueue()
     watcher_stop = Event()
     watcher_thread: Thread | None = None
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
@@ -748,15 +753,18 @@ def serve_daemon(
         _prepare_socket_path_for_bind(socket_path)
         database_lock_fd = _acquire_database_lock(database_path)
         initialize_database(database_path)
-        database = connect_database(database_path)
 
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(str(socket_path))
         os.chmod(socket_path, 0o600)
         socket_stat = socket_path.lstat()
         socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
-        server.listen()
+        server.listen(_MAX_CLIENT_WORKERS)
         server.settimeout(_ACCEPT_POLL_SECONDS)
+        client_workers = ThreadPoolExecutor(
+            max_workers=_MAX_CLIENT_WORKERS,
+            thread_name_prefix="harness-ipc-client",
+        )
 
         def watcher_target() -> None:
             try:
@@ -787,6 +795,9 @@ def serve_daemon(
         except DashboardError:
             pass
         while not effective_stop_event.is_set():
+            client_failure = _queue_failure(client_failures)
+            if client_failure is not None:
+                raise DaemonError("IPC client worker stopped unexpectedly") from client_failure
             if not watcher_thread.is_alive():
                 try:
                     watcher_failure = watcher_failures.get_nowait()
@@ -795,46 +806,106 @@ def serve_daemon(
                 if watcher_failure is not None:
                     raise DaemonError("Workspace watcher stopped unexpectedly") from watcher_failure
                 raise DaemonError("Workspace watcher stopped unexpectedly")
+            if not client_slots.acquire(timeout=_ACCEPT_POLL_SECONDS):
+                continue
             try:
                 client, _ = server.accept()
             except TimeoutError:
+                client_slots.release()
                 continue
-            with client:
-                client.settimeout(_CLIENT_TIMEOUT_SECONDS)
-                try:
-                    _serve_client(
-                        client,
-                        database,
-                        database_path,
-                        scan_lock,
-                        watcher_invalidations,
-                        dashboard,
-                        effective_stop_event,
-                    )
-                except OSError:
-                    continue
+            except BaseException:
+                client_slots.release()
+                raise
+            try:
+                client_workers.submit(
+                    _serve_client_worker,
+                    client,
+                    database_path,
+                    scan_lock,
+                    dashboard_lock,
+                    watcher_invalidations,
+                    dashboard,
+                    effective_stop_event,
+                    client_slots,
+                    client_failures,
+                )
+            except BaseException:
+                client.close()
+                client_slots.release()
+                raise
     finally:
         active_error = sys.exception()
         dashboard_error: DashboardError | None = None
+        cleanup_client_failure: BaseException | None = None
         watcher_stop.set()
+        if server is not None:
+            server.close()
+        if client_workers is not None:
+            client_workers.shutdown(wait=True)
+            cleanup_client_failure = _queue_failure(client_failures)
         if watcher_thread is not None:
             watcher_thread.join()
         try:
             dashboard.close()
         except DashboardError as exc:
             dashboard_error = exc
-        if server is not None:
-            server.close()
-        if database is not None:
-            database.close()
         if database_lock_fd is not None:
             os.close(database_lock_fd)
         _unlink_owned_socket(socket_path, socket_identity)
         os.close(socket_lock_fd)
+        if cleanup_client_failure is not None:
+            if active_error is None:
+                raise DaemonError(
+                    "IPC client worker stopped unexpectedly"
+                ) from cleanup_client_failure
+            active_error.add_note("Harness IPC client worker stopped unexpectedly during cleanup")
         if dashboard_error is not None:
             if active_error is None:
                 raise DaemonError("dashboard server did not stop cleanly") from dashboard_error
             active_error.add_note("Harness dashboard server did not stop cleanly during cleanup")
+
+
+def _serve_client_worker(
+    client: socket.socket,
+    database_path: Path,
+    scan_lock: Lock,
+    dashboard_lock: Lock,
+    watcher_invalidations: SimpleQueue[str],
+    dashboard: DashboardServerManager,
+    stop_event: Event,
+    client_slots: BoundedSemaphore,
+    failures: SimpleQueue[BaseException],
+) -> None:
+    try:
+        with client:
+            client.settimeout(_CLIENT_TIMEOUT_SECONDS)
+            database = connect_database(database_path)
+            try:
+                _serve_client(
+                    client,
+                    database,
+                    database_path,
+                    scan_lock,
+                    dashboard_lock,
+                    watcher_invalidations,
+                    dashboard,
+                    stop_event,
+                )
+            finally:
+                database.close()
+    except OSError:
+        return
+    except BaseException as exc:
+        failures.put(exc)
+    finally:
+        client_slots.release()
+
+
+def _queue_failure(failures: SimpleQueue[BaseException]) -> BaseException | None:
+    try:
+        return failures.get_nowait()
+    except Empty:
+        return None
 
 
 def _serve_client(
@@ -842,6 +913,7 @@ def _serve_client(
     database: sqlite3.Connection,
     database_path: Path,
     scan_lock: Lock,
+    dashboard_lock: Lock,
     watcher_invalidations: SimpleQueue[str],
     dashboard: DashboardServerManager,
     stop_event: Event,
@@ -859,14 +931,16 @@ def _serve_client(
         _serve_global_status(client, database, request.request_id)
         return
     if request.method == "runtime_diagnostics":
+        with dashboard_lock:
+            dashboard_running = dashboard.is_running()
         send_runtime_diagnostics_response(
             client,
             request.request_id,
-            read_runtime_diagnostics(database, dashboard_running=dashboard.is_running()),
+            read_runtime_diagnostics(database, dashboard_running=dashboard_running),
         )
         return
     if request.method == "dashboard_url":
-        _serve_dashboard_url(client, request.request_id, dashboard)
+        _serve_dashboard_url(client, request.request_id, dashboard, dashboard_lock)
         return
     if request.method == "shutdown":
         send_shutdown_response(client, request.request_id)
@@ -996,11 +1070,13 @@ def _serve_dashboard_url(
     client: socket.socket,
     request_id: str,
     dashboard: DashboardServerManager,
+    dashboard_lock: Lock,
 ) -> None:
     from harness.dashboard import DashboardError
 
     try:
-        url = dashboard.get_url()
+        with dashboard_lock:
+            url = dashboard.get_url()
     except DashboardError:
         _try_send_error(
             client,
