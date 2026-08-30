@@ -186,3 +186,98 @@ def test_schema_v11_migration_failure_rolls_back_derived_search_schema(
         assert search_objects == []
     finally:
         connection.close()
+
+
+def test_schema_v14_adds_rebuildable_content_search_without_fabricated_backfill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "content-search.db"
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", 13)
+    initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO indexed_files(
+                workspace_id, relative_path, kind, size_bytes, content_sha256
+            ) VALUES ('workspace', 'service.py', 'file', 12, ?)
+            """,
+            ("0" * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", 14)
+    status = initialize_database(database)
+    assert status.schema_version == 14
+
+    connection = connect_database(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM indexed_search_documents").fetchone() == (
+            0,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM indexed_content_search").fetchone() == (0,)
+        assert connection.execute(
+            """
+            SELECT name FROM sqlite_schema
+            WHERE type = 'trigger' AND name LIKE 'indexed_content_search_%'
+            ORDER BY name
+            """
+        ).fetchall() == [
+            ("indexed_content_search_delete",),
+        ]
+    finally:
+        connection.close()
+
+
+def test_schema_v14_migration_failure_rolls_back_content_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "content-search-rollback.db"
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", 13)
+    initialize_database(database)
+    monkeypatch.setattr(storage, "SCHEMA_VERSION", 14)
+
+    def fail_trigger_install(connection: sqlite3.Connection, _script: str) -> None:
+        connection.execute(
+            """
+            CREATE TRIGGER partial_content_search_trigger
+            AFTER INSERT ON indexed_search_documents
+            BEGIN
+                SELECT NEW.id;
+            END
+            """
+        )
+        raise sqlite3.OperationalError("synthetic v14 trigger failure")
+
+    monkeypatch.setattr(storage, "_execute_sql_script_in_transaction", fail_trigger_install)
+    with pytest.raises(sqlite3.OperationalError, match="synthetic v14 trigger failure"):
+        initialize_database(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone() == (13,)
+        assert (
+            connection.execute(
+                """
+            SELECT name FROM sqlite_schema
+            WHERE name IN (
+                'indexed_search_documents', 'indexed_content_search',
+                'partial_content_search_trigger'
+            )
+            """
+            ).fetchall()
+            == []
+        )
+    finally:
+        connection.close()

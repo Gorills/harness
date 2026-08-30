@@ -391,6 +391,14 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .visibility-hint { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
 .visibility-form { margin: 0; width: 100%; }
 .visibility-form .btn { width: 100%; }
+.management-disclosure { width: 100%; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.management-disclosure summary { list-style: none; color: var(--text-secondary); font-size: 12px; font-weight: 650; cursor: pointer; }
+.management-disclosure summary::-webkit-details-marker { display: none; }
+.management-disclosure summary::before { content: "+ "; color: var(--accent-hover); }
+.management-disclosure[open] summary::before { content: "− "; }
+.management-disclosure.danger-zone summary,
+.management-disclosure.danger-zone summary::before { color: var(--danger); }
+.management-hint { margin: 10px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.55; }
 .action-row { display: flex; flex-wrap: wrap; gap: 9px; }
 .action-row form { margin: 0; }
 .btn {

@@ -8,6 +8,7 @@ from typing import Any, BinaryIO, cast
 import pytest
 
 from harness.index import (
+    MAX_INDEXED_SEARCH_BODY_BYTES,
     IndexedFileKind,
     IndexingError,
     WorkspaceIndexMismatchError,
@@ -103,6 +104,101 @@ def test_scan_reconciles_add_modify_delete_and_is_idempotent(tmp_path: Path) -> 
         assert fourth.removed == 1
         paths = [record.relative_path for record in list_indexed_files(connection, workspace_id)]
         assert paths == ["added.txt"]
+    finally:
+        connection.close()
+
+
+def test_scan_reconciles_bounded_utf8_content_fts_without_indexing_binary(
+    tmp_path: Path,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    try:
+        (root / "service.py").write_text(
+            "def rotateRefreshToken():\n    return 'legacy credential'\n",
+            encoding="utf-8",
+        )
+        (root / "binary.bin").write_bytes(b"searchable-prefix\x00private-binary")
+        (root / "oversized.txt").write_bytes(b"x" * (MAX_INDEXED_SEARCH_BODY_BYTES + 1))
+        (root / ".pytest_nutrition_all.out").write_text(
+            "FastAPI endpoints nutrition generated test log\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        assert connection.execute(
+            """
+            SELECT documents.relative_path
+            FROM indexed_content_search
+            JOIN indexed_search_documents AS documents
+                ON documents.id = indexed_content_search.rowid
+            WHERE indexed_content_search MATCH 'legacy'
+              AND documents.workspace_id = ?
+            """,
+            (workspace_id,),
+        ).fetchall() == [("service.py",)]
+        assert connection.execute(
+            """
+            SELECT relative_path FROM indexed_search_documents
+            WHERE workspace_id = ? ORDER BY relative_path
+            """,
+            (workspace_id,),
+        ).fetchall() == [("service.py",), ("tracked.txt",)]
+        assert any(
+            record.relative_path == ".pytest_nutrition_all.out"
+            for record in list_indexed_files(connection, workspace_id)
+        )
+        assert "body" not in {
+            row[1] for row in connection.execute("PRAGMA table_info(indexed_search_documents)")
+        }
+        assert connection.execute(
+            """
+            SELECT indexed_content_search.body
+            FROM indexed_content_search
+            JOIN indexed_search_documents AS documents
+                ON documents.id = indexed_content_search.rowid
+            WHERE documents.relative_path = 'service.py'
+            """
+        ).fetchone() == (None,)
+        assert "legacy credential" not in "\n".join(connection.iterdump())
+
+        connection.execute(
+            """
+            DELETE FROM indexed_content_search
+            WHERE rowid = (
+                SELECT id FROM indexed_search_documents
+                WHERE workspace_id = ? AND relative_path = 'service.py'
+            )
+            """,
+            (workspace_id,),
+        )
+        scan_workspace(connection, workspace_id)
+        assert connection.execute(
+            "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'legacy'"
+        ).fetchall()
+
+        (root / "service.py").write_text(
+            "def rotateRefreshToken():\n    return 'current credential'\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+        assert (
+            connection.execute(
+                "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'legacy'"
+            ).fetchall()
+            == []
+        )
+        assert connection.execute(
+            "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'current'"
+        ).fetchall()
+
+        (root / "service.py").unlink()
+        scan_workspace(connection, workspace_id)
+        assert (
+            connection.execute(
+                "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'current'"
+            ).fetchall()
+            == []
+        )
     finally:
         connection.close()
 

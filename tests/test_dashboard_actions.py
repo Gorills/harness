@@ -5,13 +5,17 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import SimpleQueue
 from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import urlopen
+
+import pytest
 
 from harness.dashboard import DashboardServerManager, _allows_dashboard_mutation
 from harness.hidden_projection import CURSOR_HIDDEN_RULE_RELATIVE
 from harness.index import scan_workspace
 from harness.registry import (
+    ProjectNotFoundError,
     VisibilityMode,
     create_project,
     get_project,
@@ -216,6 +220,121 @@ def test_dashboard_feedback_is_same_origin_cas_and_resumes_same_task(tmp_path: P
             assert get_task(connection, waiting.task_id) == resumed
         finally:
             connection.close()
+    finally:
+        manager.close()
+
+
+def test_dashboard_relocates_workspace_without_losing_identity_or_files(tmp_path: Path) -> None:
+    root, database, workspace_id = _database(tmp_path)
+    moved = tmp_path / "moved-repo"
+    invalidations: SimpleQueue[str] = SimpleQueue()
+    manager = DashboardServerManager(database, workspace_invalidations=invalidations)
+    try:
+        base_url = manager.get_url()
+        parsed = urlsplit(base_url)
+        origin = f"http://127.0.0.1:{parsed.port}"
+        workspace_url = base_url + f"workspaces/{quote(workspace_id, safe='')}/"
+        status, headers, _payload = _post(
+            workspace_url,
+            {
+                "action": "relocate_workspace",
+                "workspace_id": "another-workspace",
+                "new_path": str(root),
+            },
+            origin=origin,
+        )
+        assert status == 400
+        _assert_hardened(headers)
+        root.rename(moved)
+
+        status, headers, payload = _post(
+            workspace_url,
+            {
+                "action": "relocate_workspace",
+                "workspace_id": workspace_id,
+                "new_path": str(moved),
+            },
+            origin=origin,
+        )
+
+        assert status == 303
+        assert payload == b""
+        assert headers["Location"] == urlsplit(workspace_url).path
+        _assert_hardened(headers)
+        assert invalidations.get_nowait() == workspace_id
+        connection = connect_database(database)
+        try:
+            workspace = get_workspace(connection, workspace_id)
+            assert workspace.workspace_root == moved.resolve(strict=True)
+            assert connection.execute(
+                "SELECT COUNT(*) FROM indexed_files WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone() == (0,)
+        finally:
+            connection.close()
+        assert (moved / "tracked.txt").read_text(encoding="utf-8") == "baseline\n"
+        with urlopen(workspace_url, timeout=2) as response:
+            body = response.read().decode("utf-8")
+        assert str(moved) in body
+        assert "Проект перенесён в другую папку" in body
+        assert "harness scan" in body
+    finally:
+        manager.close()
+
+
+def test_dashboard_project_deletion_requires_confirmation_and_preserves_files(
+    tmp_path: Path,
+) -> None:
+    root, database, workspace_id = _database(tmp_path)
+    connection = connect_database(database)
+    try:
+        project_id = get_workspace(connection, workspace_id).project_id
+    finally:
+        connection.close()
+    manager = DashboardServerManager(database)
+    try:
+        base_url = manager.get_url()
+        parsed = urlsplit(base_url)
+        origin = f"http://127.0.0.1:{parsed.port}"
+        project_url = base_url + f"projects/{quote(project_id, safe='')}/"
+        with urlopen(project_url, timeout=2) as response:
+            body = response.read().decode("utf-8")
+        assert "Удаление проекта" in body
+        assert "Файлы на диске останутся" in body
+
+        fields: dict[str, str | int] = {
+            "action": "delete_project",
+            "project_id": project_id,
+            "confirmation": "УДАЛИТЬ",
+        }
+        status, headers, _payload = _post(base_url, fields, origin=origin)
+        assert status == 400
+        _assert_hardened(headers)
+
+        fields["confirmation"] = "не удалять"
+        status, headers, _payload = _post(project_url, fields, origin=origin)
+        assert status == 400
+        _assert_hardened(headers)
+        connection = connect_database(database)
+        try:
+            assert get_project(connection, project_id).project_id == project_id
+        finally:
+            connection.close()
+
+        fields["confirmation"] = "УДАЛИТЬ"
+        status, headers, payload = _post(project_url, fields, origin=origin)
+        assert status == 303
+        assert payload == b""
+        assert headers["Location"] == parsed.path
+        _assert_hardened(headers)
+        connection = connect_database(database)
+        try:
+            with pytest.raises(ProjectNotFoundError):
+                get_project(connection, project_id)
+        finally:
+            connection.close()
+        assert root.is_dir()
+        assert (root / "tracked.txt").read_text(encoding="utf-8") == "baseline\n"
     finally:
         manager.close()
 

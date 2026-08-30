@@ -61,16 +61,18 @@ _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
     "Write every operator-facing Task title, summary, next_step, and Knowledge title/body in "
     f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
-    "project_search across code, docs, Knowledge, and Task history; expand selected refs with "
+    "project_search across all channels; expand selected refs with "
     "project_context, then use native host tools. Start/resume a Harness task before meaningful "
-    "changes; for a new Task pass only affected technologies and work kinds as stack_hints so "
-    "skills stay task-focused. Checkpoint meaningful progress and address operator feedback. "
-    "Before risky cross-boundary work, inspect governing contracts/specs. Before publication, independently "
+    "changes; pass only affected technologies/work kinds as new-Task stack_hints to keep skills "
+    "task-focused. Checkpoint "
+    "meaningful progress and address operator feedback. Preserve only verified reusable findings "
+    "as sparse anchored Knowledge; never store broad file summaries or speculation. "
+    "Before risky cross-boundary work, inspect governing contracts/specs. Before publication, "
+    "independently "
     "review the complete change and run repository gates. Targeted native search remains allowed. "
-    "Reply briefly: result first; use checkpoints for continuity; no task restatement, unchanged "
-    "source, or file-by-file recap diffs. Mention only material decisions, risks, blockers, and "
-    "verification unless detail is requested. In hidden visibility, do not perform durable SCM "
-    "mutations."
+    "Reply briefly: result first; checkpoints hold continuity; omit unchanged source and recap "
+    "diffs. Mention only material decisions, risks, blockers, and verification. In hidden "
+    "visibility, do not perform durable SCM mutations."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -401,8 +403,9 @@ def build_mcp_server() -> MCPServer:
 
     @server.tool(
         description=(
-            "Search bounded Project Intelligence across code paths, docs, durable Knowledge, and "
-            "Task history. Results are compact refs; use project_context only for selected refs."
+            "Search bounded Project Intelligence across local code/doc text and identifiers, "
+            "durable Knowledge, and Task history. Natural queries may include conversational "
+            "filler. Results are compact refs; use project_context only for selected refs."
         )
     )
     def project_search(
@@ -515,7 +518,9 @@ def build_mcp_server() -> MCPServer:
         description=(
             "Persist meaningful progress for one explicit working Harness task. Requires task_id "
             "and expected_revision. Write summary, next_step, and Knowledge title/body in "
-            f"{_OPERATOR_LANGUAGE}."
+            f"{_OPERATOR_LANGUAGE}. Add Knowledge only for verified reusable findings that avoid "
+            "future re-investigation; prefer precise code/document anchors and do not summarize "
+            "every file or persist speculation."
         )
     )
     def task_checkpoint(

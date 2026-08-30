@@ -38,6 +38,7 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF"]
 "**/dashboard_i18n.py" = ["RUF001"]
 "**/dashboard_assets.py" = ["RUF001"]
 "**/test_dashboard*.py" = ["RUF001"]
+"**/search_text.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.13"

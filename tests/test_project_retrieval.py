@@ -26,7 +26,14 @@ def _git(cwd: Path, *args: str) -> None:
 def _workspace(connection: sqlite3.Connection, root: Path) -> tuple[str, str]:
     root.mkdir()
     (root / "src").mkdir()
-    (root / "src" / "refresh_token.py").write_text("TOKEN = 1\n", encoding="utf-8")
+    (root / "src" / "refresh_token.py").write_text(
+        """
+def rotateRefreshToken(repository, previous_credential):
+    \"\"\"Invalidate the previous credential through one atomic replacement.\"\"\"
+    return repository.replace(previous_credential)
+""".lstrip(),
+        encoding="utf-8",
+    )
     (root / "docs").mkdir()
     (root / "docs" / "refresh-rotation.md").write_text("rotation docs\n", encoding="utf-8")
     _git(root, "init", "-b", "main")
@@ -200,7 +207,7 @@ def test_project_search_retrieves_scoped_knowledge_tasks_code_and_docs(tmp_path:
         )
         assert code[0].ref == "code:src/refresh_token.py"
         assert code[0].kind is ProjectSearchKind.CODE
-        assert code[0].match_reason == "identifier_tokens"
+        assert code[0].match_reason == "exact filename stem"
         assert docs[0].ref == "doc:docs/refresh-rotation.md"
         assert docs[0].kind is ProjectSearchKind.DOC
 
@@ -213,6 +220,228 @@ def test_project_search_retrieves_scoped_knowledge_tasks_code_and_docs(tmp_path:
             ProjectSearchKind.DOC,
             ProjectSearchKind.KNOWLEDGE,
         }
+    finally:
+        connection.close()
+
+
+def test_project_search_uses_content_for_natural_queries_and_compound_identifiers(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_refresh_token.py").write_text(
+            "def test_rotateRefreshToken():\n    assert previous_credential_is_invalid()\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        natural = search_project(
+            connection,
+            workspace_id,
+            "where previous credential invalidation happens",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+        compound = search_project(
+            connection,
+            workspace_id,
+            "rotate refresh token",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+        test_query = search_project(
+            connection,
+            workspace_id,
+            "test rotate refresh token",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert natural[0].ref == "code:src/refresh_token.py"
+        assert natural[0].match_reason == "lexical content (all terms)"
+        assert compound[0].ref == "code:src/refresh_token.py"
+        assert compound[0].match_reason == "normalized identifier/title phrase"
+        assert test_query[0].ref == "code:tests/test_refresh_token.py"
+        assert "repository.replace" not in repr(natural)
+        assert natural[0].short_summary is None
+    finally:
+        connection.close()
+
+
+def test_project_search_rejects_partial_identifier_matches_for_garbage_query(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        _project_id, workspace_id = _workspace(connection, tmp_path / "repo")
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "nonexistent-xyzzy-token-12345",
+            scope=ProjectSearchScope.ALL,
+            limit=5,
+        )
+
+        assert results == ()
+    finally:
+        connection.close()
+
+
+def test_project_search_excludes_generated_test_output_from_code_results(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "src" / "nutrition.py").write_text(
+            "# FastAPI endpoints for nutrition requests.\n",
+            encoding="utf-8",
+        )
+        (root / ".pytest_nutrition_all.out").write_text(
+            "FastAPI endpoints nutrition nutrition nutrition\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "FastAPI endpoints nutrition",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert results[0].ref == "code:src/nutrition.py"
+        assert all(hit.path != ".pytest_nutrition_all.out" for hit in results)
+    finally:
+        connection.close()
+
+
+def test_project_search_prioritizes_canonical_exact_stem_doc_over_archives(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "docs" / "ARCHITECTURE.md").write_text(
+            "Canonical system design.\n",
+            encoding="utf-8",
+        )
+        archive = root / "epic" / "archive" / "04_architecture_stabilization"
+        archive.mkdir(parents=True)
+        for name in (
+            "ARCHITECTURE.md",
+            "architecture_notes_1.md",
+            "architecture_notes_2.md",
+            "architecture_notes_3.md",
+            "architecture_notes_4.md",
+        ):
+            (archive / name).write_text(
+                "Architecture architecture architecture stabilization notes.\n",
+                encoding="utf-8",
+            )
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "architecture",
+            scope=ProjectSearchScope.DOCS,
+            limit=5,
+        )
+
+        assert results[0].ref == "doc:docs/ARCHITECTURE.md"
+    finally:
+        connection.close()
+
+
+def test_all_scope_prioritizes_direct_fresh_knowledge_over_general_lexical_hits(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project_id, workspace_id = _workspace(connection, tmp_path / "repo")
+        _knowledge(
+            connection,
+            knowledge_id="direct-card",
+            project_id=project_id,
+            title="Atomic credential invalidation",
+            body="The previous refresh credential is invalidated in the replacement transaction.",
+        )
+        _knowledge(
+            connection,
+            knowledge_id="incidental-card",
+            project_id=project_id,
+            title="Credential operations",
+            body="General operational notes for credentials.",
+        )
+
+        knowledge_results = search_project(
+            connection,
+            workspace_id,
+            "where atomic credential invalidation happens",
+            scope=ProjectSearchScope.KNOWLEDGE,
+            limit=5,
+        )
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "atomic credential invalidation",
+            scope=ProjectSearchScope.ALL,
+            limit=5,
+        )
+
+        assert [hit.ref for hit in knowledge_results] == [
+            "knowledge:direct-card",
+            "knowledge:incidental-card",
+        ]
+        assert results[0].ref == "knowledge:direct-card"
+        assert results[0].freshness == "fresh"
+        assert any(hit.ref == "code:src/refresh_token.py" for hit in results)
+    finally:
+        connection.close()
+
+
+def test_project_search_matches_common_russian_inflections_in_docs(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "docs" / "search-quality.md").write_text(
+            "Поиск по проектам учитывает релевантность результатов.\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "релевантности поиска проекта",
+            scope=ProjectSearchScope.DOCS,
+            limit=5,
+        )
+
+        assert results[0].ref == "doc:docs/search-quality.md"
+        assert results[0].match_reason == "lexical content (all terms)"
     finally:
         connection.close()
 

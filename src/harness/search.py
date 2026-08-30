@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 
 from harness.index import IndexedFileKind, list_indexed_files
 from harness.registry import get_workspace
+from harness.search_text import (
+    analyze_search_query,
+    is_document_path,
+    is_generated_text_output_path,
+    matching_term_count,
+)
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
 MAX_SEARCH_QUERY_BYTES = 256
-
-_CAMEL_LOWER_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-_CAMEL_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
-_NON_IDENTIFIER = re.compile(r"[^0-9A-Za-z]+")
 
 
 class SearchError(RuntimeError):
@@ -65,16 +65,20 @@ def search_indexed_paths(
         raise SearchError("search scope is unsupported")
 
     query_path = normalized_query.replace("\\", "/").casefold()
-    query_tokens = frozenset(_identifier_tokens(normalized_query))
+    query_terms = analyze_search_query(normalized_query).terms
     ranked: list[tuple[int, str, IndexedPathSearchResult]] = []
 
     for record in list_indexed_files(connection, workspace_id):
         is_document = is_document_path(record.relative_path)
+        if scope is not IndexedPathSearchScope.ALL and is_generated_text_output_path(
+            record.relative_path
+        ):
+            continue
         if scope is IndexedPathSearchScope.DOCS and not is_document:
             continue
         if scope is IndexedPathSearchScope.CODE and is_document:
             continue
-        match = _match_path(record.relative_path, query_path, query_tokens)
+        match = _match_path(record.relative_path, query_path, query_terms)
         if match is None:
             continue
         rank, match_kind = match
@@ -112,7 +116,7 @@ def _validate_limit(limit: int) -> None:
 def _match_path(
     relative_path: str,
     query_path: str,
-    query_tokens: frozenset[str],
+    query_terms: tuple[str, ...],
 ) -> tuple[int, SearchMatchKind] | None:
     path = relative_path.casefold()
     filename = relative_path.rsplit("/", 1)[-1].casefold()
@@ -121,31 +125,8 @@ def _match_path(
     if filename == query_path:
         return 1, SearchMatchKind.EXACT_FILENAME
 
-    path_tokens = frozenset(_identifier_tokens(relative_path))
-    if query_tokens and query_tokens.issubset(path_tokens):
+    if query_terms and matching_term_count(query_terms, relative_path) == len(query_terms):
         return 2, SearchMatchKind.IDENTIFIER_TOKENS
     if query_path in path:
         return 3, SearchMatchKind.PATH_SUBSTRING
     return None
-
-
-def _identifier_tokens(value: str) -> tuple[str, ...]:
-    tokens: list[str] = []
-    for component in _NON_IDENTIFIER.sub(" ", value).split():
-        split_component = _CAMEL_LOWER_BOUNDARY.sub(" ", component)
-        split_component = _CAMEL_ACRONYM_BOUNDARY.sub(" ", split_component)
-        tokens.extend(token.casefold() for token in split_component.split())
-    return tuple(tokens)
-
-
-def is_document_path(path: str) -> bool:
-    """Return whether an indexed path belongs to the repository documentation corpus."""
-    lowered = path.casefold()
-    name = lowered.rsplit("/", 1)[-1]
-    suffix = Path(name).suffix
-    return (
-        lowered.endswith((".md", ".mdx", ".rst", ".txt", ".adoc"))
-        or lowered.startswith("docs/")
-        or "/docs/" in lowered
-        or (not suffix and name.startswith(("readme", "adr")))
-    )

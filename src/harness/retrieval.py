@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from harness.index import get_indexed_file
+from harness.index import IndexedFileKind, get_indexed_file
 from harness.knowledge import (
     KnowledgeCardRecord,
     KnowledgeError,
@@ -19,8 +18,15 @@ from harness.search import (
     MAX_SEARCH_QUERY_BYTES,
     IndexedPathSearchScope,
     SearchError,
-    is_document_path,
     search_indexed_paths,
+)
+from harness.search_text import (
+    AnalyzedSearchQuery,
+    analyze_search_query,
+    contains_term_phrase,
+    is_document_path,
+    is_generated_text_output_path,
+    matching_term_count,
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
 from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
@@ -39,8 +45,15 @@ _CONTEXT_STACK_HINT_LIMIT = 8
 _CONTEXT_CHANGED_PATH_LIMIT = 16
 _CONTEXT_CHANGED_PATH_BYTES = 2048
 MAX_PROJECT_CONTEXT_REF_BYTES = 4096 + len("code:")
-_QUERY_TOKEN_LIMIT = 24
-_DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
+_FILE_CANDIDATE_LIMIT = 96
+
+_QUALITY_EXACT_PATH = 0
+_QUALITY_EXACT_FILENAME = 1
+_QUALITY_EXACT_FILENAME_STEM = 2
+_QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 3
+_QUALITY_ALL_TERMS = 4
+_QUALITY_PARTIAL = 5
+_QUALITY_STALE_OFFSET = 3
 
 
 class ProjectRetrievalError(RuntimeError):
@@ -85,6 +98,15 @@ class ProjectContextItem:
     data: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class _RankedProjectHit:
+    hit: ProjectSearchHit
+    quality: int
+    matched_terms: int
+    lexical_score: float
+    relevance_boost: int = 0
+
+
 def search_project(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -97,33 +119,59 @@ def search_project(
     workspace = get_workspace(connection, workspace_id)
     project = get_project(connection, workspace.project_id)
     normalized = _normalize_query(query)
+    analyzed = analyze_search_query(normalized)
+    if not analyzed.terms:
+        raise SearchError("project search query has no searchable tokens")
     _validate_limit(limit)
     if not isinstance(scope, ProjectSearchScope):
         raise SearchError("project search scope is unsupported")
 
     if scope is ProjectSearchScope.CODE:
-        return _path_hits(connection, workspace_id, normalized, IndexedPathSearchScope.CODE, limit)
+        return _project_hits(
+            _file_hits(
+                connection,
+                workspace_id,
+                analyzed,
+                IndexedPathSearchScope.CODE,
+                limit,
+            )
+        )
     if scope is ProjectSearchScope.DOCS:
-        return _path_hits(connection, workspace_id, normalized, IndexedPathSearchScope.DOCS, limit)
+        return _project_hits(
+            _file_hits(
+                connection,
+                workspace_id,
+                analyzed,
+                IndexedPathSearchScope.DOCS,
+                limit,
+            )
+        )
     if scope is ProjectSearchScope.KNOWLEDGE:
-        return _knowledge_hits(connection, project.project_id, normalized, limit)
+        return _project_hits(_knowledge_hits(connection, project.project_id, analyzed, limit))
     if scope is ProjectSearchScope.TASKS:
-        return _task_hits(connection, project.project_id, workspace_id, normalized, limit)
+        return _project_hits(
+            _task_hits(connection, project.project_id, workspace_id, analyzed, limit)
+        )
 
     channels = (
-        _path_hits(connection, workspace_id, normalized, IndexedPathSearchScope.CODE, limit),
-        _path_hits(connection, workspace_id, normalized, IndexedPathSearchScope.DOCS, limit),
-        _knowledge_hits(connection, project.project_id, normalized, limit),
-        _task_hits(connection, project.project_id, workspace_id, normalized, limit),
+        _knowledge_hits(connection, project.project_id, analyzed, limit),
+        _file_hits(
+            connection,
+            workspace_id,
+            analyzed,
+            IndexedPathSearchScope.CODE,
+            limit,
+        ),
+        _file_hits(
+            connection,
+            workspace_id,
+            analyzed,
+            IndexedPathSearchScope.DOCS,
+            limit,
+        ),
+        _task_hits(connection, project.project_id, workspace_id, analyzed, limit),
     )
-    fused: list[ProjectSearchHit] = []
-    for rank in range(limit):
-        for channel in channels:
-            if rank < len(channel):
-                fused.append(channel[rank])
-                if len(fused) == limit:
-                    return tuple(fused)
-    return tuple(fused)
+    return _fuse_ranked_channels(channels, limit)
 
 
 def read_project_context(
@@ -183,22 +231,51 @@ def read_project_context(
     return tuple(items)
 
 
-def _path_hits(
+def _file_hits(
     connection: sqlite3.Connection,
     workspace_id: str,
-    query: str,
+    query: AnalyzedSearchQuery,
     scope: IndexedPathSearchScope,
     limit: int,
-) -> tuple[ProjectSearchHit, ...]:
-    results = search_indexed_paths(connection, workspace_id, query, limit=limit, scope=scope)
-    hits: list[ProjectSearchHit] = []
-    for result in results:
+) -> tuple[_RankedProjectHit, ...]:
+    path_results = list(
+        search_indexed_paths(
+            connection,
+            workspace_id,
+            query.normalized,
+            limit=MAX_SEARCH_LIMIT,
+            scope=scope,
+        )
+    )
+    effective_path_query = " ".join(query.terms)
+    if effective_path_query.casefold() != query.normalized.casefold():
+        seen_paths = {result.relative_path for result in path_results}
+        for result in search_indexed_paths(
+            connection,
+            workspace_id,
+            effective_path_query,
+            limit=MAX_SEARCH_LIMIT,
+            scope=scope,
+        ):
+            if result.relative_path not in seen_paths:
+                path_results.append(result)
+                seen_paths.add(result.relative_path)
+
+    ranked_by_ref: dict[str, _RankedProjectHit] = {}
+    path_quality = {
+        "exact_path": _QUALITY_EXACT_PATH,
+        "exact_filename": _QUALITY_EXACT_FILENAME,
+        "identifier_tokens": _QUALITY_ALL_TERMS,
+        "path_substring": _QUALITY_PARTIAL,
+    }
+    for result in path_results:
         is_doc = is_document_path(result.relative_path)
         kind = ProjectSearchKind.DOC if is_doc else ProjectSearchKind.CODE
         prefix = "doc" if is_doc else "code"
-        hits.append(
-            ProjectSearchHit(
-                ref=f"{prefix}:{result.relative_path}",
+        ref = f"{prefix}:{result.relative_path}"
+        ranked_by_ref[ref] = _RankedProjectHit(
+            hit=ProjectSearchHit(
+                ref=ref,
                 kind=kind,
                 title=Path(result.relative_path).name,
                 location=result.relative_path,
@@ -206,18 +283,155 @@ def _path_hits(
                 match_reason=result.match_kind.value,
                 freshness="indexed_snapshot",
                 path=result.relative_path,
-            )
+            ),
+            quality=path_quality[result.match_kind.value],
+            matched_terms=matching_term_count(query.terms, result.relative_path),
+            lexical_score=float(path_quality[result.match_kind.value]),
+            relevance_boost=_path_relevance_penalty(result.relative_path, query.terms),
         )
-    return tuple(hits)
+
+    for candidate in _indexed_content_hits(connection, workspace_id, query, scope, limit):
+        previous = ranked_by_ref.get(candidate.hit.ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[candidate.hit.ref] = candidate
+
+    ranked = sorted(ranked_by_ref.values(), key=_ranked_hit_key)
+    return tuple(ranked[:limit])
+
+
+def _indexed_content_hits(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: AnalyzedSearchQuery,
+    scope: IndexedPathSearchScope,
+    limit: int,
+) -> tuple[_RankedProjectHit, ...]:
+    corpus = "docs" if scope is IndexedPathSearchScope.DOCS else "code"
+    candidate_limit = min(
+        _FILE_CANDIDATE_LIMIT,
+        max(24, limit * 8, len(query.terms) * 16),
+    )
+    ranked_by_ref: dict[str, _RankedProjectHit] = {}
+    rows = connection.execute(
+        """
+        SELECT
+            documents.relative_path,
+            documents.corpus,
+            documents.content_sha256,
+            documents.title,
+            documents.path_tokens,
+            documents.identifier_tokens,
+            bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
+            files.kind,
+            files.size_bytes,
+            files.content_sha256
+        FROM indexed_content_search
+        JOIN indexed_search_documents AS documents
+            ON documents.id = indexed_content_search.rowid
+        JOIN indexed_files AS files
+            ON files.workspace_id = documents.workspace_id
+           AND files.relative_path = documents.relative_path
+        WHERE indexed_content_search MATCH ?
+          AND documents.workspace_id = ?
+          AND documents.corpus = ?
+        ORDER BY bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
+                 documents.relative_path
+        LIMIT ?
+        """,
+        (query.all_fts_expression, workspace_id, corpus, candidate_limit),
+    ).fetchall()
+    for row in rows:
+        candidate = _indexed_content_row(row, query, corpus)
+        if candidate is None:
+            continue
+        previous = ranked_by_ref.get(candidate.hit.ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[candidate.hit.ref] = candidate
+    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _indexed_content_row(
+    row: tuple[object, ...],
+    query: AnalyzedSearchQuery,
+    corpus: str,
+) -> _RankedProjectHit | None:
+    (
+        relative_path,
+        stored_corpus,
+        document_sha256,
+        title,
+        path_tokens,
+        normalized_identifiers,
+        raw_score,
+        raw_kind,
+        size_bytes,
+        indexed_sha256,
+    ) = row
+    if (
+        not isinstance(relative_path, str)
+        or stored_corpus != corpus
+        or not isinstance(document_sha256, str)
+        or not isinstance(title, str)
+        or not isinstance(path_tokens, str)
+        or not isinstance(normalized_identifiers, str)
+        or not isinstance(raw_score, (int, float))
+        or not isinstance(raw_kind, str)
+        or isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes < 0
+        or indexed_sha256 != document_sha256
+        or is_document_path(relative_path) != (corpus == "docs")
+    ):
+        raise ProjectRetrievalError("indexed content search crossed authoritative index state")
+    try:
+        IndexedFileKind(raw_kind)
+    except ValueError as exc:
+        raise ProjectRetrievalError(
+            "indexed content search returned an invalid entry kind"
+        ) from exc
+    if is_generated_text_output_path(relative_path):
+        return None
+
+    prefix = "doc" if corpus == "docs" else "code"
+    kind = ProjectSearchKind.DOC if corpus == "docs" else ProjectSearchKind.CODE
+    exact_filename_stem = analyze_search_query(Path(title).stem).terms == query.terms
+    phrase_match = contains_term_phrase(query.terms, title) or contains_term_phrase(
+        query.terms, normalized_identifiers
+    )
+    matched_terms = len(query.terms)
+    if exact_filename_stem:
+        quality = _QUALITY_EXACT_FILENAME_STEM
+        reason = "exact filename stem"
+    elif phrase_match:
+        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+        reason = "normalized identifier/title phrase"
+    else:
+        quality = _QUALITY_ALL_TERMS
+        reason = "lexical content (all terms)"
+    return _RankedProjectHit(
+        hit=ProjectSearchHit(
+            ref=f"{prefix}:{relative_path}",
+            kind=kind,
+            title=title,
+            location=relative_path,
+            short_summary=None,
+            match_reason=reason,
+            freshness="indexed_snapshot",
+            path=relative_path,
+        ),
+        quality=quality,
+        matched_terms=matched_terms,
+        lexical_score=float(raw_score),
+        relevance_boost=_path_relevance_penalty(relative_path, query.terms),
+    )
 
 
 def _knowledge_hits(
     connection: sqlite3.Connection,
     project_id: str,
-    query: str,
+    query: AnalyzedSearchQuery,
     limit: int,
-) -> tuple[ProjectSearchHit, ...]:
-    match_query = _fts_query(query)
+) -> tuple[_RankedProjectHit, ...]:
     candidate_limit = _candidate_limit(limit)
     rows = connection.execute(
         """
@@ -227,9 +441,9 @@ def _knowledge_hits(
         ORDER BY score, knowledge_id
         LIMIT ?
         """,
-        (match_query, project_id, candidate_limit),
+        (query.fts_expression, project_id, candidate_limit),
     ).fetchall()
-    ranked: list[tuple[int, float, str, ProjectSearchHit]] = []
+    ranked: list[_RankedProjectHit] = []
     seen: set[str] = set()
     for knowledge_id, raw_score in rows:
         if not isinstance(knowledge_id, str) or not isinstance(raw_score, (int, float)):
@@ -242,62 +456,95 @@ def _knowledge_hits(
             raise ProjectRetrievalError("Knowledge search index crossed Project ownership")
         stale = card.freshness is KnowledgeFreshness.NEEDS_REVALIDATION
         location = card.anchors[0].relative_path if card.anchors else f"project:{project_id[:12]}"
+        anchor_text = " ".join(
+            f"{anchor.relative_path} {anchor.symbol or ''}" for anchor in card.anchors
+        )
+        matched_terms = matching_term_count(query.terms, card.title, card.body, anchor_text)
+        if contains_term_phrase(query.terms, card.title):
+            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+            match_reason = "Knowledge title phrase"
+        elif matched_terms == len(query.terms):
+            quality = _QUALITY_ALL_TERMS
+            match_reason = "Knowledge title/body (all terms)"
+        else:
+            quality = _QUALITY_PARTIAL
+            match_reason = "Knowledge title/body"
+        if stale:
+            quality += _QUALITY_STALE_OFFSET
         ranked.append(
-            (
-                1 if stale else 0,
-                float(raw_score),
-                card.knowledge_id,
-                ProjectSearchHit(
+            _RankedProjectHit(
+                hit=ProjectSearchHit(
                     ref=f"knowledge:{card.knowledge_id}",
                     kind=ProjectSearchKind.KNOWLEDGE,
                     title=card.title,
                     location=location,
                     short_summary=_truncate_utf8(card.body, _SUMMARY_MAX_BYTES),
-                    match_reason="semantic Knowledge title/body",
+                    match_reason=match_reason,
                     freshness=card.freshness.value,
                 ),
+                quality=quality,
+                matched_terms=matched_terms,
+                lexical_score=float(raw_score),
             )
         )
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-    return tuple(item[3] for item in ranked[:limit])
+    ranked.sort(key=_ranked_hit_key)
+    return tuple(ranked[:limit])
 
 
 def _task_hits(
     connection: sqlite3.Connection,
     project_id: str,
     active_workspace_id: str,
-    query: str,
+    query: AnalyzedSearchQuery,
     limit: int,
-) -> tuple[ProjectSearchHit, ...]:
-    match_query = _fts_query(query)
+) -> tuple[_RankedProjectHit, ...]:
     rows = connection.execute(
         """
         SELECT
             fragment_ref,
             task_id,
             workspace_id,
+            title,
+            body,
             bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
         FROM task_search
         WHERE task_search MATCH ? AND project_id = ?
         ORDER BY score, rowid
         LIMIT ?
         """,
-        (match_query, project_id, _candidate_limit(limit)),
+        (query.fts_expression, project_id, _candidate_limit(limit)),
     ).fetchall()
     current = get_relevant_task(connection, active_workspace_id)
-    best: dict[str, tuple[str, str, float]] = {}
-    for fragment_ref, task_id, workspace_id, raw_score in rows:
+    best: dict[str, tuple[str, str, float, int, int]] = {}
+    for fragment_ref, task_id, workspace_id, title, body, raw_score in rows:
         if (
             not isinstance(fragment_ref, str)
             or not isinstance(task_id, str)
             or not isinstance(workspace_id, str)
+            or not isinstance(title, str)
+            or not isinstance(body, str)
             or not isinstance(raw_score, (int, float))
         ):
             raise ProjectRetrievalError("Task search index returned invalid persisted types")
-        best.setdefault(task_id, (fragment_ref, workspace_id, float(raw_score)))
+        matched_terms = matching_term_count(query.terms, title, body)
+        if contains_term_phrase(query.terms, title):
+            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+        elif matched_terms == len(query.terms):
+            quality = _QUALITY_ALL_TERMS
+        else:
+            quality = _QUALITY_PARTIAL
+        candidate = (fragment_ref, workspace_id, float(raw_score), quality, matched_terms)
+        previous = best.get(task_id)
+        if previous is None or (quality, -matched_terms, float(raw_score), fragment_ref) < (
+            previous[3],
+            -previous[4],
+            previous[2],
+            previous[0],
+        ):
+            best[task_id] = candidate
 
-    ranked: list[tuple[int, float, str, ProjectSearchHit]] = []
-    for task_id, (fragment_ref, workspace_id, score) in best.items():
+    ranked: list[_RankedProjectHit] = []
+    for task_id, (fragment_ref, workspace_id, score, quality, matched_terms) in best.items():
         task = get_task(connection, task_id)
         owner = get_workspace(connection, task.workspace_id)
         if owner.project_id != project_id or workspace_id != task.workspace_id:
@@ -306,11 +553,8 @@ def _task_hits(
             connection, task_id, fragment_ref
         )
         ranked.append(
-            (
-                0 if current is not None and current.task_id == task_id else 1,
-                score,
-                task_id,
-                ProjectSearchHit(
+            _RankedProjectHit(
+                hit=ProjectSearchHit(
                     ref=result_ref,
                     kind=ProjectSearchKind.TASK,
                     title=task.title,
@@ -319,10 +563,14 @@ def _task_hits(
                     match_reason=reason,
                     freshness="durable_history",
                 ),
+                quality=quality,
+                matched_terms=matched_terms,
+                lexical_score=score,
+                relevance_boost=(0 if current is not None and current.task_id == task_id else 1),
             )
         )
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]))
-    return tuple(item[3] for item in ranked[:limit])
+    ranked.sort(key=_ranked_hit_key)
+    return tuple(ranked[:limit])
 
 
 def _task_fragment_projection(
@@ -659,19 +907,57 @@ def _validate_limit(limit: int) -> None:
         raise SearchError(f"project search limit must be between 1 and {MAX_SEARCH_LIMIT}")
 
 
-def _fts_query(query: str) -> str:
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for token in re.findall(r"\w+", query.casefold(), flags=re.UNICODE):
-        if token in seen:
-            continue
-        seen.add(token)
-        tokens.append(token)
-        if len(tokens) == _QUERY_TOKEN_LIMIT:
-            break
-    if not tokens:
-        raise SearchError("project search query has no searchable tokens")
-    return " OR ".join(f'"{token}"' for token in tokens)
+def _ranked_hit_key(item: _RankedProjectHit) -> tuple[int, int, int, float, str]:
+    return (
+        item.quality,
+        -item.matched_terms,
+        item.relevance_boost,
+        item.lexical_score,
+        item.hit.ref,
+    )
+
+
+def _path_relevance_penalty(relative_path: str, query_terms: tuple[str, ...]) -> int:
+    lowered = relative_path.casefold()
+    name = lowered.rsplit("/", 1)[-1]
+    parts = lowered.split("/")
+    penalty = 0
+    if not any(term in {"test", "tests", "testing"} for term in query_terms):
+        penalty += int(
+            "tests" in parts
+            or "test" in parts
+            or name.startswith(("test_", "test-"))
+            or name.endswith(("_test.py", "-test.py", ".test.js", ".test.ts"))
+        )
+    if not any(term.startswith(("archiv", "архив")) for term in query_terms):
+        penalty += int(any(part in {"archive", "archives", "archived"} for part in parts[:-1]))
+    return penalty
+
+
+def _project_hits(items: tuple[_RankedProjectHit, ...]) -> tuple[ProjectSearchHit, ...]:
+    return tuple(item.hit for item in items)
+
+
+def _fuse_ranked_channels(
+    channels: tuple[tuple[_RankedProjectHit, ...], ...],
+    limit: int,
+) -> tuple[ProjectSearchHit, ...]:
+    """Fuse comparable match-quality tiers, then interleave uncalibrated channel ranks."""
+    fused: list[tuple[int, int, int, int, str, ProjectSearchHit]] = []
+    for channel_index, channel in enumerate(channels):
+        for channel_rank, item in enumerate(channel):
+            fused.append(
+                (
+                    item.quality,
+                    -item.matched_terms,
+                    channel_rank,
+                    channel_index,
+                    item.hit.ref,
+                    item.hit,
+                )
+            )
+    fused.sort(key=lambda item: item[:-1])
+    return tuple(item[-1] for item in fused[:limit])
 
 
 def _candidate_limit(limit: int) -> int:

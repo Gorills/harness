@@ -17,6 +17,12 @@ from harness.knowledge import (
     snapshot_fresh_anchored_knowledge_ids,
 )
 from harness.registry import WorkspaceRecord, get_workspace
+from harness.search_text import (
+    identifier_expansion,
+    identifier_tokens,
+    is_document_path,
+    is_generated_text_output_path,
+)
 
 _DEFAULT_EXCLUDES = (
     "node_modules/",
@@ -31,6 +37,8 @@ _DEFAULT_EXCLUDES = (
     "*.key",
 )
 _HASH_CHUNK_BYTES = 128 * 1024
+MAX_INDEXED_SEARCH_BODY_BYTES = 1024 * 1024
+MAX_INDEXED_IDENTIFIER_TOKENS_BYTES = 256 * 1024
 
 
 class IndexingError(RuntimeError):
@@ -61,6 +69,19 @@ class IndexedFileRecord:
     kind: IndexedFileKind
     size_bytes: int
     content_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedSearchDocument:
+    """One bounded local text projection used only by the rebuildable lexical index."""
+
+    relative_path: str
+    corpus: str
+    content_sha256: str
+    title: str
+    path_tokens: str
+    identifier_tokens: str
+    body: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +194,13 @@ def scan_workspace(
                 (workspace_id, relative_path),
             )
 
+        _reconcile_search_documents(
+            connection,
+            workspace,
+            snapshot,
+            deadline=deadline,
+        )
+
         reconcile_knowledge_staleness(
             connection,
             workspace_id,
@@ -266,6 +294,232 @@ def _build_snapshot(
     if _read_harnessignore_rules(workspace.workspace_root) != harnessignore_rules:
         raise IndexingError("Workspace changed while scanning: .harnessignore")
     return snapshot
+
+
+def _build_search_document(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None,
+) -> IndexedSearchDocument | None:
+    _require_scan_deadline(deadline)
+    if (
+        record.kind is not IndexedFileKind.FILE
+        or record.size_bytes > MAX_INDEXED_SEARCH_BODY_BYTES
+        or is_generated_text_output_path(record.relative_path)
+    ):
+        return None
+    body = _read_stable_search_text(
+        workspace,
+        record,
+        deadline=deadline,
+    )
+    if body is None:
+        return None
+    return IndexedSearchDocument(
+        relative_path=record.relative_path,
+        corpus="docs" if is_document_path(record.relative_path) else "code",
+        content_sha256=record.content_sha256,
+        title=Path(record.relative_path).name,
+        path_tokens=" ".join(identifier_tokens(record.relative_path)),
+        identifier_tokens=identifier_expansion(
+            body,
+            maximum_bytes=MAX_INDEXED_IDENTIFIER_TOKENS_BYTES,
+        ),
+        body=body,
+    )
+
+
+def _read_stable_search_text(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None,
+) -> str | None:
+    path = workspace.workspace_root / record.relative_path
+    try:
+        parent = path.parent.resolve(strict=True)
+        if not parent.is_relative_to(workspace.workspace_root):
+            raise WorkspaceIndexMismatchError(
+                f"Workspace path escapes through a symlinked parent: {record.relative_path}"
+            )
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(workspace.workspace_root):
+            raise WorkspaceIndexMismatchError(
+                f"Workspace file resolves outside root: {record.relative_path}"
+            )
+        with path.open("rb") as stream:
+            opened_before = os.fstat(stream.fileno())
+            _require_stable_entry(record.relative_path, before, opened_before)
+            payload = stream.read(MAX_INDEXED_SEARCH_BODY_BYTES + 1)
+            opened_after = os.fstat(stream.fileno())
+        _require_stable_entry(record.relative_path, opened_before, opened_after)
+        current = path.lstat()
+        _require_stable_entry(record.relative_path, opened_after, current)
+    except FileNotFoundError as exc:
+        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}") from exc
+    except OSError as exc:
+        raise IndexingError(
+            f"Workspace search text could not be read: {record.relative_path}"
+        ) from exc
+
+    _require_scan_deadline(deadline)
+    if len(payload) > MAX_INDEXED_SEARCH_BODY_BYTES:
+        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
+    if hashlib.sha256(payload).hexdigest() != record.content_sha256:
+        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
+    if b"\x00" in payload:
+        return None
+    try:
+        return payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None
+
+
+def _reconcile_search_documents(
+    connection: sqlite3.Connection,
+    workspace: WorkspaceRecord,
+    snapshot: dict[str, IndexedFileRecord],
+    *,
+    deadline: float | None,
+) -> None:
+    rows = connection.execute(
+        """
+        SELECT id, relative_path, corpus, content_sha256
+        FROM indexed_search_documents
+        WHERE workspace_id = ?
+        ORDER BY relative_path
+        """,
+        (workspace.workspace_id,),
+    ).fetchall()
+    existing: dict[str, tuple[int, str, str]] = {}
+    for document_id, relative_path, corpus, content_sha256 in rows:
+        if (
+            isinstance(document_id, bool)
+            or not isinstance(document_id, int)
+            or document_id <= 0
+            or not isinstance(relative_path, str)
+            or relative_path in existing
+            or corpus not in {"code", "docs"}
+            or not isinstance(content_sha256, str)
+            or not _is_sha256(content_sha256)
+        ):
+            raise IndexingError("indexed search document row has invalid persisted types")
+        existing[relative_path] = (document_id, corpus, content_sha256)
+
+    indexed_rowids: set[int] = set()
+    for (raw_rowid,) in connection.execute(
+        """
+        SELECT indexed_content_search.rowid
+        FROM indexed_content_search
+        JOIN indexed_search_documents AS documents
+            ON documents.id = indexed_content_search.rowid
+        WHERE documents.workspace_id = ?
+        """,
+        (workspace.workspace_id,),
+    ).fetchall():
+        if isinstance(raw_rowid, bool) or not isinstance(raw_rowid, int) or raw_rowid <= 0:
+            raise IndexingError("indexed content search returned an invalid row identity")
+        indexed_rowids.add(raw_rowid)
+
+    searchable_paths: set[str] = set()
+    for record in snapshot.values():
+        _require_scan_deadline(deadline)
+        prior = existing.get(record.relative_path)
+        expected_corpus = "docs" if is_document_path(record.relative_path) else "code"
+        if (
+            record.kind is IndexedFileKind.FILE
+            and record.size_bytes <= MAX_INDEXED_SEARCH_BODY_BYTES
+            and not is_generated_text_output_path(record.relative_path)
+            and prior is not None
+            and prior[0] in indexed_rowids
+            and prior[1:] == (expected_corpus, record.content_sha256)
+        ):
+            searchable_paths.add(record.relative_path)
+            continue
+        document = _build_search_document(workspace, record, deadline=deadline)
+        if document is None:
+            continue
+        relative_path = document.relative_path
+        searchable_paths.add(relative_path)
+        prior = existing.get(relative_path)
+        if (
+            prior is not None
+            and prior[0] in indexed_rowids
+            and prior[1:] == (document.corpus, document.content_sha256)
+        ):
+            continue
+        if prior is None:
+            row = connection.execute(
+                """
+                INSERT INTO indexed_search_documents(
+                    workspace_id, relative_path, corpus, content_sha256,
+                    title, path_tokens, identifier_tokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    workspace.workspace_id,
+                    document.relative_path,
+                    document.corpus,
+                    document.content_sha256,
+                    document.title,
+                    document.path_tokens,
+                    document.identifier_tokens,
+                ),
+            ).fetchone()
+            if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
+                raise IndexingError("indexed search document identity was not persisted")
+            document_id = row[0]
+        else:
+            document_id = prior[0]
+            connection.execute(
+                "DELETE FROM indexed_content_search WHERE rowid = ?",
+                (document_id,),
+            )
+            connection.execute(
+                """
+                UPDATE indexed_search_documents
+                SET corpus = ?, content_sha256 = ?, title = ?,
+                    path_tokens = ?, identifier_tokens = ?
+                WHERE id = ?
+                """,
+                (
+                    document.corpus,
+                    document.content_sha256,
+                    document.title,
+                    document.path_tokens,
+                    document.identifier_tokens,
+                    document_id,
+                ),
+            )
+        connection.execute(
+            """
+            INSERT INTO indexed_content_search(
+                rowid, title, path_tokens, identifier_tokens, body
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                document_id,
+                document.title,
+                document.path_tokens,
+                document.identifier_tokens,
+                document.body,
+            ),
+        )
+
+    for relative_path in sorted(set(existing) - searchable_paths):
+        _require_scan_deadline(deadline)
+        connection.execute(
+            """
+            DELETE FROM indexed_search_documents
+            WHERE workspace_id = ? AND relative_path = ?
+            """,
+            (workspace.workspace_id, relative_path),
+        )
 
 
 def _candidate_paths(

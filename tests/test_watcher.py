@@ -15,7 +15,7 @@ import harness.watcher as watcher_module
 from harness.daemon import serve_daemon
 from harness.index import IndexingError, ScanResult, list_indexed_files, scan_workspace
 from harness.ipc import IpcError, StatusResult, request_status, request_workspace_scan
-from harness.registry import create_project, get_workspace, register_workspace
+from harness.registry import create_project, get_workspace, register_workspace, relocate_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.watcher import WorkspaceWatcher, read_workspace_change_token
 
@@ -365,6 +365,45 @@ def test_watcher_reconciles_existing_workspace_after_restart(tmp_path: Path) -> 
         assert (
             records["tracked.txt"].content_sha256 == hashlib.sha256(b"offline change\n").hexdigest()
         )
+    finally:
+        connection.close()
+
+
+def test_watcher_reconciles_relocated_workspace_even_when_change_token_is_identical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        monkeypatch.setattr(
+            watcher_module,
+            "read_workspace_change_token",
+            lambda *_args, **_kwargs: "stable",
+        )
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        moved = tmp_path / "moved-repo"
+        root.rename(moved)
+        relocate_workspace(connection, workspace_id, new_path=moved)
+        assert list_indexed_files(connection, workspace_id) == ()
+
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=1.11) == 1
+        records = {
+            record.relative_path: record for record in list_indexed_files(connection, workspace_id)
+        }
+        assert records["tracked.txt"].content_sha256 == hashlib.sha256(b"tracked\n").hexdigest()
     finally:
         connection.close()
 

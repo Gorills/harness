@@ -741,6 +741,7 @@ def serve_daemon(
         database_path,
         url_file=dashboard_url_path(socket_path),
         port=dashboard_listen_port(socket_path),
+        workspace_invalidations=watcher_invalidations,
     )
     effective_stop_event = Event() if stop_event is None else stop_event
     try:

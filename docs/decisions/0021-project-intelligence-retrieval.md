@@ -4,6 +4,11 @@
 - **Date:** 2026-08-26
 - **Deciders:** Repository architecture baseline
 
+> **Amended by ADR-0033 (2026-08-30):** code/docs candidate retrieval now includes bounded local
+> contentless FTS in addition to path signals, and `scope=all` first compares shared explicit
+> quality/coverage tiers before deterministic per-channel rank interleaving. The daemon ownership,
+> authoritative reread, freshness, bounds, and negative-disclosure decisions below remain intact.
+
 ## Context
 
 The model-facing `project_search` contract already defines `all`, `code`, `docs`, `knowledge`, and `tasks` scopes, while the implementation only returned current Structural Index path hits. Durable provenance-bearing Knowledge and Task history already exist, but exposing them directly from the MCP bridge would duplicate Project scoping, SQL, freshness semantics, and response-budget policy outside the daemon. A naive `LIKE` scan over growing historical tables would also make every semantic query proportional to all stored history.

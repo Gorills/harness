@@ -281,7 +281,9 @@ Persistence rules:
 - idempotent indexer writes;
 - derived data rebuildable independently from durable task/knowledge state.
 
-FTS5 availability must be checked by `harness doctor` at runtime because Python/SQLite builds are an environment capability, not a safe universal assumption.
+The exact required FTS5 capability set, including contentless-delete tables, must be checked by
+`harness doctor` at runtime because Python/SQLite builds are an environment capability, not a safe
+universal assumption.
 
 ## 11. Indexing
 
@@ -304,6 +306,14 @@ Incremental watcher events are debounced/coalesced and reconciled against the fi
 
 `ParserAdapter` remains a narrow language parsing boundary. Unsupported languages degrade to paths/text/docs/Git rather than failing the project.
 
+The implemented lexical projection indexes regular UTF-8 code/docs up to 1 MiB during the same
+authoritative reconciliation. It revalidates stable bytes against the mechanical SHA-256 snapshot,
+skips symlinks/binary/NUL/invalid-UTF-8/oversized content, and writes a contentless FTS5 index in the
+same transaction as `indexed_files`. Generated `.log`/`.out` diagnostic artifacts remain in the
+mechanical inventory but are not treated as code/docs search content. The durable mapping contains
+no readable source body. A schema migration creates only the empty derived structure; live source is
+backfilled by the next watcher or explicit scan.
+
 ## 12. Search
 
 Search combines independent retrieval channels and fuses ranked results rather than relying on a single opaque score:
@@ -324,6 +334,19 @@ Search must explain why a result matched and must penalize stale semantic eviden
 Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; both channels return metadata/history only and never raw source.
 
 The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace, the daemon validates its live Git identity before and after the read, and one read transaction fixes the corresponding Project identity. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge.
+
+Natural queries use bounded Unicode/camel/snake term normalization, conservative English/Russian
+filler removal, and prefix/inflection alternatives. Retrieval ranks explicit evidence tiers—exact
+path, exact filename, exact filename stem, title/identifier phrase, all significant terms, then
+partial match. BM25 is only an intra-channel candidate order. Code/docs results require every
+significant query term across their indexed title, path, normalized identifiers, and lexical body;
+one common normalized token cannot create a partial multi-term hit. Test and archived paths receive
+only same-tier penalties unless the query explicitly requests them. For `scope=all`, comparable
+quality/coverage tiers are ordered first and uncalibrated channel ranks are then deterministically
+interleaved; this avoids presenting a heterogeneous BM25 value as a global score while allowing
+directly relevant fresh Knowledge to beat a general lexical hit. Current-Task state is a boost, not
+a hard filter or a substitute for query relevance. More sophisticated RRF/Working-Set/graph ranking
+can replace this internal fusion later without changing refs or tool shapes.
 
 ## 13. Knowledge and staleness
 
@@ -460,7 +483,7 @@ Dashboard rules:
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
 - show only observed activity, never claim access to model internal reasoning;
-- state transitions (accept, feedback, cancel, Hidden/Normal) call the same domain services used by other interfaces;
+- state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
 - Hidden/Normal operator control is on the home dashboard and Workspace detail; a nested Project-id page is not required;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
@@ -469,6 +492,7 @@ Dashboard rules:
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.
+- Project detail supports explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Destructive and relocation POST identities must match the detail page that rendered them.
 
 ## 18. Security and privacy boundaries
 

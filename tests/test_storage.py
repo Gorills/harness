@@ -687,6 +687,8 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        connection.execute("DROP TABLE indexed_content_search")
+        connection.execute("DROP TABLE indexed_search_documents")
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")
         connection.execute("DROP TABLE task_checkpoint_verification")

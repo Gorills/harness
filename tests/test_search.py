@@ -53,6 +53,7 @@ def _registered(tmp_path: Path) -> tuple[sqlite3.Connection, str]:
             "tests/rotate_refresh_token_test.py": ("def test_rotate_refresh_token(): pass\n"),
             "docs/auth-guide.md": "authentication guide\n",
             "src/tokenBucket.py": "class TokenBucket: pass\n",
+            ".pytest_nutrition_all.out": "FastAPI endpoints nutrition test log\n",
         },
     )
     database = tmp_path / "harness.db"
@@ -85,12 +86,57 @@ def test_search_ranks_exact_path_and_filename_before_broader_matches(
         connection.close()
 
 
+def test_scoped_path_search_excludes_generated_output_but_all_keeps_inventory_access(
+    tmp_path: Path,
+) -> None:
+    connection, workspace_id = _registered(tmp_path)
+    try:
+        all_results = search_indexed_paths(
+            connection,
+            workspace_id,
+            ".pytest_nutrition_all.out",
+            scope=IndexedPathSearchScope.ALL,
+        )
+        code_results = search_indexed_paths(
+            connection,
+            workspace_id,
+            ".pytest_nutrition_all.out",
+            scope=IndexedPathSearchScope.CODE,
+        )
+
+        assert all_results[0].relative_path == ".pytest_nutrition_all.out"
+        assert all_results[0].match_kind is SearchMatchKind.EXACT_PATH
+        assert code_results == ()
+    finally:
+        connection.close()
+
+
 def test_search_normalizes_camel_snake_and_natural_identifier_tokens(
     tmp_path: Path,
 ) -> None:
     connection, workspace_id = _registered(tmp_path)
     try:
         results = search_indexed_paths(connection, workspace_id, "rotate refresh token")
+
+        assert [result.relative_path for result in results] == [
+            "src/rotateRefreshToken.py",
+            "tests/rotate_refresh_token_test.py",
+        ]
+        assert all(result.match_kind is SearchMatchKind.IDENTIFIER_TOKENS for result in results)
+    finally:
+        connection.close()
+
+
+def test_search_ignores_conversational_filler_and_matches_prefix_inflections(
+    tmp_path: Path,
+) -> None:
+    connection, workspace_id = _registered(tmp_path)
+    try:
+        results = search_indexed_paths(
+            connection,
+            workspace_id,
+            "where rotations of refresh tokens happen",
+        )
 
         assert [result.relative_path for result in results] == [
             "src/rotateRefreshToken.py",

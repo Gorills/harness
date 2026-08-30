@@ -10,6 +10,7 @@ from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from queue import SimpleQueue
 from threading import BoundedSemaphore, Event, Thread
 from time import monotonic, sleep
 from typing import ClassVar, cast
@@ -32,6 +33,11 @@ from harness.dashboard_i18n import (
     COMMENT_SUMMARY,
     CREATED,
     CURRENT_TASK,
+    DELETE_PROJECT,
+    DELETE_PROJECT_CONFIRM_LABEL,
+    DELETE_PROJECT_CONFIRM_VALUE,
+    DELETE_PROJECT_HINT,
+    DELETE_PROJECT_SUMMARY,
     DETACHED_HEAD,
     DIRTY,
     DIRTY_PATHS,
@@ -80,6 +86,7 @@ from harness.dashboard_i18n import (
     PAGE_PROJECTS_LEAD,
     PRIMARY_WORKSPACE,
     PROJECT,
+    PROJECT_MANAGEMENT,
     PROJECT_OVERVIEW,
     PROJECTS_NAV,
     RECENT_TASKS,
@@ -111,6 +118,12 @@ from harness.dashboard_i18n import (
     WORKSPACE_FALLBACK,
     WORKSPACE_HOME,
     WORKSPACE_OVERVIEW,
+    WORKSPACE_RELOCATION,
+    WORKSPACE_RELOCATION_HINT,
+    WORKSPACE_RELOCATION_LABEL,
+    WORKSPACE_RELOCATION_PLACEHOLDER,
+    WORKSPACE_RELOCATION_SUBMIT,
+    WORKSPACE_RELOCATION_SUMMARY,
     WORKSPACE_STATE,
     document_title,
     event_count_label,
@@ -142,9 +155,11 @@ from harness.registry import (
     RegistryError,
     VisibilityMode,
     WorkspaceRecord,
+    delete_project,
     get_project,
     get_workspace,
     list_workspaces,
+    relocate_workspace,
 )
 from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project
 from harness.runtime_paths import DASHBOARD_HOST
@@ -335,6 +350,21 @@ class DashboardVisibilityRequest:
 
     project_id: str
     visibility_mode: VisibilityMode
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardProjectDeleteRequest:
+    """One explicitly confirmed Project deletion from its dashboard detail page."""
+
+    project_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardWorkspaceRelocationRequest:
+    """One operator-requested rebind of a Workspace to a new absolute Git path."""
+
+    workspace_id: str
+    new_path: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,9 +788,33 @@ def mutate_dashboard_visibility(database_path: Path, request: DashboardVisibilit
         connection.close()
 
 
+def mutate_dashboard_registry(
+    database_path: Path,
+    request: DashboardProjectDeleteRequest | DashboardWorkspaceRelocationRequest,
+) -> None:
+    """Apply an explicit Project deletion or Workspace relocation to daemon-owned state."""
+    connection = connect_database(database_path)
+    try:
+        if isinstance(request, DashboardProjectDeleteRequest):
+            delete_project(connection, request.project_id)
+            return
+        relocate_workspace(
+            connection,
+            request.workspace_id,
+            new_path=request.new_path,
+        )
+    finally:
+        connection.close()
+
+
 def _parse_dashboard_action_form(
     payload: bytes,
-) -> DashboardActionRequest | DashboardVisibilityRequest:
+) -> (
+    DashboardActionRequest
+    | DashboardVisibilityRequest
+    | DashboardProjectDeleteRequest
+    | DashboardWorkspaceRelocationRequest
+):
     try:
         encoded = payload.decode("ascii")
         parsed = parse_qs(
@@ -777,6 +831,43 @@ def _parse_dashboard_action_form(
         raise TaskValidationError("dashboard action form fields must be singular")
     fields = {name: values[0] for name, values in parsed.items()}
     action = fields.get("action")
+    if action == "delete_project":
+        expected = {"action", "project_id", "confirmation"}
+        if set(fields) != expected:
+            raise TaskValidationError(
+                "dashboard Project deletion form does not match the expected schema"
+            )
+        project_id = fields["project_id"]
+        if (
+            not project_id
+            or len(project_id) > 128
+            or "\x00" in project_id
+            or fields["confirmation"] != DELETE_PROJECT_CONFIRM_VALUE
+        ):
+            raise TaskValidationError("dashboard Project deletion fields are invalid")
+        return DashboardProjectDeleteRequest(project_id=project_id)
+    if action == "relocate_workspace":
+        expected = {"action", "workspace_id", "new_path"}
+        if set(fields) != expected:
+            raise TaskValidationError(
+                "dashboard Workspace relocation form does not match the expected schema"
+            )
+        workspace_id = fields["workspace_id"]
+        new_path = fields["new_path"].strip()
+        if (
+            not workspace_id
+            or len(workspace_id) > 128
+            or "\x00" in workspace_id
+            or not new_path
+            or "\x00" in new_path
+            or len(new_path.encode("utf-8")) > 2048
+            or not Path(new_path).is_absolute()
+        ):
+            raise TaskValidationError("dashboard Workspace relocation fields are invalid")
+        return DashboardWorkspaceRelocationRequest(
+            workspace_id=workspace_id,
+            new_path=Path(new_path),
+        )
     if action == "set_visibility":
         expected = {"action", "project_id", "visibility_mode"}
         if set(fields) != expected:
@@ -932,6 +1023,44 @@ def _render_visibility_form(
         + _hidden_input("project_id", project_id)
         + _hidden_input("visibility_mode", target.value)
         + f'<button class="btn" type="submit">{escape(label)}</button></form></div>'
+    )
+
+
+def _render_project_delete_form(project_id: str, *, action: str) -> str:
+    return (
+        '<details class="management-disclosure danger-zone">'
+        f"<summary>{escape(DELETE_PROJECT_SUMMARY)}</summary>"
+        f'<p class="management-hint">{escape(DELETE_PROJECT_HINT)}</p>'
+        f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
+        + _hidden_input("action", "delete_project")
+        + _hidden_input("project_id", project_id)
+        + f'<label for="delete-confirm-{escape(project_id, quote=True)}">'
+        + escape(DELETE_PROJECT_CONFIRM_LABEL)
+        + "</label>"
+        + f'<input id="delete-confirm-{escape(project_id, quote=True)}" '
+        f'name="confirmation" type="text" required autocomplete="off" '
+        f'placeholder="{escape(DELETE_PROJECT_CONFIRM_VALUE, quote=True)}">'
+        + f'<button class="btn btn-danger" type="submit">{escape(DELETE_PROJECT)}</button>'
+        + "</form></details>"
+    )
+
+
+def _render_workspace_relocation_form(workspace_id: str, *, action: str) -> str:
+    return (
+        '<details class="management-disclosure">'
+        f"<summary>{escape(WORKSPACE_RELOCATION_SUMMARY)}</summary>"
+        f'<p class="management-hint">{escape(WORKSPACE_RELOCATION_HINT)}</p>'
+        f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
+        + _hidden_input("action", "relocate_workspace")
+        + _hidden_input("workspace_id", workspace_id)
+        + f'<label for="relocate-{escape(workspace_id, quote=True)}">'
+        + escape(WORKSPACE_RELOCATION_LABEL)
+        + "</label>"
+        + f'<input id="relocate-{escape(workspace_id, quote=True)}" name="new_path" '
+        f'type="text" required maxlength="2048" autocomplete="off" '
+        f'placeholder="{escape(WORKSPACE_RELOCATION_PLACEHOLDER, quote=True)}">'
+        + f'<button class="btn" type="submit">{escape(WORKSPACE_RELOCATION_SUBMIT)}</button>'
+        + "</form></details>"
     )
 
 
@@ -1434,11 +1563,13 @@ def render_project_page(
         f"<h1>{escape(project_name)}</h1>"
         f'<p class="hero-copy identity-line">{escape(project_id)}</p></div>'
         '<div class="page-intro-actions">'
+        f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
         + _render_visibility_form(
             project_id,
             detail.project.visibility_mode,
             action=visibility_action,
         )
+        + _render_project_delete_form(project_id, action=visibility_action)
         + "</div></section>"
         + _render_metrics(rows)
         + workspace_html
@@ -1636,6 +1767,9 @@ def render_workspace_page(
         f'<div class="fact"><dt>{escape(TASK)}</dt><dd class="mono">{escape(_display_task(row))}</dd></div>'
         '</dl><div class="settings-divider"></div>'
         + _render_visibility_form(row.project_id, row.visibility_mode, action=workspace_url)
+        + '<div class="settings-divider"></div>'
+        + f'<p class="panel-kicker">{escape(WORKSPACE_RELOCATION)}</p>'
+        + _render_workspace_relocation_form(row.workspace_id, action=workspace_url)
         + "</div></section></aside></section>"
     )
     return _render_shell(
@@ -2052,6 +2186,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
     expected_origin: ClassVar[str]
     stop_event: ClassVar[Event]
     sse_slots: ClassVar[BoundedSemaphore]
+    workspace_invalidations: ClassVar[SimpleQueue[str] | None]
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -2142,8 +2277,29 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             request = _parse_dashboard_action_form(payload)
             if isinstance(request, DashboardVisibilityRequest):
                 mutate_dashboard_visibility(self.database_path, request)
+            elif isinstance(request, DashboardProjectDeleteRequest):
+                if page.kind != "project" or page.identity != request.project_id:
+                    raise TaskValidationError(
+                        "dashboard Project deletion target does not match its page"
+                    )
+                mutate_dashboard_registry(self.database_path, request)
+                redirect_target = self.route_path
+            elif isinstance(request, DashboardWorkspaceRelocationRequest):
+                if page.kind != "workspace" or page.identity != request.workspace_id:
+                    raise TaskValidationError(
+                        "dashboard Workspace relocation target does not match its page"
+                    )
+                mutate_dashboard_registry(self.database_path, request)
+                if self.workspace_invalidations is not None:
+                    self.workspace_invalidations.put(request.workspace_id)
+                redirect_target = page.redirect_target
             else:
                 mutate_dashboard_task(self.database_path, request)
+            if not isinstance(
+                request,
+                (DashboardProjectDeleteRequest, DashboardWorkspaceRelocationRequest),
+            ):
+                redirect_target = page.redirect_target
         except TaskValidationError:
             self._send_html(400, "")
             return
@@ -2157,6 +2313,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             HiddenProjectionError,
             HiddenProjectionCollisionError,
             RegistryError,
+            GitWorkspaceError,
             HostIntegrationStateError,
         ):
             self._send_html(409, "")
@@ -2164,7 +2321,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         except (OSError, sqlite3.DatabaseError, DatabaseError):
             self._send_html(503, "")
             return
-        self._send_redirect(page.redirect_target)
+        self._send_redirect(redirect_target)
 
     def _serve_events(
         self,
@@ -2269,6 +2426,7 @@ def _request_handler(
     database_path: Path,
     access_token: str,
     stop_event: Event,
+    workspace_invalidations: SimpleQueue[str] | None,
 ) -> type[_DashboardRequestHandler]:
     class Handler(_DashboardRequestHandler):
         pass
@@ -2277,6 +2435,7 @@ def _request_handler(
     Handler.route_path = f"/{access_token}/"
     Handler.stop_event = stop_event
     Handler.sse_slots = BoundedSemaphore(_DASHBOARD_SSE_MAX_CLIENTS)
+    Handler.workspace_invalidations = workspace_invalidations
     return Handler
 
 
@@ -2403,6 +2562,7 @@ class DashboardServerManager:
         *,
         url_file: Path | None = None,
         port: int = 0,
+        workspace_invalidations: SimpleQueue[str] | None = None,
     ) -> None:
         if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
             raise DashboardError("dashboard loopback port is invalid")
@@ -2410,6 +2570,7 @@ class DashboardServerManager:
         self._url_file = url_file
         self._token_file = dashboard_token_path(database_path)
         self._port = port
+        self._workspace_invalidations = workspace_invalidations
         self._server: _DashboardHttpServer | None = None
         self._thread: Thread | None = None
         self._stop_event: Event | None = None
@@ -2442,7 +2603,12 @@ class DashboardServerManager:
             try:
                 server = _DashboardHttpServer(
                     (DASHBOARD_HOST, self._port),
-                    _request_handler(self._database_path, access_token, stop_event),
+                    _request_handler(
+                        self._database_path,
+                        access_token,
+                        stop_event,
+                        self._workspace_invalidations,
+                    ),
                 )
             except OSError as exc:
                 requested = self._port if self._port else "ephemeral"

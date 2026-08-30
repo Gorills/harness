@@ -31,7 +31,10 @@ def _git(cwd: Path, *arguments: str) -> None:
 def _init_repo(root: Path) -> None:
     root.mkdir()
     (root / "src").mkdir()
-    (root / "src" / "token_service.py").write_text("VERSION = 1\n", encoding="utf-8")
+    (root / "src" / "token_service.py").write_text(
+        "VERSION = 1\n\ndef rotateRefreshToken():\n    return 'previous credential'\n",
+        encoding="utf-8",
+    )
     (root / "docs").mkdir()
     (root / "docs" / "rotation.md").write_text("Repository rotation notes\n", encoding="utf-8")
     _git(root, "init", "-b", "main")
@@ -105,7 +108,15 @@ def _seed_project_intelligence(tmp_path: Path) -> tuple[Path, Path, str, str, st
         )
         legacy_knowledge_id = legacy.knowledge_cards[0].knowledge_id
 
-        (active_root / "src" / "token_service.py").write_text("VERSION = 2\n", encoding="utf-8")
+        (active_root / "src" / "token_service.py").write_text(
+            """
+VERSION = 2
+
+def rotateRefreshToken(repository, previous_credential):
+    return repository.replace_and_invalidate(previous_credential)
+""".lstrip(),
+            encoding="utf-8",
+        )
         scan_workspace(connection, active_workspace.workspace_id)
 
         current = task_checkpoint(
@@ -219,6 +230,22 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert task_results[0]["kind"] == "task"
             assert "SECRET_OTHER_PROJECT" not in json.dumps(
                 tasks.structured_content, sort_keys=True
+            )
+
+            code = await client.call_tool(
+                "project_search",
+                {
+                    "query": "where previous credential invalidation happens",
+                    "scope": "code",
+                    "limit": 3,
+                },
+            )
+            assert code.is_error is False
+            assert code.structured_content is not None
+            assert code.structured_content["results"][0]["ref"] == ("code:src/token_service.py")
+            assert code.structured_content["results"][0]["short_summary"] is None
+            assert "replace_and_invalidate" not in json.dumps(
+                code.structured_content, sort_keys=True
             )
 
             docs = await client.call_tool(

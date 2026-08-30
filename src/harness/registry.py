@@ -29,6 +29,10 @@ class VisibilityModeConflictError(RegistryError):
     """Raised when one Git common directory would receive contradictory visibility policy."""
 
 
+class WorkspaceRelocationConflictError(RegistryError):
+    """Raised when a Workspace cannot be safely rebound to a new Git location."""
+
+
 class VisibilityMode(StrEnum):
     """Durable Project publication policy values supported by Harness v1."""
 
@@ -62,6 +66,17 @@ class WorkspaceScanRegistration:
     workspace: WorkspaceRecord
     project_created: bool
     workspace_created: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectDeletionResult:
+    """Bounded summary of durable Harness state removed with one Project."""
+
+    project_id: str
+    workspace_count: int
+    task_count: int
+    knowledge_count: int
+    indexed_file_count: int
 
 
 def create_project(connection: sqlite3.Connection) -> ProjectRecord:
@@ -98,6 +113,130 @@ def get_workspace(connection: sqlite3.Connection, workspace_id: str) -> Workspac
     if row is None:
         raise WorkspaceNotFoundError(f"workspace is not registered: {workspace_id}")
     return _workspace_from_row(row)
+
+
+def relocate_workspace(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    new_path: Path,
+) -> WorkspaceRecord:
+    """Rebind one durable Workspace identity to a moved Git checkout.
+
+    Task and Knowledge identity stay attached to the Workspace. Rebuildable filesystem index
+    rows are cleared so the old location cannot be presented as current before the watcher scans
+    the new root.
+    """
+    if not new_path.is_absolute():
+        raise WorkspaceRelocationConflictError("new Workspace path must be absolute")
+    layout = inspect_git_workspace(new_path)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        workspace = get_workspace(connection, workspace_id)
+        project = get_project(connection, workspace.project_id)
+        existing = _workspace_by_root(connection, layout.workspace_root)
+        if existing is not None and existing.workspace_id != workspace_id:
+            raise WorkspaceRelocationConflictError(
+                f"new Workspace root is already registered: {layout.workspace_root}"
+            )
+
+        other_project_ids = set(_project_ids_by_common_dir(connection, layout.git_common_dir))
+        other_project_ids.discard(project.project_id)
+        if other_project_ids:
+            raise WorkspaceRelocationConflictError(
+                "new Git common directory is registered to another Project"
+            )
+        _require_common_dir_visibility(
+            connection,
+            git_common_dir=layout.git_common_dir,
+            visibility_mode=project.visibility_mode,
+            except_project_id=project.project_id,
+        )
+
+        relocated = WorkspaceRecord(
+            workspace_id=workspace.workspace_id,
+            project_id=workspace.project_id,
+            workspace_root=layout.workspace_root,
+            git_common_dir=layout.git_common_dir,
+        )
+        if relocated == workspace:
+            connection.execute("COMMIT")
+            return workspace
+
+        connection.execute(
+            """
+            UPDATE workspaces
+            SET workspace_root = ?, git_common_dir = ?
+            WHERE id = ? AND project_id = ?
+            """,
+            (
+                str(relocated.workspace_root),
+                str(relocated.git_common_dir),
+                relocated.workspace_id,
+                relocated.project_id,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM indexed_files WHERE workspace_id = ?",
+            (workspace_id,),
+        )
+        connection.execute("COMMIT")
+        return relocated
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def delete_project(
+    connection: sqlite3.Connection,
+    project_id: str,
+) -> ProjectDeletionResult:
+    """Delete one Project and its Harness-owned durable state, never filesystem content."""
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        get_project(connection, project_id)
+        counts = connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM workspaces WHERE project_id = ?),
+                (SELECT COUNT(*) FROM tasks
+                 WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)),
+                (SELECT COUNT(*) FROM knowledge_cards WHERE project_id = ?),
+                (SELECT COUNT(*) FROM indexed_files
+                 WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?))
+            """,
+            (project_id, project_id, project_id, project_id),
+        ).fetchone()
+        if counts is None or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
+        ):
+            raise RegistryError("project deletion counts are invalid")
+        workspace_count, task_count, knowledge_count, indexed_file_count = counts
+        workspace_ids = connection.execute(
+            "SELECT id FROM workspaces WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        ).fetchall()
+        connection.executemany(
+            "DELETE FROM knowledge_anchors WHERE workspace_id = ?",
+            workspace_ids,
+        )
+        connection.execute("DELETE FROM workspaces WHERE project_id = ?", (project_id,))
+        deleted = connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        if deleted.rowcount != 1:
+            raise RegistryError("project deletion lost its registry identity")
+        connection.execute("COMMIT")
+        return ProjectDeletionResult(
+            project_id=project_id,
+            workspace_count=workspace_count,
+            task_count=task_count,
+            knowledge_count=knowledge_count,
+            indexed_file_count=indexed_file_count,
+        )
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
 
 
 def register_workspace(

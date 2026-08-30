@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -364,11 +364,20 @@ def _live_wal_sidecars_are_safe(path: Path) -> bool:
 
 
 def fts5_available(connection: sqlite3.Connection) -> bool:
-    """Return whether the runtime SQLite connection can create an FTS5 table."""
+    """Return whether SQLite has the FTS5 capabilities required by current schema."""
     try:
-        connection.execute(f"CREATE VIRTUAL TABLE temp.{_FTS5_PROBE_TABLE} USING fts5(content)")
+        connection.execute(
+            f"""
+            CREATE VIRTUAL TABLE temp.{_FTS5_PROBE_TABLE} USING fts5(
+                content,
+                content = '',
+                contentless_delete = 1
+            )
+            """
+        )
     except sqlite3.OperationalError as exc:
-        if "no such module: fts5" in str(exc).lower():
+        detail = str(exc).lower()
+        if "no such module: fts5" in detail or "unrecognized option" in detail:
             return False
         raise
     finally:
@@ -1466,6 +1475,60 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             """
         )
         _execute_sql_script_in_transaction(connection, _TASK_SEARCH_V13_TRIGGERS)
+        return
+    if target_version == 14:
+        connection.execute(
+            """
+            CREATE TABLE indexed_search_documents (
+                id INTEGER PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                corpus TEXT NOT NULL CHECK (corpus IN ('code', 'docs')),
+                content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+                title TEXT NOT NULL CHECK (
+                    title <> '' AND length(CAST(title AS BLOB)) <= 4096
+                ),
+                path_tokens TEXT NOT NULL CHECK (
+                    length(CAST(path_tokens AS BLOB)) <= 16384
+                ),
+                identifier_tokens TEXT NOT NULL CHECK (
+                    length(CAST(identifier_tokens AS BLOB)) <= 262144
+                ),
+                UNIQUE (workspace_id, relative_path),
+                FOREIGN KEY (workspace_id, relative_path)
+                    REFERENCES indexed_files(workspace_id, relative_path) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX indexed_search_documents_workspace_corpus_idx
+            ON indexed_search_documents(workspace_id, corpus, relative_path)
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE indexed_content_search USING fts5(
+                title,
+                path_tokens,
+                identifier_tokens,
+                body,
+                content = '',
+                contentless_delete = 1,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TRIGGER indexed_content_search_delete
+            AFTER DELETE ON indexed_search_documents
+            BEGIN
+                DELETE FROM indexed_content_search WHERE rowid = OLD.id;
+            END;
+            """,
+        )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 

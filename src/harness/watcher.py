@@ -37,6 +37,7 @@ class WorkspaceWatchError(RuntimeError):
 
 @dataclass(slots=True)
 class _WorkspaceWatchState:
+    workspace: WorkspaceRecord
     token: str | None
     pending_since: float | None
     last_reconciled_at: float
@@ -107,6 +108,12 @@ class WorkspaceWatcher:
                 if workspace.workspace_id in self._forced_reconcile_ids:
                     self._forced_reconcile_ids.discard(workspace.workspace_id)
                 self._states[workspace.workspace_id] = state
+                continue
+            if state.workspace != workspace:
+                self._states[workspace.workspace_id] = self._initial_state(
+                    workspace,
+                    sampled_at,
+                )
                 continue
 
             self._sample_change(workspace, state, sampled_at)
@@ -200,6 +207,7 @@ class WorkspaceWatcher:
         except WorkspaceWatchError:
             token = None
         return _WorkspaceWatchState(
+            workspace=workspace,
             token=token,
             pending_since=sampled_at,
             last_reconciled_at=sampled_at,
