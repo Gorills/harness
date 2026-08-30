@@ -8,7 +8,12 @@ import pytest
 
 import harness.builtin_skills as builtin_module
 from harness.builtin_skills import BUILTIN_SKILLS, BuiltinSkillCollisionError, sync_builtin_skills
-from harness.skill_runtime import supported_skill_profiles, validate_skill_definitions_for_profiles
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    active_skill_profiles_for_runtime,
+    supported_skill_profiles,
+    validate_skill_definitions_for_profiles,
+)
 from harness.skills import DetectedProjectStack, ResolvedSkill, load_skill_registry, resolve_skills
 
 
@@ -45,6 +50,31 @@ def test_builtin_pack_uses_task_hints_for_bounded_composition(tmp_path: Path) ->
         "spec-audit",
         "testing-strategy",
     )
+
+
+def test_isolated_runtime_uses_one_explicit_compatible_skill_profile_set(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state" / "harness.db"
+    assert active_skill_profiles_for_runtime(
+        database,
+        environment={"HARNESS_DEV_ROOT": str(tmp_path)},
+    ) == ("codex", "cursor")
+    assert active_skill_profiles_for_runtime(
+        database,
+        environment={
+            "HARNESS_DEV_ROOT": str(tmp_path),
+            "HARNESS_DEV_SKILL_PROFILES": "claude-code",
+        },
+    ) == ("claude-code",)
+    with pytest.raises(SkillRuntimeError, match="duplicate-free"):
+        active_skill_profiles_for_runtime(
+            database,
+            environment={
+                "HARNESS_DEV_ROOT": str(tmp_path),
+                "HARNESS_DEV_SKILL_PROFILES": "claude-code,codex,cursor",
+            },
+        )
 
 
 def test_builtin_pack_refuses_foreign_collision_without_mutation(tmp_path: Path) -> None:

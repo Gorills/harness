@@ -492,6 +492,27 @@ def test_doctor_workspace_budgets_remain_finite() -> None:
     assert doctor._DOCTOR_WORKSPACE_TOTAL_SECONDS >= 90.0
 
 
+def test_isolated_doctor_inspects_development_skill_profiles(tmp_path: Path) -> None:
+    environment = _doctor_environment(tmp_path)
+    root = _git_repository(tmp_path / "repo")
+    _register_doctor_workspaces(environment, [root])
+    registry = tmp_path / "skills"
+    registry.mkdir(mode=0o700)
+    environment.update(
+        {
+            "HARNESS_DEV_ROOT": str(tmp_path),
+            "HARNESS_DEV_SKILL_PROFILES": "codex,cursor",
+            "HARNESS_SKILL_REGISTRY": str(registry),
+        }
+    )
+
+    report = doctor.run_system_doctor(environment=environment)
+
+    skills = _checks_by_name(report)["Generated skills"]
+    assert skills.severity is doctor.DoctorSeverity.OK
+    assert "1 current" in skills.detail
+
+
 def test_doctor_labels_index_timeout_with_workspace_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

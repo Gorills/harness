@@ -369,6 +369,40 @@ def test_watcher_reconciles_existing_workspace_after_restart(tmp_path: Path) -> 
         connection.close()
 
 
+def test_watcher_reconciles_project_skills_after_authoritative_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, database, workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    reconciled: list[tuple[str, tuple[str, ...]]] = []
+    try:
+
+        def reconcile(
+            _connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            profiles: tuple[str, ...],
+        ) -> None:
+            reconciled.append((selected_workspace_id, profiles))
+
+        monkeypatch.setattr(watcher_module, "reconcile_workspace_skills", reconcile)
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+            skill_profiles_provider=lambda: ("codex", "cursor"),
+        )
+
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+        assert reconciled == [(workspace_id, ("codex", "cursor"))]
+    finally:
+        connection.close()
+
+
 def test_watcher_rescans_after_sampling_failure_invalidates_prior_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -947,7 +947,13 @@ def _serve_client(
         )
         return
     if request.method == "task_start" and request.task_start is not None:
-        _serve_task_start(client, database, request.request_id, request.task_start)
+        _serve_task_start(
+            client,
+            database,
+            request.request_id,
+            request.task_start,
+            watcher_invalidations,
+        )
         return
     if request.method == "task_checkpoint" and request.task_checkpoint is not None:
         _serve_task_checkpoint(client, database, request.request_id, request.task_checkpoint)
@@ -1389,6 +1395,7 @@ def _serve_task_start(
     database: sqlite3.Connection,
     request_id: str,
     request: TaskStartRequestData,
+    watcher_invalidations: SimpleQueue[str],
 ) -> None:
     try:
         result = mutate_task_start(database, request)
@@ -1453,6 +1460,7 @@ def _serve_task_start(
             message="daemon could not mutate Task state",
         )
         return
+    watcher_invalidations.put(result.workspace_id)
     try:
         send_task_start_response(client, request_id, result)
     except IpcMessageTooLargeError:

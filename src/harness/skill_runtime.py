@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -12,6 +13,7 @@ from harness.host_adapters import (
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
+from harness.host_integration_state import load_host_integration_state_for_database
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
 from harness.skills import (
     SkillDefinition,
@@ -30,6 +32,8 @@ from harness.skills import (
 )
 
 _SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "codex", "cursor"})
+_DEFAULT_DEVELOPMENT_PROFILES: Final[tuple[str, ...]] = ("codex", "cursor")
+_DEVELOPMENT_PROFILES_ENV: Final[str] = "HARNESS_DEV_SKILL_PROFILES"
 
 
 class SkillRuntimeError(RuntimeError):
@@ -66,6 +70,35 @@ def supported_skill_profiles() -> frozenset[str]:
     return _SUPPORTED_PROFILES
 
 
+def active_skill_profiles_for_runtime(
+    database_path: Path,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return the owned host profiles whose project skills must stay reconciled.
+
+    Production reads daemon-adjacent installation intent. Isolated development has
+    no production host intent, so it uses one explicit compatible profile set and
+    never inspects or mutates user-global host configuration.
+    """
+    values = os.environ if environment is None else environment
+    if values.get("HARNESS_DEV_ROOT"):
+        configured = values.get(_DEVELOPMENT_PROFILES_ENV)
+        profiles = (
+            _DEFAULT_DEVELOPMENT_PROFILES
+            if configured is None
+            else tuple(item.strip() for item in configured.split(",") if item.strip())
+        )
+        if not profiles:
+            raise SkillRuntimeError(
+                f"{_DEVELOPMENT_PROFILES_ENV} must select at least one host profile"
+            )
+    else:
+        profiles = tuple(sorted(load_host_integration_state_for_database(database_path).profiles))
+    validate_skill_profile_combination(profiles)
+    return profiles
+
+
 def validate_skill_definitions_for_profiles(
     definitions: Sequence[SkillDefinition], profiles: Sequence[str]
 ) -> None:
@@ -75,6 +108,8 @@ def validate_skill_definitions_for_profiles(
 
 def validate_skill_profile_combination(profiles: Sequence[str]) -> None:
     """Reject active hosts that cannot share a duplicate-free project skill layout."""
+    if not profiles:
+        return
     try:
         validate_skill_projection_surface_combination(_surfaces_for_profiles(profiles))
     except SkillError as exc:

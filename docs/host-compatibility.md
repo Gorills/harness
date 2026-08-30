@@ -44,6 +44,12 @@ The current core skills slice loads Harness-owned canonical skills from `~/.harn
 
 Projection planning takes explicit host visibility surfaces and chooses a minimal set of native project roots where every active profile sees exactly one generated Harness copy; if the compatibility graph cannot satisfy that invariant, projection fails closed. Reconciliation removes only exact Harness-owned stale projections, refuses user-owned or Git-tracked collisions, rechecks filesystem identity before mutation, and maintains generated-path exclusions through `git rev-parse --git-path info/exclude` without changing `.gitignore`. Claude uses `.claude/skills`; Codex uses `.agents/skills`; Cursor prefers `.agents/skills` while also observing its Claude/Codex compatibility roots. This lets Codex+Cursor reuse one projection and makes the simultaneous Claude+Codex+Cursor graph fail closed before mutation. Antigravity can reuse `.agents/skills` where its active graph permits it. Codex and Cursor local MCP/root integration are implemented; Antigravity MCP/root integration and proprietary-host visibility remain later/acceptance work.
 
+Installed profile intent is persisted for all supported local hosts. Foreground `scan` projects
+synchronously; the daemon watcher repeats resolution after authoritative index changes and after a
+successful Task start invalidation. Thus Task `stack_hints`, manifests, dependencies, and languages
+converge to project skills without another manual scan. Host-side live discovery is still
+acceptance-owned; restart is the fallback documented by each adapter.
+
 Automated tests prove registry parsing, legacy and greenfield relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Claude Code, Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
 
 ### Codex

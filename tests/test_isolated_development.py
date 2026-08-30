@@ -24,7 +24,7 @@ from harness.cursor_adapter import (
     production_mcp_isolated_checkout_root,
 )
 from harness.entrypoints import harness_main
-from harness.ipc import WorkspaceScanResult
+from harness.ipc import WorkspaceScanResult, WorkspaceSkillsResult
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import SCHEMA_VERSION
 
@@ -158,6 +158,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         ".cursor/mcp.json",
         "HARNESS_DEV_ROOT",
         "HARNESS_SKILL_REGISTRY",
+        "HARNESS_DEV_SKILL_PROFILES",
         "UV_CACHE_DIR",
         "refused",
         "uv run --frozen harness",
@@ -268,6 +269,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     assert f"XDG_STATE_HOME={REPO_ROOT / '.harness' / 'state'}" in env_result.stdout
     assert f"XDG_RUNTIME_DIR={REPO_ROOT / '.harness' / 'runtime'}" in env_result.stdout
     assert f"HARNESS_SKILL_REGISTRY={REPO_ROOT / '.harness' / 'skills'}" in env_result.stdout
+    assert "HARNESS_DEV_SKILL_PROFILES=codex,cursor" in env_result.stdout
     assert f"UV_CACHE_DIR={REPO_ROOT / '.harness' / 'uv-cache'}" in env_result.stdout
     assert f"database={REPO_ROOT / '.harness' / 'state' / 'harness' / 'harness.db'}" in (
         env_result.stdout
@@ -442,7 +444,7 @@ def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
     assert "isolated development" in output
 
 
-def test_isolated_scan_of_overlay_root_skips_host_skill_reconciliation(
+def test_isolated_scan_projects_local_skills_without_reconciling_host_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -471,8 +473,23 @@ def test_isolated_scan_of_overlay_root_skips_host_skill_reconciliation(
             removed=0,
         )
 
-    def skills_reconcile(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("isolated overlay scan must not project skills")
+    reconciled_profiles: list[tuple[str, ...]] = []
+
+    def skills_reconcile(
+        _socket: Path,
+        _hints: object,
+        profiles: tuple[str, ...],
+    ) -> WorkspaceSkillsResult:
+        reconciled_profiles.append(profiles)
+        return WorkspaceSkillsResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id="workspace-1",
+            selected_skill_ids=("testing-strategy",),
+            materialized=1,
+            removed=0,
+            unchanged=0,
+            exclude_changed=True,
+        )
 
     monkeypatch.setattr(
         sys,
@@ -484,8 +501,12 @@ def test_isolated_scan_of_overlay_root_skips_host_skill_reconciliation(
 
     assert harness_main() == 0
     assert seen == [(socket_path, root.resolve())]
+    assert reconciled_profiles == [("codex", "cursor")]
+    assert (root / ".harness" / "skills" / "testing-strategy" / "SKILL.md").is_file()
     output = capsys.readouterr().out
-    assert "Host/skill reconciliation skipped: isolated-development checkout overlay" in output
+    assert "Development skill profiles: codex, cursor" in output
+    assert "Relevant skills: 1" in output
+    assert "Host configuration reconciliation skipped" in output
 
 
 def test_isolated_env_refuses_install_and_uninstall(
@@ -729,8 +750,7 @@ def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> 
     fake_bin = Path(env["FAKE_UV_BIN_DIR"])
     assert fields["hosts"] == "cursor,codex"
     assert fields["lifecycle_commands"] == (
-        f"{fake_bin / 'harness'} install --host cursor; "
-        f"{fake_bin / 'harness'} install --host codex"
+        f"{fake_bin / 'harness'} install --host cursor; {fake_bin / 'harness'} install --host codex"
     )
     assert fields["HARNESS_DEV_ROOT"] == ""
     assert fields["XDG_STATE_HOME"] == str(original_state)

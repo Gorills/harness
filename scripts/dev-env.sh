@@ -39,6 +39,7 @@ harness_dev_activate() {
     export XDG_STATE_HOME="$root/.harness/state"
     export XDG_RUNTIME_DIR="$root/.harness/runtime"
     export HARNESS_SKILL_REGISTRY="$root/.harness/skills"
+    export HARNESS_DEV_SKILL_PROFILES="${HARNESS_DEV_SKILL_PROFILES:-codex,cursor}"
     export UV_CACHE_DIR="$root/.harness/uv-cache"
 
     mkdir -p -- "$root/.harness"

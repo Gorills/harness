@@ -64,7 +64,11 @@ from harness.runtime_state import (
     canonical_database_purge_candidates,
     preflight_canonical_database_state,
 )
-from harness.skill_runtime import SkillRuntimeError, inspect_workspace_skills
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    active_skill_profiles_for_runtime,
+    inspect_workspace_skills,
+)
 from harness.skills import SkillError, default_skill_registry, load_skill_registry
 from harness.storage import (
     SCHEMA_VERSION,
@@ -559,6 +563,36 @@ def run_system_doctor(
                 )
             )
 
+    if isolated_development:
+        try:
+            active_skill_profiles = active_skill_profiles_for_runtime(
+                paths.database,
+                environment=values,
+            )
+        except SkillRuntimeError as exc:
+            active_skill_profiles = ()
+            stale_notes.append("invalid isolated-development skill profiles")
+            checks.append(
+                _check(
+                    "Development skill profiles",
+                    DoctorSeverity.FAIL,
+                    _bounded_detail(exc),
+                )
+            )
+    else:
+        active_skill_profiles = tuple(
+            profile
+            for profile, selected in (
+                (
+                    "claude-code",
+                    claude_registration_state is HostRegistrationState.CURRENT,
+                ),
+                ("codex", codex_host_active),
+                ("cursor", cursor_host_active),
+            )
+            if selected
+        )
+
     if database_connection is None:
         checks.append(
             _check("Projects", DoctorSeverity.WARN, "no readable canonical Project registry")
@@ -582,18 +616,7 @@ def run_system_doctor(
                 database_connection.execute("BEGIN")
                 _inspect_projects_and_workspaces(
                     database_connection,
-                    active_profiles=tuple(
-                        profile
-                        for profile, selected in (
-                            (
-                                "claude-code",
-                                claude_registration_state is HostRegistrationState.CURRENT,
-                            ),
-                            ("codex", codex_host_active),
-                            ("cursor", cursor_host_active),
-                        )
-                        if selected
-                    ),
+                    active_profiles=active_skill_profiles,
                     codex_adapter=codex_adapter,
                     codex_host_active=codex_host_active,
                     cursor_adapter=cursor_adapter,

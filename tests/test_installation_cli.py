@@ -132,6 +132,8 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
         "args": ["-m", "harness.mcp_process"],
         "env": {"HARNESS_HOST_PROFILE": "claude-code"},
     }
+    integration_state = state_home / "harness" / "host-integrations.json"
+    assert json.loads(integration_state.read_text(encoding="utf-8"))["profiles"] == ["claude-code"]
 
     monkeypatch.setattr(sys, "argv", ["harness", "install"])
     assert harness_main() == 0
@@ -165,6 +167,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "Generated skills removed: 1" in uninstall_output
     assert "Project Intelligence: preserved" in uninstall_output
     assert not claude_state.exists()
+    assert not integration_state.exists()
     assert not (repo / ".claude" / "skills" / "python-helper").exists()
     assert paths.database.exists()
     assert not paths.socket.exists()
@@ -796,7 +799,7 @@ def test_multi_host_cursor_install_scan_uninstall_preserves_claude(
     host_state = json.loads(
         (state_home / "harness" / "host-integrations.json").read_text(encoding="utf-8")
     )
-    assert host_state["profiles"] == ["cursor"]
+    assert host_state["profiles"] == ["claude-code", "cursor"]
 
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
     assert harness_main() == 0
@@ -1026,7 +1029,10 @@ def test_purge_is_refused_while_another_host_remains_active(
     assert harness_main() == 0
     capsys.readouterr()
     host_state = tmp_path / "state" / "harness" / "host-integrations.json"
-    assert json.loads(host_state.read_text(encoding="utf-8"))["profiles"] == ["cursor"]
+    assert json.loads(host_state.read_text(encoding="utf-8"))["profiles"] == [
+        "claude-code",
+        "cursor",
+    ]
 
     monkeypatch.setattr(
         sys,
@@ -1037,7 +1043,10 @@ def test_purge_is_refused_while_another_host_remains_active(
     output = capsys.readouterr().out
     assert "--purge refused" in output
     assert claude_state.is_file()
-    assert json.loads(host_state.read_text(encoding="utf-8"))["profiles"] == ["cursor"]
+    assert json.loads(host_state.read_text(encoding="utf-8"))["profiles"] == [
+        "claude-code",
+        "cursor",
+    ]
     assert default_runtime_paths().socket.exists()
 
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "all", "--purge"])

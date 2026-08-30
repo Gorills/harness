@@ -149,6 +149,11 @@ scripts/dev stop
 
 `scripts/dev` exports XDG state/runtime paths, `HARNESS_SKILL_REGISTRY`, and a writable `UV_CACHE_DIR` under `.harness/`, then runs this checkout through `uv run`. Tracked `.codex/config.toml` and `.cursor/mcp.json` name `harness-dev`; `.mcp.json` still names `harness` for Claude Code. All three launch `scripts/dev harness mcp` so agents in this repository do not use a system install. Restart Codex after changing its project config; enable `harness-dev` in Cursor Customize. A production MCP process with an interpolated overlay root still refuses tools, including when `WORKSPACE_FOLDER_PATHS` names a working repository. Do not run `uv run --frozen harness` here without sourcing `scripts/dev-env.sh`; that mix uses checkout code against the global daemon. Operators refresh the user-global install with `make install-global` (see [`docs/development/isolated-development.md`](docs/development/isolated-development.md)); checkout agents must not run that target.
 
+`scripts/dev harness scan` also seeds the checkout-local built-in registry and projects the relevant
+Codex/Cursor subset into `.agents/skills`; it never reads the user-global skill registry. Set
+`HARNESS_DEV_SKILL_PROFILES=claude-code` to test the Claude-only project surface instead. Task hints
+and later manifest changes are re-resolved by the daemon watcher.
+
 The quality gate checks lock freshness, formatting, lint, strict typing, pytest, and a wheel smoke test that installs the built artifact into an isolated environment, executes both shipping console scripts, verifies that installed CLI help exposes the implemented commands/runtime-path override contract including search, and runs the installed `harness doctor` command.
 
 ## License

@@ -280,6 +280,51 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
         connection.close()
 
 
+def test_task_stack_hints_trigger_project_skill_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, _ = _registered_database(tmp_path)
+    registry = tmp_path / "skills"
+    skill = registry / "fastapi"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: fastapi\ndescription: Build FastAPI services.\n---\n\n# FastAPI\n",
+        encoding="utf-8",
+    )
+    (skill / "harness.yaml").write_text(
+        "id: fastapi\ntask_hints:\n  - fastapi\n",
+        encoding="utf-8",
+    )
+    integration_state = database.parent / "host-integrations.json"
+    integration_state.write_text(
+        json.dumps({"version": 1, "profiles": ["codex"]}) + "\n",
+        encoding="utf-8",
+    )
+    integration_state.chmod(0o600)
+    monkeypatch.setenv("HARNESS_SKILL_REGISTRY", str(registry))
+
+    socket_path = tmp_path / "s"
+    stop_event, executor, future = _start_server(database, socket_path)
+    try:
+        request_task_start(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            title="Create a greenfield API",
+            stack_hints=("fastapi",),
+        )
+        projected = root / ".agents" / "skills" / "fastapi" / "SKILL.md"
+        deadline = time.monotonic() + 5.0
+        while not projected.is_file():
+            if future.done():
+                future.result()
+            if time.monotonic() >= deadline:
+                raise AssertionError("Task stack hints did not trigger skill projection")
+            time.sleep(0.02)
+        assert "Build FastAPI services" in projected.read_text(encoding="utf-8")
+    finally:
+        _stop_server(stop_event, executor, future)
+
+
 def test_waiting_resume_requires_revision_and_working_resume_is_idempotent(tmp_path: Path) -> None:
     root, database, _workspace_id = _registered_database(tmp_path)
     socket_path = tmp_path / "ipc" / "harness.sock"

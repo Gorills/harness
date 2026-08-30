@@ -45,7 +45,12 @@ from harness.runtime_paths import (
     ensure_private_state_directory,
 )
 from harness.search import DEFAULT_SEARCH_LIMIT
-from harness.skill_runtime import supported_skill_profiles, validate_skill_definitions_for_profiles
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    active_skill_profiles_for_runtime,
+    supported_skill_profiles,
+    validate_skill_definitions_for_profiles,
+)
 from harness.skills import SkillError, default_skill_registry, load_skill_registry
 from harness.storage import DatabaseError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -394,8 +399,34 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
             f"index reconciliation succeeded but isolated-development overlay could not be inspected: {exc}"
         )
     if overlay_root == result.workspace_root:
+        try:
+            sync_builtin_skills(default_skill_registry())
+            development_profiles = active_skill_profiles_for_runtime(
+                default_runtime_paths().database
+            )
+            development_skills = request_workspace_skills_reconcile(
+                socket_path,
+                [
+                    WorkspaceHint(
+                        path=result.workspace_root,
+                        source="scan-result-root",
+                        match_mode=WorkspaceHintMatchMode.ROOT,
+                    )
+                ],
+                development_profiles,
+            )
+        except (BuiltinSkillError, IpcError, RuntimePathError, SkillRuntimeError) as exc:
+            return _scan_failure(
+                "index reconciliation succeeded but isolated-development skills could not "
+                f"be reconciled: {exc}"
+            )
         _print_workspace_scan(result)
-        print("Host/skill reconciliation skipped: isolated-development checkout overlay")
+        print("Development skill profiles: " + ", ".join(development_profiles))
+        print(f"Relevant skills: {len(development_skills.selected_skill_ids)}")
+        print(f"Skills materialized: {development_skills.materialized}")
+        print(f"Skills removed: {development_skills.removed}")
+        print(f"Skills unchanged: {development_skills.unchanged}")
+        print("Host configuration reconciliation skipped: isolated-development checkout overlay")
         return 0
 
     active_profiles: list[str] = []

@@ -13,8 +13,14 @@ from threading import Event, Lock
 from time import monotonic
 
 from harness.git_workspace import GitWorkspaceError, _git_environment
+from harness.host_integration_state import HostIntegrationStateError
 from harness.index import IndexingError, scan_workspace
 from harness.registry import RegistryError, WorkspaceRecord, list_workspaces
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    active_skill_profiles_for_runtime,
+    reconcile_workspace_skills,
+)
 from harness.storage import connect_database
 
 DEFAULT_WATCH_POLL_SECONDS = 0.5
@@ -51,6 +57,7 @@ class WorkspaceWatcher:
         token_deadline_seconds: float = DEFAULT_WATCH_TOKEN_DEADLINE_SECONDS,
         scan_deadline_seconds: float = DEFAULT_WATCH_SCAN_DEADLINE_SECONDS,
         invalidations: SimpleQueue[str] | None = None,
+        skill_profiles_provider: Callable[[], tuple[str, ...]] | None = None,
     ) -> None:
         for name, value in (
             ("debounce_seconds", debounce_seconds),
@@ -69,6 +76,7 @@ class WorkspaceWatcher:
         self._token_deadline_seconds = token_deadline_seconds
         self._scan_deadline_seconds = scan_deadline_seconds
         self._invalidations = invalidations
+        self._skill_profiles_provider = skill_profiles_provider
         self._forced_reconcile_ids: set[str] = set()
         self._states: dict[str, _WorkspaceWatchState] = {}
 
@@ -117,14 +125,31 @@ class WorkspaceWatcher:
             if not self._scan_lock.acquire(blocking=False):
                 continue
             try:
-                scan_workspace(
-                    self._connection,
-                    workspace.workspace_id,
-                    deadline=monotonic() + self._scan_deadline_seconds,
-                )
-            except _WATCH_RETRY_ERRORS:
-                state.retry_after = sampled_at + self._retry_seconds
-                return reconciled
+                try:
+                    scan_workspace(
+                        self._connection,
+                        workspace.workspace_id,
+                        deadline=monotonic() + self._scan_deadline_seconds,
+                    )
+                except _WATCH_RETRY_ERRORS:
+                    state.retry_after = sampled_at + self._retry_seconds
+                    return reconciled
+
+                try:
+                    if self._skill_profiles_provider is not None:
+                        profiles = self._skill_profiles_provider()
+                        if profiles:
+                            reconcile_workspace_skills(
+                                self._connection,
+                                workspace.workspace_id,
+                                profiles,
+                            )
+                except _SKILL_RECONCILIATION_ERRORS:
+                    # The authoritative index is current even when an ownership collision or
+                    # malformed host-intent file prevents projection. Doctor reports the stale
+                    # skill integration, while a later invalidation/full pass retries it without
+                    # hot-looping the full Workspace scan.
+                    pass
             finally:
                 self._scan_lock.release()
 
@@ -227,6 +252,10 @@ def run_workspace_watcher(
         raise ValueError("poll_seconds must be positive")
     connection = connect_database(database_path)
     try:
+
+        def skill_profiles() -> tuple[str, ...]:
+            return active_skill_profiles_for_runtime(database_path)
+
         watcher = WorkspaceWatcher(
             connection,
             scan_lock,
@@ -236,6 +265,7 @@ def run_workspace_watcher(
             token_deadline_seconds=token_deadline_seconds,
             scan_deadline_seconds=scan_deadline_seconds,
             invalidations=invalidations,
+            skill_profiles_provider=skill_profiles,
         )
         while not stop_event.is_set():
             try:
@@ -421,4 +451,9 @@ _WATCH_RETRY_ERRORS = (
     GitWorkspaceError,
     sqlite3.DatabaseError,
     OSError,
+)
+
+_SKILL_RECONCILIATION_ERRORS = (
+    HostIntegrationStateError,
+    SkillRuntimeError,
 )

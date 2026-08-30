@@ -14,6 +14,7 @@ Isolation is done by overriding the XDG bases from [ADR-0007](../decisions/0007-
 | Autostart | `python -m harness.daemon_process` of the invoked interpreter | same module from this checkout's environment |
 | Host MCP | project-only Codex/Cursor config plus Claude user-scope MCP | tracked project overlays launching `scripts/dev harness mcp` (`harness-dev` in Codex/Cursor) |
 | Skill registry | `~/.harness/skills` | `.harness/skills` via `HARNESS_SKILL_REGISTRY` |
+| Project skill profiles | installed host intent | `codex,cursor` via `HARNESS_DEV_SKILL_PROFILES` |
 | `install` / `uninstall` | mutates user-global host MCP | refused while `HARNESS_DEV_ROOT` is set |
 
 `.harness/` is gitignored. It may also hold a local `uv` bootstrap under `.harness/tools/` and
@@ -61,6 +62,13 @@ scripts/dev harness dashboard
 ```
 
 `scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints the current private URL. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
+
+The first isolated `scan` also reconciles the 12 built-in skills into the checkout-local registry
+and projects only the relevant subset into `.agents/skills`. Codex and Cursor share that root, so
+the default development profile set is `codex,cursor`. To test Claude project skills instead, set
+`HARNESS_DEV_SKILL_PROFILES=claude-code` before invoking `scripts/dev`; the incompatible
+three-profile graph remains refused. Generated skills are Harness-owned and excluded through the
+checkout's Git-local `info/exclude`, not `.gitignore`.
 
 Foreground daemon (optional; not required after autostart works):
 
@@ -148,9 +156,9 @@ This checkout commits host overlays that do not use the production Codex/Cursor/
 
 Production install/scan/uninstall leaves the existing source-checkout overlays alone. Cursor overlay detection matches that launch under `harness-dev` or the previous `harness` name; extra host JSON keys do not drop isolation. After changing either host config, fully restart the affected Codex or Cursor client.
 
-Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP does not use it as Workspace identity. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. A production process whose interpolated `HARNESS_WORKSPACE_ROOT` is this overlay lists no tools even when `WORKSPACE_FOLDER_PATHS` names a working repository. Claude `CLAUDE_PROJECT_DIR` overlay refuse is unchanged. Cursor-profile overlay refuse does not use process cwd. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has enabled `harness-dev`.
+Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP does not use it as Workspace identity. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. A production process whose interpolated overlay root is this checkout lists no tools even when `WORKSPACE_FOLDER_PATHS` names a working repository. Claude `CLAUDE_PROJECT_DIR` overlay refuse is unchanged. Cursor-profile overlay refuse does not use process cwd. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against `.harness/` once Cursor has enabled `harness-dev`.
 
-The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout and skips host/skill reconciliation so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
+The overlay inherits `scripts/dev` XDG paths, so agents in this repository talk to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated `scripts/dev harness scan` of this source tree indexes the checkout, seeds the local registry, and reconciles only the configured development skill profiles. It still skips production host-configuration reconciliation, so it cannot project global skills or rewrite the overlay. A system `harness scan` of this tree is refused.
 
 Do not run `scripts/dev harness install` or `scripts/dev harness uninstall`. Those commands would rewrite user-global host MCP using checkout code; the CLI refuses them while `HARNESS_DEV_ROOT` is set.
 

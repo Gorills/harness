@@ -197,9 +197,7 @@ def install_harness(
 
     results: list[HostInstallResult] = []
     for adapter in selected:
-        intent_change = IntegrationChange.UNCHANGED
-        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            intent_change = add_host_profiles(paths, (adapter.profile,))
+        intent_change = add_host_profiles(paths, (adapter.profile,))
         change = adapter.register_mcp()
         if intent_change is IntegrationChange.CHANGED:
             change = IntegrationChange.CHANGED
@@ -364,14 +362,10 @@ def uninstall_harness(
     any_selected_owned = False
     for adapter in selected:
         state = observed_selected[adapter.profile]
-        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            if load_host_integration_state(paths).includes(adapter.profile) or state in {
-                HostRegistrationState.CURRENT,
-                HostRegistrationState.STALE_OWNED,
-            }:
-                any_selected_owned = True
-            continue
-        if state in {HostRegistrationState.CURRENT, HostRegistrationState.STALE_OWNED}:
+        if load_host_integration_state(paths).includes(adapter.profile) or state in {
+            HostRegistrationState.CURRENT,
+            HostRegistrationState.STALE_OWNED,
+        }:
             any_selected_owned = True
     has_state = paths.database.exists() or paths.socket.exists()
     if not any_selected_owned and not has_state:
@@ -416,10 +410,9 @@ def uninstall_harness(
     results: list[HostUninstallResult] = []
     for adapter in selected:
         change = adapter.unregister_mcp()
-        if isinstance(adapter, _PROJECT_SCOPED_ADAPTERS):
-            intent_change = remove_host_profiles(paths, (adapter.profile,))
-            if intent_change is IntegrationChange.CHANGED:
-                change = IntegrationChange.CHANGED
+        intent_change = remove_host_profiles(paths, (adapter.profile,))
+        if intent_change is IntegrationChange.CHANGED:
+            change = IntegrationChange.CHANGED
         results.append(
             HostUninstallResult(
                 host_profile=adapter.profile,
