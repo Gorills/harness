@@ -369,6 +369,8 @@ def main() -> int:
             "install",
             "uninstall",
             "doctor",
+            "backup",
+            "restore",
             "status",
             "scan",
             "search",
@@ -402,6 +404,22 @@ def main() -> int:
                 raise RuntimeError(
                     f"installed harness search --help did not contain {expected!r}: "
                     f"{search_help.stdout!r}"
+                )
+
+        backup_help = _run((str(harness), "backup", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("--database", "consistent SQLite snapshot", "existing files are never"):
+            if expected not in backup_help.stdout:
+                raise RuntimeError(
+                    f"installed harness backup --help did not contain {expected!r}: "
+                    f"{backup_help.stdout!r}"
+                )
+
+        restore_help = _run((str(harness), "restore", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("--database", "--socket", "--allow-runtime-mismatch", "checksum"):
+            if expected not in restore_help.stdout:
+                raise RuntimeError(
+                    f"installed harness restore --help did not contain {expected!r}: "
+                    f"{restore_help.stdout!r}"
                 )
 
         mcp_help = _run((str(harness), "mcp", "--help"), cwd=workspace, env=isolated_env)

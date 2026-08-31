@@ -280,6 +280,11 @@ Persistence rules:
 - explicit schema version;
 - ordered migrations tested both forward and against representative prior databases;
 - backup before potentially destructive migration;
+- operator backups use SQLite's online backup API so committed WAL frames are included without
+  stopping the daemon;
+- restore validates archive checksum, SQLite integrity/foreign keys, contiguous exact schema, and
+  creating runtime identity before taking the daemon's database lock and replacing state; the
+  current database receives an automatic pre-restore backup;
 - idempotent indexer writes;
 - derived data rebuildable independently from durable task/knowledge state.
 
