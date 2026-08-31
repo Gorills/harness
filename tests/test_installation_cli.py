@@ -581,6 +581,94 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert not (state_home / "harness" / "host-integrations.json").exists()
 
 
+def test_codex_install_preserves_registered_source_checkout_without_projecting_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    write_fake_codex(fake_bin)
+    _skill_registry(home)
+    repo = tmp_path / "repo"
+    _repo(repo)
+
+    codex_path = repo / ".codex" / "config.toml"
+    codex_path.parent.mkdir()
+    codex_text = """[mcp_servers.harness-dev]
+command = "./scripts/dogfood"
+args = ["mcp"]
+required = true
+
+[mcp_servers.harness-dev.env]
+HARNESS_WORKSPACE_ROOT = "."
+"""
+    codex_path.write_text(codex_text, encoding="utf-8")
+    cursor_path = repo / ".cursor" / "mcp.json"
+    cursor_path.parent.mkdir()
+    cursor_text = (
+        json.dumps(
+            {
+                "mcpServers": {
+                    "harness-dev": {
+                        "type": "stdio",
+                        "command": "${workspaceFolder}/scripts/dogfood",
+                        "args": ["mcp"],
+                        "env": {"HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"},
+                    }
+                }
+            }
+        )
+        + "\n"
+    )
+    cursor_path.write_text(cursor_text, encoding="utf-8")
+    _git(repo, "add", ".codex/config.toml", ".cursor/mcp.json")
+    _git(
+        repo,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "commit",
+        "-m",
+        "source checkout overlays",
+    )
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    paths = default_runtime_paths()
+    paths.database.parent.mkdir(parents=True, mode=0o700)
+    paths.database.parent.chmod(0o700)
+    initialize_database(paths.database)
+    connection = connect_database(paths.database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=repo)
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 0
+    output = capsys.readouterr().out
+    assert "Codex project overrides changed: 0" in output
+    assert codex_path.read_text(encoding="utf-8") == codex_text
+    assert cursor_path.read_text(encoding="utf-8") == cursor_text
+    assert not (repo / ".agents" / "skills" / "python-helper").exists()
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "Codex project MCP configs: OK (0 current, 1 isolated-development" in doctor_output
+    assert "Generated skills: OK (0 current, 0 stale" in doctor_output
+    assert "1 source-checkout overlay(s) skipped" in doctor_output
+
+
 def test_install_all_rejects_three_host_skill_visibility_collision_before_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

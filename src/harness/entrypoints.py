@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import sys
 from argparse import ArgumentParser
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -435,9 +436,29 @@ def _isolated_development_host_lifecycle_error() -> str | None:
     )
 
 
-def _isolated_development_canonical_scan_error(location: Path) -> str | None:
+def _isolated_development_canonical_scan_error(
+    location: Path, *, global_dogfood: bool = False
+) -> str | None:
     overlay_root = find_isolated_development_root(location)
     if overlay_root is None:
+        if global_dogfood:
+            return "--global-dogfood is valid only for a Harness source checkout overlay"
+        return None
+    if global_dogfood:
+        if os.environ.get("HARNESS_DEV_ROOT"):
+            return (
+                "--global-dogfood requires the tool-installed Harness outside "
+                "scripts/dev/HARNESS_DEV_ROOT"
+            )
+        try:
+            interpreter = Path(sys.executable).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            return f"tool-installed Harness interpreter cannot be resolved: {exc}"
+        if interpreter.is_relative_to(overlay_root):
+            return (
+                "--global-dogfood requires the tool-installed Harness; "
+                f"checkout interpreter refused: {interpreter}"
+            )
         return None
     configured = os.environ.get("HARNESS_DEV_ROOT")
     if configured:
@@ -452,7 +473,12 @@ def _isolated_development_canonical_scan_error(location: Path) -> str | None:
     )
 
 
-def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
+def _run_scan(
+    workspace_location: Path,
+    socket_path: Path | None,
+    *,
+    global_dogfood: bool = False,
+) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -461,7 +487,9 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return _scan_failure(f"workspace path is not a directory: {location}")
     blocked = None
     try:
-        blocked = _isolated_development_canonical_scan_error(location)
+        blocked = _isolated_development_canonical_scan_error(
+            location, global_dogfood=global_dogfood
+        )
     except HostIntegrationError as exc:
         return _scan_failure(str(exc))
     if blocked is not None:
@@ -484,6 +512,20 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return _scan_failure(
             f"index reconciliation succeeded but isolated-development overlay could not be inspected: {exc}"
         )
+    if global_dogfood:
+        if overlay_root != result.workspace_root:
+            return _scan_failure(
+                "source checkout overlay changed during global dogfood registration; "
+                "host and skill reconciliation was not attempted"
+            )
+        if result.visibility_mode != "normal":
+            return _scan_failure(
+                "global dogfood requires Normal visibility because host policy reconciliation "
+                "is intentionally skipped"
+            )
+        _print_workspace_scan(result)
+        print("Global dogfood: index registered; host and skill reconciliation skipped")
+        return 0
     if overlay_root == result.workspace_root:
         try:
             sync_builtin_skills(default_skill_registry())
@@ -989,6 +1031,14 @@ def harness_main() -> int:
         metavar="PATH",
         help="override the canonical per-user Unix-domain socket path",
     )
+    scan_parser.add_argument(
+        "--global-dogfood",
+        action="store_true",
+        help=(
+            "register the Harness source checkout with a tool-installed runtime while skipping "
+            "checkout host and skill reconciliation"
+        ),
+    )
     visibility_parser = subparsers.add_parser(
         "visibility",
         help="set Project Hidden or Normal visibility for one Git Workspace",
@@ -1113,7 +1163,7 @@ def harness_main() -> int:
     if args.command == "status":
         return _run_status(args.path, args.socket)
     if args.command == "scan":
-        return _run_scan(args.path, args.socket)
+        return _run_scan(args.path, args.socket, global_dogfood=args.global_dogfood)
     if args.command == "visibility":
         return _run_visibility(args.mode, args.path, args.socket)
     if args.command == "search":

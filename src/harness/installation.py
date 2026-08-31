@@ -17,6 +17,7 @@ from harness.cursor_adapter import (
     CursorProjectRuntimeStatus,
     cursor_project_enable_command,
     discover_cursor_adapter,
+    find_isolated_development_root,
 )
 from harness.daemon import DaemonError, hold_database_maintenance_lock
 from harness.daemon_autostart import ensure_canonical_daemon
@@ -665,7 +666,11 @@ def _reconcile_remaining_profiles(
 ) -> SkillCleanupResult:
     removed = 0
     exclude_changed = 0
+    skipped = 0
     for workspace in workspaces:
+        if find_isolated_development_root(workspace.workspace_root) == workspace.workspace_root:
+            skipped += 1
+            continue
         result = request_workspace_skills_reconcile(
             paths.socket,
             (
@@ -682,8 +687,8 @@ def _reconcile_remaining_profiles(
     return SkillCleanupResult(
         schema_version=SCHEMA_VERSION,
         workspace_count=len(workspaces),
-        cleaned_workspace_count=len(workspaces),
-        skipped_workspace_count=0,
+        cleaned_workspace_count=len(workspaces) - skipped,
+        skipped_workspace_count=skipped,
         removed=removed,
         exclude_changed_count=exclude_changed,
     )

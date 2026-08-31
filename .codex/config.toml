@@ -1,7 +1,6 @@
 [mcp_servers.harness-dev]
-command = "./scripts/dev"
+command = "./scripts/dogfood"
 args = [
-    "harness",
     "mcp",
 ]
 startup_timeout_sec = 30
@@ -9,10 +8,3 @@ required = true
 
 [mcp_servers.harness-dev.env]
 HARNESS_WORKSPACE_ROOT = "."
-
-[mcp_servers.harness]
-command = "./scripts/dev"
-args = [
-    "harness",
-    "mcp",
-]

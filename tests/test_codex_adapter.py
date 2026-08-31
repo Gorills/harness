@@ -12,7 +12,6 @@ import pytest
 import harness.codex_adapter as codex_module
 from harness.codex_adapter import (
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
-    CODEX_MCP_FORWARD_ENV_VARS,
     CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
     CodexAdapter,
     codex_profile_missing_workspace_root,
@@ -83,8 +82,9 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
             "harness": {
                 "command": "/venv/bin/python",
                 "args": ["-m", "harness.mcp_process"],
-                "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
+                "env_vars": list(adapter.forward_env_vars),
                 "cwd": str(root),
+                "required": True,
                 "env": {
                     "HARNESS_HOST_PROFILE": "codex",
                     "HARNESS_WORKSPACE_ROOT": str(root),
@@ -172,7 +172,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
     legacy = "\n".join(
         line
         for line in path.read_text(encoding="utf-8").splitlines()
-        if not line.startswith("env_vars = ")
+        if not line.startswith(("env_vars = ", "required = "))
     )
     path.write_text(legacy + "\n", encoding="utf-8")
 
@@ -182,7 +182,8 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
 
     assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
     entry = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"]
-    assert entry["env_vars"] == list(CODEX_MCP_FORWARD_ENV_VARS)
+    assert entry["env_vars"] == list(adapter.forward_env_vars)
+    assert entry["required"] is True
     instructions = tomllib.loads(path.read_text(encoding="utf-8"))["developer_instructions"]
     assert instructions.startswith(CODEX_BOOTSTRAP_INSTRUCTION_BODY)
 
@@ -312,6 +313,99 @@ def test_codex_exact_tracked_manual_config_is_adopted_but_never_removed(tmp_path
     assert generated.reconcile_project(root) is IntegrationChange.UNCHANGED
     assert generated.remove_project(root) is IntegrationChange.UNCHANGED
     assert _config(root).is_file()
+
+
+@pytest.mark.parametrize(
+    ("server_name", "command", "args"),
+    [
+        ("harness-dev", "./scripts/dogfood", ["mcp"]),
+        ("harness", "./scripts/dev", ["harness", "mcp"]),
+    ],
+)
+def test_codex_tracked_source_checkout_overlay_is_preserved(
+    tmp_path: Path,
+    server_name: str,
+    command: str,
+    args: list[str],
+) -> None:
+    root = _repository(tmp_path / "repo")
+    path = _config(root)
+    path.parent.mkdir()
+    path.write_text(
+        "\n".join(
+            (
+                f"[mcp_servers.{server_name}]",
+                f"command = {json.dumps(command)}",
+                f"args = {json.dumps(args)}",
+                "startup_timeout_sec = 30",
+                "required = true",
+                "",
+                f"[mcp_servers.{server_name}.env]",
+                'HARNESS_WORKSPACE_ROOT = "."',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    _git(root, "add", ".codex/config.toml")
+
+    adapter = _adapter()
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.state is HostRegistrationState.CURRENT
+    assert diagnostic.isolated_development
+    assert not diagnostic.harness_owned
+    assert diagnostic.preflight_error is None
+    assert diagnostic.configured_python == command
+    assert diagnostic.configured_workspace_root == "."
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert adapter.remove_project(root) is IntegrationChange.UNCHANGED
+    assert path.read_bytes() == original
+
+    hidden = adapter.project_registration_diagnostic(root, hidden=True)
+    assert not hidden.isolated_development
+    assert hidden.preflight_error is not None
+    with pytest.raises(HostIntegrationError, match=r"tracked \.codex/config\.toml requires"):
+        adapter.reconcile_project(root, hidden=True)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "env_line",
+    [
+        'HARNESS_WORKSPACE_ROOT = "/different/root"',
+        'HARNESS_WORKSPACE_ROOT = "."\nHARNESS_HOST_PROFILE = "codex"',
+    ],
+)
+def test_codex_tracked_source_checkout_overlay_requires_bounded_identity(
+    tmp_path: Path,
+    env_line: str,
+) -> None:
+    root = _repository(tmp_path / "repo")
+    path = _config(root)
+    path.parent.mkdir()
+    path.write_text(
+        "\n".join(
+            (
+                "[mcp_servers.harness-dev]",
+                'command = "./scripts/dogfood"',
+                'args = ["mcp"]',
+                "",
+                "[mcp_servers.harness-dev.env]",
+                env_line,
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    _git(root, "add", ".codex/config.toml")
+
+    diagnostic = _adapter().project_registration_diagnostic(root)
+    assert not diagnostic.isolated_development
+    assert diagnostic.state is HostRegistrationState.ABSENT
+    assert diagnostic.preflight_error is not None
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("hidden", [False, True])
@@ -508,12 +602,17 @@ def test_discover_codex_adapter_uses_path_and_selected_python(tmp_path: Path) ->
     executable.chmod(0o755)
 
     adapter = discover_codex_adapter(
-        environment={"PATH": str(executable.parent)},
+        environment={
+            "HOME": str(tmp_path / "home"),
+            "PATH": str(executable.parent),
+            "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        },
         python_executable=Path("relative/python"),
     )
     assert adapter is not None
     assert adapter.executable == executable.resolve()
     assert adapter.python_executable == Path(os.path.abspath("relative/python"))
+    assert adapter.forward_env_vars == ("HOME", "PATH", "XDG_RUNTIME_DIR")
     assert adapter.profile == "codex"
     assert adapter.skill_projection_surface().profile == "codex"
     assert discover_codex_adapter(environment={"PATH": str(tmp_path / "missing")}) is None
@@ -571,6 +670,6 @@ def test_installed_codex_cli_loads_generated_trusted_project_mcp(tmp_path: Path)
             "HARNESS_HOST_PROFILE": "codex",
             "HARNESS_WORKSPACE_ROOT": str(root),
         },
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
+        "env_vars": list(adapter.forward_env_vars),
         "cwd": str(root),
     }

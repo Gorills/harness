@@ -218,6 +218,7 @@ def _verify_project_config(
         "args": ["-m", "harness.mcp_process"],
         "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
         "cwd": expected_root,
+        "required": True,
         "env": static_environment,
     }
     if entry != expected:
@@ -251,6 +252,38 @@ def _verify_codex_inspection(payload: object, python: Path, workspace: Path) -> 
         raise CodexAcceptanceError(f"Codex loaded an unexpected Harness MCP transport: {payload!r}")
     if payload.get("enabled") is not True or payload.get("disabled_reason") is not None:
         raise CodexAcceptanceError(f"Codex did not enable the Harness MCP server: {payload!r}")
+
+
+def prompt_input_contains_bootstrap(value: object) -> bool:
+    """Return whether rendered model input contains the exact Harness bootstrap text."""
+    if isinstance(value, str):
+        return CODEX_BOOTSTRAP_INSTRUCTION_BODY in value
+    if isinstance(value, Mapping):
+        return any(prompt_input_contains_bootstrap(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(prompt_input_contains_bootstrap(item) for item in value)
+    return False
+
+
+def _verify_codex_prompt_input(
+    codex: Path,
+    workspace: Path,
+    environment: Mapping[str, str],
+) -> None:
+    rendered = _run(
+        (str(codex), "debug", "prompt-input", "Harness acceptance prompt probe"),
+        cwd=workspace,
+        environment=environment,
+        show_output=False,
+    )
+    try:
+        payload = json.loads(rendered.stdout)
+    except json.JSONDecodeError as exc:
+        raise CodexAcceptanceError("codex debug prompt-input emitted invalid JSON") from exc
+    if not prompt_input_contains_bootstrap(payload):
+        raise CodexAcceptanceError(
+            "Codex model-visible prompt input omitted the Harness bootstrap instructions"
+        )
 
 
 def _verify_untrusted_project_fail_closed(
@@ -721,6 +754,7 @@ def run_acceptance(
                 except json.JSONDecodeError as exc:
                     raise CodexAcceptanceError("codex mcp get emitted invalid JSON") from exc
                 _verify_codex_inspection(inspection_payload, python, workspace)
+                _verify_codex_prompt_input(codex, workspace, environment)
 
                 observed_calls, wire_workspace_id = _verify_mcp_wire(
                     python,
@@ -815,6 +849,7 @@ def run_acceptance(
                 "untrusted_project_fail_closed_verified": True,
                 "project_configs_verified": len(workspaces),
                 "codex_project_config_discoveries_verified": len(workspaces),
+                "codex_prompt_bootstrap_verified": True,
                 "generated_skill_names": list(projected_skill_names),
                 "generated_skill_count_per_workspace": len(projected_skill_names),
                 "wire_verified_harness_tool_calls": list(wire_calls),

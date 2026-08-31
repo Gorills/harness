@@ -770,6 +770,37 @@ def test_cursor_project_inspect_fails_when_tools_are_missing(
         adapter.enable_and_verify_project_mcp(root)
 
 
+def test_cursor_project_inspect_shares_one_timeout_with_owned_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _repo(tmp_path / "repo")
+    observed: list[tuple[str, float | None]] = []
+    times = iter((100.0, 106.0))
+    monkeypatch.setattr(cursor_module, "monotonic", lambda: next(times))
+    monkeypatch.setattr(
+        cursor_module,
+        "discover_cursor_agent",
+        lambda **_kwargs: Path("/usr/bin/agent"),
+    )
+
+    def fake_agent(*_args: object, timeout_seconds: float | None, **_kwargs: object) -> object:
+        observed.append(("agent", timeout_seconds))
+        return subprocess.CompletedProcess([], 1, stdout="no tools")
+
+    def fake_owned(*_args: object, timeout_seconds: float | None, **_kwargs: object) -> tuple[()]:
+        observed.append(("owned", timeout_seconds))
+        return ()
+
+    monkeypatch.setattr(cursor_module, "_run_cursor_agent", fake_agent)
+    monkeypatch.setattr(cursor_module, "_probe_owned_project_mcp_tools", fake_owned)
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    result = adapter.inspect_project_mcp_tools(root, timeout_seconds=10.0)
+
+    assert result.status is CursorProjectRuntimeStatus.UNAVAILABLE
+    assert observed == [("agent", 10.0), ("owned", 4.0)]
+
+
 def test_cursor_isolated_overlay_is_not_enabled_as_production_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -11,7 +11,7 @@ import sys
 import tempfile
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
@@ -29,6 +29,11 @@ _CODEX_PROFILE = "codex"
 _HOST_PROFILE_ENV = "HARNESS_HOST_PROFILE"
 _WORKSPACE_ROOT_ENV = "HARNESS_WORKSPACE_ROOT"
 _SERVER_NAME = "harness"
+_ISOLATED_DEV_SERVER_NAME = "harness-dev"
+_ISOLATED_DEV_COMMAND = "./scripts/dev"
+_ISOLATED_DEV_ARGS = ["harness", "mcp"]
+_DOGFOOD_COMMAND = "./scripts/dogfood"
+_DOGFOOD_ARGS = ["mcp"]
 _OWNER_MARKER = ".harness-mcp-owner.json"
 _OWNER_VERSION = 1
 _EXCLUDE_BEGIN = "# BEGIN HARNESS CODEX MCP"
@@ -63,6 +68,14 @@ CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
 )
 
 
+def codex_mcp_forward_env_vars(
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Return configured bounded variables that Codex can forward without warnings."""
+    values = os.environ if environment is None else environment
+    return tuple(name for name in CODEX_MCP_FORWARD_ENV_VARS if values.get(name))
+
+
 @dataclass(frozen=True, slots=True)
 class CodexProjectRegistrationDiagnostic:
     """Read-only state for one project-scoped Codex Harness MCP registration."""
@@ -74,6 +87,7 @@ class CodexProjectRegistrationDiagnostic:
     configured_workspace_root: str | None
     harness_owned: bool
     preflight_error: str | None = None
+    isolated_development: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +107,14 @@ class CodexAdapter:
 
     executable: Path
     python_executable: Path
+    forward_env_vars: tuple[str, ...] = field(default_factory=codex_mcp_forward_env_vars)
+
+    def __post_init__(self) -> None:
+        expected = tuple(
+            name for name in CODEX_MCP_FORWARD_ENV_VARS if name in self.forward_env_vars
+        )
+        if self.forward_env_vars != expected:
+            raise ValueError("Codex forwarded environment names must be an ordered known subset")
 
     @property
     def profile(self) -> str:
@@ -140,6 +162,7 @@ class CodexAdapter:
         raw = _read_optional_regular_file(path, label="Codex project config")
         configured_python: str | None = None
         configured_root: str | None = None
+        isolated_development = False
 
         if raw is None:
             state = (
@@ -150,17 +173,35 @@ class CodexAdapter:
         else:
             value = _parse_toml(raw, path)
             entry = _harness_entry(value)
+            isolated_entry = _isolated_development_entry(value)
+            if marker is None and not hidden and isolated_entry is not None:
+                entry = isolated_entry
+                isolated_development = True
             configured_python, configured_root = _entry_identity(entry)
-            if entry is None:
+            if isolated_development:
+                state = HostRegistrationState.CURRENT
+            elif entry is None:
                 state = HostRegistrationState.ABSENT
             elif marker is not None:
                 if not _config_is_owned_shape(value, root):
                     state = HostRegistrationState.FOREIGN
-                elif _config_is_desired(value, root, self.python_executable, hidden=hidden):
+                elif _config_is_desired(
+                    value,
+                    root,
+                    self.python_executable,
+                    self.forward_env_vars,
+                    hidden=hidden,
+                ):
                     state = HostRegistrationState.CURRENT
                 else:
                     state = HostRegistrationState.STALE_OWNED
-            elif _manual_config_is_desired(value, root, self.python_executable, hidden=hidden):
+            elif _manual_config_is_desired(
+                value,
+                root,
+                self.python_executable,
+                self.forward_env_vars,
+                hidden=hidden,
+            ):
                 state = HostRegistrationState.CURRENT
             else:
                 state = HostRegistrationState.FOREIGN
@@ -178,6 +219,7 @@ class CodexAdapter:
             configured_workspace_root=configured_root,
             harness_owned=marker is not None,
             preflight_error=preflight_error,
+            isolated_development=isolated_development,
         )
 
     def preflight_project_reconcile(self, workspace_root: Path, *, hidden: bool = False) -> None:
@@ -192,10 +234,18 @@ class CodexAdapter:
                 f"tracked Harness Codex ownership marker requires manual cleanup: {marker_path}"
             )
         if _git_is_tracked(root, path.relative_to(root)):
-            if raw is not None and _manual_config_is_desired(
-                _parse_toml(raw, path), root, self.python_executable, hidden=hidden
-            ):
-                return
+            if raw is not None:
+                value = _parse_toml(raw, path)
+                if not hidden and _isolated_development_entry(value) is not None:
+                    return
+                if _manual_config_is_desired(
+                    value,
+                    root,
+                    self.python_executable,
+                    self.forward_env_vars,
+                    hidden=hidden,
+                ):
+                    return
             requirement = (
                 "an exact manual Harness MCP entry plus the exact Harness Codex bootstrap and "
                 "Hidden developer instructions"
@@ -217,7 +267,13 @@ class CodexAdapter:
                 "Harness-owned Codex config contains unknown user content and cannot be "
                 f"rewritten: {path}"
             )
-        if _manual_config_is_desired(value, root, self.python_executable, hidden=hidden):
+        if _manual_config_is_desired(
+            value,
+            root,
+            self.python_executable,
+            self.forward_env_vars,
+            hidden=hidden,
+        ):
             return
         if marker is not None and _config_is_owned_shape(value, root):
             return
@@ -241,12 +297,22 @@ class CodexAdapter:
 
         if raw is not None:
             value = _parse_toml(raw, path)
+            if marker is None and not hidden and _isolated_development_entry(value) is not None:
+                return IntegrationChange.UNCHANGED
             if marker is None and _manual_config_is_desired(
-                value, root, self.python_executable, hidden=hidden
+                value,
+                root,
+                self.python_executable,
+                self.forward_env_vars,
+                hidden=hidden,
             ):
                 return IntegrationChange.UNCHANGED
             if marker is not None and _config_is_desired(
-                value, root, self.python_executable, hidden=hidden
+                value,
+                root,
+                self.python_executable,
+                self.forward_env_vars,
+                hidden=hidden,
             ):
                 if marker is not None and _ensure_codex_exclude(root):
                     return IntegrationChange.CHANGED
@@ -256,7 +322,12 @@ class CodexAdapter:
                     f"Codex project config cannot be safely reconciled: {path}"
                 )
 
-        desired = _desired_config(root, self.python_executable, hidden=hidden)
+        desired = _desired_config(
+            root,
+            self.python_executable,
+            self.forward_env_vars,
+            hidden=hidden,
+        )
         _require_directory_safe(path.parent)
         if marker is None:
             _replace_if_unchanged(
@@ -285,8 +356,13 @@ class CodexAdapter:
         if marker is None:
             if raw is None:
                 return
-            entry = _harness_entry(_parse_toml(raw, path))
-            if entry is None or _entry_is_desired(entry, root, self.python_executable):
+            value = _parse_toml(raw, path)
+            if _isolated_development_entry(value) is not None:
+                return
+            entry = _harness_entry(value)
+            if entry is None or _entry_is_desired(
+                entry, root, self.python_executable, self.forward_env_vars
+            ):
                 return
             raise HostRegistrationCollisionError(
                 f"Codex project config has a non-Harness MCP server named 'harness': {path}"
@@ -313,8 +389,13 @@ class CodexAdapter:
         if marker is None:
             if raw is None:
                 return IntegrationChange.UNCHANGED
-            entry = _harness_entry(_parse_toml(raw, path))
-            if entry is None or _entry_is_desired(entry, root, self.python_executable):
+            value = _parse_toml(raw, path)
+            if _isolated_development_entry(value) is not None:
+                return IntegrationChange.UNCHANGED
+            entry = _harness_entry(value)
+            if entry is None or _entry_is_desired(
+                entry, root, self.python_executable, self.forward_env_vars
+            ):
                 return IntegrationChange.UNCHANGED
             raise HostRegistrationCollisionError(
                 f"Codex project config has a non-Harness MCP server named 'harness': {path}"
@@ -356,6 +437,7 @@ def discover_codex_adapter(
         python_executable=_absolute_executable_path(
             Path(sys.executable) if python_executable is None else python_executable
         ),
+        forward_env_vars=codex_mcp_forward_env_vars(values),
     )
 
 
@@ -388,12 +470,17 @@ def codex_developer_instructions(*, hidden: bool = False) -> str:
     return f"{CODEX_BOOTSTRAP_INSTRUCTION_BODY}\n{HIDDEN_INSTRUCTION_BODY}"
 
 
-def _desired_entry(root: Path, python_executable: Path) -> dict[str, object]:
+def _desired_entry(
+    root: Path,
+    python_executable: Path,
+    forward_env_vars: tuple[str, ...],
+) -> dict[str, object]:
     return {
         "command": str(python_executable),
         "args": ["-m", "harness.mcp_process"],
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
+        "env_vars": list(forward_env_vars),
         "cwd": str(root),
+        "required": True,
         "env": {
             _HOST_PROFILE_ENV: _CODEX_PROFILE,
             _WORKSPACE_ROOT_ENV: str(root),
@@ -401,8 +488,14 @@ def _desired_entry(root: Path, python_executable: Path) -> dict[str, object]:
     }
 
 
-def _desired_config(root: Path, python_executable: Path, *, hidden: bool = False) -> bytes:
-    entry = _desired_entry(root, python_executable)
+def _desired_config(
+    root: Path,
+    python_executable: Path,
+    forward_env_vars: tuple[str, ...],
+    *,
+    hidden: bool = False,
+) -> bytes:
+    entry = _desired_entry(root, python_executable, forward_env_vars)
     lines = [
         "# Generated and owned by Harness. Do not edit this file in place.",
         f"developer_instructions = {_toml_string(codex_developer_instructions(hidden=hidden))}",
@@ -413,10 +506,9 @@ def _desired_config(root: Path, python_executable: Path, *, hidden: bool = False
             "[mcp_servers.harness]",
             f"command = {_toml_string(entry['command'])}",
             'args = ["-m", "harness.mcp_process"]',
-            "env_vars = ["
-            + ", ".join(_toml_string(name) for name in CODEX_MCP_FORWARD_ENV_VARS)
-            + "]",
+            "env_vars = [" + ", ".join(_toml_string(name) for name in forward_env_vars) + "]",
             f"cwd = {_toml_string(entry['cwd'])}",
+            "required = true",
             "",
             "[mcp_servers.harness.env]",
             f"{_HOST_PROFILE_ENV} = {_toml_string(_CODEX_PROFILE)}",
@@ -451,6 +543,36 @@ def _harness_entry(value: dict[str, object]) -> dict[str, object] | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _isolated_development_entry(value: dict[str, object]) -> dict[str, object] | None:
+    servers = value.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return None
+    for name in (_ISOLATED_DEV_SERVER_NAME, _SERVER_NAME):
+        entry = servers.get(name)
+        if not isinstance(entry, dict):
+            continue
+        configured_type = entry.get("type")
+        if configured_type is not None and configured_type != "stdio":
+            continue
+        env = entry.get("env")
+        if not isinstance(env, dict):
+            continue
+        launch_isolated = (
+            entry.get("command") == _ISOLATED_DEV_COMMAND
+            and entry.get("args") == _ISOLATED_DEV_ARGS
+        )
+        launch_dogfood = (
+            entry.get("command") == _DOGFOOD_COMMAND and entry.get("args") == _DOGFOOD_ARGS
+        )
+        if (
+            (launch_isolated or launch_dogfood)
+            and env.get(_WORKSPACE_ROOT_ENV) == "."
+            and env.get(_HOST_PROFILE_ENV) is None
+        ):
+            return entry
+    return None
+
+
 def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | None]:
     if entry is None:
         return None, None
@@ -463,18 +585,24 @@ def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | 
     )
 
 
-def _entry_is_desired(entry: dict[str, object] | None, root: Path, python_executable: Path) -> bool:
-    return entry == _desired_entry(root, python_executable)
+def _entry_is_desired(
+    entry: dict[str, object] | None,
+    root: Path,
+    python_executable: Path,
+    forward_env_vars: tuple[str, ...],
+) -> bool:
+    return entry == _desired_entry(root, python_executable, forward_env_vars)
 
 
 def _manual_config_is_desired(
     value: dict[str, object],
     root: Path,
     python_executable: Path,
+    forward_env_vars: tuple[str, ...],
     *,
     hidden: bool,
 ) -> bool:
-    if not _entry_is_desired(_harness_entry(value), root, python_executable):
+    if not _entry_is_desired(_harness_entry(value), root, python_executable, forward_env_vars):
         return False
     return value.get("developer_instructions") == codex_developer_instructions(hidden=hidden)
 
@@ -483,11 +611,12 @@ def _config_is_desired(
     value: dict[str, object],
     root: Path,
     python_executable: Path,
+    forward_env_vars: tuple[str, ...],
     *,
     hidden: bool,
 ) -> bool:
     return _config_is_owned_shape(value, root) and value == tomllib.loads(
-        _desired_config(root, python_executable, hidden=hidden).decode("utf-8")
+        _desired_config(root, python_executable, forward_env_vars, hidden=hidden).decode("utf-8")
     )
 
 
@@ -504,15 +633,23 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     if not isinstance(servers, dict) or set(servers) != {_SERVER_NAME}:
         return False
     entry = servers.get(_SERVER_NAME)
-    if not isinstance(entry, dict) or set(entry) not in (
-        {"command", "args", "cwd", "env"},
-        {"command", "args", "env_vars", "cwd", "env"},
-    ):
+    if not isinstance(entry, dict):
         return False
+    required_keys = {"command", "args", "cwd", "env"}
+    if not required_keys <= set(entry) or not set(entry) - required_keys <= {
+        "env_vars",
+        "required",
+    }:
+        return False
+    forwarded = entry.get("env_vars", [])
+    if not isinstance(forwarded, list) or any(not isinstance(name, str) for name in forwarded):
+        return False
+    expected_order = tuple(name for name in CODEX_MCP_FORWARD_ENV_VARS if name in forwarded)
     env = entry.get("env")
     return (
         entry.get("args") == ["-m", "harness.mcp_process"]
-        and ("env_vars" not in entry or entry.get("env_vars") == list(CODEX_MCP_FORWARD_ENV_VARS))
+        and tuple(forwarded) == expected_order
+        and entry.get("required", True) is True
         and entry.get("cwd") == str(root)
         and isinstance(entry.get("command"), str)
         and isinstance(env, dict)

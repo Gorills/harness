@@ -4,17 +4,33 @@ These rules apply to every coding agent and human contributor in this repository
 
 ## Isolated development
 
-This checkout must not share process, database, socket, MCP, or host configuration with a separately installed Harness.
+This checkout is isolated by default and must not accidentally mix checkout code with a separately
+installed Harness process, database, socket, or host configuration. The only supported sharing
+exception is the explicit ADR-0036 global-dogfood route, which runs the tool-installed executable
+and skips checkout host/skill reconciliation.
 
-- Run CLI/daemon commands through `scripts/dev` (or `source scripts/dev-env.sh` then `uv run --frozen`). Do not invoke `harness` / `harnessd` from `PATH`.
+- Run current-checkout CLI/daemon commands through `scripts/dev` (or `source scripts/dev-env.sh`
+  then `uv run --frozen`). Use `scripts/dogfood` for the selected MCP/dogfood route. Do not invoke
+  `harness` / `harnessd` from `PATH`.
 - `uv run --frozen harness …` without `scripts/dev-env.sh` uses checkout code against the global daemon. Never do that in this repository.
-- Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user `harness.sock`) during ordinary checkout work.
+- Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user
+  `harness.sock`) during ordinary isolated checkout work. When a human has explicitly enabled
+  `scripts/dogfood` global mode, its MCP/Search/Task/Knowledge operations intentionally use that
+  canonical state through the tool-installed runtime; do not enable or disable the mode without
+  explicit user authorization.
 - Do not run `harness install` or `harness uninstall` from this environment. Those commands mutate user-global host MCP and are refused while `HARNESS_DEV_ROOT` is set.
 - Machine acceptance is the only agent-operated exception. After the user explicitly requests global installation or real-host acceptance, an agent may run `make accept-global-codex` with sandbox escalation. That target may replace the user-global uv-tool package, but all synthetic Harness/Codex/Workspace state must remain under its temporary roots and be cleaned on failure as well as success.
 - Live activation is separate from synthetic acceptance. After the same explicit authorization, an agent may run `make install-global HOST=<explicit-profile>` and the corresponding read-only `make doctor-global` with sandbox escalation. Never default to multiple profiles, never create synthetic Workspaces in canonical state, and report which real registered Workspace configurations the live install reconciled.
 - Do not invoke `scripts/install-global` directly except through those Make targets. Do not run global `harness uninstall --purge`, and do not delete or rewrite canonical per-user state to recover a failed acceptance.
-- Tracked `.cursor/mcp.json` names `harness-dev` and launches `${workspaceFolder}/scripts/dev harness mcp`. `.mcp.json` still names `harness` for Claude Code. Those are the checkout-local daemon under `.harness/`, not the global install. Prefer reading this repository over those tools when implementing Harness.
-- Never invoke a user-level / global Harness MCP namespace (`user-harness` or equivalent) from this source checkout. The machine acceptance target may exercise the production `harness` namespace only from its temporary trusted Git Workspaces. Enable project `harness-dev` in Cursor Customize for ordinary checkout work.
+- Tracked Codex/Cursor config names `harness-dev`; `.mcp.json` still names `harness` for Claude
+  Code. All launch `scripts/dogfood mcp`. With no marker the router uses checkout-local
+  `scripts/dev`; explicit global mode uses the tool-installed runtime and canonical state. Prefer
+  reading this repository over broad Harness context when implementing Harness.
+- Never invoke a leftover user-level/global MCP namespace (`user-harness` or equivalent) from this
+  source checkout. The tracked project router is the only supported dogfood surface. Enable
+  project `harness-dev` in Cursor Customize. `harness scan --global-dogfood` is reserved for the
+  installed executable selected by `scripts/dogfood`; it indexes/registers this checkout without
+  host or skill reconciliation.
 - Ignore globally installed Harness skills if they appear in the host.
 
 See [`docs/development/isolated-development.md`](docs/development/isolated-development.md).

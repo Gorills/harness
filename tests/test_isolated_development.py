@@ -32,6 +32,7 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX isolated-developm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEV_SCRIPT = REPO_ROOT / "scripts" / "dev"
+DOGFOOD_SCRIPT = REPO_ROOT / "scripts" / "dogfood"
 DEV_ENV_SCRIPT = REPO_ROOT / "scripts" / "dev-env.sh"
 DEV_UV_SCRIPT = REPO_ROOT / "scripts" / "dev-uv.sh"
 INSTALL_GLOBAL_SCRIPT = REPO_ROOT / "scripts" / "install-global"
@@ -154,7 +155,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "XDG_RUNTIME_DIR",
         ".harness/state/harness/harness.db",
         ".harness/runtime/harness/harness.sock",
-        "does not share that process, database, or Unix socket",
+        "explicit global-dogfood route",
         ".cursor/mcp.json",
         "HARNESS_DEV_ROOT",
         "HARNESS_SKILL_REGISTRY",
@@ -163,6 +164,8 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "refused",
         "uv run --frozen harness",
         "make install-global",
+        "scripts/dogfood enable-global",
+        "--global-dogfood",
         "harness-dev",
         "WORKSPACE_FOLDER_PATHS",
         "uv tool install --force --reinstall",
@@ -399,8 +402,8 @@ def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> No
     assert "harness" not in overlay["mcpServers"]
     assert find_isolated_development_root(REPO_ROOT) == REPO_ROOT
     claude = json.loads((REPO_ROOT / ".mcp.json").read_text(encoding="utf-8"))
-    assert claude["mcpServers"]["harness"]["command"] == "./scripts/dev"
-    assert claude["mcpServers"]["harness"]["args"] == ["harness", "mcp"]
+    assert claude["mcpServers"]["harness"]["command"] == "./scripts/dogfood"
+    assert claude["mcpServers"]["harness"]["args"] == ["mcp"]
     assert claude["mcpServers"]["harness"]["type"] == "stdio"
 
 
@@ -408,12 +411,156 @@ def test_checkout_codex_overlay_uses_scripts_dev_and_fails_closed() -> None:
     config = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8"))
     entry = config["mcp_servers"]["harness-dev"]
     assert entry == {
-        "command": "./scripts/dev",
-        "args": ["harness", "mcp"],
+        "command": "./scripts/dogfood",
+        "args": ["mcp"],
         "startup_timeout_sec": 30,
         "required": True,
         "env": {"HARNESS_WORKSPACE_ROOT": "."},
     }
+    assert set(config["mcp_servers"]) == {"harness-dev"}
+
+
+def _dogfood_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
+    root = tmp_path / "checkout"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    dogfood = scripts / "dogfood"
+    dogfood.write_bytes(DOGFOOD_SCRIPT.read_bytes())
+    dogfood.chmod(0o755)
+    (scripts / "dev-uv.sh").write_bytes(DEV_UV_SCRIPT.read_bytes())
+
+    log = tmp_path / "dogfood.log"
+    dev = scripts / "dev"
+    dev.write_text(
+        '#!/usr/bin/env bash\nprintf \'dev:%s\\n\' "$*" >> "$DOGFOOD_TEST_LOG"\n',
+        encoding="utf-8",
+    )
+    dev.chmod(0o755)
+
+    tool_bin = tmp_path / "tool-bin"
+    tool_bin.mkdir()
+    harness = tool_bin / "harness"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'global:%s\\n\' "$*" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'root=%s\\n\' "${HARNESS_WORKSPACE_ROOT-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'dev_root=%s\\n\' "${HARNESS_DEV_ROOT-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'state=%s\\n\' "${XDG_STATE_HOME-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'runtime=%s\\n\' "${XDG_RUNTIME_DIR-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'venv=%s\\n\' "${VIRTUAL_ENV-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'skills=%s\\n\' "${HARNESS_SKILL_REGISTRY-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'pythonpath=%s\\n\' "${PYTHONPATH-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'printf \'path=%s\\n\' "${PATH-}" >> "$DOGFOOD_TEST_LOG"\n'
+        'exit "${DOGFOOD_TEST_EXIT-0}"\n',
+        encoding="utf-8",
+    )
+    harness.chmod(0o755)
+
+    fake_uv = tmp_path / "uv"
+    fake_uv.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"${1-}\" == '--version' ]]; then echo 'uv 0.12.5'; exit 0; fi\n"
+        "if [[ \"${1-}\" == 'tool' && \"${2-}\" == 'dir' && \"${3-}\" == '--bin' ]]; then\n"
+        "  printf '%s\\n' \"$DOGFOOD_TEST_TOOL_BIN\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+
+    canonical_state = tmp_path / "canonical-state"
+    canonical_runtime = tmp_path / "canonical-runtime"
+    canonical_state.mkdir()
+    canonical_runtime.mkdir()
+    overlay = root / ".harness"
+    env = os.environ.copy()
+    env.update(
+        {
+            "DOGFOOD_TEST_LOG": str(log),
+            "DOGFOOD_TEST_TOOL_BIN": str(tool_bin),
+            "HARNESS_DEV_UV": str(fake_uv),
+            "HARNESS_DEV_ROOT": str(root),
+            "HARNESS_DEV_SAVED_XDG_STATE_HOME": str(canonical_state),
+            "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR": str(canonical_runtime),
+            "XDG_STATE_HOME": str(overlay / "state"),
+            "XDG_RUNTIME_DIR": str(overlay / "runtime"),
+            "HARNESS_SKILL_REGISTRY": str(overlay / "skills"),
+            "VIRTUAL_ENV": str(root / ".venv"),
+            "PATH": f"{root / '.venv' / 'bin'}{os.pathsep}{env.get('PATH', '')}",
+        }
+    )
+    return dogfood, env, log, root
+
+
+def test_dogfood_router_defaults_to_isolated_checkout(tmp_path: Path) -> None:
+    dogfood, env, log, root = _dogfood_fixture(tmp_path)
+
+    result = _run([str(dogfood), "mcp"], cwd=tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert log.read_text(encoding="utf-8") == "dev:harness mcp\n"
+    assert not (root / ".harness" / "global-dogfood-mode").exists()
+
+
+def test_dogfood_enable_scans_before_atomic_global_switch(tmp_path: Path) -> None:
+    dogfood, env, log, root = _dogfood_fixture(tmp_path)
+
+    result = _run([str(dogfood), "enable-global"], cwd=tmp_path, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert (root / ".harness" / "global-dogfood-mode").read_text(encoding="utf-8") == (
+        "global-v1\n"
+    )
+    text = log.read_text(encoding="utf-8")
+    assert f"global:scan --global-dogfood {root}" in text
+    assert f"root={root}" in text
+    assert "dev_root=\n" in text
+    assert f"state={tmp_path / 'canonical-state'}" in text
+    assert f"runtime={tmp_path / 'canonical-runtime'}" in text
+    assert "venv=\n" in text
+    assert "skills=\n" in text
+    assert "pythonpath=\n" in text
+    assert str(root / ".venv" / "bin") not in next(
+        line for line in text.splitlines() if line.startswith("path=")
+    )
+
+    log.unlink()
+    routed = _run([str(dogfood), "mcp"], cwd=tmp_path, env=env)
+    assert routed.returncode == 0, routed.stderr
+    assert log.read_text(encoding="utf-8").startswith("global:mcp\n")
+
+    visibility = _run([str(dogfood), "visibility", "hidden"], cwd=tmp_path, env=env)
+    assert visibility.returncode == 1
+    assert "visibility changes are not routed" in visibility.stderr
+
+
+def test_dogfood_failed_scan_does_not_enable_global_mode(tmp_path: Path) -> None:
+    dogfood, env, _log, root = _dogfood_fixture(tmp_path)
+    env["DOGFOOD_TEST_EXIT"] = "17"
+
+    result = _run([str(dogfood), "enable-global"], cwd=tmp_path, env=env)
+
+    assert result.returncode == 17
+    assert not (root / ".harness" / "global-dogfood-mode").exists()
+
+
+def test_dogfood_invalid_or_symlinked_marker_fails_closed(tmp_path: Path) -> None:
+    dogfood, env, _log, root = _dogfood_fixture(tmp_path)
+    marker = root / ".harness" / "global-dogfood-mode"
+    marker.parent.mkdir()
+    marker.write_text("unknown\n", encoding="utf-8")
+    invalid = _run([str(dogfood), "mcp"], cwd=tmp_path, env=env)
+    assert invalid.returncode == 1
+    assert "invalid dogfood mode marker" in invalid.stderr
+
+    marker.unlink()
+    target = tmp_path / "marker"
+    target.write_text("global-v1\n", encoding="utf-8")
+    marker.symlink_to(target)
+    symlinked = _run([str(dogfood), "mcp"], cwd=tmp_path, env=env)
+    assert symlinked.returncode == 1
+    assert "must not be a symlink" in symlinked.stderr
 
 
 def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
@@ -507,6 +654,171 @@ def test_isolated_scan_projects_local_skills_without_reconciling_host_config(
     assert "Development skill profiles: codex, cursor" in output
     assert "Relevant skills: 1" in output
     assert "Host configuration reconciliation skipped" in output
+
+
+def test_global_dogfood_scan_indexes_overlay_without_reconciling_integrations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "repo")
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    seen: list[tuple[Path, Path]] = []
+
+    def request_scan(ipc_socket: Path, path: Path) -> WorkspaceScanResult:
+        seen.append((ipc_socket, path))
+        return WorkspaceScanResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id="workspace-global",
+            project_id="project-global",
+            visibility_mode="normal",
+            workspace_root=root.resolve(),
+            project_created=True,
+            workspace_created=True,
+            file_count=1,
+            added=1,
+            updated=0,
+            removed=0,
+        )
+
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harness",
+            "scan",
+            "--global-dogfood",
+            str(root),
+            "--socket",
+            str(socket_path),
+        ],
+    )
+    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(
+        entrypoints,
+        "request_workspace_skills_reconcile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("global dogfood must not reconcile skills")
+        ),
+    )
+    monkeypatch.setattr(
+        entrypoints,
+        "discover_codex_adapter",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("global dogfood must not reconcile host adapters")
+        ),
+    )
+
+    assert harness_main() == 0
+    assert seen == [(socket_path, root.resolve())]
+    output = capsys.readouterr().out
+    assert "Global dogfood: index registered" in output
+    assert "host and skill reconciliation skipped" in output
+
+
+def test_global_dogfood_scan_refuses_checkout_interpreter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "repo")
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+    checkout_python = root / ".venv" / "bin" / "python"
+    checkout_python.parent.mkdir(parents=True)
+    checkout_python.touch()
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.setattr(sys, "executable", str(checkout_python))
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
+    monkeypatch.setattr(
+        entrypoints,
+        "request_workspace_scan",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
+    )
+
+    assert harness_main() == 1
+    assert "tool-installed Harness" in capsys.readouterr().out
+
+
+def test_global_dogfood_scan_refuses_ordinary_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "ordinary")
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
+    monkeypatch.setattr(
+        entrypoints,
+        "request_workspace_scan",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
+    )
+
+    assert harness_main() == 1
+    assert "valid only for a Harness source checkout overlay" in capsys.readouterr().out
+
+
+def test_global_dogfood_scan_refuses_hidden_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = _git_workspace(tmp_path / "repo")
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(json.dumps(_isolated_overlay()), encoding="utf-8")
+    socket_path = tmp_path / "ipc" / "harness.sock"
+
+    monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+    monkeypatch.setattr(sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "harness",
+            "scan",
+            "--global-dogfood",
+            str(root),
+            "--socket",
+            str(socket_path),
+        ],
+    )
+    monkeypatch.setattr(
+        entrypoints,
+        "request_workspace_scan",
+        lambda _socket, _path: WorkspaceScanResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id="workspace-hidden",
+            project_id="project-hidden",
+            visibility_mode="hidden",
+            workspace_root=root.resolve(),
+            project_created=False,
+            workspace_created=False,
+            file_count=1,
+            added=0,
+            updated=0,
+            removed=0,
+        ),
+    )
+    monkeypatch.setattr(
+        entrypoints,
+        "request_workspace_skills_reconcile",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("hidden global dogfood must not reconcile skills")
+        ),
+    )
+
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "global dogfood requires Normal visibility" in output
+    assert "host policy reconciliation is intentionally skipped" in output
 
 
 def test_isolated_env_refuses_install_and_uninstall(

@@ -77,7 +77,7 @@ _SERVER_INSTRUCTIONS = (
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
     "Do not call Harness MCP tools. Isolated checkout MCP is the project server "
-    "harness-dev: scripts/dev harness mcp without HARNESS_HOST_PROFILE."
+    "harness-dev: scripts/dogfood mcp without HARNESS_HOST_PROFILE."
 )
 _ISOLATED_CHECKOUT_REFUSAL_MESSAGE = (
     "production Harness MCP is refused in the Harness source checkout; "

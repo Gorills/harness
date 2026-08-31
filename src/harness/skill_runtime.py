@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from harness.cursor_adapter import find_isolated_development_root
 from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
 from harness.host_adapters import (
     claude_code_skill_projection_surface,
@@ -128,6 +129,13 @@ def reconcile_workspace_skills(
     """Resolve and reconcile relevant skills for one registered live Workspace."""
     workspace = get_workspace(connection, workspace_id)
     _validate_workspace_identity(workspace)
+    if (
+        not os.environ.get("HARNESS_DEV_ROOT")
+        and find_isolated_development_root(workspace.workspace_root) == workspace.workspace_root
+    ):
+        raise SkillRuntimeError(
+            "global Harness does not project skills into a source-checkout overlay"
+        )
     surfaces = _surfaces_for_profiles(profiles)
     root = default_skill_registry() if registry_root is None else registry_root
     try:

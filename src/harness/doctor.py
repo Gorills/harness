@@ -935,6 +935,7 @@ def _inspect_projects_and_workspaces(
     index_failed: list[WorkspaceRecord] = []
     current_skills = 0
     stale_skills = 0
+    skill_projects_isolated = 0
     skill_timed_out: list[WorkspaceRecord] = []
     skill_failed: list[WorkspaceRecord] = []
     cursor_projects_current = 0
@@ -946,6 +947,7 @@ def _inspect_projects_and_workspaces(
     cursor_project_checks: list[DoctorCheck] = []
     cursor_runtime_checks: list[DoctorCheck] = []
     codex_projects_current = 0
+    codex_projects_isolated = 0
     codex_projects_bad = 0
     codex_project_checks: list[DoctorCheck] = []
     hidden_ok = 0
@@ -959,6 +961,8 @@ def _inspect_projects_and_workspaces(
             skipped.extend(inspectable[position:])
             break
         workspace_deadline = min(overall_deadline, monotonic() + _DOCTOR_WORKSPACE_DEADLINE_SECONDS)
+        codex_project_isolated = False
+        cursor_project_isolated = False
         try:
             identity = inspect_git_workspace_runtime_identity(
                 workspace.workspace_root,
@@ -1049,7 +1053,18 @@ def _inspect_projects_and_workspaces(
         else:
             configured_python = codex_project.configured_python or "<missing>"
             configured_root = codex_project.configured_workspace_root or "<missing>"
-            if codex_host_active:
+            if codex_project.isolated_development:
+                codex_projects_isolated += 1
+                codex_project_isolated = True
+                codex_project_checks.append(
+                    _check(
+                        f"Codex project MCP config {workspace.workspace_id}",
+                        DoctorSeverity.OK,
+                        f"isolated-development overlay at {codex_project.path}; "
+                        "server harness-dev (or legacy harness) is left unchanged",
+                    )
+                )
+            elif codex_host_active:
                 if (
                     codex_project.state is HostRegistrationState.CURRENT
                     and codex_project.preflight_error is None
@@ -1111,6 +1126,7 @@ def _inspect_projects_and_workspaces(
             configured_root = cursor_project.configured_workspace_root or "<missing>"
             if cursor_project.isolated_development:
                 cursor_projects_isolated += 1
+                cursor_project_isolated = True
                 cursor_project_checks.append(
                     _check(
                         f"Cursor project MCP override {workspace.workspace_id}",
@@ -1242,6 +1258,9 @@ def _inspect_projects_and_workspaces(
                                 f"Cursor project MCP tools unavailable {workspace.workspace_id}"
                             )
 
+        if codex_project_isolated and cursor_project_isolated:
+            skill_projects_isolated += 1
+            continue
         if not active_profiles or not registry_ok:
             continue
         if registry_root is None:
@@ -1323,7 +1342,8 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Codex project MCP configs",
                 DoctorSeverity.FAIL,
-                f"{codex_projects_current} current, {codex_projects_bad} "
+                f"{codex_projects_current} current, {codex_projects_isolated} "
+                f"isolated-development, {codex_projects_bad} "
                 "missing/stale/foreign/orphaned/unsafe; see per-Workspace checks below",
             )
         )
@@ -1337,8 +1357,18 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Codex project MCP configs",
                 codex_severity,
-                f"{codex_projects_current} current, 0 missing/stale/foreign; each config "
-                "binds an explicit absolute HARNESS_WORKSPACE_ROOT",
+                f"{codex_projects_current} current, {codex_projects_isolated} "
+                "isolated-development, 0 missing/stale/foreign; production configs bind an "
+                "explicit absolute HARNESS_WORKSPACE_ROOT",
+            )
+        )
+    elif codex_projects_isolated:
+        checks.append(
+            _check(
+                "Codex project MCP configs",
+                DoctorSeverity.OK,
+                f"{codex_projects_isolated} isolated-development overlay(s) preserved; "
+                "Codex host integration is inactive",
             )
         )
     else:
@@ -1456,7 +1486,8 @@ def _inspect_projects_and_workspaces(
         skill_detail = (
             f"{current_skills} current, {stale_skills} stale, "
             f"{_counted_named(len(skill_timed_out), 'timed out', skill_timed_out)}, "
-            f"{_counted_named(len(skill_failed), 'failed', skill_failed)}"
+            f"{_counted_named(len(skill_failed), 'failed', skill_failed)}, "
+            f"{skill_projects_isolated} source-checkout overlay(s) skipped"
         )
         if skipped:
             skill_detail += (

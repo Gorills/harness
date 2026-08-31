@@ -206,6 +206,18 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
     overlay_path.parent.mkdir()
     overlay_text = json.dumps(overlay) + "\n"
     overlay_path.write_text(overlay_text, encoding="utf-8")
+    codex_overlay = root / ".codex" / "config.toml"
+    codex_overlay.parent.mkdir()
+    codex_text = """[mcp_servers.harness-dev]
+command = "./scripts/dogfood"
+args = ["mcp"]
+startup_timeout_sec = 30
+required = true
+
+[mcp_servers.harness-dev.env]
+HARNESS_WORKSPACE_ROOT = "."
+"""
+    codex_overlay.write_text(codex_text, encoding="utf-8")
     (root / "README.md").write_text("repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
     subprocess.run(
@@ -257,6 +269,18 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
         for check in report.checks
         if check.severity is doctor.DoctorSeverity.FAIL
     )
+    codex_checks = [
+        check for check in report.checks if check.name.startswith("Codex project MCP config ")
+    ]
+    assert codex_checks
+    assert all(check.severity is doctor.DoctorSeverity.OK for check in codex_checks)
+    assert any("isolated-development overlay" in check.detail for check in codex_checks)
+    codex_summary = next(
+        check for check in report.checks if check.name == "Codex project MCP configs"
+    )
+    assert codex_summary.severity is doctor.DoctorSeverity.OK
+    assert "isolated-development" in codex_summary.detail
+    assert codex_overlay.read_text(encoding="utf-8") == codex_text
 
 
 def test_run_system_doctor_refuses_database_symlink_without_following_target(

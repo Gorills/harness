@@ -65,7 +65,9 @@ Automated tests prove registry parsing, legacy and greenfield relevance, bounded
 ADR-0030 selects project-scoped Codex MCP rather than a user-level shared process whose active
 Workspace is not established by current documentation. The adapter writes the canonical Workspace
 root into both `mcp_servers.harness.cwd` and `HARNESS_WORKSPACE_ROOT`, with
-`HARNESS_HOST_PROFILE=codex`. Automatic mutation is limited to an absent `.codex/config.toml` or a
+`HARNESS_HOST_PROFILE=codex`. The generated server is required, and its `env_vars` list contains
+only non-empty bounded host variables observed during reconciliation, avoiding diagnostics for
+unset optional selectors. Automatic mutation is limited to an absent `.codex/config.toml` or a
 complete container proven by Harness's adjacent ownership marker. Existing exact config may be
 adopted manually; arbitrary user TOML, foreign same-name servers, tracked mutation, malformed
 files, symlinks, and unknown additions to an owned container fail closed without rewrite.
@@ -92,14 +94,15 @@ prints the external destination, exact temporary fixture/MCP payload class, acco
 API-key scope, and local isolation guarantees without invoking a model. With explicit
 `--run-model` approval and an invocation-scoped `CODEX_API_KEY`, it builds the exact wheel, requires
 real Codex JSONL evidence for successful calls to all five Harness tools, checks
-doctor/skills/config/cleanup, and emits a sanitized report. The key is passed only to `codex exec`;
+doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
+bootstrap in model-visible input, and emits a sanitized report. The key is passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or
 writes user trust/config. A local-only preflight passed on 2026-08-28 with `codex-cli 0.147.0`,
 including project MCP discovery, exact configured stdio launch through the official MCP SDK, all
 five schemas and successful tool calls in two simultaneous repositories, distinct exact Workspace
 identities, the exact relevant/no irrelevant or duplicate generated skill set, `doctor` with zero failures,
 untrusted-project refusal without created trust/config, owned cleanup, and byte-unchanged user
-config. Codex model arbitration, IDE
+config. The prompt-input check applies to a fresh CLI process; Codex model arbitration, IDE
 extension, and desktop acceptance remain open.
 
 ### Cursor
@@ -167,6 +170,9 @@ support; Codex claims only ADR-0028 hygiene-effective support until real-host en
 - [ ] No duplicate Harness skill appears because of compatibility directory scanning.
 - [ ] Removing Harness deletes only Harness-owned integration artifacts.
 - [ ] Codex trusted-project config is discovered independently by the current CLI, IDE extension, and ChatGPT desktop local client; untrusted projects remain fail-closed without Harness changing trust.
+- [ ] After the required restart/reload, each Codex client includes the exact Harness bootstrap in
+  the actual model-visible developer input; an already-running app with a stale config snapshot is
+  reported as needing restart rather than accepted.
 - [ ] Hidden projection leaves `.gitignore` byte-for-byte unchanged and all Harness-owned project artifacts untracked/ignored.
 - [ ] Hidden agent attempts to stage/commit/amend/create refs or tags/push/create or edit PRs/issues/reviews/comments are denied by the host profile, not merely discouraged by prompt text.
 - [ ] Hidden enforcement configuration is tamper-resistant for the tested profile: the agent cannot edit/disable it or escalate into a bypass/full-access mode.

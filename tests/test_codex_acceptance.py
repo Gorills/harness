@@ -19,7 +19,10 @@ from accept_codex import (
     completed_harness_tool_calls,
     main,
     project_actions_before_harness_status,
+    prompt_input_contains_bootstrap,
 )
+
+from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
 
 
 def test_codex_acceptance_scopes_api_key_away_from_local_commands(
@@ -175,6 +178,24 @@ def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints(
     ):
         assert tool_name not in prompt
     assert EXPECTED_GENERATED_SKILLS == ("secure-by-design", "testing-strategy")
+
+
+def test_codex_acceptance_detects_bootstrap_in_rendered_prompt_input() -> None:
+    payload = [
+        {"role": "developer", "content": [{"type": "text", "text": "other"}]},
+        {
+            "role": "developer",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "prefix\n" + CODEX_BOOTSTRAP_INSTRUCTION_BODY + "\nsuffix",
+                }
+            ],
+        },
+    ]
+
+    assert prompt_input_contains_bootstrap(payload)
+    assert not prompt_input_contains_bootstrap({"role": "developer", "content": "other"})
 
 
 def test_codex_acceptance_uses_private_temporary_trust(tmp_path: Path) -> None:
