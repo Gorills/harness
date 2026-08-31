@@ -38,7 +38,7 @@ DEV_UV_SCRIPT = REPO_ROOT / "scripts" / "dev-uv.sh"
 INSTALL_GLOBAL_SCRIPT = REPO_ROOT / "scripts" / "install-global"
 MAKEFILE = REPO_ROOT / "Makefile"
 ISOLATED_DOC = REPO_ROOT / "docs" / "development" / "isolated-development.md"
-CODEX_CONFIG = REPO_ROOT / ".codex" / "config.toml"
+CODEX_CONFIG_EXAMPLE = REPO_ROOT / ".codex" / "config.toml.example"
 
 
 def _run(
@@ -407,17 +407,38 @@ def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> No
     assert claude["mcpServers"]["harness"]["type"] == "stdio"
 
 
-def test_checkout_codex_overlay_uses_scripts_dev_and_fails_closed() -> None:
-    config = tomllib.loads(CODEX_CONFIG.read_text(encoding="utf-8"))
-    entry = config["mcp_servers"]["harness-dev"]
-    assert entry == {
-        "command": "./scripts/dogfood",
-        "args": ["mcp"],
-        "startup_timeout_sec": 30,
-        "required": True,
-        "env": {"HARNESS_WORKSPACE_ROOT": "."},
-    }
-    assert set(config["mcp_servers"]) == {"harness-dev"}
+def test_checkout_codex_config_is_generated_not_tracked_stdio() -> None:
+    config_path = REPO_ROOT / ".codex" / "config.toml"
+    tracked = _run(
+        ["git", "ls-files", "--error-unmatch", ".codex/config.toml"],
+        cwd=REPO_ROOT,
+    )
+    assert tracked.returncode != 0
+    if config_path.exists():
+        ignored = _run(["git", "check-ignore", "-q", ".codex/config.toml"], cwd=REPO_ROOT)
+        assert ignored.returncode == 0
+        generated = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        entry = generated["mcp_servers"]["harness"]
+        assert entry["url"].startswith("http://127.0.0.1:")
+        assert "command" not in entry
+        assert "harness-dev" not in generated["mcp_servers"]
+    config = tomllib.loads(CODEX_CONFIG_EXAMPLE.read_text(encoding="utf-8"))
+    assert config["developer_instructions"].startswith("Harness is required")
+    entry = config["mcp_servers"]["harness"]
+    assert entry["url"] == "http://127.0.0.1:17375/mcp"
+    assert entry["required"] is True
+    assert entry["http_headers"]["Authorization"].startswith("Bearer <private")
+    assert "harness-dev" not in config["mcp_servers"]
+
+
+def test_checkout_agent_instructions_require_harness_before_native_tools() -> None:
+    instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    bootstrap = instructions.split("## Isolated development", maxsplit=1)[0]
+
+    assert "`project_status` must be the first repository action" in bootstrap
+    assert "deferred or omitted from the initial visible tool list" in bootstrap
+    assert "only allowed\n  pre-status action" in bootstrap
+    assert "After status, use `project_search`" in bootstrap
 
 
 def _dogfood_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:

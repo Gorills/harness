@@ -128,7 +128,16 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             cwd=str(tmp_path),
         )
         async with Client(stdio_client(params)) as client:
+            assert client.instructions is not None
+            first_512 = client.instructions[:512]
+            assert "must be the first repository action" in first_512
+            assert "Before any shell command" in first_512
+            assert "project_status" in first_512
+            assert "deferred" in first_512
+            assert "initial visible tool list" in first_512
             listed = await client.list_tools()
+            assert listed.tools[0].description is not None
+            assert "Required first repository action" in listed.tools[0].description
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
                 "project_search",

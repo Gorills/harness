@@ -37,8 +37,8 @@ Cursor's current MCP documentation requires restarting Cursor after changing `mc
 `harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
 
 When Codex intent is active, scan creates/updates only the ignored marker-owned project
-`.codex/config.toml`, with an absolute Workspace `cwd`, `HARNESS_WORKSPACE_ROOT`, and bounded
-`env_vars` forwarding for the local Harness runtime/state. Harness never writes project trust or
+`.codex/config.toml`, with the authenticated daemon Streamable HTTP URL and exact absolute
+`X-Harness-Workspace-Root`. Harness never writes project trust or
 `~/.codex/config.toml`. Restart Codex and verify from the trusted Workspace with
 `codex mcp get harness --json`. For Hidden Projects the same marker-owned config carries exact
 `developer_instructions`; install and transitions preserve user `AGENTS.md`. Doctor reports that
@@ -59,7 +59,7 @@ agent mcp list
 
 From a Harness source checkout the same refresh is `make install-global`, `make install-global HOST=claude-code`, or `make install-global HOST=codex`. Run the helper once per compatible active profile. It leaves isolated-development overlay environment first and uses `--force --reinstall` because the development version stays `0.1.0.dev0`. Do not run it through `scripts/dev`.
 
-The post-upgrade profile install is required. It verifies the frozen daemon identity before updating registrations and every owned project config to the selected interpreter. Run each compatible active profile explicitly; do not use install-all. Installed-wheel smoke proves Codex refresh across two Python 3.13 environments and three Workspace roots.
+The post-upgrade profile install is required. It verifies the frozen daemon identity before updating registrations and every owned project config to the selected daemon endpoint and capability. Run each compatible active profile explicitly; do not use install-all. Installed-wheel smoke proves Codex refresh across runtime upgrades and independent/linked Workspaces.
 
 ## Uninstall
 
@@ -89,7 +89,7 @@ Bare `harness doctor` is read-only and operational. `OK` means the inspected inv
 For Cursor, doctor reports leftover/foreign/absent global `user-harness` separately from on-disk project configs and from Cursor approval/tool catalog. A leftover owned or foreign global `harness` is FAIL. Missing `agent` is WARN with `cd <workspace> && agent mcp enable harness`, not a blanket OK. When `agent` is present, a project without the exact five tools is FAIL for that Workspace. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect with `agent mcp list-tools harness`. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. An absent Claude MCP registration is a warning, not a Cursor failure.
 
 For Codex, doctor reports CLI discovery, Harness-owned intent, and each registered Workspace project
-config separately, including expected/configured Python, absolute root, and ownership/preflight
+config separately, including expected/configured HTTP endpoint, absolute root header, and ownership/preflight
 state. It does not claim project trust or connected proprietary-client tools from on-disk TOML.
 
 Index state and Generated skills report `timed out` or `failed` for named Workspaces when live inspection hits the doctor deadline or raises an inspection error. `unavailable` is reserved for Project Git/identity inspection failure of a named Workspace, not for a timeout. Workspaces skipped by the count limit or aggregate time budget are named as `not inspected (doctor budget)`. Timeout and budget-truncation warnings do not fail the command; identity mismatches and other integrity failures still do.
@@ -112,7 +112,7 @@ should:
 2. Confirm leftover `~/.cursor/mcp.json` `mcpServers.harness` is absent.
 3. Fully quit and reopen Cursor.
 4. In two working repositories at once (for example Alia and Mangazeya), confirm `agent mcp list-tools harness` shows the five tools and that `project_status` roots/tasks are distinct.
-5. In the Harness source checkout, confirm only `harness-dev` is the connected overlay and that production `harness` is not enabled there.
+5. In the Harness source checkout, confirm the single generated `harness` HTTP server resolves the checkout Workspace and no legacy Codex `harness-dev` server remains.
 
 ## Explicitly authorized Codex acceptance
 
@@ -152,7 +152,7 @@ scripts/dev python scripts/accept_codex.py --run-model \
 
 The runner builds and installs the exact current wheel under one temporary directory, uses two
 temporary Git Workspaces containing only fixture README/pyproject text, isolates Harness state and
-skills, and uses the official MCP SDK to launch the exact configured stdio command and call all five
+skills, and uses the official MCP SDK to connect to the exact configured Streamable HTTP endpoint and call all five
 tools during local-only preflight. Model mode additionally requires the real Codex CLI to select and
 complete all five MCP calls from JSONL evidence. Both modes verify schemas, distinct simultaneous
 Workspace identities, the exact relevant/no irrelevant generated skill set, doctor, and owned
@@ -161,13 +161,15 @@ trust only through a temporary `CODEX_HOME`, does not use saved Codex authentica
 that temporary state after the run. It does not prove IDE or desktop behavior.
 
 1. Run `make install-global HOST=codex`, then `harness scan` in each Workspace.
-2. Trust each Workspace through Codex's own UI and fully restart the Codex client under test.
-3. From each Workspace root, require `codex mcp get harness --json` to show the absolute local
-   `cwd`, matching `HARNESS_WORKSPACE_ROOT`, `HARNESS_HOST_PROFILE=codex`, and the current installed
-   Python, plus exact `env_vars` forwarding for `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`,
-   and `HARNESS_SKILL_REGISTRY`. Confirm no user-level `~/.codex/config.toml` Harness server was
-   added.
-4. In fresh Codex CLI processes, call all five Harness tools and confirm `project_status` returns
+2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,
+   and create a new Task; an existing Task keeps its original instruction snapshot.
+3. From each Workspace root, require `codex mcp get harness --json` to show the loopback
+   Streamable HTTP URL, bearer authorization, and exact absolute
+   `X-Harness-Workspace-Root`. Confirm no user-level `~/.codex/config.toml` Harness server was
+   added and no capability appears in logs or acceptance evidence.
+4. In each fresh Codex Task, confirm `project_status` is the first project action (before shell
+   commands, repository reads/searches, browser inspection, or changes; only Harness tool
+   discovery may precede it); then call all five Harness tools and confirm it returns
    the correct distinct Workspace ID/root for simultaneous repositories and linked worktrees.
 5. Start/checkpoint a Task and Knowledge in one Codex process; restart Codex and then switch to a
    supported second host. Require the same Task ID/revision and Knowledge to remain available.

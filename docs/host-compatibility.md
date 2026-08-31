@@ -17,7 +17,7 @@ This file is evidence for adapter design, not a promise that undocumented host i
 | Host | Global/user MCP | Project MCP | Project root signal | Project skills | Global/user skills | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `~/.claude.json` user scope | `.mcp.json` | `CLAUDE_PROJECT_DIR` documented for stdio server | `.claude/skills/` | `~/.claude/skills/` | MCP registration/root adapter implemented; real-host acceptance still required. Reads `CLAUDE.md`, not `AGENTS.md`; use `CLAUDE.md` importing `@AGENTS.md`. |
-| Codex CLI / IDE / ChatGPT desktop local config | Not used by Harness until a safe active-root contract is proven | `.codex/config.toml` in trusted project | Exact project `cwd` + Harness-owned `HARNESS_WORKSPACE_ROOT`; lifecycle/wire integration is implemented, real-host acceptance remains | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | Ownership-aware project adapter implemented; MCP server instructions are used and the first 512 chars should be self-contained. |
+| Codex CLI / IDE / ChatGPT desktop local config | Not written by Harness | `.codex/config.toml` in trusted project | Authenticated daemon-owned Streamable HTTP plus exact `X-Harness-Workspace-Root`; lifecycle/wire integration is implemented, real-host acceptance remains | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | Ownership-aware project adapter implemented; required initialization validates the daemon and Workspace before use. MCP server instructions are used and the first 512 chars should be self-contained. |
 | Cursor | leftover `~/.cursor/mcp.json` is removed if Harness-owned | `.cursor/mcp.json` | Project `${workspaceFolder}` mapped to `HARNESS_WORKSPACE_ROOT`. Leftover `user-harness` is not Workspace identity; Cursor-injected `WORKSPACE_FOLDER_PATHS` is ignored | `.agents/skills/`, `.cursor/skills/`, plus compatibility roots | `~/.agents/skills/`, `~/.cursor/skills/`, plus compatibility roots | Local IDE + CLI adapter implemented; production MCP is project-only and enabled with `agent mcp enable harness`. Cursor Cloud Agents are a separate out-of-scope profile. |
 | Antigravity | `~/.gemini/config/mcp_config.json` | `.agents/mcp_config.json` | Needs real-host acceptance for global stdio current-root behavior | IDE + current CLI: `.agents/skills/<skill>/SKILL.md`; IDE also supports legacy `.agent/skills/` | IDE: `~/.gemini/antigravity/skills/`; CLI: `~/.gemini/antigravity-cli/skills/` | IDE and current CLI both use folder-based `SKILL.md`; CLI 1.1.9 runtime `/skills` also exposed Shared `~/.gemini/skills/`, but current 1.1.20 docs do not document that root. Treat it as versioned runtime evidence pending acceptance. CLI does not claim the IDE legacy `.agent/skills/` compatibility root. Keep separate profiles because their visibility contracts differ. |
 
@@ -63,11 +63,12 @@ Automated tests prove registry parsing, legacy and greenfield relevance, bounded
 ### Implemented Codex local project adapter boundary
 
 ADR-0030 selects project-scoped Codex MCP rather than a user-level shared process whose active
-Workspace is not established by current documentation. The adapter writes the canonical Workspace
-root into both `mcp_servers.harness.cwd` and `HARNESS_WORKSPACE_ROOT`, with
-`HARNESS_HOST_PROFILE=codex`. The generated server is required, and its `env_vars` list contains
-only non-empty bounded host variables observed during reconciliation, avoiding diagnostics for
-unset optional selectors. Automatic mutation is limited to an absent `.codex/config.toml` or a
+Workspace is not established by current documentation. ADR-0037 replaces the failed stdio-to-Unix
+socket route with a daemon-owned authenticated Streamable HTTP endpoint. The adapter writes the
+canonical Workspace root as `X-Harness-Workspace-Root` and writes the private daemon capability as
+an `Authorization` header. The generated server is required; initialization validates the bearer,
+registered Workspace, and daemon path before Codex can start. Automatic mutation is limited to an
+absent `.codex/config.toml` or a
 complete container proven by Harness's adjacent ownership marker. Existing exact config may be
 adopted manually; arbitrary user TOML, foreign same-name servers, tracked mutation, malformed
 files, symlinks, and unknown additions to an owned container fail closed without rewrite.
@@ -75,11 +76,11 @@ files, symlinks, and unknown additions to an owned container fail closed without
 Harness-created Codex config and marker files are kept untracked through exact root-anchored Git
 `info/exclude` entries without changing `.gitignore`; cleanup preserves unrelated exclude content
 and keeps the shared block while another linked worktree remains owned. Unit tests prove exact TOML,
-ownership, idempotence, stale-Python refresh, manual adoption, collision refusal, cleanup, explicit
-root hints, and CLI discovery. `install --host codex` records project-only intent; `scan` reconciles
-the Workspace config and `.agents/skills`; doctor reports expected/configured Python, root, and
-ownership state; uninstall removes only marker-owned config. A Codex-profile MCP process without
-the explicit root publishes no tools. Wire tests prove Claude → Codex → Cursor Task/Knowledge
+ownership, idempotence, capability refresh, stdio-to-HTTP migration, manual adoption, collision
+refusal, cleanup, explicit root headers, and CLI discovery. `install --host codex` records project-only intent; `scan` reconciles
+the Workspace config and `.agents/skills`; doctor reports expected/configured endpoint, root, and
+ownership state; uninstall removes only marker-owned config. An HTTP initialization without the
+explicit root fails before publishing a usable tool session. Wire tests prove Claude → Codex → Cursor Task/Knowledge
 continuity.
 
 Codex and Cursor share one `.agents/skills` projection, while Codex and Claude use two native
@@ -97,13 +98,20 @@ real Codex JSONL evidence for successful calls to all five Harness tools, checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
 bootstrap in model-visible input, and emits a sanitized report. The key is passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or
-writes user trust/config. A local-only preflight passed on 2026-08-28 with `codex-cli 0.147.0`,
-including project MCP discovery, exact configured stdio launch through the official MCP SDK, all
-five schemas and successful tool calls in two simultaneous repositories, distinct exact Workspace
-identities, the exact relevant/no irrelevant or duplicate generated skill set, `doctor` with zero failures,
-untrusted-project refusal without created trust/config, owned cleanup, and byte-unchanged user
-config. The prompt-input check applies to a fresh CLI process; Codex model arbitration, IDE
-extension, and desktop acceptance remain open.
+writes user trust/config. A local-only stdio preflight passed on 2026-08-28 with `codex-cli 0.147.0`.
+ADR-0037 replaced that transport; current automated proof uses the official MCP SDK against the
+generated Streamable HTTP endpoint. Real Codex model-selected HTTP MCP, IDE extension, and desktop
+acceptance remain in the matrix below. The prompt-input check applies to a fresh CLI process.
+
+When Harness changes a Codex project config, its CLI guidance requires fully quitting and reopening
+the client and then creating a new Task. Existing Tasks retain their original instruction snapshot.
+The acceptance check for that new Task is behavioral: `project_status` precedes shell search,
+browser inspection, repository file reads, and changes. Only tool discovery needed to locate and
+call Harness is allowed first; targeted native search begins after the status call. Harness does
+not generate or merge root `AGENTS.md`:
+that file is user-owned, and claiming it would be unsafe across existing instructions and linked
+worktrees. MCP server instructions carry the same deferred-tool bootstrap in their first 512
+characters as a second supported delivery path after server discovery.
 
 ### Cursor
 

@@ -2449,6 +2449,17 @@ def dashboard_token_path(database_path: Path) -> Path:
     return database_path.parent / _DASHBOARD_TOKEN_FILENAME
 
 
+def load_or_create_dashboard_access_token(database_path: Path) -> str:
+    """Return the stable private capability shared by daemon-owned loopback services."""
+    return _load_or_create_access_token(dashboard_token_path(database_path))
+
+
+def read_dashboard_access_token(database_path: Path) -> str | None:
+    """Read the existing private loopback capability without creating state."""
+    token = _read_private_ascii_line(dashboard_token_path(database_path))
+    return token if token is not None and _DASHBOARD_TOKEN_PATTERN.fullmatch(token) else None
+
+
 def _write_private_url_file(path: Path, url: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0)
@@ -2595,7 +2606,7 @@ class DashboardServerManager:
             return self._url
         self.close()
 
-        access_token = _load_or_create_access_token(self._token_file)
+        access_token = load_or_create_dashboard_access_token(self._database_path)
         stop_event = Event()
         started_event = Event()
         self._failure = None

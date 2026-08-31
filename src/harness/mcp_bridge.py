@@ -55,24 +55,23 @@ from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchScope
 from harness.runtime_paths import default_runtime_paths
 from harness.tasks import TaskState, TaskWaitReason
 from harness.verification import VerificationDraft, VerificationStatus
-from harness.workspace_resolution import WorkspaceHint
+from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
-    "Write every operator-facing Task title, summary, next_step, and Knowledge title/body in "
-    f"{_OPERATOR_LANGUAGE}. Use project_status before broad repository exploration. Use "
-    "project_search across all channels; expand selected refs with "
-    "project_context, then use native host tools. Start/resume a Harness task before meaningful "
-    "changes; pass only affected technologies/work kinds as new-Task stack_hints to keep skills "
-    "task-focused. Checkpoint "
-    "meaningful progress and address operator feedback. Preserve only verified reusable findings "
-    "as sparse anchored Knowledge; never store broad file summaries or speculation. "
-    "Before risky cross-boundary work, inspect governing contracts/specs. Before publication, "
-    "independently "
-    "review the complete change and run repository gates. Targeted native search remains allowed. "
-    "Reply briefly: result first; checkpoints hold continuity; omit unchanged source and recap "
-    "diffs. Mention only material decisions, risks, blockers, and verification. In hidden "
-    "visibility, do not perform durable SCM mutations."
+    "Harness is required. project_status must be the first repository action of each task. "
+    "Before any shell command, repository read/search, browser inspection, or change, locate "
+    "Harness tools if deferred or omitted from the initial visible tool list and call "
+    "project_status. Tool discovery is the only allowed pre-status action; omission is not "
+    f"failure. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
+    "title/body. New-Task stack_hints must be affected and task-focused. After status use "
+    "project_search, project_context, then native tools. Start/resume a Task before changes. "
+    "Checkpoint progress, decisions, checks, "
+    "risks and outcome. Keep task_id+expected_revision across turns; never "
+    "infer write targets. Store only reusable anchored Knowledge, not broad summaries/speculation. "
+    "Inspect contracts before risky work; review and run repo gates before publication. Native "
+    "search only after status. Reply briefly, result first; omit unchanged source and recap diffs. "
+    "Hidden mode forbids durable SCM mutations."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -91,9 +90,9 @@ _CURSOR_USER_MCP_REFUSAL_INSTRUCTIONS = (
     "harness-dev. Do not call these tools."
 )
 _CODEX_MCP_REFUSAL_INSTRUCTIONS = (
-    "Codex MCP has no Workspace root. Production Codex MCP must be launched from the trusted "
-    "project .codex/config.toml created by `harness scan`. Restart Codex after reconciliation. "
-    "Isolated Harness source checkout uses harness-dev. Do not call these tools."
+    "Codex MCP has no Workspace root. Production Codex MCP must be initialized from the trusted "
+    "project .codex/config.toml created by `harness scan` with X-Harness-Workspace-Root. Restart "
+    "Codex after reconciliation. Do not call these tools."
 )
 _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
@@ -107,6 +106,7 @@ _MCP_WIRE_OVERHEAD_BYTES = 1024
 _MCP_STDIO_FRAME_MAX_BYTES = 12 * 1024
 _MCP_REQUEST_ID_MAX_BYTES = 256
 _MCP_EOF_DRAIN_TIMEOUT_SECONDS = 65.0
+_HTTP_WORKSPACE_ROOT_HEADER = "x-harness-workspace-root"
 _TOOL_RESPONSE_MAX_BYTES = {
     "project_status": _STATUS_MAX_BYTES,
     "project_search": _SEARCH_MAX_BYTES,
@@ -307,6 +307,24 @@ class HarnessMCPServer(MCPServer):
         return result
 
 
+class _HTTPWorkspaceInitializationMiddleware:
+    """Fail HTTP MCP initialization unless its explicit Workspace is live."""
+
+    async def __call__(
+        self,
+        ctx: Any,
+        call_next: Any,
+    ) -> Any:
+        if ctx.method in {"initialize", "server/discover"}:
+            hints = _http_workspace_hints(ctx)
+            await anyio.to_thread.run_sync(
+                request_workspace_status,
+                _socket_path(),
+                hints,
+            )
+        return await call_next(ctx)
+
+
 def _mcp_tool_refusal() -> tuple[str, str] | None:
     """Return model-facing instructions and call error when tools must not be exposed."""
     if codex_profile_missing_workspace_root():
@@ -324,8 +342,8 @@ def _mcp_tool_refusal() -> tuple[str, str] | None:
     return None
 
 
-def build_mcp_server() -> MCPServer:
-    """Build the production stdio MCP adapter without owning domain state."""
+def build_mcp_server(*, workspace_transport: Literal["environment", "http-header"] = "environment") -> MCPServer:
+    """Build the thin MCP adapter for stdio or daemon-owned HTTP transport."""
     refusal = _mcp_tool_refusal()
     server = HarnessMCPServer(
         "Harness",
@@ -334,14 +352,22 @@ def build_mcp_server() -> MCPServer:
         version=distribution_version("harness"),
         log_level="WARNING",
         tool_refusal_message=None if refusal is None else refusal[1],
+        middleware=(
+            [_HTTPWorkspaceInitializationMiddleware()]
+            if workspace_transport == "http-header"
+            else None
+        ),
     )
 
     @server.tool(
-        description="Return compact current Workspace, Git, index, and durable Task continuity state."
+        description=(
+            "Required first repository action. Return compact current Workspace, Git, index, and "
+            "durable Task continuity state."
+        )
     )
-    def project_status() -> dict[str, Any]:
+    def project_status(ctx: Context[Any, Any]) -> dict[str, Any]:
         socket_path = _socket_path()
-        hints = _workspace_hints()
+        hints = _workspace_hints(ctx, workspace_transport=workspace_transport)
         status = request_workspace_status(socket_path, hints)
         task_status = request_workspace_task_status(socket_path, hints)
         if (
@@ -409,6 +435,7 @@ def build_mcp_server() -> MCPServer:
         )
     )
     def project_search(
+        ctx: Context[Any, Any],
         query: str,
         scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
         limit: StrictInt = _SEARCH_DEFAULT_LIMIT,
@@ -417,7 +444,7 @@ def build_mcp_server() -> MCPServer:
             raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
         result = request_project_search(
             _socket_path(),
-            _workspace_hints(),
+            _workspace_hints(ctx, workspace_transport=workspace_transport),
             query,
             limit=limit,
             scope=ProjectSearchScope(scope),
@@ -447,7 +474,7 @@ def build_mcp_server() -> MCPServer:
             "metadata only; Knowledge and Task refs expose bounded durable semantic context."
         )
     )
-    def project_context(refs: list[str]) -> dict[str, Any]:
+    def project_context(ctx: Context[Any, Any], refs: list[str]) -> dict[str, Any]:
         if not refs or len(refs) > _CONTEXT_HARD_LIMIT:
             raise ValueError(f"refs must contain between 1 and {_CONTEXT_HARD_LIMIT} items")
         if len(set(refs)) != len(refs):
@@ -461,7 +488,11 @@ def build_mcp_server() -> MCPServer:
             ):
                 raise ValueError("unsupported or invalid context ref")
         try:
-            result = request_project_context(_socket_path(), _workspace_hints(), refs)
+            result = request_project_context(
+                _socket_path(),
+                _workspace_hints(ctx, workspace_transport=workspace_transport),
+                refs,
+            )
         except IpcRemoteError as exc:
             if exc.code in {"context_ref_error", "retrieval_error"}:
                 raise ValueError("context ref is not available in the active Project") from exc
@@ -497,6 +528,7 @@ def build_mcp_server() -> MCPServer:
         )
     )
     def task_start(
+        ctx: Context[Any, Any],
         title: str | None = None,
         stack_hints: list[str] | None = None,
         task_id: str | None = None,
@@ -504,7 +536,7 @@ def build_mcp_server() -> MCPServer:
     ) -> dict[str, Any]:
         result = request_task_start(
             _socket_path(),
-            _workspace_hints(),
+            _workspace_hints(ctx, workspace_transport=workspace_transport),
             title=title,
             stack_hints=() if stack_hints is None else stack_hints,
             task_id=task_id,
@@ -524,6 +556,7 @@ def build_mcp_server() -> MCPServer:
         )
     )
     def task_checkpoint(
+        ctx: Context[Any, Any],
         task_id: str,
         expected_revision: StrictInt,
         state: Literal["working", "waiting", "completed"],
@@ -535,7 +568,7 @@ def build_mcp_server() -> MCPServer:
     ) -> dict[str, Any]:
         result = request_task_checkpoint(
             _socket_path(),
-            _workspace_hints(),
+            _workspace_hints(ctx, workspace_transport=workspace_transport),
             task_id,
             expected_revision=expected_revision,
             state=TaskState(state),
@@ -565,8 +598,39 @@ def _socket_path() -> Path:
     return paths.socket
 
 
-def _workspace_hints() -> tuple[WorkspaceHint, ...]:
+def _workspace_hints(
+    ctx: Context[Any, Any] | None = None,
+    *,
+    workspace_transport: Literal["environment", "http-header"] = "environment",
+) -> tuple[WorkspaceHint, ...]:
+    if workspace_transport == "http-header":
+        if ctx is None:
+            raise ValueError("HTTP MCP request context is unavailable")
+        return _http_workspace_hints(ctx.request_context)
     return workspace_hints_from_environment()
+
+
+def _http_workspace_hints(ctx: Any) -> tuple[WorkspaceHint, ...]:
+    headers = getattr(getattr(ctx, "request", None), "headers", None)
+    configured = headers.get(_HTTP_WORKSPACE_ROOT_HEADER) if headers is not None else None
+    if not isinstance(configured, str) or not configured or "\x00" in configured:
+        raise ValueError("HTTP MCP requires one explicit X-Harness-Workspace-Root header")
+    root = Path(configured)
+    if not root.is_absolute():
+        raise ValueError("HTTP MCP Workspace root must be absolute")
+    try:
+        resolved = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("HTTP MCP Workspace root is unavailable") from exc
+    if not resolved.is_dir():
+        raise ValueError("HTTP MCP Workspace root is not a directory")
+    return (
+        WorkspaceHint(
+            path=resolved,
+            source="codex-http-project-config-root",
+            match_mode=WorkspaceHintMatchMode.ROOT,
+        ),
+    )
 
 
 def _verification_drafts(items: list[VerificationInput]) -> tuple[VerificationDraft, ...]:

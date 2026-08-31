@@ -249,7 +249,7 @@ def run_system_doctor(
             _check(
                 "Codex host integration",
                 DoctorSeverity.OK,
-                "isolated development uses checkout overlay harness-dev, not production Codex intent",
+                "isolated development does not inspect the generated production Codex HTTP config",
             )
         )
         checks.append(
@@ -480,6 +480,7 @@ def run_system_doctor(
         python_executable=(
             Path(sys.executable) if python_executable is None else python_executable
         ).resolve(),
+        mcp_http_database=paths.database,
     )
     cursor_adapter = discover_cursor_adapter(
         environment=environment,
@@ -1051,7 +1052,7 @@ def _inspect_projects_and_workspaces(
             )
             stale_notes.append(f"Codex project config unreadable {workspace.workspace_id}")
         else:
-            configured_python = codex_project.configured_python or "<missing>"
+            configured_endpoint = codex_project.configured_endpoint or "<missing>"
             configured_root = codex_project.configured_workspace_root or "<missing>"
             if codex_project.isolated_development:
                 codex_projects_isolated += 1
@@ -1074,9 +1075,8 @@ def _inspect_projects_and_workspaces(
                         _check(
                             f"Codex project MCP config {workspace.workspace_id}",
                             DoctorSeverity.OK,
-                            f"current at {codex_project.path}; configured Python: "
-                            f"{configured_python}; expected Python: {codex_project.expected_python}; "
-                            f"HARNESS_WORKSPACE_ROOT={configured_root}",
+                            f"current at {codex_project.path}; endpoint: "
+                            f"{configured_endpoint}; X-Harness-Workspace-Root={configured_root}",
                         )
                     )
                 else:
@@ -1086,10 +1086,10 @@ def _inspect_projects_and_workspaces(
                         _check(
                             f"Codex project MCP config {workspace.workspace_id}",
                             DoctorSeverity.FAIL,
-                            f"{codex_project.path}: {issue}; expected Python: "
-                            f"{codex_project.expected_python}; configured Python: "
-                            f"{configured_python}; expected HARNESS_WORKSPACE_ROOT="
-                            f"{workspace.workspace_root}; configured HARNESS_WORKSPACE_ROOT="
+                            f"{codex_project.path}: {issue}; expected endpoint: "
+                            f"{codex_project.expected_endpoint}; configured endpoint: "
+                            f"{configured_endpoint}; expected X-Harness-Workspace-Root="
+                            f"{workspace.workspace_root}; configured X-Harness-Workspace-Root="
                             f"{configured_root}; remediation: harness install --host codex",
                         )
                     )
@@ -1359,7 +1359,7 @@ def _inspect_projects_and_workspaces(
                 codex_severity,
                 f"{codex_projects_current} current, {codex_projects_isolated} "
                 "isolated-development, 0 missing/stale/foreign; production configs bind an "
-                "explicit absolute HARNESS_WORKSPACE_ROOT",
+                "authenticated loopback HTTP endpoint and explicit X-Harness-Workspace-Root",
             )
         )
     elif codex_projects_isolated:

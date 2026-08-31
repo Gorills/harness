@@ -15,6 +15,7 @@ from accept_codex import (
     _installed_python_from_console_script,
     _isolated_environment,
     _prepare_temporary_codex_home,
+    _validate_wire_instructions,
     _validate_wire_tools,
     completed_harness_tool_calls,
     main,
@@ -149,7 +150,11 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     tools = [
         {
             "name": name,
-            "description": f"{name} description",
+            "description": (
+                "Required first repository action. project_status description"
+                if name == "project_status"
+                else f"{name} description"
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {key: {} for key in keys},
@@ -160,6 +165,21 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     ]
 
     assert _validate_wire_tools(tools) == tuple(properties)
+
+
+def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
+    instructions = (
+        "project_status must be the first repository action. Before any shell command, locate "
+        "Harness. Tool discovery is the only allowed pre-status action."
+    )
+
+    _validate_wire_instructions(instructions)
+    with pytest.raises(CodexAcceptanceError, match="strict bootstrap phrase"):
+        _validate_wire_instructions("Use project_status before broad work")
+    with pytest.raises(CodexAcceptanceError, match="ambiguous broad-work wording"):
+        _validate_wire_instructions(
+            instructions + " Before broad repository exploration, use project_status."
+        )
 
 
 def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints() -> None:

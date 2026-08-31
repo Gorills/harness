@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from harness.dashboard import load_or_create_dashboard_access_token, read_dashboard_access_token
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.host_adapters import (
     HostIntegrationError,
@@ -21,6 +22,13 @@ from harness.host_adapters import (
     HostRegistrationState,
     IntegrationChange,
     codex_skill_projection_surface,
+)
+from harness.runtime_paths import (
+    DASHBOARD_HOST,
+    RuntimePathError,
+    default_runtime_paths,
+    ensure_private_state_directory,
+    mcp_http_listen_port,
 )
 from harness.skills import SkillProjectionSurface
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -34,6 +42,9 @@ _ISOLATED_DEV_COMMAND = "./scripts/dev"
 _ISOLATED_DEV_ARGS = ["harness", "mcp"]
 _DOGFOOD_COMMAND = "./scripts/dogfood"
 _DOGFOOD_ARGS = ["mcp"]
+_MCP_HTTP_PATH = "/mcp"
+_MCP_HTTP_AUTHORIZATION_HEADER = "Authorization"
+_MCP_HTTP_WORKSPACE_HEADER = "X-Harness-Workspace-Root"
 _OWNER_MARKER = ".harness-mcp-owner.json"
 _OWNER_VERSION = 1
 _EXCLUDE_BEGIN = "# BEGIN HARNESS CODEX MCP"
@@ -49,7 +60,7 @@ CODEX_MCP_FORWARD_ENV_VARS = (
     "HARNESS_SKILL_REGISTRY",
 )
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness is required for repository work. Before broad repository exploration, browser "
     "inspection, or meaningful changes, locate the configured Harness MCP tools—even when they "
     "are deferred or omitted from the initial visible tool list—and call `project_status`. Do not "
@@ -60,10 +71,46 @@ CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "allowed.\n"
 )
 
+_SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness is required for repository work. Before broad repository exploration, browser "
+    "inspection, or meaningful changes, locate the configured Harness MCP tools—even when they "
+    "are deferred or omitted from the initial visible tool list—and call `project_status`. Do not "
+    "treat omission from the initial tool list as unavailability. If Harness project "
+    "configuration changed after this task started, stop repository work and use a fully "
+    "restarted Codex client with a new task; existing instruction snapshots do not refresh.\n\n"
+    "Use `project_search` across code, docs, Knowledge, and Task history; expand only selected refs "
+    "with `project_context`, then use native host tools. Start or resume a Harness Task before "
+    "meaningful changes and checkpoint meaningful progress. Targeted native search remains "
+    "allowed.\n"
+)
+
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness is required for repository work. `project_status` must be the first repository "
+    "action at the start of every Codex task. Before running any shell command, reading or "
+    "searching repository files, inspecting with a browser, or making changes, locate the "
+    "configured Harness MCP tools—even when they are deferred or omitted from the initial visible "
+    "tool list—and call `project_status`. Tool discovery needed to locate and call Harness is the "
+    "only action allowed before `project_status`; do not treat initial omission as unavailability. "
+    "After Harness config changes, use a fully restarted Codex client and new task; existing "
+    "instruction snapshots do not refresh.\n\n"
+    "After successful `project_status`, use `project_search`, expand selected refs with "
+    "`project_context`, then use native tools. Start or resume a Harness Task before changes and "
+    "checkpoint progress. Native search is allowed only after the initial status call.\n"
+)
+
+_OWNED_CODEX_BOOTSTRAP_BASES = (
+    _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+)
+_OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(
+    (*_OWNED_CODEX_BOOTSTRAP_BASES, HIDDEN_INSTRUCTION_BODY)
+) | frozenset(f"{base}\n{HIDDEN_INSTRUCTION_BODY}" for base in _OWNED_CODEX_BOOTSTRAP_BASES)
+
 CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
     "Codex MCP did not receive a Workspace root. Production Harness MCP must be "
-    "launched from the trusted project .codex/config.toml with explicit "
-    "HARNESS_WORKSPACE_ROOT. Re-run `harness scan` for this Workspace and restart "
+    "initialized from the trusted project .codex/config.toml with an explicit "
+    "X-Harness-Workspace-Root header. Re-run `harness scan` for this Workspace and restart "
     "the Codex client."
 )
 
@@ -82,8 +129,8 @@ class CodexProjectRegistrationDiagnostic:
 
     path: Path
     state: HostRegistrationState
-    expected_python: Path
-    configured_python: str | None
+    expected_endpoint: str
+    configured_endpoint: str | None
     configured_workspace_root: str | None
     harness_owned: bool
     preflight_error: str | None = None
@@ -108,6 +155,9 @@ class CodexAdapter:
     executable: Path
     python_executable: Path
     forward_env_vars: tuple[str, ...] = field(default_factory=codex_mcp_forward_env_vars)
+    mcp_http_url: str = f"http://{DASHBOARD_HOST}:17375{_MCP_HTTP_PATH}"
+    mcp_http_database: Path | None = None
+    mcp_http_token: str | None = None
 
     def __post_init__(self) -> None:
         expected = tuple(
@@ -115,6 +165,10 @@ class CodexAdapter:
         )
         if self.forward_env_vars != expected:
             raise ValueError("Codex forwarded environment names must be an ordered known subset")
+        if not self.mcp_http_url.startswith(f"http://{DASHBOARD_HOST}:") or not self.mcp_http_url.endswith(
+            _MCP_HTTP_PATH
+        ):
+            raise ValueError("Codex MCP HTTP URL must be a loopback Harness endpoint")
 
     @property
     def profile(self) -> str:
@@ -160,7 +214,7 @@ class CodexAdapter:
         path = _config_path(root)
         marker = _read_owner_marker(root)
         raw = _read_optional_regular_file(path, label="Codex project config")
-        configured_python: str | None = None
+        configured_endpoint: str | None = None
         configured_root: str | None = None
         isolated_development = False
 
@@ -177,9 +231,13 @@ class CodexAdapter:
             if marker is None and not hidden and isolated_entry is not None:
                 entry = isolated_entry
                 isolated_development = True
-            configured_python, configured_root = _entry_identity(entry)
+            configured_endpoint, configured_root = _entry_identity(entry)
             if isolated_development:
-                state = HostRegistrationState.CURRENT
+                state = (
+                    HostRegistrationState.CURRENT
+                    if _isolated_development_bootstrap_is_current(value)
+                    else HostRegistrationState.FOREIGN
+                )
             elif entry is None:
                 state = HostRegistrationState.ABSENT
             elif marker is not None:
@@ -188,8 +246,8 @@ class CodexAdapter:
                 elif _config_is_desired(
                     value,
                     root,
-                    self.python_executable,
-                    self.forward_env_vars,
+                    self.mcp_http_url,
+                    self._http_token(),
                     hidden=hidden,
                 ):
                     state = HostRegistrationState.CURRENT
@@ -198,8 +256,8 @@ class CodexAdapter:
             elif _manual_config_is_desired(
                 value,
                 root,
-                self.python_executable,
-                self.forward_env_vars,
+                self.mcp_http_url,
+                self._http_token(),
                 hidden=hidden,
             ):
                 state = HostRegistrationState.CURRENT
@@ -214,8 +272,8 @@ class CodexAdapter:
         return CodexProjectRegistrationDiagnostic(
             path=path,
             state=state,
-            expected_python=self.python_executable,
-            configured_python=configured_python,
+            expected_endpoint=self.mcp_http_url,
+            configured_endpoint=configured_endpoint,
             configured_workspace_root=configured_root,
             harness_owned=marker is not None,
             preflight_error=preflight_error,
@@ -237,12 +295,18 @@ class CodexAdapter:
             if raw is not None:
                 value = _parse_toml(raw, path)
                 if not hidden and _isolated_development_entry(value) is not None:
-                    return
+                    if _isolated_development_bootstrap_is_current(value):
+                        return
+                    raise HostIntegrationError(
+                        "tracked source-checkout .codex/config.toml requires the exact Harness "
+                        "Codex bootstrap and local MCP placement; update the checkout and restart "
+                        "Codex with a new task"
+                    )
                 if _manual_config_is_desired(
                     value,
                     root,
-                    self.python_executable,
-                    self.forward_env_vars,
+                    self.mcp_http_url,
+                    self._http_token(),
                     hidden=hidden,
                 ):
                     return
@@ -270,8 +334,8 @@ class CodexAdapter:
         if _manual_config_is_desired(
             value,
             root,
-            self.python_executable,
-            self.forward_env_vars,
+            self.mcp_http_url,
+            self._http_token(),
             hidden=hidden,
         ):
             return
@@ -298,20 +362,26 @@ class CodexAdapter:
         if raw is not None:
             value = _parse_toml(raw, path)
             if marker is None and not hidden and _isolated_development_entry(value) is not None:
-                return IntegrationChange.UNCHANGED
+                if _isolated_development_bootstrap_is_current(value):
+                    return IntegrationChange.UNCHANGED
+                raise HostIntegrationError(
+                    "tracked source-checkout .codex/config.toml requires the exact Harness "
+                    "Codex bootstrap and local MCP placement; update the checkout and restart "
+                    "Codex with a new task"
+                )
             if marker is None and _manual_config_is_desired(
                 value,
                 root,
-                self.python_executable,
-                self.forward_env_vars,
+                self.mcp_http_url,
+                self._http_token(),
                 hidden=hidden,
             ):
                 return IntegrationChange.UNCHANGED
             if marker is not None and _config_is_desired(
                 value,
                 root,
-                self.python_executable,
-                self.forward_env_vars,
+                self.mcp_http_url,
+                self._required_http_token(),
                 hidden=hidden,
             ):
                 if marker is not None and _ensure_codex_exclude(root):
@@ -324,8 +394,8 @@ class CodexAdapter:
 
         desired = _desired_config(
             root,
-            self.python_executable,
-            self.forward_env_vars,
+            self.mcp_http_url,
+            self._required_http_token(),
             hidden=hidden,
         )
         _require_directory_safe(path.parent)
@@ -361,7 +431,7 @@ class CodexAdapter:
                 return
             entry = _harness_entry(value)
             if entry is None or _entry_is_desired(
-                entry, root, self.python_executable, self.forward_env_vars
+                entry, root, self.mcp_http_url, self._http_token()
             ):
                 return
             raise HostRegistrationCollisionError(
@@ -394,7 +464,7 @@ class CodexAdapter:
                 return IntegrationChange.UNCHANGED
             entry = _harness_entry(value)
             if entry is None or _entry_is_desired(
-                entry, root, self.python_executable, self.forward_env_vars
+                entry, root, self.mcp_http_url, self._http_token()
             ):
                 return IntegrationChange.UNCHANGED
             raise HostRegistrationCollisionError(
@@ -421,6 +491,38 @@ class CodexAdapter:
         _remove_empty_directory(path.parent)
         return IntegrationChange.CHANGED
 
+    def _http_token(self) -> str | None:
+        token = self.mcp_http_token
+        if token is None and self.mcp_http_database is not None:
+            token = read_dashboard_access_token(self.mcp_http_database)
+        if token is not None and (not token.isascii() or not token or len(token) > 128):
+            raise HostIntegrationError("Harness loopback MCP capability is invalid")
+        return token
+
+    def _required_http_token(self) -> str:
+        token = self._http_token()
+        if token is None and self.mcp_http_database is not None:
+            try:
+                ensure_private_state_directory(self.mcp_http_database.parent)
+                created = load_or_create_dashboard_access_token(self.mcp_http_database)
+            except RuntimePathError as exc:
+                raise HostIntegrationError(
+                    "Harness loopback MCP capability is unavailable; start the daemon and retry"
+                ) from exc
+            persisted = read_dashboard_access_token(self.mcp_http_database)
+            if persisted is None or persisted != created:
+                raise HostIntegrationError(
+                    "Harness loopback MCP capability is unavailable; start the daemon and retry"
+                )
+            token = persisted
+            if not token.isascii() or not token or len(token) > 128:
+                raise HostIntegrationError("Harness loopback MCP capability is invalid")
+        if token is None:
+            raise HostIntegrationError(
+                "Harness loopback MCP capability is unavailable; start the daemon and retry"
+            )
+        return token
+
 
 def discover_codex_adapter(
     *,
@@ -432,12 +534,18 @@ def discover_codex_adapter(
     executable = shutil.which("codex", path=values.get("PATH"))
     if executable is None:
         return None
+    paths = default_runtime_paths(environment=values)
+    port = mcp_http_listen_port(paths.socket, environment=values)
+    if port == 0:
+        raise HostIntegrationError("Codex MCP HTTP canonical port could not be resolved")
     return CodexAdapter(
         executable=_absolute_executable_path(executable),
         python_executable=_absolute_executable_path(
             Path(sys.executable) if python_executable is None else python_executable
         ),
         forward_env_vars=codex_mcp_forward_env_vars(values),
+        mcp_http_url=f"http://{DASHBOARD_HOST}:{port}{_MCP_HTTP_PATH}",
+        mcp_http_database=paths.database,
     )
 
 
@@ -472,47 +580,47 @@ def codex_developer_instructions(*, hidden: bool = False) -> str:
 
 def _desired_entry(
     root: Path,
-    python_executable: Path,
-    forward_env_vars: tuple[str, ...],
+    mcp_http_url: str,
+    mcp_http_token: str | None,
 ) -> dict[str, object]:
+    if mcp_http_token is None:
+        return {}
     return {
-        "command": str(python_executable),
-        "args": ["-m", "harness.mcp_process"],
-        "env_vars": list(forward_env_vars),
-        "cwd": str(root),
+        "url": mcp_http_url,
         "required": True,
-        "env": {
-            _HOST_PROFILE_ENV: _CODEX_PROFILE,
-            _WORKSPACE_ROOT_ENV: str(root),
+        "startup_timeout_sec": 30,
+        "http_headers": {
+            _MCP_HTTP_AUTHORIZATION_HEADER: f"Bearer {mcp_http_token}",
+            _MCP_HTTP_WORKSPACE_HEADER: str(root),
         },
     }
 
 
 def _desired_config(
     root: Path,
-    python_executable: Path,
-    forward_env_vars: tuple[str, ...],
+    mcp_http_url: str,
+    mcp_http_token: str,
     *,
     hidden: bool = False,
 ) -> bytes:
-    entry = _desired_entry(root, python_executable, forward_env_vars)
+    entry = _desired_entry(root, mcp_http_url, mcp_http_token)
     lines = [
         "# Generated and owned by Harness. Do not edit this file in place.",
+        "# After this file changes, fully restart Codex and begin a new task.",
         f"developer_instructions = {_toml_string(codex_developer_instructions(hidden=hidden))}",
         "",
     ]
     lines.extend(
         [
             "[mcp_servers.harness]",
-            f"command = {_toml_string(entry['command'])}",
-            'args = ["-m", "harness.mcp_process"]',
-            "env_vars = [" + ", ".join(_toml_string(name) for name in forward_env_vars) + "]",
-            f"cwd = {_toml_string(entry['cwd'])}",
+            f"url = {_toml_string(entry['url'])}",
             "required = true",
+            "startup_timeout_sec = 30",
             "",
-            "[mcp_servers.harness.env]",
-            f"{_HOST_PROFILE_ENV} = {_toml_string(_CODEX_PROFILE)}",
-            f"{_WORKSPACE_ROOT_ENV} = {_toml_string(root)}",
+            "[mcp_servers.harness.http_headers]",
+            f"{_MCP_HTTP_AUTHORIZATION_HEADER} = "
+            f"{_toml_string(f'Bearer {mcp_http_token}')}",
+            f"{_toml_string(_MCP_HTTP_WORKSPACE_HEADER)} = {_toml_string(root)}",
             "",
         ]
     )
@@ -573,14 +681,29 @@ def _isolated_development_entry(value: dict[str, object]) -> dict[str, object] |
     return None
 
 
+def _isolated_development_bootstrap_is_current(value: dict[str, object]) -> bool:
+    entry = _isolated_development_entry(value)
+    return (
+        value.get("developer_instructions") == CODEX_BOOTSTRAP_INSTRUCTION_BODY
+        and entry is not None
+        and entry.get("experimental_environment") == "local"
+    )
+
+
 def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | None]:
     if entry is None:
         return None, None
     command = entry.get("command")
+    url = entry.get("url")
+    headers = entry.get("http_headers")
     env = entry.get("env")
-    root = env.get(_WORKSPACE_ROOT_ENV) if isinstance(env, dict) else None
+    root = (
+        headers.get(_MCP_HTTP_WORKSPACE_HEADER)
+        if isinstance(headers, dict)
+        else env.get(_WORKSPACE_ROOT_ENV) if isinstance(env, dict) else None
+    )
     return (
-        command if isinstance(command, str) else None,
+        url if isinstance(url, str) else command if isinstance(command, str) else None,
         root if isinstance(root, str) else None,
     )
 
@@ -588,21 +711,21 @@ def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | 
 def _entry_is_desired(
     entry: dict[str, object] | None,
     root: Path,
-    python_executable: Path,
-    forward_env_vars: tuple[str, ...],
+    mcp_http_url: str,
+    mcp_http_token: str | None,
 ) -> bool:
-    return entry == _desired_entry(root, python_executable, forward_env_vars)
+    return entry == _desired_entry(root, mcp_http_url, mcp_http_token)
 
 
 def _manual_config_is_desired(
     value: dict[str, object],
     root: Path,
-    python_executable: Path,
-    forward_env_vars: tuple[str, ...],
+    mcp_http_url: str,
+    mcp_http_token: str | None,
     *,
     hidden: bool,
 ) -> bool:
-    if not _entry_is_desired(_harness_entry(value), root, python_executable, forward_env_vars):
+    if not _entry_is_desired(_harness_entry(value), root, mcp_http_url, mcp_http_token):
         return False
     return value.get("developer_instructions") == codex_developer_instructions(hidden=hidden)
 
@@ -610,24 +733,28 @@ def _manual_config_is_desired(
 def _config_is_desired(
     value: dict[str, object],
     root: Path,
-    python_executable: Path,
-    forward_env_vars: tuple[str, ...],
+    mcp_http_url: str,
+    mcp_http_token: str | None,
     *,
     hidden: bool,
 ) -> bool:
-    return _config_is_owned_shape(value, root) and value == tomllib.loads(
-        _desired_config(root, python_executable, forward_env_vars, hidden=hidden).decode("utf-8")
+    return bool(
+        mcp_http_token is not None
+        and _config_is_owned_shape(value, root)
+        and value
+        == tomllib.loads(
+            _desired_config(root, mcp_http_url, mcp_http_token, hidden=hidden).decode("utf-8")
+        )
     )
 
 
 def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     if set(value) not in ({"mcp_servers"}, {"developer_instructions", "mcp_servers"}):
         return False
-    if "developer_instructions" in value and value["developer_instructions"] not in {
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY,
-        HIDDEN_INSTRUCTION_BODY,
-        codex_developer_instructions(hidden=True),
-    }:
+    if (
+        "developer_instructions" in value
+        and value["developer_instructions"] not in _OWNED_CODEX_DEVELOPER_INSTRUCTIONS
+    ):
         return False
     servers = value.get("mcp_servers")
     if not isinstance(servers, dict) or set(servers) != {_SERVER_NAME}:
@@ -635,10 +762,26 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     entry = servers.get(_SERVER_NAME)
     if not isinstance(entry, dict):
         return False
+    if "url" in entry:
+        headers = entry.get("http_headers")
+        return (
+            set(entry) == {"url", "required", "startup_timeout_sec", "http_headers"}
+            and isinstance(entry.get("url"), str)
+            and entry.get("required") is True
+            and entry.get("startup_timeout_sec") == 30
+            and isinstance(headers, dict)
+            and set(headers) == {
+                _MCP_HTTP_AUTHORIZATION_HEADER,
+                _MCP_HTTP_WORKSPACE_HEADER,
+            }
+            and isinstance(headers.get(_MCP_HTTP_AUTHORIZATION_HEADER), str)
+            and headers.get(_MCP_HTTP_WORKSPACE_HEADER) == str(root)
+        )
     required_keys = {"command", "args", "cwd", "env"}
     if not required_keys <= set(entry) or not set(entry) - required_keys <= {
         "env_vars",
         "required",
+        "experimental_environment",
     }:
         return False
     forwarded = entry.get("env_vars", [])
@@ -650,6 +793,7 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
         entry.get("args") == ["-m", "harness.mcp_process"]
         and tuple(forwarded) == expected_order
         and entry.get("required", True) is True
+        and entry.get("experimental_environment") in (None, "local")
         and entry.get("cwd") == str(root)
         and isinstance(entry.get("command"), str)
         and isinstance(env, dict)

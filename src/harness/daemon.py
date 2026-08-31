@@ -723,7 +723,8 @@ def serve_daemon(
 ) -> None:
     """Serve local IPC while keeping registered Workspace indexes reconciled."""
     from harness.dashboard import DashboardError, DashboardServerManager, dashboard_url_path
-    from harness.runtime_paths import dashboard_listen_port
+    from harness.mcp_http_server import MCPHTTPServerError, MCPHTTPServerManager
+    from harness.runtime_paths import dashboard_listen_port, mcp_http_listen_port
 
     _require_posix_transport()
     _require_daemon_runtime_identity()
@@ -747,6 +748,10 @@ def serve_daemon(
         url_file=dashboard_url_path(socket_path),
         port=dashboard_listen_port(socket_path),
         workspace_invalidations=watcher_invalidations,
+    )
+    mcp_http = MCPHTTPServerManager(
+        database_path,
+        port=mcp_http_listen_port(socket_path),
     )
     effective_stop_event = Event() if stop_event is None else stop_event
     try:
@@ -794,6 +799,7 @@ def serve_daemon(
             dashboard.get_url()
         except DashboardError:
             pass
+        mcp_http.get_url()
         while not effective_stop_event.is_set():
             client_failure = _queue_failure(client_failures)
             if client_failure is not None:
@@ -836,6 +842,7 @@ def serve_daemon(
     finally:
         active_error = sys.exception()
         dashboard_error: DashboardError | None = None
+        mcp_http_error: MCPHTTPServerError | None = None
         cleanup_client_failure: BaseException | None = None
         watcher_stop.set()
         if server is not None:
@@ -849,6 +856,10 @@ def serve_daemon(
             dashboard.close()
         except DashboardError as exc:
             dashboard_error = exc
+        try:
+            mcp_http.close()
+        except MCPHTTPServerError as exc:
+            mcp_http_error = exc
         if database_lock_fd is not None:
             os.close(database_lock_fd)
         _unlink_owned_socket(socket_path, socket_identity)
@@ -863,6 +874,10 @@ def serve_daemon(
             if active_error is None:
                 raise DaemonError("dashboard server did not stop cleanly") from dashboard_error
             active_error.add_note("Harness dashboard server did not stop cleanly during cleanup")
+        if mcp_http_error is not None:
+            if active_error is None:
+                raise DaemonError("MCP HTTP server did not stop cleanly") from mcp_http_error
+            active_error.add_note("Harness MCP HTTP server did not stop cleanly during cleanup")
 
 
 def _serve_client_worker(

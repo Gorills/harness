@@ -26,9 +26,9 @@ When these goals conflict, choose the simplest design that keeps correctness and
                            │
                            ▼
 Claude Code ─┐
-Codex       ─┤
 Cursor      ─┼─ stdio MCP ─ harness mcp ─ local IPC ─ harnessd
 Antigravity ─┘                                      │
+Codex ─ authenticated Streamable HTTP MCP ──────────┤
                                                     ├─ SQLite
                                                     ├─ Registry
                                                     ├─ Tasks
@@ -60,11 +60,13 @@ One daemon per OS user. It owns:
 
 The daemon is the only process allowed to perform business-state transitions directly.
 
-### `harness mcp`
+### MCP adapters
 
-A small process spawned by an agent host through stdio. It:
+A thin host-facing adapter exposed through stdio where accepted and through daemon-owned
+Streamable HTTP for Codex. It:
 
-1. establishes a local authenticated-by-OS-user IPC channel to `harnessd`;
+1. reaches daemon-owned state through local IPC; the Codex HTTP adapter runs with `harnessd`, so
+   Codex never needs access to the Unix socket;
 2. resolves the current Workspace using host-specific and generic hints;
 3. exposes the five model-facing MCP tools;
 4. applies exposure limits at the model boundary;
@@ -471,9 +473,9 @@ Responsibilities:
 
 Adapters must be idempotent and preserve unknown user configuration.
 
-The implemented Linux/POSIX installation slice supports Claude Code, local Codex CLI/IDE/desktop project config, and local Cursor IDE/CLI. `harness install --host claude-code|codex|cursor|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` remains Claude Code. `--host all` install is rejected because the three-host skill graph is incompatible; uninstall-all remains supported. Claude uses the official `claude mcp` CLI and `CLAUDE_PROJECT_DIR`. Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with explicit absolute `cwd` and `HARNESS_WORKSPACE_ROOT`; it forwards only configured non-empty names from the bounded local environment needed to select the host's canonical Harness runtime/state rather than fallback paths under a reduced stdio environment, and marks the MCP server required so initialization failure blocks startup/resume. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Codex/Cursor processes without their required root list no tools. Tracked project configs are manual-adoption/removal only; generated configs and markers use Git-local exclusions. The Harness source checkout has tracked project overlays routed through `scripts/dogfood`: absent opt-in they launch `scripts/dev harness mcp` against checkout-local state; explicit ADR-0036 global mode launches only the tool-installed runtime against canonical state. Production lifecycle never rewrites these overlays.
+The implemented Linux/POSIX installation slice supports Claude Code, local Codex CLI/IDE/desktop project config, and local Cursor IDE/CLI. `harness install --host claude-code|codex|cursor|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` remains Claude Code. `--host all` install is rejected because the three-host skill graph is incompatible; uninstall-all remains supported. Claude uses the official `claude mcp` CLI and `CLAUDE_PROJECT_DIR`. Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with an authenticated daemon-owned Streamable HTTP URL and exact absolute `X-Harness-Workspace-Root`; required initialization validates daemon connectivity, capability, and Workspace before Codex starts. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Generated configs and markers use Git-local exclusions. The Harness source checkout keeps tracked Cursor/Claude router overlays; Codex uses the same locally generated private HTTP config as production Workspaces.
 
-`harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Claude registration, Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio and installed-wheel tests prove Claude → Codex → Cursor continuity and cross-interpreter project-config refresh; proprietary-host acceptance remains a separate gate.
+`harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Claude registration, Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Claude → Codex → Cursor continuity; real Codex acceptance exercises the configured HTTP path.
 
 ADR-0036 defines source-checkout global dogfood. Its `scan --global-dogfood` path is accepted only
 from an external tool-installed interpreter and returns after registration/indexing, before host or
@@ -497,6 +499,12 @@ Do not branch core business logic on host identity.
 ## 17. Dashboard
 
 The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
+
+The daemon also owns Codex's Streamable HTTP MCP endpoint on `127.0.0.1:17375` (isolated
+development: `17376`). It is a separate authenticated protocol surface, not part of the dashboard
+UI. Both listeners reuse the same persistent private capability, but Codex sends it as a bearer
+header and must also send the exact project-scoped Workspace root. MCP initialization validates
+both daemon reachability and Workspace identity before returning success. See ADR-0037.
 
 Dashboard rules:
 

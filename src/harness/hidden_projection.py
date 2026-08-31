@@ -349,10 +349,12 @@ def _surface_for_profile(profile: str) -> HiddenInstructionSurface:
 
 def _codex_adapter() -> CodexAdapter:
     from harness.codex_adapter import CodexAdapter
+    from harness.runtime_paths import default_runtime_paths
 
     return CodexAdapter(
         executable=Path("codex"),
         python_executable=Path(os.path.abspath(sys.executable)),
+        mcp_http_database=default_runtime_paths().database,
     )
 
 

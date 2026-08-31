@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import tomllib
@@ -13,12 +14,12 @@ from pathlib import Path
 from typing import Any
 
 import anyio
-from mcp import Client, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from harness.codex_adapter import (
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
-    CODEX_MCP_FORWARD_ENV_VARS,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -120,13 +121,31 @@ def _isolated_environment(root: Path, codex: Path) -> dict[str, str]:
         "HARNESS_WORKSPACE_ROOT",
         "CLAUDE_PROJECT_DIR",
         "WORKSPACE_FOLDER_PATHS",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT",
     ):
         values.pop(key, None)
     values["XDG_STATE_HOME"] = str(root / "state")
     values["XDG_RUNTIME_DIR"] = str(root / "runtime")
     values["HARNESS_SKILL_REGISTRY"] = str(root / "skills")
+    dashboard_port, mcp_http_port = _unused_loopback_ports(2)
+    values["HARNESS_ACCEPTANCE_DASHBOARD_PORT"] = str(dashboard_port)
+    values["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"] = str(mcp_http_port)
     values["PATH"] = str(codex.parent) + os.pathsep + values.get("PATH", "")
     return values
+
+
+def _unused_loopback_ports(count: int) -> tuple[int, ...]:
+    listeners: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listeners.append(listener)
+        return tuple(int(listener.getsockname()[1]) for listener in listeners)
+    finally:
+        for listener in listeners:
+            listener.close()
 
 
 def _prepare_temporary_codex_home(root: Path, workspaces: Sequence[Path]) -> Path:
@@ -195,10 +214,9 @@ def _init_repository(
 
 def _verify_project_config(
     path: Path,
-    python: Path,
     workspace: Path,
-    local_environment: Mapping[str, str],
-) -> dict[str, str]:
+    expected_url: str,
+) -> dict[str, object]:
     try:
         value = tomllib.loads(path.read_text(encoding="utf-8"))
         entry = value["mcp_servers"]["harness"]
@@ -209,49 +227,51 @@ def _verify_project_config(
         raise CodexAcceptanceError(
             f"generated Codex project config has no exact Harness bootstrap instructions: {path}"
         )
-    static_environment: dict[str, str] = {
-        "HARNESS_HOST_PROFILE": "codex",
-        "HARNESS_WORKSPACE_ROOT": expected_root,
-    }
+    headers = entry.get("http_headers")
+    if not isinstance(headers, dict):
+        raise CodexAcceptanceError("generated Codex HTTP MCP config has no headers")
+    authorization = headers.get("Authorization")
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise CodexAcceptanceError("generated Codex HTTP MCP config has no bearer capability")
     expected: dict[str, object] = {
-        "command": str(python.absolute()),
-        "args": ["-m", "harness.mcp_process"],
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
-        "cwd": expected_root,
+        "url": expected_url,
         "required": True,
-        "env": static_environment,
+        "startup_timeout_sec": 30,
+        "http_headers": {
+            "Authorization": authorization,
+            "X-Harness-Workspace-Root": expected_root,
+        },
     }
     if entry != expected:
         raise CodexAcceptanceError(
-            f"generated Codex project config does not match the acceptance runtime: {entry!r}"
+            "generated Codex project config does not match the acceptance runtime"
         )
-    server_environment = static_environment.copy()
-    for name in CODEX_MCP_FORWARD_ENV_VARS:
-        forwarded_value = local_environment.get(name)
-        if forwarded_value is not None:
-            server_environment[name] = forwarded_value
-    return server_environment
+    return {"url": entry["url"], "headers": headers}
 
 
-def _verify_codex_inspection(payload: object, python: Path, workspace: Path) -> None:
+def _verify_codex_inspection(payload: object, workspace: Path, expected_url: str) -> None:
     if not isinstance(payload, dict):
         raise CodexAcceptanceError("codex mcp get did not return an object")
     expected_root = str(workspace.resolve())
-    expected_transport = {
-        "type": "stdio",
-        "command": str(python.absolute()),
-        "args": ["-m", "harness.mcp_process"],
-        "env": {
-            "HARNESS_HOST_PROFILE": "codex",
-            "HARNESS_WORKSPACE_ROOT": expected_root,
-        },
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
-        "cwd": expected_root,
+    transport = payload.get("transport")
+    if not isinstance(transport, dict):
+        raise CodexAcceptanceError("Codex reported no Harness MCP transport")
+    headers = transport.get("http_headers")
+    expected_headers = {
+        "Authorization": headers.get("Authorization") if isinstance(headers, dict) else None,
+        "X-Harness-Workspace-Root": expected_root,
     }
-    if payload.get("name") != "harness" or payload.get("transport") != expected_transport:
-        raise CodexAcceptanceError(f"Codex loaded an unexpected Harness MCP transport: {payload!r}")
+    if (
+        payload.get("name") != "harness"
+        or transport.get("type") != "streamable_http"
+        or transport.get("url") != expected_url
+        or headers != expected_headers
+        or not isinstance(expected_headers["Authorization"], str)
+        or not expected_headers["Authorization"].startswith("Bearer ")
+    ):
+        raise CodexAcceptanceError("Codex loaded an unexpected Harness MCP transport")
     if payload.get("enabled") is not True or payload.get("disabled_reason") is not None:
-        raise CodexAcceptanceError(f"Codex did not enable the Harness MCP server: {payload!r}")
+        raise CodexAcceptanceError("Codex did not enable the Harness MCP server")
 
 
 def prompt_input_contains_bootstrap(value: object) -> bool:
@@ -398,6 +418,10 @@ def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
         schema = tool.get("inputSchema")
         if not isinstance(description, str) or not description:
             raise CodexAcceptanceError(f"installed MCP tool has no description: {name}")
+        if name == "project_status" and "Required first repository action" not in description:
+            raise CodexAcceptanceError(
+                "installed MCP project_status description does not require first action"
+            )
         if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
             raise CodexAcceptanceError(f"installed MCP tool schema is not fail-closed: {name}")
         properties = schema.get("properties")
@@ -411,6 +435,24 @@ def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return names
 
 
+def _validate_wire_instructions(instructions: str | None) -> None:
+    """Require the unambiguous first-action bootstrap from the installed MCP server."""
+    if not isinstance(instructions, str):
+        raise CodexAcceptanceError("installed MCP server returned no instructions")
+    first_512 = instructions[:512]
+    for required in (
+        "project_status must be the first repository action",
+        "Before any shell command",
+        "only allowed pre-status action",
+    ):
+        if required not in first_512:
+            raise CodexAcceptanceError(
+                f"installed MCP instructions omit strict bootstrap phrase: {required}"
+            )
+    if "Before broad repository exploration" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions retain ambiguous broad-work wording")
+
+
 def _structured_result(name: str, result: Any) -> dict[str, Any]:
     if result.is_error:
         raise CodexAcceptanceError(f"installed MCP {name} call returned an error")
@@ -421,132 +463,148 @@ def _structured_result(name: str, result: Any) -> dict[str, Any]:
 
 
 async def _verify_mcp_wire_async(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    parameters = StdioServerParameters(
-        command=str(python.absolute()),
-        args=["-m", "harness.mcp_process"],
-        env=dict(environment),
-        cwd=str(workspace.resolve()),
-    )
-    async with Client(stdio_client(parameters)) as client:
-        listed = await client.list_tools()
-        tools = tuple(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
-        names = _validate_wire_tools(tools)
-
-        status = _structured_result("project_status", await client.call_tool("project_status"))
-        workspace_id = status.get("workspace_id")
-        if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
-            workspace_id, str
-        ):
-            raise CodexAcceptanceError(
-                f"installed MCP resolved the wrong Workspace identity: {status!r}"
+    url = connection.get("url")
+    headers = connection.get("headers")
+    if not isinstance(url, str) or not isinstance(headers, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
+    ):
+        raise CodexAcceptanceError("generated HTTP MCP connection is invalid")
+    async with create_mcp_http_client(headers=headers) as http_client:
+        transport = streamable_http_client(url, http_client=http_client)
+        async with Client(transport, mode="legacy") as client:
+            _validate_wire_instructions(client.instructions)
+            listed = await client.list_tools()
+            tools = tuple(
+                tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools
             )
-        searched = _structured_result(
-            "project_search",
-            await client.call_tool(
-                "project_search", {"query": "pyproject", "scope": "code", "limit": 5}
-            ),
-        )
-        results = searched.get("results")
-        if not isinstance(results, list) or not results or not isinstance(results[0], dict):
-            raise CodexAcceptanceError("installed MCP project_search returned no fixture result")
-        selected_ref = results[0].get("ref")
-        if not isinstance(selected_ref, str):
-            raise CodexAcceptanceError("installed MCP project_search returned no usable ref")
-        context = _structured_result(
-            "project_context",
-            await client.call_tool("project_context", {"refs": [selected_ref]}),
-        )
-        items = context.get("items")
-        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
-            raise CodexAcceptanceError("installed MCP project_context returned no fixture item")
-        if items[0].get("ref") != selected_ref:
-            raise CodexAcceptanceError("installed MCP project_context returned the wrong ref")
+            names = _validate_wire_tools(tools)
 
-        started = _structured_result(
-            "task_start",
-            await client.call_tool(
+            status = _structured_result(
+                "project_status", await client.call_tool("project_status")
+            )
+            workspace_id = status.get("workspace_id")
+            if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
+                workspace_id, str
+            ):
+                raise CodexAcceptanceError(
+                    f"installed MCP resolved the wrong Workspace identity: {status!r}"
+                )
+            searched = _structured_result(
+                "project_search",
+                await client.call_tool(
+                    "project_search", {"query": "pyproject", "scope": "code", "limit": 5}
+                ),
+            )
+            results = searched.get("results")
+            if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+                raise CodexAcceptanceError(
+                    "installed MCP project_search returned no fixture result"
+                )
+            selected_ref = results[0].get("ref")
+            if not isinstance(selected_ref, str):
+                raise CodexAcceptanceError("installed MCP project_search returned no usable ref")
+            context = _structured_result(
+                "project_context",
+                await client.call_tool("project_context", {"refs": [selected_ref]}),
+            )
+            items = context.get("items")
+            if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+                raise CodexAcceptanceError("installed MCP project_context returned no fixture item")
+            if items[0].get("ref") != selected_ref:
+                raise CodexAcceptanceError("installed MCP project_context returned the wrong ref")
+
+            started = _structured_result(
                 "task_start",
-                {"title": "Локальная проверка Codex MCP", "stack_hints": ["python"]},
-            ),
-        )
-        task_id = started.get("task_id")
-        revision = started.get("revision")
-        if not isinstance(task_id, str) or not isinstance(revision, int):
-            raise CodexAcceptanceError("installed MCP task_start returned invalid Task identity")
-        checkpoint = _structured_result(
-            "task_checkpoint",
-            await client.call_tool(
+                await client.call_tool(
+                    "task_start",
+                    {"title": "Локальная проверка Codex MCP", "stack_hints": ["python"]},
+                ),
+            )
+            task_id = started.get("task_id")
+            revision = started.get("revision")
+            if not isinstance(task_id, str) or not isinstance(revision, int):
+                raise CodexAcceptanceError(
+                    "installed MCP task_start returned invalid Task identity"
+                )
+            checkpoint = _structured_result(
                 "task_checkpoint",
-                {
-                    "task_id": task_id,
-                    "expected_revision": revision,
-                    "state": "completed",
-                    "summary": "Пять MCP-инструментов проверены локальным wire-клиентом",
-                    "next_step": None,
-                    "verification": [
-                        {
-                            "name": "Installed MCP wire acceptance",
-                            "status": "passed",
-                            "evidence": "Official MCP SDK completed all five calls",
-                        }
-                    ],
-                },
-            ),
-        )
-        if (
-            checkpoint.get("task_id") != task_id
-            or checkpoint.get("state") != "completed"
-            or checkpoint.get("revision") != revision + 1
-        ):
-            raise CodexAcceptanceError("installed MCP task_checkpoint returned invalid continuity")
-        return names, workspace_id
+                await client.call_tool(
+                    "task_checkpoint",
+                    {
+                        "task_id": task_id,
+                        "expected_revision": revision,
+                        "state": "completed",
+                        "summary": "Пять MCP-инструментов проверены локальным wire-клиентом",
+                        "next_step": None,
+                        "verification": [
+                            {
+                                "name": "Installed MCP wire acceptance",
+                                "status": "passed",
+                                "evidence": "Official MCP SDK completed all five calls",
+                            }
+                        ],
+                    },
+                ),
+            )
+            if (
+                checkpoint.get("task_id") != task_id
+                or checkpoint.get("state") != "completed"
+                or checkpoint.get("revision") != revision + 1
+            ):
+                raise CodexAcceptanceError(
+                    "installed MCP task_checkpoint returned invalid continuity"
+                )
+            return names, workspace_id
 
 
 async def _verify_mcp_read_only_async(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
     """Verify the production catalog and status without creating Task or Project state."""
-    parameters = StdioServerParameters(
-        command=str(python.absolute()),
-        args=["-m", "harness.mcp_process"],
-        env=dict(environment),
-        cwd=str(workspace.resolve()),
-    )
-    async with Client(stdio_client(parameters)) as client:
-        listed = await client.list_tools()
-        tools = tuple(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
-        names = _validate_wire_tools(tools)
-        status = _structured_result("project_status", await client.call_tool("project_status"))
-        workspace_id = status.get("workspace_id")
-        if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
-            workspace_id, str
-        ):
-            raise CodexAcceptanceError(
-                f"installed MCP resolved the wrong Workspace identity: {status!r}"
+    url = connection.get("url")
+    headers = connection.get("headers")
+    if not isinstance(url, str) or not isinstance(headers, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
+    ):
+        raise CodexAcceptanceError("generated HTTP MCP connection is invalid")
+    async with create_mcp_http_client(headers=headers) as http_client:
+        transport = streamable_http_client(url, http_client=http_client)
+        async with Client(transport, mode="legacy") as client:
+            _validate_wire_instructions(client.instructions)
+            listed = await client.list_tools()
+            tools = tuple(
+                tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools
             )
-        return names, workspace_id
+            names = _validate_wire_tools(tools)
+            status = _structured_result(
+                "project_status", await client.call_tool("project_status")
+            )
+            workspace_id = status.get("workspace_id")
+            if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
+                workspace_id, str
+            ):
+                raise CodexAcceptanceError(
+                    f"installed MCP resolved the wrong Workspace identity: {status!r}"
+                )
+            return names, workspace_id
 
 
 def verify_mcp_read_only(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    return anyio.run(_verify_mcp_read_only_async, python, workspace, environment)
+    return anyio.run(_verify_mcp_read_only_async, connection, workspace)
 
 
 def _verify_mcp_wire(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    return anyio.run(_verify_mcp_wire_async, python, workspace, environment)
+    return anyio.run(_verify_mcp_wire_async, connection, workspace)
 
 
 def _acceptance_prompt() -> str:
@@ -676,7 +734,11 @@ def run_acceptance(
     with tempfile.TemporaryDirectory(prefix="harness-codex-real-host-") as temporary:
         root = Path(temporary)
         environment = _isolated_environment(root, codex)
-        harness, python = (
+        expected_mcp_url = (
+            "http://127.0.0.1:"
+            f"{environment['HARNESS_ACCEPTANCE_MCP_HTTP_PORT']}/mcp"
+        )
+        harness, _python = (
             global_runtime
             if global_runtime is not None
             else _build_installed_wheel(root, uv, environment)
@@ -712,11 +774,10 @@ def run_acceptance(
                 if workspace == primary_workspace:
                     _verify_untrusted_project_fail_closed(codex, workspace, environment)
                 config = workspace / ".codex" / "config.toml"
-                mcp_environment = _verify_project_config(
+                mcp_connection = _verify_project_config(
                     config,
-                    python,
                     workspace,
-                    environment,
+                    expected_mcp_url,
                 )
                 skills = tuple(
                     sorted(
@@ -753,13 +814,12 @@ def run_acceptance(
                     inspection_payload = json.loads(inspected.stdout)
                 except json.JSONDecodeError as exc:
                     raise CodexAcceptanceError("codex mcp get emitted invalid JSON") from exc
-                _verify_codex_inspection(inspection_payload, python, workspace)
+                _verify_codex_inspection(inspection_payload, workspace, expected_mcp_url)
                 _verify_codex_prompt_input(codex, workspace, environment)
 
                 observed_calls, wire_workspace_id = _verify_mcp_wire(
-                    python,
+                    mcp_connection,
                     workspace,
-                    mcp_environment,
                 )
                 if wire_calls and observed_calls != wire_calls:
                     raise CodexAcceptanceError("installed MCP catalogs differ across Workspaces")

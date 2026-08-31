@@ -13,7 +13,7 @@ import pytest
 from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_agent
 
 from harness.builtin_skills import BUILTIN_SKILLS
-from harness.codex_adapter import codex_developer_instructions
+from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
 from harness.entrypoints import harness_main
 from harness.registry import VisibilityMode, create_project, register_workspace
 from harness.runtime_paths import default_runtime_paths
@@ -537,13 +537,21 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
     assert "Codex restart required" in scan_output
+    assert "fully quit and reopen" in scan_output
+    assert "create a new task" in scan_output
+    assert "existing tasks keep their original instruction snapshot" in scan_output
     assert "Codex trust" in scan_output
+    assert "`project_status` must be the first project action" in scan_output
     config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
-    assert config["mcp_servers"]["harness"]["cwd"] == str(repo.resolve())
-    assert config["mcp_servers"]["harness"]["env"] == {
-        "HARNESS_HOST_PROFILE": "codex",
-        "HARNESS_WORKSPACE_ROOT": str(repo.resolve()),
-    }
+    entry = config["mcp_servers"]["harness"]
+    assert entry["url"].startswith("http://127.0.0.1:")
+    assert entry["url"].endswith("/mcp")
+    assert entry["required"] is True
+    assert entry["http_headers"]["X-Harness-Workspace-Root"] == str(repo.resolve())
+    assert entry["http_headers"]["Authorization"].startswith("Bearer ")
+    assert "command" not in entry
+    assert "cwd" not in entry
+    assert "env" not in entry
     assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
 
     monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
@@ -554,18 +562,16 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert "Codex project MCP configs: OK (1 current" in doctor_output
 
     config_path = repo / ".codex" / "config.toml"
+    stale_url = "http://127.0.0.1:1/mcp"
     config_path.write_text(
-        config_path.read_text(encoding="utf-8").replace(
-            f'command = "{os.path.abspath(sys.executable)}"',
-            'command = "/stale/codex/python"',
-        ),
+        config_path.read_text(encoding="utf-8").replace(entry["url"], stale_url),
         encoding="utf-8",
     )
     monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
     assert harness_main() == 1
     broken_doctor = capsys.readouterr().out
     assert "Codex project MCP configs: FAIL" in broken_doctor
-    assert "configured Python: /stale/codex/python" in broken_doctor
+    assert f"configured endpoint: {stale_url}" in broken_doctor
     assert "remediation: harness install --host codex" in broken_doctor
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
     assert harness_main() == 0
@@ -598,10 +604,13 @@ def test_codex_install_preserves_registered_source_checkout_without_projecting_s
 
     codex_path = repo / ".codex" / "config.toml"
     codex_path.parent.mkdir()
-    codex_text = """[mcp_servers.harness-dev]
+    codex_text = f"""developer_instructions = {json.dumps(CODEX_BOOTSTRAP_INSTRUCTION_BODY)}
+
+[mcp_servers.harness-dev]
 command = "./scripts/dogfood"
 args = ["mcp"]
 required = true
+experimental_environment = "local"
 
 [mcp_servers.harness-dev.env]
 HARNESS_WORKSPACE_ROOT = "."

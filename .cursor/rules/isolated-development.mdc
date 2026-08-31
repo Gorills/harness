@@ -21,6 +21,9 @@ Harness without mixing checkout code into its daemon.
   `scripts/dev` and checkout-local XDG paths; an explicitly human-enabled marker selects the
   tool-installed global runtime. Prefer reading this repository over broad Harness context when
   implementing Harness.
+- Codex uses a generated ignored `.codex/config.toml` with daemon-owned Streamable HTTP, not the
+  Cursor `harness-dev` stdio overlay. Codex must have only generated `harness`, never legacy
+  `harness-dev`.
 - Never invoke `user-harness` or another leftover user-level/global MCP namespace. Enable the
   tracked `harness-dev` project server in Cursor Customize. Do not enable/disable global dogfood
   mode without explicit user authorization.

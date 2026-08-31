@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import harness.doctor as doctor
+from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
 from harness.doctor import run_doctor_checks
 from harness.git_workspace import GitWorkspaceDeadlineExceededError
 from harness.hidden_projection import apply_hidden_projection
@@ -208,11 +209,14 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
     overlay_path.write_text(overlay_text, encoding="utf-8")
     codex_overlay = root / ".codex" / "config.toml"
     codex_overlay.parent.mkdir()
-    codex_text = """[mcp_servers.harness-dev]
+    codex_text = f"""developer_instructions = {json.dumps(CODEX_BOOTSTRAP_INSTRUCTION_BODY)}
+
+[mcp_servers.harness-dev]
 command = "./scripts/dogfood"
 args = ["mcp"]
 startup_timeout_sec = 30
 required = true
+experimental_environment = "local"
 
 [mcp_servers.harness-dev.env]
 HARNESS_WORKSPACE_ROOT = "."

@@ -249,10 +249,18 @@ def _print_cursor_manual_enable(commands: tuple[str, ...]) -> None:
 
 
 def _print_codex_reload_guidance(*, expect_harness: bool) -> None:
-    print("Codex restart required: restart the Codex client after project MCP config changes.")
+    print(
+        "Codex restart required: fully quit and reopen the Codex client after project MCP "
+        "config changes, then create a new task; existing tasks keep their original instruction "
+        "snapshot."
+    )
     if expect_harness:
         print("Codex trust: open and trust the Workspace so project .codex/config.toml is loaded.")
         print("Codex verification: run `codex mcp get harness --json` from the Workspace root.")
+        print(
+            "Codex task verification: in the new task, `project_status` must be the first "
+            "project action, before shell search, browser inspection, or changes."
+        )
     else:
         print(
             "Codex verification: confirm the Harness-owned project .codex/config.toml was removed."

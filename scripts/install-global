@@ -48,10 +48,10 @@ target after explicit user authorization. Live host activation remains
 `make install-global` and also requires explicit user authorization for agents.
 
 The tracked `.cursor/mcp.json` overlay in this repository is the intended
-checkout-local server (`harness-dev`). Production Codex and Cursor MCP are
-project-only. This helper refreshes the selected profiles and does not touch
-checkout `.harness/` overlay state. Test the global install from another Git
-worktree, then restart the affected hosts if project MCP config changed.
+checkout-local server (`harness-dev`). Production Cursor and Codex MCP are
+project-only; Codex uses a generated authenticated loopback HTTP config rather
+than a tracked stdio overlay. This helper does not touch checkout `.harness/`
+router state. Restart affected hosts if project MCP config changed.
 EOF
 }
 
@@ -333,7 +333,7 @@ fi
 cat <<EOF
 Global Harness package now uses $HARNESS_BIN from this checkout.
 Production Cursor MCP is project-only \`.cursor/mcp.json\` harness, enabled with
-\`agent mcp enable harness\`; Codex MCP is project-only \`.codex/config.toml\`.
-This checkout overlay remains harness-dev and is not rewritten. Test the global
-install from another Git worktree and restart the affected hosts after changes.
+\`agent mcp enable harness\`; Codex MCP is one project-only authenticated HTTP
+server in the generated \`.codex/config.toml\`. The Cursor checkout overlay remains
+harness-dev. Restart affected hosts after changes.
 EOF
