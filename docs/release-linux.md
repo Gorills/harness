@@ -153,12 +153,20 @@ scripts/dev python scripts/accept_codex.py --run-model \
 The runner builds and installs the exact current wheel under one temporary directory, uses two
 temporary Git Workspaces containing only fixture README/pyproject text, isolates Harness state and
 skills, and uses the official MCP SDK to connect to the exact configured Streamable HTTP endpoint and call all five
-tools during local-only preflight. Model mode additionally requires the real Codex CLI to select and
-complete all five MCP calls from JSONL evidence. Both modes verify schemas, distinct simultaneous
+tools during local-only preflight. Preflight also writes a temporary user-owned
+`acceptance-skill` (and a projected negative sibling) into the isolated registry, projects them into
+each fixture `.agents/skills`, and proves the runtime nonce lives in the `SKILL.md` body rather than
+description/frontmatter or the positive prompt. It does not contact the model;
+`skill_read_verified` and `skill_negative_verified` remain false. Model mode additionally requires
+the real Codex CLI to select and complete all five MCP calls from JSONL evidence, and additionally
+proves native skill discovery → description relevance → `SKILL.md` body read by requiring the
+hidden nonce in `skill_marker` / JSONL for the matching synthetic-acceptance prompt, plus a second
+exec whose unmatched prompt must not return the negative nonce. Both modes verify schemas, distinct simultaneous
 Workspace identities, the exact relevant/no irrelevant generated skill set, doctor, and owned
 cleanup, and fail if `~/.codex/config.toml` changes. The runner gives Codex project
 trust only through a temporary `CODEX_HOME`, does not use saved Codex authentication, and removes
-that temporary state after the run. It does not prove IDE or desktop behavior.
+that temporary state after the run. It does not prove Codex IDE, ChatGPT desktop, Cursor, or other
+proprietary UI behavior; those remain open host-compatibility matrix items.
 
 1. Run `make install-global HOST=codex`, then `harness scan` in each Workspace.
 2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,
@@ -181,7 +189,8 @@ that temporary state after the run. It does not prove IDE or desktop behavior.
    and `harness doctor` has no FAIL results.
 
 Record exact client versions and results in `docs/host-compatibility.md`; until CLI model, IDE, and
-desktop checks are recorded, proprietary Codex acceptance remains open.
+desktop checks are recorded, proprietary Codex acceptance remains open. Automated Codex CLI
+preflight/model proof does not complete that matrix.
 
 ## Proprietary host acceptance still required
 

@@ -377,6 +377,10 @@ def _run_skills_sync() -> int:
     print(f"Unchanged: {result.unchanged}")
     if result.adopted:
         print(f"Adopted exact built-ins: {result.adopted}")
+    if result.retired:
+        print(f"Retired: {result.retired}")
+    if result.released:
+        print(f"Released: {result.released}")
     return 0
 
 

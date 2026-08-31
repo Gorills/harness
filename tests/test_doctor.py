@@ -24,7 +24,12 @@ from harness.registry import (
     update_project_visibility,
 )
 from harness.skill_runtime import SkillRuntimeError
-from harness.skills import SkillProjectionError
+from harness.skills import (
+    SkillProjectionError,
+    SkillRegistryError,
+    load_skill_registry,
+    validate_skill_registry_trust,
+)
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.visibility import set_project_visibility
 
@@ -313,6 +318,33 @@ def test_run_system_doctor_refuses_group_writable_skill_registry(tmp_path: Path)
     by_name = {check.name: check for check in report.checks}
     assert by_name["Skill registry permissions"].severity is doctor.DoctorSeverity.FAIL
     assert report.failure_count >= 1
+
+
+def test_doctor_and_runtime_use_identical_skill_registry_trust_decision(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    validate_skill_registry_trust(registry)
+    assert load_skill_registry(registry) == ()
+    ok_checks: list[doctor.DoctorCheck] = []
+    assert doctor._inspect_skill_registry_permissions(registry, ok_checks) is True
+    assert ok_checks[0].severity is doctor.DoctorSeverity.OK
+
+    missing_checks: list[doctor.DoctorCheck] = []
+    assert load_skill_registry(tmp_path / "missing") == ()
+    assert doctor._inspect_skill_registry_permissions(tmp_path / "missing", missing_checks) is True
+    assert missing_checks == []
+
+    registry.chmod(0o770)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        validate_skill_registry_trust(registry)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+    fail_checks: list[doctor.DoctorCheck] = []
+    assert doctor._inspect_skill_registry_permissions(registry, fail_checks) is False
+    assert fail_checks[0].name == "Skill registry permissions"
+    assert fail_checks[0].severity is doctor.DoctorSeverity.FAIL
+    assert "group/other write" in fail_checks[0].detail
 
 
 def test_run_system_doctor_reports_relative_home_as_failure_without_mutation(

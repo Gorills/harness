@@ -171,8 +171,11 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
         "uv tool install --force --reinstall",
         "pre-overlay",
         "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
+        "current built-in skill pack",
+        "ADR-0029",
     ):
         assert needle in text
+    assert "12 built-in skills" not in text
 
 
 def test_dev_uv_script_must_be_sourced() -> None:

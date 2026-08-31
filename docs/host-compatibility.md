@@ -92,7 +92,8 @@ proprietary CLI/IDE/desktop acceptance remains open.
 prints the external destination, exact temporary fixture/MCP payload class, account-usage effect,
 API-key scope, and local isolation guarantees without invoking a model. With explicit
 `--run-model` approval and an invocation-scoped `CODEX_API_KEY`, it builds the exact wheel, requires
-real Codex JSONL evidence for successful calls to all five Harness tools, checks
+real Codex JSONL evidence for successful calls to all five Harness tools, a native skill-read
+`skill_marker` field proof, and a negative-control exec, checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
 bootstrap in model-visible input, and emits a sanitized report. The key is passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or

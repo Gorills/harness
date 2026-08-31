@@ -65,7 +65,12 @@ from harness.skill_runtime import (
     active_skill_profiles_for_runtime,
     inspect_workspace_skills,
 )
-from harness.skills import SkillError, default_skill_registry, load_skill_registry
+from harness.skills import (
+    SkillError,
+    default_skill_registry,
+    load_skill_registry,
+    validate_skill_registry_trust,
+)
 from harness.storage import (
     SCHEMA_VERSION,
     DatabaseError,
@@ -1453,26 +1458,12 @@ def _inspect_projects_and_workspaces(
 
 def _inspect_skill_registry_permissions(path: Path, checks: list[DoctorCheck]) -> bool:
     try:
-        metadata = path.lstat()
+        validate_skill_registry_trust(path)
     except FileNotFoundError:
         return True
-    except OSError as exc:
+    except SkillError as exc:
         checks.append(
             _check("Skill registry permissions", DoctorSeverity.FAIL, _bounded_detail(exc))
-        )
-        return False
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o022
-    ):
-        checks.append(
-            _check(
-                "Skill registry permissions",
-                DoctorSeverity.FAIL,
-                "registry must be a real current-user directory without group/other write access",
-            )
         )
         return False
     checks.append(

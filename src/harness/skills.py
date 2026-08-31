@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
+import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import combinations
@@ -40,6 +41,28 @@ _YAML_NON_TEXT_SCALAR_RE = re.compile(
     r"[0-9][0-9_]*(?:e[+-]?[0-9_]+)?))"
 )
 _YAML_BLOCK_SCALAR_HEADER_RE = re.compile(r"^[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:\s+#.*)?$")
+_PUBSPEC_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_PUBSPEC_DEPENDENCY_SECTIONS = frozenset(
+    {"dependencies", "dev_dependencies", "dependency_overrides"}
+)
+_GEMFILE_GEM_RE = re.compile(r"""^\s*gem\s*\(?\s*["']([A-Za-z0-9._-]+)["']""")
+_GEMFILE_LOCK_SPEC_RE = re.compile(r"^ {4}([A-Za-z0-9._-]+) \(")
+_GRADLE_QUOTED_COORDINATE_RE = re.compile(
+    r"""["']([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::[^"']*)?["']"""
+)
+_GRADLE_PLUGIN_ID_RE = re.compile(r"""(?:id\s*\(\s*["']([^"']+)["']\s*\)|id\s+["']([^"']+)["'])""")
+_TOML_MODULE_ID_RE = re.compile(r"""\b(?:module|id)\s*=\s*["']([^"']+)["']""")
+_TOML_GROUP_NAME_RE = re.compile(r"""\b(?:group|name)\s*=\s*["']([^"']+)["']""")
+_GRADLE_VERSION_CATALOG_NAME = "libs.versions.toml"
+_GRADLE_GROOVY_KTS_NAMES = frozenset(
+    {
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+    }
+)
+_GRADLE_MANIFEST_NAMES = _GRADLE_GROOVY_KTS_NAMES | {_GRADLE_VERSION_CATALOG_NAME}
 _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".c": "c",
     ".cc": "cpp",
@@ -47,6 +70,7 @@ _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".cpp": "cpp",
     ".cs": "csharp",
     ".cxx": "cpp",
+    ".dart": "dart",
     ".go": "go",
     ".gd": "gdscript",
     ".h": "c",
@@ -130,9 +154,14 @@ _BACKEND_DEPENDENCIES = frozenset(
         "github-com/gin-gonic/gin",
         "laravel/framework",
         "litestar",
+        "microsoft-net-sdk-web",
+        "org-springframework-boot",
         "rails",
         "sanic",
         "sinatra",
+        "spring-boot-starter-parent",
+        "spring-boot-starter-web",
+        "spring-boot-starter-webflux",
         "starlette",
         "symfony/framework-bundle",
     }
@@ -162,12 +191,21 @@ _DATABASE_DEPENDENCIES = frozenset(
 )
 _SOFTWARE_MANIFEST_NAMES = frozenset(
     {
+        "build.gradle",
+        "build.gradle.kts",
         "cargo.toml",
         "composer.json",
+        "gemfile",
+        "gemfile.lock",
         "go.mod",
+        _GRADLE_VERSION_CATALOG_NAME,
         "package.json",
+        "pom.xml",
         "project.godot",
+        "pubspec.yaml",
         "pyproject.toml",
+        "settings.gradle",
+        "settings.gradle.kts",
     }
 )
 
@@ -368,16 +406,37 @@ def default_skill_registry(
     return base / ".harness" / "skills"
 
 
+def validate_skill_registry_trust(root: Path) -> None:
+    """Require an existing canonical skill registry to be a private current-user directory.
+
+    Missing paths raise ``FileNotFoundError``. When the path exists it must be a
+    real directory, not a symlink, owned by the effective uid, and without group
+    or other write bits. Callers must not chmod an unsafe existing root into
+    compliance.
+    """
+    try:
+        metadata = root.lstat()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise SkillRegistryError("skill registry cannot be inspected") from exc
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o022
+    ):
+        raise SkillRegistryError(
+            "skill registry must be a real current-user directory without group/other write access"
+        )
+
+
 def load_skill_registry(registry_root: Path) -> tuple[SkillDefinition, ...]:
     """Load a deterministic canonical skill registry without following symlinks."""
     try:
-        root_stat = registry_root.lstat()
+        validate_skill_registry_trust(registry_root)
     except FileNotFoundError:
         return ()
-    except OSError as exc:
-        raise SkillRegistryError("skill registry cannot be inspected") from exc
-    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_ISLNK(root_stat.st_mode):
-        raise SkillRegistryError("skill registry must be a real directory")
 
     definitions: list[SkillDefinition] = []
     seen_ids: set[str] = set()
@@ -417,6 +476,12 @@ def detect_workspace_stack(
     manifests: set[str] = set()
     facets: set[str] = set()
     has_web_source = False
+    gemfile_lock_directories = {
+        PurePosixPath(record.relative_path).parent
+        for record in records
+        if record.kind is IndexedFileKind.FILE
+        and PurePosixPath(record.relative_path).name.casefold() == "gemfile.lock"
+    }
 
     for record in records:
         _require_resolution_deadline(deadline)
@@ -451,6 +516,19 @@ def detect_workspace_stack(
             manifest_dependencies = _go_mod_dependencies(workspace, record, deadline=deadline)
         elif name == "composer.json":
             manifest_dependencies = _composer_dependencies(workspace, record, deadline=deadline)
+        elif name == "pubspec.yaml":
+            manifest_dependencies = _pubspec_dependencies(workspace, record, deadline=deadline)
+        elif name == "gemfile.lock":
+            manifest_dependencies = _gemfile_lock_dependencies(workspace, record, deadline=deadline)
+        elif name == "gemfile":
+            if path.parent not in gemfile_lock_directories:
+                manifest_dependencies = _gemfile_dependencies(workspace, record, deadline=deadline)
+        elif name == "pom.xml":
+            manifest_dependencies = _pom_xml_dependencies(workspace, record, deadline=deadline)
+        elif name in _GRADLE_MANIFEST_NAMES:
+            manifest_dependencies = _gradle_text_dependencies(workspace, record, deadline=deadline)
+        elif suffix == ".csproj":
+            manifest_dependencies = _csproj_dependencies(workspace, record, deadline=deadline)
         dependencies.update(manifest_dependencies)
         facets.update(_dependency_facets(manifest_dependencies))
 
@@ -1290,6 +1368,8 @@ def _dependency_facets(dependencies: set[str]) -> set[str]:
         facets.add("backend-service")
     if dependencies & _DATABASE_DEPENDENCIES:
         facets.add("database-backed")
+    if dependencies & _MOBILE_DEPENDENCIES:
+        facets.add("mobile-app")
     return facets
 
 
@@ -1511,6 +1591,254 @@ def _composer_dependencies(
                 )
             dependencies.add(_normalize_dependency(name))
     return dependencies
+
+
+def _pubspec_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResolutionError(
+            f"indexed pubspec.yaml is not UTF-8: {record.relative_path}"
+        ) from exc
+    if "\x00" in text:
+        raise SkillResolutionError(f"indexed pubspec.yaml is malformed: {record.relative_path}")
+    dependencies: set[str] = set()
+    section: str | None = None
+    child_indent: int | None = None
+    current_child: str | None = None
+    current_child_indent: int | None = None
+    for raw in text.splitlines():
+        _require_resolution_deadline(deadline)
+        if "\t" in raw:
+            raise SkillResolutionError(f"indexed pubspec.yaml is malformed: {record.relative_path}")
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("%"):
+            continue
+        if stripped in {"---", "..."}:
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if section is not None and indent == 0:
+            section = None
+            child_indent = None
+            current_child = None
+            current_child_indent = None
+        if section is None:
+            if indent != 0:
+                continue
+            key, value = _pubspec_mapping_entry(stripped, record.relative_path)
+            section = key
+            child_indent = None
+            current_child = None
+            current_child_indent = None
+            if key == "flutter":
+                dependencies.add(_normalize_dependency("flutter"))
+            if key in _PUBSPEC_DEPENDENCY_SECTIONS:
+                inline = value.strip()
+                if inline and not inline.startswith("#"):
+                    raise SkillResolutionError(
+                        f"indexed pubspec.yaml is malformed: {record.relative_path}"
+                    )
+            continue
+        if section in _PUBSPEC_DEPENDENCY_SECTIONS:
+            if stripped.startswith("-"):
+                raise SkillResolutionError(
+                    f"indexed pubspec.yaml is malformed: {record.relative_path}"
+                )
+            key, value = _pubspec_mapping_entry(stripped, record.relative_path)
+            if child_indent is None:
+                child_indent = indent
+            if indent == child_indent:
+                current_child = key
+                current_child_indent = indent
+                dependencies.add(_normalize_dependency(key))
+                continue
+            if (
+                current_child is not None
+                and current_child_indent is not None
+                and indent > current_child_indent
+            ):
+                scalar = _strip_yaml_plain_scalar_comment(value).casefold()
+                if key.casefold() == "sdk" and scalar == "flutter":
+                    dependencies.add(_normalize_dependency("flutter"))
+            continue
+        if section == "environment" and indent > 0:
+            key, _value = _pubspec_mapping_entry(stripped, record.relative_path)
+            if key.casefold() == "flutter":
+                dependencies.add(_normalize_dependency("flutter"))
+    return dependencies
+
+
+def _pubspec_mapping_entry(stripped: str, relative_path: str) -> tuple[str, str]:
+    if stripped[:1] in {"[", "{", "!", "&", "*", "?", "|", ">"} or stripped.startswith("-"):
+        raise SkillResolutionError(f"indexed pubspec.yaml is malformed: {relative_path}")
+    if ":" not in stripped:
+        raise SkillResolutionError(f"indexed pubspec.yaml is malformed: {relative_path}")
+    key, rest = stripped.split(":", 1)
+    key = key.strip()
+    if not key or not _PUBSPEC_KEY_RE.fullmatch(key):
+        raise SkillResolutionError(f"indexed pubspec.yaml is malformed: {relative_path}")
+    return key, rest.strip()
+
+
+def _gemfile_lock_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResolutionError(
+            f"indexed Gemfile.lock is not UTF-8: {record.relative_path}"
+        ) from exc
+    dependencies: set[str] = set()
+    for raw in text.splitlines():
+        _require_resolution_deadline(deadline)
+        match = _GEMFILE_LOCK_SPEC_RE.match(raw)
+        if match is not None:
+            dependencies.add(_normalize_dependency(match.group(1)))
+    return dependencies
+
+
+def _gemfile_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResolutionError(f"indexed Gemfile is not UTF-8: {record.relative_path}") from exc
+    dependencies: set[str] = set()
+    for raw in text.splitlines():
+        _require_resolution_deadline(deadline)
+        match = _GEMFILE_GEM_RE.match(raw)
+        if match is not None:
+            dependencies.add(_normalize_dependency(match.group(1)))
+    return dependencies
+
+
+def _pom_xml_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    root = _parse_indexed_xml(payload, record.relative_path)
+    dependencies: set[str] = set()
+    for element in root.iter():
+        _require_resolution_deadline(deadline)
+        local = _xml_local_name(element.tag)
+        if local not in {"groupId", "artifactId"}:
+            continue
+        value = (element.text or "").strip()
+        if value:
+            dependencies.add(_normalize_dependency(value))
+    return dependencies
+
+
+def _gradle_text_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResolutionError(
+            f"indexed Gradle manifest is not UTF-8: {record.relative_path}"
+        ) from exc
+    catalog = PurePosixPath(record.relative_path).name.casefold() == _GRADLE_VERSION_CATALOG_NAME
+    dependencies: set[str] = set()
+    for raw in text.splitlines():
+        _require_resolution_deadline(deadline)
+        if catalog:
+            for match in _TOML_MODULE_ID_RE.finditer(raw):
+                _add_maven_coordinate(dependencies, match.group(1))
+            for match in _TOML_GROUP_NAME_RE.finditer(raw):
+                _add_maven_coordinate(dependencies, match.group(1))
+            continue
+        for match in _GRADLE_QUOTED_COORDINATE_RE.finditer(raw):
+            _add_maven_coordinate(dependencies, f"{match.group(1)}:{match.group(2)}")
+        for match in _GRADLE_PLUGIN_ID_RE.finditer(raw):
+            plugin_id = match.group(1) or match.group(2)
+            if plugin_id:
+                _add_maven_coordinate(dependencies, plugin_id)
+    return dependencies
+
+
+def _csproj_dependencies(
+    workspace: WorkspaceRecord,
+    record: IndexedFileRecord,
+    *,
+    deadline: float | None = None,
+) -> set[str]:
+    payload = _read_indexed_manifest(workspace, record, deadline=deadline)
+    root = _parse_indexed_xml(payload, record.relative_path)
+    dependencies: set[str] = set()
+    sdk = root.attrib.get("Sdk")
+    if isinstance(sdk, str) and sdk.strip():
+        _add_maven_coordinate(dependencies, sdk.split("/", 1)[0])
+    for element in root.iter():
+        _require_resolution_deadline(deadline)
+        local = _xml_local_name(element.tag)
+        if local == "Sdk":
+            name = element.attrib.get("Name")
+            if isinstance(name, str) and name.strip():
+                _add_maven_coordinate(dependencies, name.split("/", 1)[0])
+        elif local == "PackageReference":
+            include = element.attrib.get("Include")
+            if isinstance(include, str) and include.strip():
+                dependencies.add(_normalize_dependency(include))
+    return dependencies
+
+
+def _parse_indexed_xml(payload: bytes, relative_path: str) -> ET.Element:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SkillResolutionError(f"indexed XML manifest is not UTF-8: {relative_path}") from exc
+    if "\x00" in text:
+        raise SkillResolutionError(f"indexed XML manifest is malformed: {relative_path}")
+    if "<!DOCTYPE" in text or "<!doctype" in text:
+        raise SkillResolutionError(f"indexed XML manifest is malformed: {relative_path}")
+    try:
+        return ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise SkillResolutionError(f"indexed XML manifest is malformed: {relative_path}") from exc
+
+
+def _xml_local_name(tag: str) -> str:
+    if tag.startswith("{") and "}" in tag:
+        return tag.rsplit("}", 1)[-1]
+    return tag
+
+
+def _add_maven_coordinate(dependencies: set[str], raw: str) -> None:
+    token = raw.strip()
+    if not token:
+        return
+    if ":" in token:
+        group, artifact, *_rest = token.split(":")
+        if group.strip():
+            dependencies.add(_normalize_dependency(group))
+        if artifact.strip():
+            dependencies.add(_normalize_dependency(artifact))
+        return
+    dependencies.add(_normalize_dependency(token))
 
 
 def _read_indexed_manifest(

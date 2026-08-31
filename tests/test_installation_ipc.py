@@ -48,6 +48,8 @@ def _repo(root: Path) -> None:
 def _skill_registry(home: Path) -> None:
     skill = home / ".harness" / "skills" / "python-helper"
     skill.mkdir(parents=True)
+    (home / ".harness").chmod(0o700)
+    (home / ".harness" / "skills").chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: python-helper\ndescription: Use Python conventions.\n---\n\n"
         "# Python helper\n\nUse Python conventions.\n",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -14,7 +15,12 @@ from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_a
 from harness.builtin_skills import BUILTIN_SKILLS
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
 from harness.entrypoints import harness_main
-from harness.installation import InstallationError, install_harness, uninstall_harness
+from harness.installation import (
+    InstallationError,
+    _preflight_skill_registry_purge,
+    install_harness,
+    uninstall_harness,
+)
 from harness.registry import VisibilityMode, create_project, register_workspace
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import connect_database, initialize_database
@@ -47,6 +53,7 @@ def _repo(root: Path) -> None:
 def _skill_registry(home: Path) -> None:
     skill = home / ".harness" / "skills" / "python-helper"
     skill.mkdir(parents=True)
+    (home / ".harness").chmod(0o700)
     (home / ".harness" / "skills").chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: python-helper\ndescription: Python conventions\n---\n\n# Python helper\n",
@@ -316,6 +323,38 @@ def test_purge_preflight_refuses_unsafe_skill_registry_before_uninstall_mutation
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall"])
     assert harness_main() == 0
     capsys.readouterr()
+
+
+def test_purge_preflight_refuses_group_writable_skill_registry_before_uninstall_mutation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    registry = home / ".harness" / "skills"
+    registry.mkdir(parents=True)
+    (home / ".harness").chmod(0o700)
+    registry.chmod(0o700)
+    sentinel = registry / "user-owned.txt"
+    sentinel.write_text("keep\n", encoding="utf-8")
+    registry.chmod(0o770)
+    environment = {
+        "HOME": str(home),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+    }
+
+    with pytest.raises(InstallationError, match="unsafe skill registry"):
+        _preflight_skill_registry_purge(environment)
+
+    assert sentinel.read_text(encoding="utf-8") == "keep\n"
+    assert stat.S_IMODE(registry.stat().st_mode) & 0o022
+
+
+def test_purge_preflight_allows_missing_skill_registry(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _preflight_skill_registry_purge({"HOME": str(home)})
+    assert not (home / ".harness" / "skills").exists()
 
 
 def test_purge_preflight_refuses_unsafe_database_candidate_before_registry_deletion(

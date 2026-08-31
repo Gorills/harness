@@ -44,6 +44,7 @@ def _surface() -> SkillProjectionSurface:
 def _resolved_fastapi(registry: Path) -> tuple[ResolvedSkill, ...]:
     skill = registry / "fastapi"
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: fastapi\ndescription: Apply FastAPI conventions.\n---\n\n# FastAPI\n",
         encoding="utf-8",

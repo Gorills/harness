@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import shutil
 import sqlite3
-import stat
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -60,7 +59,7 @@ from harness.runtime_state import (
     preflight_canonical_database_state,
 )
 from harness.skill_runtime import SkillRuntimeError, validate_skill_profile_combination
-from harness.skills import SkillRegistryError, default_skill_registry
+from harness.skills import SkillRegistryError, default_skill_registry, validate_skill_registry_trust
 from harness.storage import SCHEMA_VERSION, DatabaseError, connect_database_read_only
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -849,17 +848,11 @@ def _skill_registry_path(environment: Mapping[str, str] | None) -> Path:
 def _preflight_skill_registry_purge(environment: Mapping[str, str] | None) -> None:
     registry = _skill_registry_path(environment)
     try:
-        metadata = registry.lstat()
+        validate_skill_registry_trust(registry)
     except FileNotFoundError:
         return
-    except OSError as exc:
-        raise InstallationError("Harness skill registry could not be inspected") from exc
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-    ):
-        raise InstallationError("Harness purge refused an unsafe skill registry")
+    except SkillRegistryError as exc:
+        raise InstallationError("Harness purge refused an unsafe skill registry") from exc
 
 
 def _purge_skill_registry(environment: Mapping[str, str] | None) -> None:

@@ -14,7 +14,7 @@ Isolation is done by overriding the XDG bases from [ADR-0007](../decisions/0007-
 | Database | `~/.local/state/harness/harness.db` | `.harness/state/harness/harness.db` |
 | Socket | `$XDG_RUNTIME_DIR/harness/harness.sock` or `/tmp/harness-<uid>/harness.sock` | `.harness/runtime/harness/harness.sock` |
 | Autostart | `python -m harness.daemon_process` of the invoked interpreter | same module from this checkout's environment |
-| Host MCP | project-only Codex/Cursor config plus Claude user-scope MCP | tracked Cursor/Claude router overlays plus generated private Codex HTTP config; isolated by default |
+| Host MCP | project-only Codex/Cursor config | tracked Cursor router overlay plus generated private Codex HTTP config; isolated by default |
 | Skill registry | `~/.harness/skills` | `.harness/skills` via `HARNESS_SKILL_REGISTRY` |
 | Project skill profiles | installed host intent | `codex,cursor` via `HARNESS_DEV_SKILL_PROFILES` |
 | `install` / `uninstall` | mutates user-global host MCP | refused while `HARNESS_DEV_ROOT` is set |
@@ -65,7 +65,9 @@ scripts/dev harness dashboard
 
 `scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints the current private URL. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
-The first isolated `scan` also reconciles the 12 built-in skills into the checkout-local registry
+The first isolated `scan` also reconciles the current built-in skill pack into the checkout-local
+registry (the count is not an invariant; see
+[ADR-0029](../decisions/0029-quality-discipline-verification-and-response-economy.md))
 and projects only the relevant subset into `.agents/skills`. Codex and Cursor share that root, so
 the default development profile set is `codex,cursor`. Claude Code is not a supported host.
 Generated skills are Harness-owned and excluded through the
@@ -111,7 +113,7 @@ uv run --frozen python scripts/quality.py
 
 ## 6. Opt-in global dogfood
 
-The tracked Cursor and Claude project MCP entries launch `scripts/dogfood`. Codex uses a generated
+The tracked Cursor project MCP entry launches `scripts/dogfood`. Codex uses a generated
 authenticated HTTP entry. With no marker,
 that router delegates to `scripts/dev harness`, so a fresh checkout remains isolated. After the
 exact tool-installed package has been refreshed through an explicitly authorized acceptance or

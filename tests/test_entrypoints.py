@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
+import harness.builtin_skills as builtin_module
 import harness.entrypoints as entrypoints
-from harness.builtin_skills import BUILTIN_SKILLS
+from harness.builtin_skills import BUILTIN_SKILLS, BuiltinSkill
 from harness.doctor import DoctorCheck, DoctorReport, DoctorSeverity, SystemDoctorReport
 from harness.entrypoints import harness_main, harnessd_main
 from harness.ipc import (
@@ -621,6 +622,7 @@ def test_harness_skills_list_reads_canonical_registry_without_mutation(
     registry = tmp_path / "skills"
     skill = registry / "python-helper"
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\ndescription: Use Python conventions.\n---\n\n# Python helper\n",
         encoding="utf-8",
@@ -654,6 +656,39 @@ def test_harness_skills_sync_and_validate_builtin_quality_pack(
     out = capsys.readouterr().out
     assert "Host profiles: codex, cursor" in out
     assert "Skill validation: OK" in out
+
+
+def test_harness_skills_sync_reports_retired_and_released_built_ins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    registry = tmp_path / "skills"
+    retired = BuiltinSkill(
+        "retired-example",
+        "Use when testing built-in retirement reporting.",
+        ("retired-example",),
+        "# retired-example\nValid body so the skill would load if left in place.\n",
+    )
+    released = BuiltinSkill(
+        "released-example",
+        "Use when testing built-in release reporting.",
+        ("released-example",),
+        "# released-example\nValid body so the skill would load if left in place.\n",
+    )
+    monkeypatch.setattr(entrypoints, "default_skill_registry", lambda: registry)
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, retired, released))
+    monkeypatch.setattr(sys, "argv", ["harness", "skills", "sync"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    skill_md = registry / released.skill_id / "SKILL.md"
+    skill_md.write_text(
+        skill_md.read_text(encoding="utf-8") + "User customization.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    assert harness_main() == 0
+    out = capsys.readouterr().out
+    assert "Retired: 1" in out
+    assert "Released: 1" in out
 
 
 def test_install_and_uninstall_host_cli_choices_are_codex_cursor_all(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -17,6 +18,7 @@ from harness.host_adapters import (
 )
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
+from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
 from harness.skills import (
     SKILL_METADATA_FILE_NAME,
     SKILL_OWNERSHIP_MARKER_NAME,
@@ -101,6 +103,7 @@ def _write_skill(
 ) -> Path:
     directory = registry / skill_id
     directory.mkdir(parents=True)
+    registry.chmod(0o700)
     (directory / "SKILL.md").write_text(
         skill_text
         or (
@@ -198,6 +201,62 @@ def test_registry_rejects_symlinks_and_unknown_metadata(tmp_path: Path) -> None:
     )
     with pytest.raises(SkillRegistryError, match="unsupported skill metadata field"):
         load_skill_registry(registry)
+
+
+def test_load_skill_registry_missing_is_empty(tmp_path: Path) -> None:
+    assert load_skill_registry(tmp_path / "missing") == ()
+
+
+def test_load_skill_registry_accepts_current_user_0700(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    _write_skill(registry, "fastapi")
+    definitions = load_skill_registry(registry)
+    assert tuple(item.skill_id for item in definitions) == ("fastapi",)
+
+
+def test_load_skill_registry_rejects_group_writable_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o770)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+
+
+def test_load_skill_registry_rejects_world_writable_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o702)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+
+
+def test_load_skill_registry_rejects_foreign_owned_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    foreign_uid = os.geteuid() + 1
+    monkeypatch.setattr(os, "geteuid", lambda: foreign_uid)
+    with pytest.raises(SkillRegistryError, match="current-user"):
+        load_skill_registry(registry)
+
+
+def test_reconcile_workspace_skills_fails_closed_on_unsafe_registry(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(tmp_path, {"main.py": "VALUE = 1\n"})
+    registry = tmp_path / "registry"
+    _write_skill(registry, "python-helper", languages=("python",))
+    registry.chmod(0o770)
+    with pytest.raises(SkillRuntimeError, match="could not be reconciled") as raised:
+        reconcile_workspace_skills(
+            connection,
+            workspace_id,
+            ("codex",),
+            registry_root=registry,
+        )
+    assert isinstance(raised.value.__cause__, SkillRegistryError)
 
 
 def test_resolver_selects_only_relevant_legacy_stack(tmp_path: Path) -> None:
@@ -350,6 +409,377 @@ require (
         "github-com/jackc/pgx/v5",
     } <= stack.dependencies
     assert {"backend-service", "database-backed", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_flutter_pubspec_and_dart_language(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "lib/main.dart": "void main() {}\n",
+            "pubspec.yaml": """\
+name: hello
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "dart" in stack.languages
+    assert "flutter" in stack.dependencies
+    assert {"mobile-app", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gemfile_lock_rails_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.1.0)
+    rails (8.0.0)
+      rack (= 3.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails
+""",
+            "app.rb": "require 'rails'\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gemfile_when_lockfile_is_absent(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile": """\
+source "https://rubygems.org"
+gem "sinatra"
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "sinatra" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_maven_spring_boot_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "pom.xml": """\
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.4.5</version>
+  </parent>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gradle_spring_boot_text_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "build.gradle": """\
+plugins {
+    id 'org.springframework.boot' version '3.4.5'
+    id 'java'
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gradle_version_catalog_spring_boot(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "gradle/libs.versions.toml": """\
+[libraries]
+spring-boot-web = { module = "org.springframework.boot:spring-boot-starter-web" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version = "3.4.5" }
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_settings_gradle_root_project_name_is_not_a_dependency(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"settings.gradle": 'rootProject.name = "rails"\n'},
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" not in stack.dependencies
+    assert "backend-service" not in stack.facets
+
+
+def test_stack_detection_reads_nested_gemfile_when_unrelated_lockfile_exists(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "other-gem/Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rake (13.2.1)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rake
+""",
+            "app/Gemfile": """\
+source "https://rubygems.org"
+gem "rails"
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert "rake" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_prefers_gemfile_lock_over_gemfile(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile": 'source "https://rubygems.org"\ngem "sinatra"\n',
+            "Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.1.0)
+    rails (8.0.0)
+      rack (= 3.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert "sinatra" not in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_parse_indexed_xml_rejects_utf8_doctype() -> None:
+    payload = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b"<!DOCTYPE project [\n"
+        b'  <!ENTITY xxe "rails">\n'
+        b"]>\n"
+        b"<project><artifactId>&xxe;</artifactId></project>\n"
+    )
+    with pytest.raises(SkillResolutionError, match="malformed"):
+        skills_module._parse_indexed_xml(payload, "pom.xml")
+
+
+def test_parse_indexed_xml_rejects_utf16_dtd() -> None:
+    xml = (
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE project [\n"
+        '  <!ENTITY xxe "rails">\n'
+        "]>\n"
+        "<project><artifactId>&xxe;</artifactId></project>\n"
+    )
+    payload = xml.encode("utf-16-le")
+    assert b"<!DOCTYPE" not in payload
+    with pytest.raises(SkillResolutionError):
+        skills_module._parse_indexed_xml(payload, "pom.xml")
+
+
+def test_parse_indexed_xml_accepts_utf8_pom_and_csproj_without_dtd() -> None:
+    pom = skills_module._parse_indexed_xml(
+        b'<?xml version="1.0" encoding="UTF-8"?><project><artifactId>demo</artifactId></project>',
+        "pom.xml",
+    )
+    csproj = skills_module._parse_indexed_xml(
+        b'<Project Sdk="Microsoft.NET.Sdk.Web">'
+        b'<PackageReference Include="Swashbuckle.AspNetCore" />'
+        b"</Project>",
+        "Web.csproj",
+    )
+    assert skills_module._xml_local_name(pom.tag) == "project"
+    assert skills_module._xml_local_name(csproj.tag) == "Project"
+    assert csproj.attrib.get("Sdk") == "Microsoft.NET.Sdk.Web"
+
+
+def test_stack_detection_reads_web_sdk_csproj_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Web.csproj": """\
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="7.0.0" />
+  </ItemGroup>
+</Project>
+""",
+            "Program.cs": "var builder = WebApplication.CreateBuilder(args);\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "csharp" in stack.languages
+    assert {
+        "microsoft-net-sdk-web",
+        "swashbuckle-aspnetcore",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_classlib_csproj_is_not_backend_from_sdk_alone(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Lib.csproj": """\
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""",
+            "Class1.cs": "namespace Lib;\npublic class Class1 {}\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "microsoft-net-sdk-web" not in stack.dependencies
+    assert "backend-service" not in stack.facets
+    assert "software-project" in stack.facets
+
+
+def test_stack_detection_fails_closed_on_malformed_pubspec(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"pubspec.yaml": "dependencies: [\n"},
+    )
+    try:
+        with pytest.raises(SkillResolutionError, match="malformed"):
+            detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+
+def test_stack_detection_fails_closed_on_malformed_pom(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"pom.xml": "<project><unclosed\n"},
+    )
+    try:
+        with pytest.raises(SkillResolutionError, match="malformed"):
+            detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
 
 
 def test_stack_detection_recognizes_godot_shell_ci_and_deployment_facets(

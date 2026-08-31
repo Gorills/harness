@@ -16,7 +16,7 @@ The product specification already defines checkpoint verification as `name`, `st
    product invariant. The separate model-visible resolver budget remains authoritative.
 2. Built-in skills use hyphenated portable ids/frontmatter and existing `task_hints`; Harness does not add a composition DSL.
 3. `harness install` reconciles the pack before host/runtime mutation. `harness skills sync` provides explicit reconciliation and `harness skills validate` checks every currently supported host surface.
-4. Reconciliation never overwrites unknown same-id content. A registry-root ownership manifest records exact installed hashes; owned skills update only while current bytes still match the recorded hash. Exact current built-ins may be adopted. Failures roll back in-process replacements.
+4. Reconciliation never overwrites unknown same-id content. A registry-root ownership manifest records exact installed hashes; owned skills update only while current bytes still match the recorded hash. Exact current built-ins may be adopted. Failures roll back in-process replacements when restore succeeds. A failed restore continues remaining entries, preserves surviving backups, and raises an explicit recovery failure instead of re-raising only the original error.
 5. Harness does not import `PROJECT_STATUS.md`, `STACK.md`, epic state, trigger wrappers, or host rule mirrors. Task/checkpoint state remains in Harness; mechanically detectable stack facts remain in the Structural Index; only non-mechanical project conventions belong in durable Knowledge.
 6. Checkpoint verification becomes durable schema state. A checkpoint may carry bounded ordered `agent_reported` entries with `name`, `status`, and `evidence`, written atomically with Task revision/checkpoint/Knowledge/event. `project_status` returns compact name/status; selected Task context may return bounded evidence/source.
 7. Operator chat follows a response-economy contract: checkpoints own durable continuity; chat is only the human-relevant delta. Server instructions require governing-contract inspection before risky cross-boundary implementation and independent complete-change review plus repository gates before publication.
@@ -99,6 +99,27 @@ or product/mobile reference, implement from semantic tokens and complete states,
 visual inspection and at most one confirmation pass. Named anti-patterns reject unjustified model
 defaults without turning valid brand choices into universal bans.
 
+## 2026-08-31 amendment: built-in sync retires IDs that left the pack
+
+Reconciliation subtracts stale ownership IDs (`stale = owned_before.keys() - desired.keys()`,
+where `desired` is the current `BUILTIN_SKILLS` set). Exact-owned stale directory trees are
+removed transactionally through the same replacement-backup path as updates, so a later
+manifest-commit failure restores retired directories when rollback succeeds. User-modified stale trees are not
+deleted; Harness drops them from the ownership manifest and they remain as user-owned
+skills. Missing stale paths only drop manifest ownership. Unsafe stale entries (symlink or
+non-directory) fail closed with the existing collision error. Successful restore still
+returns exact pre-sync trees, including retirements.
+
+## 2026-08-31 amendment: built-in sync reports restore failure
+
+Directory replacements, including retirements, happen before the ownership manifest is
+persisted. When a later step fails and every replacement restores, the caller sees the
+original error and the registry matches the pre-sync trees. When a restore step fails,
+rollback continues through the remaining entries, does not delete a surviving backup, and
+the caller raises an explicit recovery failure rather than re-raising only the original
+error. When automatic restore is impossible, that recovery failure includes the surviving
+backup path. Failed restore is not silent atomic success.
+
 ## 2026-08-31 amendment: Task ritual is diagnosis-inclusive
 
 ADR-0038 supersedes the specification §71 reading that a Harness Task starts only before
@@ -106,6 +127,60 @@ meaningful changes. Compact models treated diagnosis, feed inspection, and other
 exempt, then skipped retry after a schema error. Always-on instructions and unknown-argument
 errors now require Task start/resume before diagnosis, schema retry without echoing unknown field
 names, and a checkpoint after each logical stage. Compliance remains host acceptance evidence.
+
+## 2026-08-31 amendment: secure-by-design accompanies backend security reviews
+
+`backend-security` is selected only by the specialized `backend-security` and
+`server-auth-review` Task hints. `secure-by-design` previously matched those Tasks only through
+the `software-project` stack facet, so Task-focused projection kept the short backend checklist
+and dropped threat modeling, authorization verification, and the security verification reference.
+
+`secure-by-design` therefore shares those two Task hints, for the same reason `frontend-design`
+shares public-web and mobile surface hints: Task-focused projection must not retain a specialized
+surface skill while silently dropping the broader guidance. `testing-strategy` does not share
+them; specialized verification remains in `secure-by-design/references/verification.md`. This
+amendment does not change the resolver or add a composition DSL.
+
+## 2026-08-31 amendment: skill registry trust is fail-closed at runtime
+
+Doctor already reports FAIL unless the canonical skill registry is a real
+current-user directory without group or other write. Runtime `load_skill_registry`,
+built-in sync prepare, workspace reconcile (via load), and purge preflight now share
+that same check and refuse an unsafe existing root instead of loading or projecting it.
+The default create path remains `0700`; an unsafe existing registry is never chmod'd
+into compliance. Immediate parent of a prepared registry must also be a current-user
+directory without group or other write. Walking custom `HARNESS_SKILL_REGISTRY`
+ancestors to `/` is out of v1 scope. This is local filesystem trust and data-integrity
+of projected instructions, not a remote security boundary.
+
+## 2026-08-31 amendment: stack detection parses additional ecosystem manifests
+
+Stack detection now parses Dart/pubspec, Ruby lockfile, Maven/Gradle (bounded), and csproj
+PackageReference/web SDK. Gradle matching is conservative text evidence, not a full Groovy or
+Kotlin DSL evaluator, so plugin/catalog indirection may be missed. Groovy/KTS files match quoted
+Maven coordinates and plugin ids only; version-catalog `module=`/`id=`/`group=`/`name=` regexes
+apply only to `libs.versions.toml`. Indexed `pom.xml`/`.csproj` decode as UTF-8, reject NULs and
+`<!DOCTYPE`/`<!doctype` on that text, then use ElementTree `fromstring`. When a directory has both
+`Gemfile.lock` and `Gemfile`, only the lockfile is parsed; a `Gemfile` without a sibling lock is
+still parsed even if another directory's lockfile is indexed.
+
+## 2026-08-31 amendment: Codex CLI nonce proves native skill body read
+
+`scripts/accept_codex.py` projects a temporary user-owned `acceptance-skill` (not a production
+built-in) whose `SKILL.md` body holds a per-run nonce absent from description, frontmatter, and the
+model prompt. `--preflight-only` proves that projection; `--run-model` additionally requires Codex
+JSONL `skill_marker` evidence plus a negative unmatched exec. This does not complete the
+host-compatibility matrix for Codex IDE, desktop, or Cursor.
+
+## 2026-08-31 amendment: CI supply-chain, metric cardinality, quoted skill scalars
+
+Task-focused `github-actions` can retain only `ci-release`, so that skill carries GitHub Actions
+supply-chain boundaries (policy, reviewed SHA pins, token/fork-PR isolation, OIDC, protected
+release, existing provenance) without pulling `secure-by-design`. `observability` requires bounded
+metric labels/attributes and deliberate histogram/unit cost. Built-in `SKILL.md` name/description
+and matching `harness.yaml` scalars are JSON-quoted YAML; values that cannot remain one YAML line,
+or that strip empty, fail closed. iOS/iPadOS 44x44 pt and Android 48x48 dp in `frontend-design`
+follow current platform accessibility guidance and are not a frozen Harness constant.
 
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
@@ -117,5 +192,7 @@ names, and a checkpoint after each logical stage. Compliance remains host accept
 - User-modified or same-id custom skills fail closed instead of being silently replaced.
 - Recognized user-facing frontend work receives one portable design-quality baseline across web and
   mobile without merging SEO, native delivery, and visual-design concerns into one giant skill.
+- Recognized backend security reviews keep `secure-by-design` with `backend-security` so
+  Task-focused projection cannot drop threat, authorization, and verification guidance.
 - Future observed hooks may add `source=observed` without changing the v1 agent-reported shape.
 - Real-host compliance with response instructions remains acceptance evidence, not an enforcement claim.
