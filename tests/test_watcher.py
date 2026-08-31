@@ -5,6 +5,7 @@ import os
 import sqlite3
 import subprocess
 import time
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
@@ -13,11 +14,29 @@ import pytest
 
 import harness.watcher as watcher_module
 from harness.daemon import serve_daemon
-from harness.index import IndexingError, ScanResult, list_indexed_files, scan_workspace
+from harness.index import (
+    IndexedFileRecord,
+    IndexingError,
+    ScanResult,
+    list_indexed_files,
+    scan_workspace,
+    scan_workspace_paths,
+)
 from harness.ipc import IpcError, StatusResult, request_status, request_workspace_scan
-from harness.registry import create_project, get_workspace, register_workspace, relocate_workspace
+from harness.registry import (
+    WorkspaceRecord,
+    create_project,
+    get_workspace,
+    register_workspace,
+    relocate_workspace,
+)
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
-from harness.watcher import WorkspaceWatcher, read_workspace_change_token
+from harness.watcher import (
+    WorkspaceGitSnapshot,
+    WorkspaceMetadataSnapshot,
+    WorkspaceWatcher,
+    read_workspace_change_token,
+)
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX daemon watcher slice")
 
@@ -202,13 +221,142 @@ def test_watcher_debounces_rapid_changes_and_scans_final_filesystem_state(tmp_pa
         assert watcher.poll(now=1.0) == 0
         added.write_text("final\n", encoding="utf-8")
         assert watcher.poll(now=1.1) == 0
-        assert watcher.poll(now=1.35) == 0
-        assert watcher.poll(now=1.41) == 1
+        assert watcher.poll(now=1.35) == 1
 
         records = {
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
         }
         assert records["added.txt"].content_sha256 == hashlib.sha256(b"final\n").hexdigest()
+    finally:
+        connection.close()
+
+
+def test_idle_watcher_poll_uses_no_git_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, database, _workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        def unexpected_run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+            raise AssertionError("idle watcher poll must not invoke Git")
+
+        monkeypatch.setattr(subprocess, "run", unexpected_run)
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=2.0) == 0
+    finally:
+        connection.close()
+
+
+def test_watcher_uses_incremental_scan_for_bounded_dirty_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        full_calls = 0
+        incremental_calls: list[tuple[str, ...]] = []
+        real_full_scan = scan_workspace
+        real_incremental_scan = scan_workspace_paths
+
+        def counted_full_scan(
+            scan_connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            *,
+            deadline: float | None = None,
+        ) -> ScanResult:
+            nonlocal full_calls
+            full_calls += 1
+            return real_full_scan(scan_connection, selected_workspace_id, deadline=deadline)
+
+        def counted_incremental_scan(
+            scan_connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            relative_paths: Sequence[str],
+            *,
+            deadline: float | None = None,
+        ) -> ScanResult:
+            incremental_calls.append(tuple(relative_paths))
+            return real_incremental_scan(
+                scan_connection,
+                selected_workspace_id,
+                relative_paths,
+                deadline=deadline,
+            )
+
+        monkeypatch.setattr(watcher_module, "scan_workspace", counted_full_scan)
+        monkeypatch.setattr(watcher_module, "scan_workspace_paths", counted_incremental_scan)
+        (root / "tracked.txt").write_text("incremental\n", encoding="utf-8")
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=1.11) == 1
+
+        assert full_calls == 0
+        assert incremental_calls == [("tracked.txt",)]
+        record = {
+            item.relative_path: item for item in list_indexed_files(connection, workspace_id)
+        }["tracked.txt"]
+        assert record.content_sha256 == hashlib.sha256(b"incremental\n").hexdigest()
+    finally:
+        connection.close()
+
+
+def test_rotating_metadata_shards_detect_rewrite_beyond_first_sample(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered(tmp_path)
+    bulk = root / "bulk"
+    bulk.mkdir()
+    for index in range(300):
+        (bulk / f"file_{index:03d}.txt").write_text(f"{index}\n", encoding="utf-8")
+    _git(root, "add", "bulk")
+    connection = connect_database(database)
+    try:
+        scan_workspace(connection, workspace_id)
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        target = bulk / "file_280.txt"
+        target.write_text("rotated\n", encoding="utf-8")
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=1.1) == 0
+        assert watcher.poll(now=1.21) == 1
+
+        record = {
+            item.relative_path: item for item in list_indexed_files(connection, workspace_id)
+        }["bulk/file_280.txt"]
+        assert record.content_sha256 == hashlib.sha256(b"rotated\n").hexdigest()
     finally:
         connection.close()
 
@@ -296,7 +444,10 @@ def test_watcher_preserves_pending_change_while_manual_scan_lock_is_held(tmp_pat
         connection.close()
 
 
-def test_watcher_detects_clean_tracked_tree_change_from_head_move(tmp_path: Path) -> None:
+def test_watcher_detects_clean_tracked_tree_change_from_head_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     root, database, workspace_id = _registered(tmp_path)
     connection = connect_database(database)
     try:
@@ -329,6 +480,40 @@ def test_watcher_detects_clean_tracked_tree_change_from_head_move(tmp_path: Path
         assert watcher.poll(now=0.0) == 0
         assert watcher.poll(now=0.11) == 1
 
+        full_calls = 0
+        incremental_calls = 0
+        real_full_scan = scan_workspace
+        real_incremental_scan = scan_workspace_paths
+
+        def counted_full_scan(
+            scan_connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            *,
+            deadline: float | None = None,
+        ) -> ScanResult:
+            nonlocal full_calls
+            full_calls += 1
+            return real_full_scan(scan_connection, selected_workspace_id, deadline=deadline)
+
+        def counted_incremental_scan(
+            scan_connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            relative_paths: Sequence[str],
+            *,
+            deadline: float | None = None,
+        ) -> ScanResult:
+            nonlocal incremental_calls
+            incremental_calls += 1
+            return real_incremental_scan(
+                scan_connection,
+                selected_workspace_id,
+                relative_paths,
+                deadline=deadline,
+            )
+
+        monkeypatch.setattr(watcher_module, "scan_workspace", counted_full_scan)
+        monkeypatch.setattr(watcher_module, "scan_workspace_paths", counted_incremental_scan)
+
         _git(root, "reset", "--hard", "HEAD^")
         assert watcher.poll(now=1.0) == 0
         assert watcher.poll(now=1.11) == 1
@@ -337,6 +522,8 @@ def test_watcher_detects_clean_tracked_tree_change_from_head_move(tmp_path: Path
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
         }
         assert records["tracked.txt"].content_sha256 == hashlib.sha256(b"tracked\n").hexdigest()
+        assert full_calls == 1
+        assert incremental_calls == 0
     finally:
         connection.close()
 
@@ -378,8 +565,8 @@ def test_watcher_reconciles_relocated_workspace_even_when_change_token_is_identi
     try:
         monkeypatch.setattr(
             watcher_module,
-            "read_workspace_change_token",
-            lambda *_args, **_kwargs: "stable",
+            "read_workspace_metadata_snapshot",
+            lambda *_args, **_kwargs: WorkspaceMetadataSnapshot("stable", "stable"),
         )
         watcher = WorkspaceWatcher(
             connection,
@@ -450,14 +637,27 @@ def test_watcher_rescans_after_sampling_failure_invalidates_prior_token(
     try:
         calls = 0
 
-        def flaky_token(*_args: object, **_kwargs: object) -> str:
+        real_metadata_snapshot = watcher_module.read_workspace_metadata_snapshot
+
+        def flaky_token(
+            workspace: WorkspaceRecord,
+            indexed_files: Sequence[IndexedFileRecord],
+            *,
+            deadline: float,
+            directory_paths: Sequence[str] | None = None,
+        ) -> WorkspaceMetadataSnapshot:
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if calls == 4:
                 raise watcher_module.WorkspaceWatchError("transient token failure")
-            return "stable"
+            return real_metadata_snapshot(
+                workspace,
+                indexed_files,
+                deadline=deadline,
+                directory_paths=directory_paths,
+            )
 
-        monkeypatch.setattr(watcher_module, "read_workspace_change_token", flaky_token)
+        monkeypatch.setattr(watcher_module, "read_workspace_metadata_snapshot", flaky_token)
         watcher = WorkspaceWatcher(
             connection,
             Lock(),
@@ -469,8 +669,11 @@ def test_watcher_rescans_after_sampling_failure_invalidates_prior_token(
         )
         assert watcher.poll(now=0.0) == 0
         (root / "tracked.txt").write_text("sampling failed\n", encoding="utf-8")
-        assert watcher.poll(now=0.11) == 1
+        assert watcher.poll(now=0.11) == 0
         assert watcher.poll(now=0.22) == 1
+        assert watcher.poll(now=0.22) == 0
+        assert watcher.poll(now=0.32) == 0
+        assert watcher.poll(now=0.43) == 1
 
         records = {
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
@@ -491,14 +694,20 @@ def test_watcher_rescans_after_success_with_unknown_pre_scan_token(
     try:
         calls = 0
 
-        def flaky_token(*_args: object, **_kwargs: object) -> str:
+        real_snapshot = watcher_module.read_workspace_change_snapshot
+
+        def flaky_snapshot(
+            workspace: WorkspaceRecord,
+            *,
+            deadline: float,
+        ) -> WorkspaceGitSnapshot:
             nonlocal calls
             calls += 1
             if calls <= 2:
                 raise watcher_module.WorkspaceWatchError("transient token failure")
-            return "stable"
+            return real_snapshot(workspace, deadline=deadline)
 
-        monkeypatch.setattr(watcher_module, "read_workspace_change_token", flaky_token)
+        monkeypatch.setattr(watcher_module, "read_workspace_change_snapshot", flaky_snapshot)
         watcher = WorkspaceWatcher(
             connection,
             Lock(),
@@ -510,8 +719,11 @@ def test_watcher_rescans_after_success_with_unknown_pre_scan_token(
         )
         assert watcher.poll(now=0.0) == 0
         (root / "tracked.txt").write_text("during unknown token\n", encoding="utf-8")
-        assert watcher.poll(now=0.11) == 1
-        assert watcher.poll(now=0.22) == 1
+        assert watcher.poll(now=0.11) == 0
+        assert watcher.poll(now=0.22) == 0
+        assert watcher.poll(now=0.32) == 0
+        assert watcher.poll(now=0.43) == 0
+        assert watcher.poll(now=0.64) == 1
 
         records = {
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
@@ -550,10 +762,10 @@ def test_periodic_reconcile_repairs_a_missed_change_hint(
     connection = connect_database(database)
     try:
 
-        def constant_token(*_args: object, **_kwargs: object) -> str:
-            return "constant"
+        def constant_token(*_args: object, **_kwargs: object) -> WorkspaceMetadataSnapshot:
+            return WorkspaceMetadataSnapshot("constant", "constant")
 
-        monkeypatch.setattr(watcher_module, "read_workspace_change_token", constant_token)
+        monkeypatch.setattr(watcher_module, "read_workspace_metadata_snapshot", constant_token)
         watcher = WorkspaceWatcher(
             connection,
             Lock(),

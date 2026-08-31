@@ -7,15 +7,18 @@ from typing import Any, BinaryIO, cast
 
 import pytest
 
+import harness.index as index_module
 from harness.index import (
     MAX_INDEXED_SEARCH_BODY_BYTES,
     IndexedFileKind,
+    IndexedFileRecord,
     IndexingError,
     WorkspaceIndexMismatchError,
     list_indexed_files,
     scan_workspace,
+    scan_workspace_paths,
 )
-from harness.registry import create_project, register_workspace
+from harness.registry import WorkspaceRecord, create_project, register_workspace
 from harness.storage import connect_database, initialize_database
 
 
@@ -104,6 +107,62 @@ def test_scan_reconciles_add_modify_delete_and_is_idempotent(tmp_path: Path) -> 
         assert fourth.removed == 1
         paths = [record.relative_path for record in list_indexed_files(connection, workspace_id)]
         assert paths == ["added.txt"]
+    finally:
+        connection.close()
+
+
+def test_incremental_scan_hashes_only_selected_paths_and_preserves_full_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    try:
+        untouched = root / "untouched.txt"
+        untouched.write_text("stable\n", encoding="utf-8")
+        _git(root, "add", "untouched.txt")
+        scan_workspace(connection, workspace_id)
+
+        inspected: list[str] = []
+        original_inspect = index_module._inspect_entry
+
+        def recording_inspect(
+            workspace: WorkspaceRecord,
+            relative_path: str,
+            *,
+            deadline: float | None,
+        ) -> IndexedFileRecord | None:
+            inspected.append(relative_path)
+            return original_inspect(workspace, relative_path, deadline=deadline)
+
+        monkeypatch.setattr(index_module, "_inspect_entry", recording_inspect)
+        (root / "tracked.txt").write_text("incremental\n", encoding="utf-8")
+        added = root / "added.txt"
+        added.write_text("added\n", encoding="utf-8")
+
+        result = scan_workspace_paths(
+            connection,
+            workspace_id,
+            ("tracked.txt", "added.txt"),
+        )
+        assert (result.added, result.updated, result.removed) == (1, 1, 0)
+        assert inspected == ["added.txt", "tracked.txt"]
+        records = {
+            record.relative_path: record for record in list_indexed_files(connection, workspace_id)
+        }
+        assert set(records) == {"added.txt", "tracked.txt", "untouched.txt"}
+        assert records["untouched.txt"].content_sha256 == hashlib.sha256(b"stable\n").hexdigest()
+
+        inspected.clear()
+        added.unlink()
+        result = scan_workspace_paths(connection, workspace_id, ("added.txt",))
+        assert (result.added, result.updated, result.removed) == (0, 0, 1)
+        assert inspected == []
+        assert {
+            record.relative_path for record in list_indexed_files(connection, workspace_id)
+        } == {
+            "tracked.txt",
+            "untouched.txt",
+        }
     finally:
         connection.close()
 

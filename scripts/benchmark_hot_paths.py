@@ -5,6 +5,7 @@ import json
 import math
 import os
 import platform
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,18 +25,23 @@ from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from harness.daemon import serve_daemon
-from harness.index import scan_workspace
+from harness.index import list_indexed_files, scan_workspace, scan_workspace_paths
 from harness.registry import (
     WorkspaceRecord,
     create_project,
     register_workspace,
 )
 from harness.storage import connect_database, initialize_database
-from harness.watcher import read_workspace_change_token
+from harness.watcher import (
+    WATCH_METADATA_FILE_SAMPLE_LIMIT,
+    list_workspace_metadata_directories,
+    read_workspace_metadata_token,
+)
 
 _PROJECT_STATUS_GIT_BUDGET = 13
 _PROJECT_STATUS_IPC_BUDGET = 2
-_WATCH_TOKEN_GIT_BUDGET = 2
+_WATCH_TOKEN_GIT_BUDGET = 0
+_INCREMENTAL_SCAN_GIT_BUDGET = 6
 _NOOP_SCAN_GIT_BUDGET = 6
 
 
@@ -227,6 +233,35 @@ def _measure(
     return _duration_summary(samples), counter.snapshot()
 
 
+def _measure_incremental_scan(
+    fixture: _Fixture,
+    connection: sqlite3.Connection,
+    counter: _SubprocessCounter,
+    *,
+    iterations: int,
+    warmup: int,
+) -> tuple[dict[str, float], dict[str, int]]:
+    target = fixture.root / "src" / "module_000000.py"
+    samples: list[int] = []
+    total = iterations + warmup
+    for index in range(total):
+        target.write_text(f"VALUE_000000 = {(index + 1) % 2}\n", encoding="utf-8")
+        if index == warmup:
+            counter.reset()
+        started = monotonic_ns()
+        result = scan_workspace_paths(
+            connection,
+            fixture.workspace.workspace_id,
+            ("src/module_000000.py",),
+        )
+        elapsed = monotonic_ns() - started
+        if result.updated != 1:
+            raise RuntimeError("benchmark incremental scan did not update the selected path")
+        if index >= warmup:
+            samples.append(elapsed)
+    return _duration_summary(samples), counter.snapshot()
+
+
 async def _measure_project_status(
     fixture: _Fixture,
     runtime_root: Path,
@@ -304,15 +339,33 @@ def _benchmark_fixture(
 
         connection = connect_database(fixture.database)
         try:
+            metadata_directories = list_workspace_metadata_directories(
+                fixture.root,
+                deadline=monotonic_ns() / 1_000_000_000 + 10,
+            )
+            metadata_file_sample = list_indexed_files(
+                connection,
+                fixture.workspace.workspace_id,
+            )[:WATCH_METADATA_FILE_SAMPLE_LIMIT]
 
             def watch_token() -> None:
-                read_workspace_change_token(
+                read_workspace_metadata_token(
                     fixture.workspace,
+                    metadata_file_sample,
                     deadline=monotonic_ns() / 1_000_000_000 + 10,
+                    directory_paths=metadata_directories,
                 )
 
             watch_latency, watch_counts = _measure(
                 watch_token,
+                counter,
+                iterations=iterations,
+                warmup=warmup,
+            )
+
+            incremental_latency, incremental_counts = _measure_incremental_scan(
+                fixture,
+                connection,
                 counter,
                 iterations=iterations,
                 warmup=warmup,
@@ -344,6 +397,14 @@ def _benchmark_fixture(
             "git_subprocesses_per_iteration": _per_iteration(_git_total(watch_counts), iterations),
             "git_commands": watch_counts,
         },
+        "watcher_incremental_reconcile": {
+            "latency": incremental_latency,
+            "git_subprocesses_per_iteration": _per_iteration(
+                _git_total(incremental_counts), iterations
+            ),
+            "git_commands": incremental_counts,
+            "hashed_paths_per_iteration": 1,
+        },
         "authoritative_noop_scan": {
             "latency": scan_latency,
             "git_subprocesses_per_iteration": _per_iteration(_git_total(scan_counts), iterations),
@@ -356,6 +417,7 @@ def _assert_counter_budgets(results: dict[str, object]) -> None:
     expected = {
         "project_status": (_PROJECT_STATUS_GIT_BUDGET, _PROJECT_STATUS_IPC_BUDGET),
         "watcher_idle_token": (_WATCH_TOKEN_GIT_BUDGET, None),
+        "watcher_incremental_reconcile": (_INCREMENTAL_SCAN_GIT_BUDGET, None),
         "authoritative_noop_scan": (_NOOP_SCAN_GIT_BUDGET, None),
     }
     failures: list[str] = []

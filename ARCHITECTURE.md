@@ -304,7 +304,13 @@ Workspace discovery
 → FTS refresh
 ```
 
-Incremental watcher events are debounced/coalesced and reconciled against the filesystem. Watcher events are hints; the filesystem is authoritative. Rename may be observed as delete+create and must still converge correctly.
+Incremental watcher observations are debounced/coalesced and reconciled against the filesystem.
+Idle polls use a subprocess-free metadata token over directory/Git-control state plus one rotating
+128-path metadata shard; Git status/HEAD confirmation runs only after that token changes. A bounded
+same-HEAD dirty-path set is reconciled through the canonical index/FTS/Knowledge rules without
+hashing unrelated files. Initial, HEAD/policy/unknown/large changes and the periodic safety pass
+remain full authoritative scans. Watcher observations are hints; the filesystem is authoritative.
+Rename may be observed as delete+create and must still converge correctly.
 
 `ParserAdapter` remains a narrow language parsing boundary. Unsupported languages degrade to paths/text/docs/Git rather than failing the project.
 
