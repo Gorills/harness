@@ -26,6 +26,7 @@ The primary Linux local close-out is Cursor IDE/CLI in Normal mode: `harness ins
 uv tool install --python 3.13 .
 harness install --host cursor
 harness doctor
+harness backup /safe/path/harness-$(date +%F).harness-backup
 cd /path/to/git/repository
 harness scan
 harness visibility hidden   # operator-only; projects local rules + git info/exclude
@@ -33,6 +34,14 @@ harness visibility hidden   # operator-only; projects local rules + git info/exc
 agent mcp list
 harness status
 ```
+
+Durable recovery uses `harness backup ARCHIVE` and `harness restore ARCHIVE`. Backup is safe while
+the daemon is running and captures committed WAL content. Restore validates the archive checksum,
+SQLite integrity, exact schema, and creating runtime identity, cleanly stops the daemon, and keeps a
+timestamped pre-restore backup beside the database. A reviewed exact-schema archive from another
+Harness build requires the explicit `--allow-runtime-mismatch` flag. Backup archives can contain
+Task and Knowledge text and should be protected like the database itself. See
+[ADR-0036](docs/decisions/0036-durable-state-backup-and-restore.md).
 
 Claude Code remains `harness install` / `harness install --host claude-code`. Install a compatible Claude+Cursor pair by running the two profile commands sequentially; `--host all` is intentionally rejected because adding Codex would create the unsupported three-host skill graph. Current Claude Code `claude mcp get` absent-server text (quoted or unquoted) is classified as absent, so Claude CLI output drift is not a Cursor doctor/install/uninstall/scan blocker. Unexpected Claude inspect failures still fail doctor; true absence remains a warning.
 
@@ -91,6 +100,8 @@ Claude Code registration remains owned through the official `claude mcp` CLI and
 - [ADR-0031: Operator Task tracking, explicit reopen, and searchable history](docs/decisions/0031-task-operator-tracking-reopen-and-search.md)
 - [ADR-0033: Bounded local content retrieval and quality-tier fusion](docs/decisions/0033-local-content-retrieval-and-quality-tier-fusion.md)
 - [ADR-0034: Dashboard Project removal and Workspace relocation](docs/decisions/0034-dashboard-project-removal-and-workspace-relocation.md)
+- [ADR-0035: Daemon IPC uses bounded concurrent client workers](docs/decisions/0035-daemon-bounded-concurrent-ipc.md)
+- [ADR-0036: Durable-state recovery uses validated SQLite backup archives](docs/decisions/0036-durable-state-backup-and-restore.md)
 
 ## Development state
 

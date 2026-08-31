@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 from argparse import ArgumentParser
@@ -5,6 +6,7 @@ from importlib.metadata import version as distribution_version
 from pathlib import Path
 from signal import SIGINT, SIGTERM, getsignal, signal
 from threading import Event
+from time import monotonic, sleep
 from types import FrameType
 
 from harness.builtin_skills import BuiltinSkillError, sync_builtin_skills
@@ -28,17 +30,20 @@ from harness.host_integration_state import load_host_integration_state
 from harness.installation import InstallationError, install_harness, uninstall_harness
 from harness.ipc import (
     IpcError,
+    IpcTransportError,
     VisibilityResult,
     WorkspaceScanResult,
     WorkspaceSearchResult,
     WorkspaceStatusResult,
     request_dashboard_url,
     request_set_visibility,
+    request_shutdown,
     request_workspace_scan,
     request_workspace_search,
     request_workspace_skills_reconcile,
     request_workspace_status,
 )
+from harness.recovery import RecoveryError, create_database_backup, restore_database_backup
 from harness.registry import WorkspaceRecord
 from harness.runtime_paths import (
     RuntimePathError,
@@ -59,6 +64,8 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 _DOCTOR_RUNTIME_SCOPE = "Doctor scope: SQLite runtime only."
 _DOCTOR_DATABASE_SCOPE = "Doctor scope: SQLite runtime + selected initialized database."
 _FAILURE_DETAIL_MAX_LENGTH = 1024
+_RECOVERY_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+_RECOVERY_SHUTDOWN_POLL_SECONDS = 0.05
 
 
 def _parser(program: str, description: str) -> ArgumentParser:
@@ -127,6 +134,84 @@ def _run_doctor(
     result = max(result, _print_database_report(report, database_path))
     print(_DOCTOR_DATABASE_SCOPE)
     return result
+
+
+def _run_backup(archive_path: Path, database_path: Path | None) -> int:
+    try:
+        paths = default_runtime_paths()
+        database = paths.database if database_path is None else database_path.absolute()
+        if database_path is None:
+            ensure_private_state_directory(database.parent)
+        result = create_database_backup(database, archive_path)
+    except (DatabaseError, RecoveryError, RuntimePathError, OSError) as exc:
+        print(f"Harness backup: FAIL ({exc})")
+        return 1
+    print(f"Harness backup: OK ({result.path})")
+    print(f"Database schema: {result.manifest.schema_version}")
+    print(f"Runtime version: {result.manifest.package_version}")
+    print(f"Database SHA-256: {result.manifest.database_sha256}")
+    return 0
+
+
+def _run_restore(
+    archive_path: Path,
+    database_path: Path | None,
+    socket_path: Path | None,
+    *,
+    allow_runtime_mismatch: bool,
+) -> int:
+    try:
+        if database_path is not None and socket_path is None:
+            raise RecoveryError("--database restore requires the matching --socket path")
+        defaults = default_runtime_paths()
+        database = defaults.database if database_path is None else database_path.absolute()
+        socket = defaults.socket if socket_path is None else socket_path.absolute()
+        if database_path is None:
+            ensure_private_state_directory(database.parent)
+        _stop_daemon_for_restore(socket)
+        result = restore_database_backup(
+            database,
+            archive_path,
+            allow_runtime_mismatch=allow_runtime_mismatch,
+        )
+    except (DatabaseError, RecoveryError, RuntimePathError, IpcError, OSError) as exc:
+        print(f"Harness restore: FAIL ({exc})")
+        return 1
+    print(f"Harness restore: OK ({result.database_path})")
+    print(f"Database schema: {result.manifest.schema_version}")
+    if result.previous_state_backup is not None:
+        print(f"Previous state backup: {result.previous_state_backup}")
+    print("Harness daemon: stopped; the next normal Harness command starts it with restored state.")
+    return 0
+
+
+def _stop_daemon_for_restore(socket_path: Path) -> None:
+    try:
+        socket_path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RecoveryError("Harness daemon socket could not be inspected for restore") from exc
+    try:
+        request_shutdown(socket_path)
+    except IpcTransportError as exc:
+        cause = exc.__cause__
+        if not isinstance(cause, OSError) or cause.errno not in {
+            errno.ENOENT,
+            errno.ECONNREFUSED,
+        }:
+            raise
+        return
+    deadline = monotonic() + _RECOVERY_SHUTDOWN_TIMEOUT_SECONDS
+    while True:
+        try:
+            socket_path.lstat()
+        except FileNotFoundError:
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise RecoveryError("Harness daemon did not stop cleanly for restore")
+        sleep(min(_RECOVERY_SHUTDOWN_POLL_SECONDS, remaining))
 
 
 def _print_workspace_status(status: WorkspaceStatusResult) -> None:
@@ -809,6 +894,57 @@ def harness_main() -> int:
         action="store_true",
         help="check only the ephemeral SQLite/FTS5 runtime without inspecting Harness state",
     )
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="create a consistent durable-state backup archive",
+        description=(
+            "Create an atomic archive from a consistent SQLite snapshot, including committed WAL "
+            "content, plus schema, runtime-identity, size, and checksum metadata."
+        ),
+    )
+    backup_parser.add_argument(
+        "archive",
+        type=Path,
+        metavar="ARCHIVE",
+        help="new backup archive path (existing files are never overwritten)",
+    )
+    backup_parser.add_argument(
+        "--database",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Harness database path",
+    )
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="validate and restore a durable-state backup archive",
+        description=(
+            "Cleanly stop the selected daemon, validate archive checksum, SQLite integrity, "
+            "schema, and runtime identity, then atomically restore the database."
+        ),
+    )
+    restore_parser.add_argument(
+        "archive",
+        type=Path,
+        metavar="ARCHIVE",
+        help="Harness backup archive to restore",
+    )
+    restore_parser.add_argument(
+        "--database",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Harness database path",
+    )
+    restore_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the Unix-domain socket for clean daemon shutdown",
+    )
+    restore_parser.add_argument(
+        "--allow-runtime-mismatch",
+        action="store_true",
+        help="restore an exact-schema archive created by a different Harness runtime after review",
+    )
     status_parser = subparsers.add_parser(
         "status",
         help="show read-only status for one registered Workspace",
@@ -965,6 +1101,15 @@ def harness_main() -> int:
         return _run_uninstall(host=args.host, purge=args.purge)
     if args.command == "doctor":
         return _run_doctor(args.database, runtime_only=args.runtime_only)
+    if args.command == "backup":
+        return _run_backup(args.archive, args.database)
+    if args.command == "restore":
+        return _run_restore(
+            args.archive,
+            args.database,
+            args.socket,
+            allow_runtime_mismatch=args.allow_runtime_mismatch,
+        )
     if args.command == "status":
         return _run_status(args.path, args.socket)
     if args.command == "scan":
