@@ -314,6 +314,37 @@ def test_codex_exact_tracked_manual_config_is_adopted_but_never_removed(tmp_path
     assert _config(root).is_file()
 
 
+@pytest.mark.parametrize("hidden", [False, True])
+def test_codex_tracked_manual_config_without_env_forwarding_is_never_adopted(
+    tmp_path: Path,
+    hidden: bool,
+) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    path = _config(root)
+    legacy = "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.startswith("env_vars = ")
+    )
+    path.write_text(legacy + "\n", encoding="utf-8")
+    _marker(root).unlink()
+    _exclude(root).write_text("", encoding="utf-8")
+    _git(root, "add", ".codex/config.toml")
+
+    diagnostic = adapter.project_registration_diagnostic(root, hidden=hidden)
+    assert diagnostic.state is HostRegistrationState.FOREIGN
+    assert not diagnostic.harness_owned
+    assert diagnostic.preflight_error is not None
+    assert "tracked .codex/config.toml requires" in diagnostic.preflight_error
+    with pytest.raises(HostIntegrationError, match=r"tracked \.codex/config\.toml requires"):
+        adapter.reconcile_project(root, hidden=hidden)
+    assert (
+        "env_vars" not in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"]
+    )
+
+
 def test_codex_tracked_config_without_exact_entry_is_never_modified(tmp_path: Path) -> None:
     root = _repository(tmp_path / "repo")
     path = _config(root)
