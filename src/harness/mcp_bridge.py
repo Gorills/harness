@@ -65,13 +65,13 @@ _SERVER_INSTRUCTIONS = (
     "project_status. Tool discovery is the only allowed pre-status action; omission is not "
     f"failure. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
     "title/body. New-Task stack_hints must be affected and task-focused. After status use "
-    "project_search, project_context, then native tools. Start/resume a Task before changes. "
-    "Checkpoint progress, decisions, checks, "
-    "risks and outcome. Keep task_id+expected_revision across turns; never "
-    "infer write targets. Store only reusable anchored Knowledge, not broad summaries/speculation. "
-    "Inspect contracts before risky work; review and run repo gates before publication. Native "
-    "search only after status. Reply briefly, result first; omit unchanged source and recap diffs. "
-    "Hidden mode forbids durable SCM mutations."
+    "project_search, project_context, then native tools. Start/resume a Task before diagnosis "
+    "or edits; on schema error retry, never skip. Checkpoint each stage. New request or "
+    "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision "
+    "across turns; never infer write targets. Store only reusable Knowledge. Inspect "
+    "contracts before risky work; review and run repo gates before publication. Reply briefly, "
+    "result first; omit unchanged source and recap diffs. Hidden mode forbids durable SCM "
+    "mutations."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -132,6 +132,26 @@ _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
         }
     ),
 }
+
+
+def _unknown_tool_argument_error(name: str, allowed: frozenset[str], unknown: set[str]) -> MCPError:
+    """Reject extra fields with public allowed names; never echo unknown names."""
+    if allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        message = (
+            f"Unknown tool argument fields; allowed: {allowed_text}. "
+            "Read the schema and retry; do not skip."
+        )
+    else:
+        message = (
+            "Unknown tool argument fields; this tool takes no arguments. "
+            "Read the schema and retry; do not skip."
+        )
+    return MCPError(
+        code=INVALID_PARAMS,
+        message=message,
+        data={"tool": name, "unknown_field_count": len(unknown)},
+    )
 
 
 class _StrictInputModel(BaseModel):
@@ -294,13 +314,9 @@ class HarnessMCPServer(MCPServer):
             )
         allowed = _TOOL_ARGUMENTS.get(name)
         if allowed is not None:
-            unknown = sorted(set(arguments).difference(allowed))
+            unknown = set(arguments).difference(allowed)
             if unknown:
-                raise MCPError(
-                    code=INVALID_PARAMS,
-                    message="Unknown tool argument fields",
-                    data={"tool": name, "unknown_field_count": len(unknown)},
-                )
+                raise _unknown_tool_argument_error(name, allowed, unknown)
         result = await super().call_tool(name, arguments, context)
         if isinstance(result, CallToolResult):
             return _bounded_call_result(name, result)
@@ -520,11 +536,13 @@ def build_mcp_server(*, workspace_transport: Literal["environment", "http-header
 
     @server.tool(
         description=(
-            "Create a new durable Harness task, or explicitly resume an existing task. A new "
-            f"title is operator-facing {_OPERATOR_LANGUAGE}. Existing task mutations use "
-            "revision compare-and-set when required. For a new Task, stack_hints should name "
-            "only affected technologies and work kinds (for example fastapi, alembic, expo, "
-            "apk, bugfix) so native skill projection stays task-focused."
+            "Create a new durable Harness task, or explicitly resume an existing task. Required "
+            f"before diagnosis and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
+            "Create with title and optional stack_hints only; omit task_id; never pass summary or "
+            "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
+            "A schema error is a blocker: read this schema and retry. For a new Task, stack_hints "
+            "should name only affected technologies and work kinds (for example fastapi, alembic, "
+            "expo, apk, bugfix) so native skill projection stays task-focused."
         )
     )
     def task_start(
@@ -548,11 +566,12 @@ def build_mcp_server(*, workspace_transport: Literal["environment", "http-header
 
     @server.tool(
         description=(
-            "Persist meaningful progress for one explicit working Harness task. Requires task_id "
-            "and expected_revision. Write summary, next_step, and Knowledge title/body in "
-            f"{_OPERATOR_LANGUAGE}. Add Knowledge only for verified reusable findings that avoid "
-            "future re-investigation; prefer precise code/document anchors and do not summarize "
-            "every file or persist speculation."
+            "Persist progress for one explicit working Harness task after each logical stage, "
+            "including diagnosis with no code change. Requires task_id and expected_revision. "
+            f"Write summary, next_step, and Knowledge title/body in {_OPERATOR_LANGUAGE}. Add "
+            "Knowledge only for verified reusable findings that avoid future re-investigation; "
+            "prefer precise code/document anchors and do not summarize every file or persist "
+            "speculation."
         )
     )
     def task_checkpoint(

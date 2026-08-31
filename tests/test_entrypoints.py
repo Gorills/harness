@@ -652,5 +652,27 @@ def test_harness_skills_sync_and_validate_builtin_quality_pack(
     monkeypatch.setattr(sys, "argv", ["harness", "skills", "validate"])
     assert harness_main() == 0
     out = capsys.readouterr().out
-    assert "Host profiles: claude-code, codex, cursor" in out
+    assert "Host profiles: codex, cursor" in out
     assert "Skill validation: OK" in out
+
+
+def test_install_and_uninstall_host_cli_choices_are_codex_cursor_all(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "claude-code"])
+    with pytest.raises(SystemExit) as raised:
+        harness_main()
+    assert raised.value.code == 2
+    install_err = capsys.readouterr().err
+    assert "invalid choice: 'claude-code'" in install_err
+    assert "codex" in install_err
+    assert "cursor" in install_err
+    assert "all" in install_err
+
+    monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "claude-code"])
+    with pytest.raises(SystemExit) as raised:
+        harness_main()
+    assert raised.value.code == 2
+    uninstall_err = capsys.readouterr().err
+    assert "invalid choice: 'claude-code'" in uninstall_err

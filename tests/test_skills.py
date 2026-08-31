@@ -11,7 +11,10 @@ from time import monotonic
 import pytest
 
 import harness.skills as skills_module
-from harness.host_adapters import ClaudeCodeAdapter
+from harness.host_adapters import (
+    codex_skill_projection_surface,
+    cursor_skill_projection_surface,
+)
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
 from harness.skills import (
@@ -21,7 +24,6 @@ from harness.skills import (
     ResolvedSkill,
     SkillProjectionCollisionError,
     SkillProjectionError,
-    SkillProjectionSurface,
     SkillRegistryError,
     SkillResolutionError,
     SkillResolutionPolicy,
@@ -100,7 +102,11 @@ def _write_skill(
     directory = registry / skill_id
     directory.mkdir(parents=True)
     (directory / "SKILL.md").write_text(
-        skill_text or f"# {skill_id}\n\nPortable instructions.\n",
+        skill_text
+        or (
+            f"---\nname: {skill_id}\ndescription: Portable {skill_id} instructions.\n"
+            f"---\n\n# {skill_id}\n\nPortable instructions.\n"
+        ),
         encoding="utf-8",
     )
     lines = [f"id: {skill_id}"]
@@ -494,7 +500,7 @@ def test_resolver_budget_is_bounded_deterministic_and_explicit_wins(tmp_path: Pa
         )
 
 
-def test_projection_planner_avoids_compatibility_duplicates_or_fails_closed(tmp_path: Path) -> None:
+def test_projection_planner_shares_agents_root_for_codex_and_cursor(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _make_repo(root, {"README.md": "repo\n"})
     registry = tmp_path / "registry"
@@ -505,41 +511,18 @@ def test_projection_planner_avoids_compatibility_duplicates_or_fails_closed(tmp_
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("shared",),
     )
-    claude = SkillProjectionSurface(
-        profile="claude-code",
-        target_root=PurePosixPath(".claude/skills"),
-        visible_roots=(PurePosixPath(".claude/skills"),),
-    )
-    codex = SkillProjectionSurface(
-        profile="codex",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(PurePosixPath(".agents/skills"),),
-    )
-    cursor = SkillProjectionSurface(
-        profile="cursor",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(
-            PurePosixPath(".agents/skills"),
-            PurePosixPath(".cursor/skills"),
-            PurePosixPath(".claude/skills"),
-            PurePosixPath(".codex/skills"),
-        ),
-    )
+    cursor = cursor_skill_projection_surface()
+    codex = codex_skill_projection_surface()
 
-    claude_cursor = plan_skill_projection(root, resolved, (claude, cursor))
-    codex_cursor = plan_skill_projection(root, resolved, (codex, cursor))
+    plan = plan_skill_projection(root, resolved, (codex, cursor))
 
-    assert tuple(target.relative_root for target in claude_cursor.targets) == (
-        PurePosixPath(".claude/skills"),
-    )
-    assert tuple(target.relative_root for target in codex_cursor.targets) == (
+    assert tuple(target.relative_root for target in plan.targets) == (
         PurePosixPath(".agents/skills"),
     )
-    with pytest.raises(SkillProjectionCollisionError, match="duplicate-free"):
-        plan_skill_projection(root, resolved, (claude, codex, cursor))
+    assert PurePosixPath(".claude/skills") in cursor.visible_roots
 
 
-def test_projection_reconciles_stale_compatibility_roots_and_refuses_user_duplicates(
+def test_projection_reconciles_leftover_claude_skills_visible_to_cursor(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "repo"
@@ -551,45 +534,36 @@ def test_projection_reconciles_stale_compatibility_roots_and_refuses_user_duplic
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("shared",),
     )
-    claude = SkillProjectionSurface(
-        profile="claude-code",
-        target_root=PurePosixPath(".claude/skills"),
-        visible_roots=(PurePosixPath(".claude/skills"),),
-    )
-    codex = SkillProjectionSurface(
-        profile="codex",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(PurePosixPath(".agents/skills"),),
-    )
-    cursor = SkillProjectionSurface(
-        profile="cursor",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(
-            PurePosixPath(".agents/skills"),
-            PurePosixPath(".cursor/skills"),
-            PurePosixPath(".claude/skills"),
-            PurePosixPath(".codex/skills"),
-        ),
+    cursor = cursor_skill_projection_surface()
+
+    leftover = root / ".claude" / "skills" / "shared"
+    leftover.mkdir(parents=True)
+    (leftover / "SKILL.md").write_text("# leftover\n", encoding="utf-8")
+    (leftover / SKILL_OWNERSHIP_MARKER_NAME).write_text(
+        json.dumps(
+            {"content_sha256": "0" * 64, "skill_id": "shared", "version": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
-    apply_skill_projection(plan_skill_projection(root, resolved, (codex, cursor)))
-    assert (root / ".agents" / "skills" / "shared").is_dir()
-
-    changed = apply_skill_projection(plan_skill_projection(root, resolved, (claude, cursor)))
+    changed = apply_skill_projection(plan_skill_projection(root, resolved, (cursor,)))
 
     assert changed.materialized == 1
     assert changed.removed == 1
-    assert not (root / ".agents" / "skills" / "shared").exists()
-    assert (root / ".claude" / "skills" / "shared").is_dir()
+    assert not leftover.exists()
+    assert (root / ".agents" / "skills" / "shared").is_dir()
 
-    apply_skill_projection(plan_skill_projection(root, (), (claude, cursor)))
-    user_duplicate = root / ".agents" / "skills" / "shared"
+    apply_skill_projection(plan_skill_projection(root, (), (cursor,)))
+    user_duplicate = root / ".claude" / "skills" / "shared"
     user_duplicate.mkdir(parents=True)
     (user_duplicate / "SKILL.md").write_text("# user duplicate\n", encoding="utf-8")
     with pytest.raises(SkillProjectionCollisionError, match="duplicate Harness projection"):
-        apply_skill_projection(plan_skill_projection(root, resolved, (claude, cursor)))
+        apply_skill_projection(plan_skill_projection(root, resolved, (cursor,)))
     assert (user_duplicate / "SKILL.md").read_text(encoding="utf-8") == "# user duplicate\n"
-    assert not (root / ".claude" / "skills" / "shared").exists()
+    assert not (root / ".agents" / "skills" / "shared").exists()
 
 
 def test_projection_inspection_honors_expired_deadline_before_git_or_mutation(
@@ -597,13 +571,13 @@ def test_projection_inspection_honors_expired_deadline_before_git_or_mutation(
 ) -> None:
     root = tmp_path / "repo"
     _make_repo(root, {"README.md": "repo\n"})
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, (), (surface,))
 
     with pytest.raises(SkillProjectionError, match="inspection deadline exceeded"):
         inspect_skill_projection(plan, deadline=0.0)
 
-    assert not (root / ".claude").exists()
+    assert not (root / ".agents").exists()
 
 
 def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> None:
@@ -630,13 +604,13 @@ def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> No
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
 
     first = apply_skill_projection(plan)
     second = apply_skill_projection(plan)
 
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     assert first.materialized == 1
     assert first.removed == 0
     assert first.exclude_changed is True
@@ -648,10 +622,10 @@ def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> No
     assert not (target / SKILL_METADATA_FILE_NAME).exists()
     assert (target / SKILL_OWNERSHIP_MARKER_NAME).is_file()
     assert (root / ".gitignore").read_bytes() == original_gitignore
-    assert _git(root, "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md").returncode == 0
+    assert _git(root, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
     assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == b""
 
-    user_skill = root / ".claude" / "skills" / "user-owned"
+    user_skill = root / ".agents" / "skills" / "user-owned"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("# user\n", encoding="utf-8")
     empty_plan = plan_skill_projection(root, (), (surface,))
@@ -676,7 +650,7 @@ def test_projection_rechecks_target_state_immediately_before_mutation(
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
     original_build = skills_module._build_projected_skill
 
@@ -692,7 +666,7 @@ def test_projection_rechecks_target_state_immediately_before_mutation(
     with pytest.raises(SkillProjectionCollisionError, match="changed before mutation"):
         apply_skill_projection(plan)
 
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "# late user\n"
     assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
 
@@ -709,9 +683,9 @@ def test_projection_rollback_does_not_overwrite_concurrent_target_change(
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
 
     def fail_after_concurrent_change(path: Path, original: bytes, updated: bytes) -> None:
         del path, original, updated
@@ -743,7 +717,7 @@ def test_projection_uses_git_path_info_exclude_for_linked_worktree(tmp_path: Pat
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(worktree, resolved, (surface,))
     raw_exclude = _git(worktree, "rev-parse", "--git-path", "info/exclude").stdout.decode().strip()
     exclude_path = Path(raw_exclude)
@@ -753,7 +727,7 @@ def test_projection_uses_git_path_info_exclude_for_linked_worktree(tmp_path: Pat
 
     apply_skill_projection(plan)
 
-    assert _git(worktree, "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md").returncode == 0
+    assert _git(worktree, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
     assert (worktree / ".git").is_file()
     apply_skill_projection(plan_skill_projection(worktree, (), (surface,)))
     assert exclude_path.read_bytes() == original
@@ -770,9 +744,9 @@ def test_projection_refuses_user_owned_or_tracked_target_before_mutation(tmp_pat
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
-    user_target = root / ".claude" / "skills" / "fastapi"
+    user_target = root / ".agents" / "skills" / "fastapi"
     user_target.mkdir(parents=True)
     (user_target / "SKILL.md").write_text("# user\n", encoding="utf-8")
 
@@ -780,10 +754,10 @@ def test_projection_refuses_user_owned_or_tracked_target_before_mutation(tmp_pat
         apply_skill_projection(plan)
     assert (user_target / "SKILL.md").read_text(encoding="utf-8") == "# user\n"
 
-    shutil.rmtree(root / ".claude")
+    shutil.rmtree(root / ".agents")
     user_target.mkdir(parents=True)
     (user_target / "SKILL.md").write_text("# tracked\n", encoding="utf-8")
-    _git(root, "add", "-f", ".claude/skills/fastapi/SKILL.md")
+    _git(root, "add", "-f", ".agents/skills/fastapi/SKILL.md")
     _git(
         root,
         "-c",

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-26
 - **Deciders:** Repository architecture baseline
+- **Later amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code as a Harness host. This ADR remains the historical Linux Claude installation contract.
 
 ## Context
 

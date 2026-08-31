@@ -73,3 +73,19 @@ def test_host_integration_state_refuses_unknown_version(tmp_path: Path) -> None:
 def test_host_integration_state_refuses_unknown_profile(tmp_path: Path) -> None:
     with pytest.raises(HostIntegrationStateError, match="unsupported Harness host profile"):
         add_host_profiles(_paths(tmp_path), ("antigravity-ide",))
+
+
+def test_host_integration_state_strips_retired_claude_code(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    path = host_integration_state_path(paths)
+    path.parent.mkdir(parents=True, mode=0o700)
+    path.write_text(
+        json.dumps({"version": 1, "profiles": ["claude-code", "codex", "cursor"]}) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(path, 0o600)
+
+    state = load_host_integration_state(paths)
+
+    assert state.profiles == frozenset({"codex", "cursor"})
+    assert not state.includes("claude-code")

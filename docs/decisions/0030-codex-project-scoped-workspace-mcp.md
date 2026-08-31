@@ -2,6 +2,9 @@
 
 > **Amended by ADR-0037:** Codex now uses authenticated daemon-owned Streamable HTTP. The stdio
 > launch details below remain historical context and migration input, not current runtime behavior.
+>
+> **Amended by ADR-0039:** Claude Code is no longer a supported Harness host. `--host all` is the
+> Codex+Cursor pair. Decision point 8's Claude pairing is historical.
 
 - **Status:** Accepted
 - **Date:** 2026-08-28

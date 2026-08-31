@@ -84,7 +84,7 @@ _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "allowed.\n"
 )
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness is required for repository work. `project_status` must be the first repository "
     "action at the start of every Codex task. Before running any shell command, reading or "
     "searching repository files, inspecting with a browser, or making changes, locate the "
@@ -98,9 +98,25 @@ CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "checkpoint progress. Native search is allowed only after the initial status call.\n"
 )
 
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness is required for repository work. `project_status` must be the first repository "
+    "action at the start of every Codex task. Before running any shell command, reading or "
+    "searching repository files, inspecting with a browser, or making changes, locate the "
+    "configured Harness MCP tools—even when they are deferred or omitted from the initial visible "
+    "tool list—and call `project_status`. Tool discovery needed to locate and call Harness is the "
+    "only action allowed before `project_status`; do not treat initial omission as unavailability. "
+    "After Harness config changes, use a fully restarted Codex client and new task; existing "
+    "instruction snapshots do not refresh.\n\n"
+    "After successful `project_status`, use `project_search`, expand selected refs with "
+    "`project_context`, then use native tools. Start or resume a Harness Task before diagnosis or "
+    "edits; on schema error retry, never skip. Checkpoint each logical stage. Native search is "
+    "allowed only after the initial status call. Phase shift: complete/wait then new Task.\n"
+)
+
 _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(

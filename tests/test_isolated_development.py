@@ -401,10 +401,7 @@ def test_checkout_cursor_overlay_shadows_global_harness_with_scripts_dev() -> No
     assert is_isolated_development_overlay_entry(entry)
     assert "harness" not in overlay["mcpServers"]
     assert find_isolated_development_root(REPO_ROOT) == REPO_ROOT
-    claude = json.loads((REPO_ROOT / ".mcp.json").read_text(encoding="utf-8"))
-    assert claude["mcpServers"]["harness"]["command"] == "./scripts/dogfood"
-    assert claude["mcpServers"]["harness"]["args"] == ["mcp"]
-    assert claude["mcpServers"]["harness"]["type"] == "stdio"
+    assert not (REPO_ROOT / ".mcp.json").exists()
 
 
 def test_checkout_codex_config_is_generated_not_tracked_stdio() -> None:
@@ -439,6 +436,10 @@ def test_checkout_agent_instructions_require_harness_before_native_tools() -> No
     assert "deferred or omitted from the initial visible tool list" in bootstrap
     assert "only allowed\n  pre-status action" in bootstrap
     assert "After status, use `project_search`" in bootstrap
+    assert "before diagnosis or edits" in bootstrap
+    assert "read the tool schema and retry" in bootstrap
+    assert "Checkpoint each logical stage" in bootstrap
+    assert "before changes and checkpoint meaningful" not in bootstrap
 
 
 def _dogfood_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
@@ -1011,7 +1012,10 @@ def test_install_global_help_does_not_require_uv() -> None:
 def test_install_global_rejects_unknown_host() -> None:
     result = _run([str(INSTALL_GLOBAL_SCRIPT), "--host", "vscode"], cwd=REPO_ROOT)
     assert result.returncode == 1
-    assert "cursor, claude-code, or codex" in result.stderr
+    assert "cursor or codex" in result.stderr
+    retired = _run([str(INSTALL_GLOBAL_SCRIPT), "--host", "claude-code"], cwd=REPO_ROOT)
+    assert retired.returncode == 1
+    assert "cursor or codex" in retired.stderr
 
 
 def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: Path) -> None:
@@ -1534,7 +1538,8 @@ def test_isolated_doctor_ignores_user_global_cursor_claude_and_skills(tmp_path: 
     )
     names = {check.name: check.detail for check in report.checks}
     assert "user-global Cursor MCP is not inspected" in names["Cursor MCP registration"]
-    assert "user-global Claude MCP is not inspected" in names["Claude Code MCP registration"]
+    assert "Claude Code MCP registration" not in names
+    assert "user-global Claude MCP" not in " ".join(names.values())
     assert str(local_skills) in names["Skill registry"]
     assert str(home / ".harness" / "skills") not in names["Skill registry"]
     assert all(check.severity is not doctor.DoctorSeverity.FAIL for check in report.checks)

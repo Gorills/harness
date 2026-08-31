@@ -99,6 +99,14 @@ or product/mobile reference, implement from semantic tokens and complete states,
 visual inspection and at most one confirmation pass. Named anti-patterns reject unjustified model
 defaults without turning valid brand choices into universal bans.
 
+## 2026-08-31 amendment: Task ritual is diagnosis-inclusive
+
+ADR-0038 supersedes the specification §71 reading that a Harness Task starts only before
+meaningful changes. Compact models treated diagnosis, feed inspection, and other read-only work as
+exempt, then skipped retry after a schema error. Always-on instructions and unknown-argument
+errors now require Task start/resume before diagnosis, schema retry without echoing unknown field
+names, and a checkpoint after each logical stage. Compliance remains host acceptance evidence.
+
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
 - High-precision facets prevent ambiguous ecosystem dependencies from selecting the wrong surface

@@ -354,14 +354,15 @@ def test_isolated_runtime_uses_one_explicit_compatible_skill_profile_set(
         database,
         environment={"HARNESS_DEV_ROOT": str(tmp_path)},
     ) == ("codex", "cursor")
-    assert active_skill_profiles_for_runtime(
-        database,
-        environment={
-            "HARNESS_DEV_ROOT": str(tmp_path),
-            "HARNESS_DEV_SKILL_PROFILES": "claude-code",
-        },
-    ) == ("claude-code",)
-    with pytest.raises(SkillRuntimeError, match="duplicate-free"):
+    with pytest.raises(SkillRuntimeError, match="unsupported host skill profile"):
+        active_skill_profiles_for_runtime(
+            database,
+            environment={
+                "HARNESS_DEV_ROOT": str(tmp_path),
+                "HARNESS_DEV_SKILL_PROFILES": "claude-code",
+            },
+        )
+    with pytest.raises(SkillRuntimeError, match="unsupported host skill profile"):
         active_skill_profiles_for_runtime(
             database,
             environment={

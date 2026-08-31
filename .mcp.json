@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "harness": {
-      "type": "stdio",
-      "command": "./scripts/dogfood",
-      "args": ["mcp"]
-    }
-  }
-}

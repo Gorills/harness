@@ -8,6 +8,7 @@
 - **Codex amendment:** [ADR-0030](0030-codex-project-scoped-workspace-mcp.md) adds Codex and makes install-all incompatible while preserving uninstall-all.
 - **Source-dogfood amendment:** [ADR-0036](0036-source-checkout-global-dogfood.md) replaces the direct checkout MCP launch with an isolated-by-default router and one explicit tool-installed index-only route.
 - **Unavailable-root amendment:** 2026-08-30. Cursor/Codex install and uninstall skip registered Workspace roots that cannot be resolved as directories. That is the same unavailable class doctor already WARNs. Live Workspaces remain fail-closed for ownership and tracked-config collisions. Registry rows are not deleted; `harness doctor` still names them.
+- **Host-retirement amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code. Supported hosts are Codex and Cursor; omitted `--host` installs Cursor; `--host all` installs that pair.
 
 ## Context
 

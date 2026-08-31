@@ -1,13 +1,13 @@
 # Linux local release and acceptance
 
-The primary Linux local close-out is Cursor IDE/CLI in Normal mode (`harness install --host cursor`). Claude Code and local Codex project MCP are implemented; omitted `--host` still selects Claude. Codex/Cursor proprietary-host acceptance remains open.
+The primary Linux local close-out is Cursor IDE/CLI in Normal mode (`harness install --host cursor`). Local Codex project MCP is also implemented; omitted `--host` selects Cursor. `--host all` installs the Codex+Cursor pair. Claude Code is no longer a supported Harness host ([ADR-0039](decisions/0039-retire-claude-code-host.md)). Codex/Cursor proprietary-host acceptance remains open.
 
 ## Prerequisites
 
 - Linux with a current Git executable.
 - Python 3.13.
 - `uv` 0.12.5 for the repository installation path (`scripts/dev` bootstraps `.harness/tools/uv` in a checkout). System `uv` 0.12.1 cannot `uv tool install` this repository.
-- Claude Code CLI on `PATH` for Claude install/uninstall; Codex CLI on `PATH` for Codex install (cleanup does not require it). Cursor local config does not require a Cursor executable for ownership checks.
+- Codex CLI on `PATH` for Codex install (cleanup does not require it). Cursor local config does not require a Cursor executable for ownership checks.
 - SQLite in the selected Python runtime with FTS5.
 
 ## Install from this repository
@@ -20,7 +20,7 @@ harness install --host cursor
 harness doctor
 ```
 
-Claude Code remains available as `harness install`; Codex is `harness install --host codex`. Install compatible pairs sequentially. Install-all is rejected because Claude + Codex + Cursor cannot share a duplicate-free skill graph; uninstall-all remains supported.
+Omitted `--host` installs Cursor. Codex is `harness install --host codex`. `--host all` installs both. Claude Code is not a supported host ([ADR-0039](decisions/0039-retire-claude-code-host.md)).
 
 Register and index each Git worktree explicitly:
 
@@ -34,7 +34,7 @@ harness status
 
 Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. When `agent` is installed, `harness install --host cursor` and `harness scan` run `agent mcp enable harness` and verify `agent mcp list-tools harness`. Registered Workspace roots that cannot be resolved as directories are skipped and named; they do not fail install or uninstall. Missing `agent` prints `cd <workspace> && agent mcp enable harness` plus a full Cursor quit/reopen (window reload is not enough). Leftover `user-harness` is not Workspace identity and is removed. Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
 
-`harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Claude and Cursor therefore share one compatible generated skill projection instead of receiving duplicate copies through Cursor compatibility roots. `harness skills list` shows the canonical skill registry without changing projects.
+`harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Codex and Cursor therefore share one generated `.agents/skills` projection. `harness skills list` shows the canonical skill registry without changing projects.
 
 When Codex intent is active, scan creates/updates only the ignored marker-owned project
 `.codex/config.toml`, with the authenticated daemon Streamable HTTP URL and exact absolute
@@ -57,9 +57,9 @@ harness doctor
 agent mcp list
 ```
 
-From a Harness source checkout the same refresh is `make install-global`, `make install-global HOST=claude-code`, or `make install-global HOST=codex`. Run the helper once per compatible active profile. It leaves isolated-development overlay environment first and uses `--force --reinstall` because the development version stays `0.1.0.dev0`. Do not run it through `scripts/dev`.
+From a Harness source checkout the same refresh is `make install-global`, `make install-global HOST=cursor`, `make install-global HOST=codex`, or `make install-global HOST=all`. Run the helper once per compatible active profile. It leaves isolated-development overlay environment first and uses `--force --reinstall` because the development version stays `0.1.0.dev0`. Do not run it through `scripts/dev`.
 
-The post-upgrade profile install is required. It verifies the frozen daemon identity before updating registrations and every owned project config to the selected daemon endpoint and capability. Run each compatible active profile explicitly; do not use install-all. Installed-wheel smoke proves Codex refresh across runtime upgrades and independent/linked Workspaces.
+The post-upgrade profile install is required. It verifies the frozen daemon identity before updating registrations and every owned project config to the selected daemon endpoint and capability. `--host all` is valid for the Codex+Cursor pair. Installed-wheel smoke proves Cursor/Codex refresh across runtime upgrades and independent/linked Workspaces.
 
 ## Uninstall
 
@@ -67,7 +67,7 @@ The post-upgrade profile install is required. It verifies the frozen daemon iden
 harness uninstall --host cursor
 ```
 
-The no-argument form preserves Claude-only behavior. Select any profile or every owned profile explicitly:
+The no-argument form uninstalls Cursor. Select any profile or every owned profile explicitly:
 
 ```bash
 harness uninstall
@@ -86,7 +86,7 @@ Purge is refused while another supported host remains active and is fail-closed 
 
 Bare `harness doctor` is read-only and operational. `OK` means the inspected invariant holds, `WARN` means absent/lazy/stale-but-non-destructive state that may need attention, and `FAIL` means an integrity, ownership, compatibility, or runtime mismatch. Any `FAIL` makes the command exit nonzero; warnings alone do not. Project/index/skill checks use one SQLite read snapshot. A quiescent WAL database is opened immutably so doctor does not create `-wal`/`-shm` files merely by inspecting it; an existing live WAL is still read through SQLite's normal read-only WAL path so uncheckpointed durable frames remain visible.
 
-For Cursor, doctor reports leftover/foreign/absent global `user-harness` separately from on-disk project configs and from Cursor approval/tool catalog. A leftover owned or foreign global `harness` is FAIL. Missing `agent` is WARN with `cd <workspace> && agent mcp enable harness`, not a blanket OK. When `agent` is present, a project without the exact five tools is FAIL for that Workspace. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect with `agent mcp list-tools harness`. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. An absent Claude MCP registration is a warning, not a Cursor failure.
+For Cursor, doctor reports leftover/foreign/absent global `user-harness` separately from on-disk project configs and from Cursor approval/tool catalog. A leftover owned or foreign global `harness` is FAIL. Missing `agent` is WARN with `cd <workspace> && agent mcp enable harness`, not a blanket OK. When `agent` is present, a project without the exact five tools is FAIL for that Workspace. After correcting a Cursor MCP problem, run `harness install --host cursor`, fully quit/reopen Cursor, then inspect with `agent mcp list-tools harness`. Cursor's MCP Logs in the Output panel are the next host-side diagnostic when the server still does not start. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor MCP or `~/.harness/skills`.
 
 For Codex, doctor reports CLI discovery, Harness-owned intent, and each registered Workspace project
 config separately, including expected/configured HTTP endpoint, absolute root header, and ownership/preflight
@@ -98,7 +98,7 @@ Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and 
 
 ## Automated release gate
 
-`scripts/quality.py` remains the exact-head repository gate. Its installed-wheel smoke installs Codex against an existing Cursor Hidden Project without changing `AGENTS.md`, restores Normal, refreshes owned Codex configs across Python environments and independent/linked Workspaces, and verifies Claude → Codex → Cursor Task continuity, doctor, partial cleanup, Cursor lifecycle, uninstall-all, and purge.
+`scripts/quality.py` remains the exact-head repository gate. Its installed-wheel smoke installs Codex against an existing Cursor Hidden Project without changing `AGENTS.md`, restores Normal, refreshes owned Codex configs across Python environments and independent/linked Workspaces, and verifies Cursor → Codex Task continuity, doctor, partial cleanup, Cursor lifecycle, uninstall-all, and purge.
 
 ## Explicitly authorized Cursor refresh
 
@@ -108,7 +108,7 @@ Harness/Codex/Workspace state. Live activation still requires
 `make install-global HOST=<profile>`. After this project-only Cursor change lands, an operator
 should:
 
-1. Run `make install-global` from the Harness checkout; repeat with `HOST=claude-code` or `HOST=codex` for each compatible active profile.
+1. Run `make install-global` from the Harness checkout; repeat with `HOST=codex` or `HOST=all` for each compatible active profile.
 2. Confirm leftover `~/.cursor/mcp.json` `mcpServers.harness` is absent.
 3. Fully quit and reopen Cursor.
 4. In two working repositories at once (for example Alia and Mangazeya), confirm `agent mcp list-tools harness` shows the five tools and that `project_status` roots/tasks are distinct.

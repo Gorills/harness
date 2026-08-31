@@ -25,7 +25,6 @@ from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
     IntegrationChange,
-    discover_claude_code_adapter,
 )
 from harness.host_integration_state import load_host_integration_state
 from harness.installation import InstallationError, install_harness, uninstall_harness
@@ -566,16 +565,6 @@ def _run_scan(
         return 0
 
     active_profiles: list[str] = []
-    claude = discover_claude_code_adapter()
-    if claude is not None:
-        try:
-            registration_state = claude.registration_state()
-        except HostIntegrationError as exc:
-            return _scan_failure(
-                f"index reconciliation succeeded but Claude integration could not be inspected: {exc}"
-            )
-        if registration_state is HostRegistrationState.CURRENT:
-            active_profiles.append(claude.profile)
 
     try:
         integration_state = load_host_integration_state(default_runtime_paths())
@@ -898,15 +887,14 @@ def harness_main() -> int:
         help="install a supported local Harness integration",
         description=(
             "Prepare the canonical local daemon and idempotently register Harness with one local "
-            "host profile. The explicit 'all' selection is rejected while the three-profile "
-            "skill visibility graph cannot be projected without duplicates."
+            "host profile. The explicit 'all' selection installs Codex and Cursor."
         ),
     )
     install_parser.add_argument(
         "--host",
-        choices=("claude-code", "codex", "cursor", "all"),
-        default="claude-code",
-        help="host integration to install (default: claude-code)",
+        choices=("codex", "cursor", "all"),
+        default="cursor",
+        help="host integration to install (default: cursor)",
     )
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -918,9 +906,9 @@ def harness_main() -> int:
     )
     uninstall_parser.add_argument(
         "--host",
-        choices=("claude-code", "codex", "cursor", "all"),
-        default="claude-code",
-        help="host integration to remove (default: claude-code)",
+        choices=("codex", "cursor", "all"),
+        default="cursor",
+        help="host integration to remove (default: cursor)",
     )
     uninstall_parser.add_argument(
         "--purge",

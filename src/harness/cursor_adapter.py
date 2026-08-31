@@ -957,8 +957,8 @@ def production_mcp_isolated_checkout_root(
     that resolves to the overlay. ``WORKSPACE_FOLDER_PATHS`` is not an identity
     alternative and cannot keep tools attached to another window. Missing or
     literal ``${workspaceFolder}`` is the missing-root path, not overlay refuse.
-    Claude Code still consults ``CLAUDE_PROJECT_DIR``, then process cwd when that
-    hint is absent or does not resolve to an existing path. Cwd is never Workspace
+    Claude Code leftovers still consult ``CLAUDE_PROJECT_DIR`` so a retired host
+    process against this checkout lists no tools. Cwd is never Workspace
     identity.
     """
     values = os.environ if environment is None else environment

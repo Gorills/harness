@@ -67,9 +67,8 @@ scripts/dev harness dashboard
 
 The first isolated `scan` also reconciles the 12 built-in skills into the checkout-local registry
 and projects only the relevant subset into `.agents/skills`. Codex and Cursor share that root, so
-the default development profile set is `codex,cursor`. To test Claude project skills instead, set
-`HARNESS_DEV_SKILL_PROFILES=claude-code` before invoking `scripts/dev`; the incompatible
-three-profile graph remains refused. Generated skills are Harness-owned and excluded through the
+the default development profile set is `codex,cursor`. Claude Code is not a supported host.
+Generated skills are Harness-owned and excluded through the
 checkout's Git-local `info/exclude`, not `.gitignore`.
 
 Foreground daemon (optional; not required after autostart works):
@@ -182,7 +181,10 @@ make install-global HOST=codex
 make doctor-global
 ```
 
-`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=claude-code` and `HOST=codex` select those profiles; explicitly authorized agents must always name one profile. Codex reconciliation writes the daemon HTTP URL, private bearer capability, and exact Workspace root into the ignored project config. `scripts/install-global --package-only` is reserved for the acceptance target and never runs host lifecycle or doctor. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=codex` and
+`HOST=cursor,codex` select those profiles; explicitly authorized agents must always name the
+profile set. Codex reconciliation writes the daemon HTTP URL, private bearer capability, and exact
+Workspace root into the ignored project config. `scripts/install-global --package-only` is reserved for the acceptance target and never runs host lifecycle or doctor. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
 
 This repository's tracked `.cursor/mcp.json` is the intended source-checkout overlay
 (`harness-dev` launching `scripts/dogfood mcp`). Production Cursor MCP is project-only and never
@@ -221,16 +223,15 @@ Those flags still bypass default path selection. Isolated development normally d
 
 ## MCP
 
-This checkout commits Cursor and Claude stdio overlays. Codex uses the generated production-shaped HTTP config:
+This checkout commits a Cursor stdio overlay. Codex uses the generated production-shaped HTTP config:
 
 - Cursor: `.cursor/mcp.json` names `harness-dev` and launches `${workspaceFolder}/scripts/dogfood mcp` with `HARNESS_WORKSPACE_ROOT=${workspaceFolder}`.
-- Claude Code: `.mcp.json` still names `harness` and launches `./scripts/dogfood mcp`.
 - Codex: `.codex/config.toml` is generated locally with the daemon HTTP URL, bearer capability,
   and exact absolute `X-Harness-Workspace-Root`.
 
-Production install/scan/uninstall leaves the tracked Cursor and Claude source-checkout overlays alone and reconciles the ignored Codex HTTP config. Cursor overlay detection matches that launch under `harness-dev` or the previous `harness` name; extra host JSON keys do not drop isolation. After changing either host config, fully restart the affected Codex or Cursor client.
+Production install/scan/uninstall leaves the tracked Cursor source-checkout overlay alone and reconciles the ignored Codex HTTP config. Cursor overlay detection matches that launch under `harness-dev` or the previous `harness` name; extra host JSON keys do not drop isolation. After changing either host config, fully restart the affected Codex or Cursor client.
 
-Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP does not use it as Workspace identity. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor/Claude MCP or `~/.harness/skills`. A production process whose interpolated overlay root is this checkout lists no tools even when `WORKSPACE_FOLDER_PATHS` names a working repository. Claude `CLAUDE_PROJECT_DIR` overlay refuse is unchanged. Cursor-profile overlay refuse does not use process cwd. Codex identity is the authenticated HTTP request header and never process cwd.
+Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNESS_WORKSPACE_ROOT`. Cursor IDE still injects `WORKSPACE_FOLDER_PATHS` on that process; production MCP does not use it as Workspace identity. Isolated `scripts/dev harness doctor` does not inspect user-global Cursor MCP or `~/.harness/skills`. A production process whose interpolated overlay root is this checkout lists no tools even when `WORKSPACE_FOLDER_PATHS` names a working repository. A leftover `HARNESS_HOST_PROFILE=claude-code` process still refuses tools when `CLAUDE_PROJECT_DIR` is this checkout. Cursor-profile overlay refuse does not use process cwd. Codex identity is the authenticated HTTP request header and never process cwd.
 
 In the default mode the router inherits `scripts/dev` XDG paths, so agents in this repository talk
 to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated

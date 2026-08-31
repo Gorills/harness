@@ -26,7 +26,7 @@ usage() {
 Refresh the user-global Harness install from this checkout.
 
 Usage:
-  scripts/install-global [--host cursor|claude-code|codex[,...]] [--no-doctor]
+  scripts/install-global [--host cursor|codex[,...]] [--no-doctor]
   scripts/install-global --package-only
   scripts/install-global --doctor-only
   scripts/install-global --dry-run [--host ...]
@@ -152,7 +152,7 @@ append_hosts() {
     local IFS=,
     for host in $value; do
         if [[ -z "$host" ]]; then
-            echo "scripts/install-global: --host requires cursor, claude-code, or codex" >&2
+            echo "scripts/install-global: --host requires cursor or codex" >&2
             return 1
         fi
         HOSTS+=("$host")
@@ -163,9 +163,9 @@ validate_hosts() {
     local host
     for host in "${HOSTS[@]}"; do
         case "$host" in
-            cursor | claude-code | codex) ;;
+            cursor | codex) ;;
             *)
-                echo "scripts/install-global: --host must be cursor, claude-code, or codex (got: $host)" >&2
+                echo "scripts/install-global: --host must be cursor or codex (got: $host)" >&2
                 return 1
                 ;;
         esac
@@ -228,7 +228,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --host)
             if [[ $# -lt 2 ]]; then
-                echo "scripts/install-global: --host requires cursor, claude-code, or codex" >&2
+                echo "scripts/install-global: --host requires cursor or codex" >&2
                 exit 1
             fi
             append_hosts "$2" || exit 1

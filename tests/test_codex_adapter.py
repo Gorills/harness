@@ -126,6 +126,10 @@ def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> N
     assert "only action allowed before `project_status`" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "Before broad repository exploration" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "allowed only after the initial status call" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "before diagnosis or" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "never skip" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "before changes and checkpoint progress" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
 
 
 def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: Path) -> None:
@@ -215,6 +219,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
     [
         codex_module._LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])

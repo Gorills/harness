@@ -15,7 +15,8 @@ from harness.runtime_paths import RuntimePathError, RuntimePaths, ensure_private
 
 HOST_INTEGRATION_STATE_VERSION = 1
 HOST_INTEGRATION_STATE_FILENAME = "host-integrations.json"
-SUPPORTED_HOST_PROFILES = frozenset({"claude-code", "codex", "cursor"})
+SUPPORTED_HOST_PROFILES = frozenset({"codex", "cursor"})
+RETIRED_HOST_PROFILES = frozenset({"claude-code"})
 _WRITE_MODE = 0o600
 _TEMPORARY_PREFIX = ".harness-host-integrations-"
 
@@ -131,12 +132,17 @@ def _parse_state(value: object, path: Path) -> HostIntegrationState:
         raise HostIntegrationStateError(
             f"Harness host integration state profiles must be a string array: {path}"
         )
-    profiles = _require_supported_profiles(observed)
-    if len(observed) != len(profiles):
+    unique = frozenset(observed)
+    if len(observed) != len(unique):
         raise HostIntegrationStateError(
             f"Harness host integration state profiles must be unique: {path}"
         )
-    return HostIntegrationState(profiles=profiles)
+    unknown = unique - SUPPORTED_HOST_PROFILES - RETIRED_HOST_PROFILES
+    if unknown:
+        raise HostIntegrationStateError(
+            "unsupported Harness host profile in integration state: " + ", ".join(sorted(unknown))
+        )
+    return HostIntegrationState(profiles=unique & SUPPORTED_HOST_PROFILES)
 
 
 def _encode_state(state: HostIntegrationState) -> bytes:

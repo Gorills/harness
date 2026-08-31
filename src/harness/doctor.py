@@ -26,11 +26,7 @@ from harness.git_workspace import (
     inspect_git_workspace_runtime_identity,
 )
 from harness.hidden_projection import HiddenProjectionError, inspect_hidden_workspace
-from harness.host_adapters import (
-    HostIntegrationError,
-    HostRegistrationState,
-    discover_claude_code_adapter,
-)
+from harness.host_adapters import HostIntegrationError, HostRegistrationState
 from harness.host_integration_state import load_host_integration_state
 from harness.index import (
     IndexingError,
@@ -216,28 +212,12 @@ def run_system_doctor(
     )
 
     isolated_development = bool(values.get("HARNESS_DEV_ROOT"))
-    claude_registration_state: HostRegistrationState | None = None
     codex_host_active = False
     cursor_registration_state: HostRegistrationState | None = None
     cursor_host_active = False
     inspect_cursor_runtime = False
     cursor_agent = None
     if isolated_development:
-        checks.append(
-            _check(
-                "Claude Code adapter",
-                DoctorSeverity.WARN,
-                "isolated development; user-global Claude MCP is not inspected",
-            )
-        )
-        checks.append(
-            _check(
-                "Claude Code MCP registration",
-                DoctorSeverity.WARN,
-                "isolated development; user-global Claude MCP is not inspected",
-            )
-        )
-        claude_registration_state = None
         checks.append(
             _check(
                 "Codex adapter",
@@ -278,73 +258,6 @@ def run_system_doctor(
         cursor_agent = None
         inspect_cursor_runtime = False
     else:
-        adapter = discover_claude_code_adapter(
-            environment=environment,
-            python_executable=python_executable,
-        )
-        if adapter is None:
-            checks.append(
-                _check("Claude Code adapter", DoctorSeverity.WARN, "Claude CLI not found on PATH")
-            )
-            checks.append(
-                _check(
-                    "Claude Code MCP registration",
-                    DoctorSeverity.WARN,
-                    "not inspectable without Claude CLI",
-                )
-            )
-        else:
-            checks.append(
-                _check(
-                    "Claude Code adapter", DoctorSeverity.OK, f"discovered at {adapter.executable}"
-                )
-            )
-            try:
-                claude_registration_state = adapter.registration_state()
-            except HostIntegrationError as exc:
-                checks.append(
-                    _check(
-                        "Claude Code MCP registration",
-                        DoctorSeverity.FAIL,
-                        _bounded_detail(exc),
-                    )
-                )
-            else:
-                if claude_registration_state is HostRegistrationState.CURRENT:
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.OK,
-                            "current Harness user registration",
-                        )
-                    )
-                elif claude_registration_state is HostRegistrationState.ABSENT:
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.WARN,
-                            "Harness registration absent",
-                        )
-                    )
-                elif claude_registration_state is HostRegistrationState.STALE_OWNED:
-                    stale_notes.append("stale Claude Harness MCP registration")
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.FAIL,
-                            "Harness-owned registration points at a different installed runtime",
-                        )
-                    )
-                else:
-                    stale_notes.append("Claude MCP name collision")
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.FAIL,
-                            "non-Harness user registration already owns the name 'harness'",
-                        )
-                    )
-
         codex_discovered = discover_codex_adapter(
             environment=environment,
             python_executable=python_executable,
@@ -584,10 +497,6 @@ def run_system_doctor(
         active_skill_profiles = tuple(
             profile
             for profile, selected in (
-                (
-                    "claude-code",
-                    claude_registration_state is HostRegistrationState.CURRENT,
-                ),
                 ("codex", codex_host_active),
                 ("cursor", cursor_host_active),
             )
