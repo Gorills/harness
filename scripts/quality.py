@@ -9,6 +9,17 @@ CHECKS: tuple[tuple[str, ...], ...] = (
     ("ruff", "check", "."),
     ("mypy",),
     ("pytest",),
+    (
+        sys.executable,
+        "scripts/benchmark_hot_paths.py",
+        "--files",
+        "100",
+        "--iterations",
+        "5",
+        "--warmup",
+        "1",
+        "--assert-counters",
+    ),
     (sys.executable, "scripts/smoke_wheel.py"),
 )
 
