@@ -5,7 +5,7 @@ import os
 import sqlite3
 import stat
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from queue import Empty, SimpleQueue
@@ -14,7 +14,14 @@ from time import monotonic
 
 from harness.git_workspace import GitWorkspaceError, _git_environment
 from harness.host_integration_state import HostIntegrationStateError
-from harness.index import IndexingError, scan_workspace
+from harness.index import (
+    MAX_INCREMENTAL_SCAN_PATHS,
+    IndexedFileRecord,
+    IndexingError,
+    list_indexed_files,
+    scan_workspace,
+    scan_workspace_paths,
+)
 from harness.registry import RegistryError, WorkspaceRecord, list_workspaces
 from harness.skill_runtime import (
     SkillRuntimeError,
@@ -35,13 +42,39 @@ class WorkspaceWatchError(RuntimeError):
     """Raised when a filesystem-change hint cannot be sampled safely."""
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceGitSnapshot:
+    """Bounded Git confirmation state sampled only after a cheap metadata invalidation."""
+
+    token: str
+    head: bytes
+    dirty_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceMetadataSnapshot:
+    """Subprocess-free global and bounded file-metadata watcher hints."""
+
+    global_token: str
+    file_token: str
+
+
 @dataclass(slots=True)
 class _WorkspaceWatchState:
     workspace: WorkspaceRecord
-    token: str | None
+    metadata_global_token: str | None
+    metadata_file_tokens: dict[int, str]
+    metadata_shard_count: int
+    next_metadata_shard: int
+    metadata_directories: tuple[str, ...]
+    git_snapshot: WorkspaceGitSnapshot | None
     pending_since: float | None
     last_reconciled_at: float
     retry_after: float
+    force_full_reconcile: bool
+
+
+WATCH_METADATA_FILE_SAMPLE_LIMIT = 128
 
 
 class WorkspaceWatcher:
@@ -120,6 +153,7 @@ class WorkspaceWatcher:
             if sampled_at - state.last_reconciled_at >= self._full_reconcile_seconds:
                 if state.pending_since is None:
                     state.pending_since = sampled_at
+                state.force_full_reconcile = True
 
             if state.pending_since is None:
                 continue
@@ -128,22 +162,39 @@ class WorkspaceWatcher:
             if sampled_at - state.pending_since < self._debounce_seconds:
                 continue
 
-            trigger_token = state.token
             if not self._scan_lock.acquire(blocking=False):
                 continue
             try:
                 try:
-                    scan_workspace(
-                        self._connection,
-                        workspace.workspace_id,
-                        deadline=monotonic() + self._scan_deadline_seconds,
+                    trigger_snapshot = read_workspace_change_snapshot(
+                        workspace,
+                        deadline=monotonic() + self._token_deadline_seconds,
                     )
+                    incremental_paths = _incremental_paths(
+                        state.git_snapshot,
+                        trigger_snapshot,
+                        force_full=state.force_full_reconcile,
+                    )
+                    scan_performed = incremental_paths is None or bool(incremental_paths)
+                    if incremental_paths is None:
+                        scan_workspace(
+                            self._connection,
+                            workspace.workspace_id,
+                            deadline=monotonic() + self._scan_deadline_seconds,
+                        )
+                    elif incremental_paths:
+                        scan_workspace_paths(
+                            self._connection,
+                            workspace.workspace_id,
+                            incremental_paths,
+                            deadline=monotonic() + self._scan_deadline_seconds,
+                        )
                 except _WATCH_RETRY_ERRORS:
                     state.retry_after = sampled_at + self._retry_seconds
                     return reconciled
 
                 try:
-                    if self._skill_profiles_provider is not None:
+                    if scan_performed and self._skill_profiles_provider is not None:
                         profiles = self._skill_profiles_provider()
                         if profiles:
                             reconcile_workspace_skills(
@@ -160,24 +211,30 @@ class WorkspaceWatcher:
             finally:
                 self._scan_lock.release()
 
-            reconciled += 1
-            state.last_reconciled_at = sampled_at
+            if scan_performed:
+                reconciled += 1
+                state.last_reconciled_at = sampled_at
             state.pending_since = None
             state.retry_after = 0.0
+            state.force_full_reconcile = False
             if stop_requested is not None and stop_requested():
                 return reconciled
             try:
-                post_token = read_workspace_change_token(
+                post_snapshot = read_workspace_change_snapshot(
                     workspace,
                     deadline=monotonic() + self._token_deadline_seconds,
                 )
+                self._reset_metadata_state(workspace, state)
             except WorkspaceWatchError:
-                state.token = None
+                state.metadata_global_token = None
+                state.metadata_file_tokens.clear()
+                state.git_snapshot = None
                 state.pending_since = sampled_at
                 state.retry_after = sampled_at + self._retry_seconds
+                state.force_full_reconcile = True
                 return reconciled
-            state.token = post_token
-            if trigger_token is None or post_token != trigger_token:
+            state.git_snapshot = post_snapshot
+            if post_snapshot.token != trigger_snapshot.token:
                 state.pending_since = sampled_at
             return reconciled
 
@@ -197,21 +254,37 @@ class WorkspaceWatcher:
             else:
                 state.pending_since = sampled_at
                 state.retry_after = 0.0
+                state.force_full_reconcile = True
 
     def _initial_state(self, workspace: WorkspaceRecord, sampled_at: float) -> _WorkspaceWatchState:
+        indexed_files = list_indexed_files(self._connection, workspace.workspace_id)
+        shard_count = _metadata_shard_count(len(indexed_files))
         try:
-            token = read_workspace_change_token(
-                workspace,
+            directories = list_workspace_metadata_directories(
+                workspace.workspace_root,
                 deadline=monotonic() + self._token_deadline_seconds,
             )
+            metadata = read_workspace_metadata_snapshot(
+                workspace,
+                _metadata_shard(indexed_files, 0),
+                deadline=monotonic() + self._token_deadline_seconds,
+                directory_paths=directories,
+            )
         except WorkspaceWatchError:
-            token = None
+            directories = ()
+            metadata = None
         return _WorkspaceWatchState(
             workspace=workspace,
-            token=token,
+            metadata_global_token=None if metadata is None else metadata.global_token,
+            metadata_file_tokens={} if metadata is None else {0: metadata.file_token},
+            metadata_shard_count=shard_count,
+            next_metadata_shard=0 if shard_count == 1 else 1,
+            metadata_directories=directories,
+            git_snapshot=None,
             pending_since=sampled_at,
             last_reconciled_at=sampled_at,
             retry_after=0.0,
+            force_full_reconcile=True,
         )
 
     def _sample_change(
@@ -220,26 +293,71 @@ class WorkspaceWatcher:
         state: _WorkspaceWatchState,
         sampled_at: float,
     ) -> None:
+        indexed_files = list_indexed_files(self._connection, workspace.workspace_id)
+        shard_count = _metadata_shard_count(len(indexed_files))
+        shard_index = state.next_metadata_shard % shard_count
         try:
-            token = read_workspace_change_token(
+            metadata = read_workspace_metadata_snapshot(
                 workspace,
+                _metadata_shard(indexed_files, shard_index),
                 deadline=monotonic() + self._token_deadline_seconds,
+                directory_paths=state.metadata_directories,
             )
         except WorkspaceWatchError:
-            state.token = None
+            state.metadata_global_token = None
+            state.metadata_file_tokens.clear()
             if state.pending_since is None:
                 state.pending_since = sampled_at
+            state.force_full_reconcile = True
             return
 
-        if state.token is None:
-            state.token = token
-            if state.pending_since is None:
-                state.pending_since = sampled_at
+        changed = (
+            state.metadata_global_token is not None
+            and metadata.global_token != state.metadata_global_token
+        )
+        if state.metadata_shard_count != shard_count:
+            state.metadata_file_tokens.clear()
+            state.metadata_shard_count = shard_count
+            changed = True
+        prior_file_token = state.metadata_file_tokens.get(shard_index)
+        if prior_file_token is not None and metadata.file_token != prior_file_token:
+            changed = True
+        state.metadata_global_token = metadata.global_token
+        state.metadata_file_tokens[shard_index] = metadata.file_token
+        state.next_metadata_shard = (shard_index + 1) % shard_count
+        if not changed:
             return
-        if token == state.token:
-            return
-        state.token = token
         state.pending_since = sampled_at
+
+    def _reset_metadata_state(
+        self,
+        workspace: WorkspaceRecord,
+        state: _WorkspaceWatchState,
+    ) -> None:
+        indexed_files = list_indexed_files(self._connection, workspace.workspace_id)
+        shard_count = _metadata_shard_count(len(indexed_files))
+        directories = list_workspace_metadata_directories(
+            workspace.workspace_root,
+            deadline=monotonic() + self._token_deadline_seconds,
+        )
+        metadata = read_workspace_metadata_snapshot(
+            workspace,
+            _metadata_shard(indexed_files, 0),
+            deadline=monotonic() + self._token_deadline_seconds,
+            directory_paths=directories,
+        )
+        state.metadata_global_token = metadata.global_token
+        file_tokens = {0: metadata.file_token}
+        for shard_index in range(1, shard_count):
+            file_tokens[shard_index] = _file_metadata_token(
+                workspace,
+                _metadata_shard(indexed_files, shard_index),
+                deadline=monotonic() + self._token_deadline_seconds,
+            )
+        state.metadata_file_tokens = file_tokens
+        state.metadata_shard_count = shard_count
+        state.next_metadata_shard = 0 if shard_count == 1 else 1
+        state.metadata_directories = directories
 
 
 def run_workspace_watcher(
@@ -285,12 +403,10 @@ def run_workspace_watcher(
         connection.close()
 
 
-def read_workspace_change_token(workspace: WorkspaceRecord, *, deadline: float) -> str:
-    """Return a lightweight invalidation token for current Workspace/Git state.
-
-    The token is only a watcher hint. A triggered update always calls ``scan_workspace`` so the
-    filesystem and Git remain authoritative. A periodic full reconciliation repairs missed hints.
-    """
+def read_workspace_change_snapshot(
+    workspace: WorkspaceRecord, *, deadline: float
+) -> WorkspaceGitSnapshot:
+    """Return Git confirmation state after a cheap Workspace metadata invalidation."""
     _require_watch_deadline(deadline)
     status = _git_status_bytes(workspace.workspace_root, deadline=deadline)
     head = _git_head_bytes(workspace.workspace_root, deadline=deadline)
@@ -306,7 +422,294 @@ def read_workspace_change_token(workspace: WorkspaceRecord, *, deadline: float) 
         _require_watch_deadline(deadline)
         _digest_entry_identity(digest, workspace.workspace_root, relative_path)
     _require_watch_deadline(deadline)
+    return WorkspaceGitSnapshot(
+        token=digest.hexdigest(),
+        head=head,
+        dirty_paths=tuple(sorted(dirty_paths, key=os.fsencode)),
+    )
+
+
+def read_workspace_change_token(workspace: WorkspaceRecord, *, deadline: float) -> str:
+    """Return the compatibility Git confirmation token used by focused tests and diagnostics."""
+    return read_workspace_change_snapshot(workspace, deadline=deadline).token
+
+
+def read_workspace_metadata_token(
+    workspace: WorkspaceRecord,
+    indexed_files: Sequence[IndexedFileRecord],
+    *,
+    deadline: float,
+    directory_paths: Sequence[str] | None = None,
+) -> str:
+    """Return one combined subprocess-free metadata hint for benchmarks/diagnostics."""
+    snapshot = read_workspace_metadata_snapshot(
+        workspace,
+        indexed_files,
+        deadline=deadline,
+        directory_paths=directory_paths,
+    )
+    digest = hashlib.sha256()
+    digest.update(snapshot.global_token.encode("ascii"))
+    digest.update(snapshot.file_token.encode("ascii"))
     return digest.hexdigest()
+
+
+def read_workspace_metadata_snapshot(
+    workspace: WorkspaceRecord,
+    indexed_files: Sequence[IndexedFileRecord],
+    *,
+    deadline: float,
+    directory_paths: Sequence[str] | None = None,
+) -> WorkspaceMetadataSnapshot:
+    """Return global topology/Git and selected-file metadata hints without subprocesses."""
+    _require_watch_deadline(deadline)
+    global_digest = hashlib.sha256()
+    global_digest.update(b"harness-workspace-metadata-global-v1\0")
+    directories = (
+        list_workspace_metadata_directories(workspace.workspace_root, deadline=deadline)
+        if directory_paths is None
+        else directory_paths
+    )
+    _digest_workspace_directories(
+        global_digest,
+        workspace.workspace_root,
+        directories,
+        deadline=deadline,
+    )
+    file_token = _file_metadata_token(workspace, indexed_files, deadline=deadline)
+    _digest_git_control_state(global_digest, workspace, deadline=deadline)
+    _require_watch_deadline(deadline)
+    return WorkspaceMetadataSnapshot(
+        global_token=global_digest.hexdigest(),
+        file_token=file_token,
+    )
+
+
+def _file_metadata_token(
+    workspace: WorkspaceRecord,
+    indexed_files: Sequence[IndexedFileRecord],
+    *,
+    deadline: float,
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"harness-workspace-metadata-files-v1\0")
+    for record in indexed_files:
+        if record.workspace_id != workspace.workspace_id:
+            raise WorkspaceWatchError("Workspace watcher received a foreign indexed file")
+        _require_watch_deadline(deadline)
+        _digest_entry_identity(digest, workspace.workspace_root, record.relative_path)
+    return digest.hexdigest()
+
+
+def _metadata_shard_count(indexed_file_count: int) -> int:
+    return max(
+        1,
+        (indexed_file_count + WATCH_METADATA_FILE_SAMPLE_LIMIT - 1)
+        // WATCH_METADATA_FILE_SAMPLE_LIMIT,
+    )
+
+
+def _metadata_shard(
+    indexed_files: Sequence[IndexedFileRecord],
+    shard_index: int,
+) -> Sequence[IndexedFileRecord]:
+    start = shard_index * WATCH_METADATA_FILE_SAMPLE_LIMIT
+    return indexed_files[start : start + WATCH_METADATA_FILE_SAMPLE_LIMIT]
+
+
+def _incremental_paths(
+    previous: WorkspaceGitSnapshot | None,
+    current: WorkspaceGitSnapshot,
+    *,
+    force_full: bool,
+) -> tuple[str, ...] | None:
+    if force_full or previous is None or previous.head != current.head:
+        return None
+    if previous.token == current.token:
+        return ()
+    paths = tuple(sorted(set(previous.dirty_paths) | set(current.dirty_paths), key=os.fsencode))
+    if not paths or ".harnessignore" in paths or len(paths) > MAX_INCREMENTAL_SCAN_PATHS:
+        return None
+    return paths
+
+
+_WATCH_DIRECTORY_EXCLUDES = frozenset(
+    {".git", "node_modules", "vendor", "dist", "build", "target", "caches"}
+)
+
+
+def list_workspace_metadata_directories(
+    workspace_root: Path,
+    *,
+    deadline: float,
+) -> tuple[str, ...]:
+    try:
+        root_stat = workspace_root.lstat()
+    except OSError as exc:
+        raise WorkspaceWatchError("Workspace watcher could not inspect the Workspace root") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise WorkspaceWatchError("Workspace watcher root is not a real directory")
+    directories: list[str] = [""]
+    pending: list[tuple[str, Path]] = [("", workspace_root)]
+    while pending:
+        _require_watch_deadline(deadline)
+        relative, directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            raise WorkspaceWatchError("Workspace watcher could not enumerate directories") from exc
+        for entry in entries:
+            _require_watch_deadline(deadline)
+            if entry.name in _WATCH_DIRECTORY_EXCLUDES:
+                continue
+            child_relative = entry.name if not relative else f"{relative}/{entry.name}"
+            child_path = Path(entry.path)
+            try:
+                is_directory = entry.is_dir(follow_symlinks=False)
+            except OSError as exc:
+                raise WorkspaceWatchError(
+                    "Workspace watcher could not inspect a directory"
+                ) from exc
+            if not is_directory:
+                continue
+            directories.append(child_relative)
+            pending.append((child_relative, child_path))
+    return tuple(sorted(directories, key=os.fsencode))
+
+
+def _digest_workspace_directories(
+    digest: hashlib._Hash,
+    workspace_root: Path,
+    directory_paths: Sequence[str],
+    *,
+    deadline: float,
+) -> None:
+    for relative in directory_paths:
+        _require_watch_deadline(deadline)
+        path = workspace_root if not relative else workspace_root / relative
+        _digest_absolute_identity(digest, relative or ".", path)
+
+
+def _digest_git_control_state(
+    digest: hashlib._Hash,
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float,
+) -> None:
+    git_dir = _workspace_git_dir(workspace)
+    for label, path in (
+        ("git/HEAD", git_dir / "HEAD"),
+        ("git/index", git_dir / "index"),
+        ("git/packed-refs", workspace.git_common_dir / "packed-refs"),
+        ("git/info/exclude", workspace.git_common_dir / "info" / "exclude"),
+    ):
+        _require_watch_deadline(deadline)
+        _digest_absolute_identity(digest, label, path)
+    _digest_control_tree(
+        digest,
+        workspace.git_common_dir / "refs",
+        label="git/refs",
+        deadline=deadline,
+    )
+
+
+def _workspace_git_dir(workspace: WorkspaceRecord) -> Path:
+    dotgit = workspace.workspace_root / ".git"
+    try:
+        if dotgit.is_dir():
+            return dotgit.resolve(strict=True)
+        raw = dotgit.read_bytes()
+    except OSError as exc:
+        raise WorkspaceWatchError("Workspace watcher could not resolve the Git directory") from exc
+    prefix = b"gitdir: "
+    if not raw.startswith(prefix) or b"\x00" in raw or len(raw) > 4096:
+        raise WorkspaceWatchError("Workspace watcher found a malformed .git file")
+    value = os.fsdecode(raw[len(prefix) :].strip())
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = workspace.workspace_root / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceWatchError("Workspace watcher could not resolve the Git directory") from exc
+    if not resolved.is_dir():
+        raise WorkspaceWatchError("Workspace watcher Git directory is not a directory")
+    if not resolved.is_relative_to(workspace.git_common_dir):
+        raise WorkspaceWatchError(
+            "Workspace watcher Git directory escaped the registered common dir"
+        )
+    return resolved
+
+
+def _digest_control_tree(
+    digest: hashlib._Hash,
+    root: Path,
+    *,
+    label: str,
+    deadline: float,
+) -> None:
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        _digest_missing(digest, label)
+        return
+    except OSError as exc:
+        raise WorkspaceWatchError("Workspace watcher could not inspect Git refs") from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise WorkspaceWatchError("Workspace watcher Git refs path is not a real directory")
+    _digest_stat(digest, label, root_stat)
+    pending: list[tuple[str, Path]] = [(label, root)]
+    while pending:
+        _require_watch_deadline(deadline)
+        parent_label, directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            raise WorkspaceWatchError("Workspace watcher could not enumerate Git refs") from exc
+        for entry in sorted(entries, key=lambda item: os.fsencode(item.name)):
+            entry_label = f"{parent_label}/{entry.name}"
+            path = Path(entry.path)
+            _digest_absolute_identity(digest, entry_label, path)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append((entry_label, path))
+            except OSError as exc:
+                raise WorkspaceWatchError("Workspace watcher could not inspect Git refs") from exc
+
+
+def _digest_absolute_identity(digest: hashlib._Hash, label: str, path: Path) -> None:
+    try:
+        entry = path.lstat()
+    except FileNotFoundError:
+        _digest_missing(digest, label)
+        return
+    except OSError as exc:
+        raise WorkspaceWatchError("Workspace watcher could not inspect metadata") from exc
+    _digest_stat(digest, label, entry)
+
+
+def _digest_missing(digest: hashlib._Hash, label: str) -> None:
+    raw_label = os.fsencode(label)
+    digest.update(len(raw_label).to_bytes(4, "big"))
+    digest.update(raw_label)
+    digest.update(b"missing\0")
+
+
+def _digest_stat(digest: hashlib._Hash, label: str, entry: os.stat_result) -> None:
+    raw_label = os.fsencode(label)
+    digest.update(len(raw_label).to_bytes(4, "big"))
+    digest.update(raw_label)
+    digest.update(b"present\0")
+    for value in (
+        stat.S_IFMT(entry.st_mode),
+        entry.st_dev,
+        entry.st_ino,
+        entry.st_size,
+        entry.st_mtime_ns,
+        entry.st_ctime_ns,
+    ):
+        digest.update(str(value).encode("ascii"))
+        digest.update(b"\0")
 
 
 def _git_head_bytes(workspace_root: Path, *, deadline: float) -> bytes:

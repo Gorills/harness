@@ -65,3 +65,32 @@ Automated tests must prove:
 - an existing Workspace changed while the daemon was stopped reconciles after watcher startup;
 - a Workspace changed immediately after its first daemon scan converges without another explicit scan;
 - real daemon create/modify/delete changes converge while existing IPC status remains usable.
+
+## 2026-08-31 amendment: subprocess-free idle hints and bounded path reconciliation
+
+The original polling hint launched `git status` plus `git rev-parse HEAD` every 0.5 seconds for
+every registered Workspace. A measured 1,000-file fixture showed that this cost was small per call
+but permanently repeated while idle, while the periodic no-op full scan crossed the original
+150 ms p95 orientation. The correctness contract does not require Git subprocesses while no
+observable metadata changes.
+
+The watcher now uses two levels of hints:
+
+1. Every ordinary poll computes a subprocess-free metadata token from known directory metadata,
+   bounded Git control metadata (`HEAD`, index, refs, packed refs, and local exclude state), and one
+   rotating shard of at most 128 indexed path identities. It does not hash source contents and does
+   not traverse Git objects or known generated roots. New/deleted paths change their parent
+   directory metadata; an existing-file rewrite is detected within one shard rotation.
+2. Only a changed/unknown metadata token runs the existing Git status/HEAD confirmation. If HEAD
+   is unchanged and the union of previous/current dirty paths is bounded to 256 paths, the watcher
+   reconciles those paths through the same Git ignore/default-exclude, stable-read, transactional
+   index/FTS, and Knowledge-staleness rules. `.harnessignore` changes always force a full scan.
+
+Initial/restart reconciliation, manual invalidation, Workspace relocation, Git HEAD changes,
+unknown/oversized path sets, sampling failures, and the five-minute periodic safety pass remain
+full authoritative reconciliations. A post-reconcile metadata and Git sample retains the existing
+changed-during-scan retry rule. Metadata can still miss deliberately restored inode timestamps, so
+the periodic full pass remains a correctness requirement rather than an optional maintenance job.
+
+The structural performance gate therefore changes the idle budget from two Git subprocesses per
+poll to zero. It does not impose a wall-clock threshold on shared CI hardware.

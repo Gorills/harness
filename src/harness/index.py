@@ -5,6 +5,7 @@ import os
 import sqlite3
 import stat
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -39,6 +40,7 @@ _DEFAULT_EXCLUDES = (
 _HASH_CHUNK_BYTES = 128 * 1024
 MAX_INDEXED_SEARCH_BODY_BYTES = 1024 * 1024
 MAX_INDEXED_IDENTIFIER_TOKENS_BYTES = 256 * 1024
+MAX_INCREMENTAL_SCAN_PATHS = 256
 
 
 class IndexingError(RuntimeError):
@@ -146,6 +148,72 @@ def scan_workspace(
     _require_scan_deadline(deadline)
     _require_registered_layout(workspace, deadline=deadline)
 
+    return _persist_snapshot(
+        connection,
+        workspace,
+        snapshot,
+        eligible_knowledge_ids=eligible_knowledge_ids,
+        deadline=deadline,
+    )
+
+
+def scan_workspace_paths(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    relative_paths: Sequence[str],
+    *,
+    deadline: float | None = None,
+) -> ScanResult:
+    """Reconcile a bounded set of Git-observed paths without hashing the whole Workspace."""
+    _require_scan_deadline(deadline)
+    selected_paths = _normalize_incremental_paths(relative_paths)
+    workspace = get_workspace(connection, workspace_id)
+    _require_registered_layout(workspace, deadline=deadline)
+    eligible_knowledge_ids = snapshot_fresh_anchored_knowledge_ids(connection, workspace_id)
+    existing = {
+        record.relative_path: record for record in list_indexed_files(connection, workspace_id)
+    }
+    harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
+    candidates = _candidate_paths(
+        workspace.workspace_root,
+        harnessignore_rules,
+        deadline=deadline,
+        pathspecs=selected_paths,
+    )
+    changed_snapshot: dict[str, IndexedFileRecord] = {}
+    for relative_path in candidates:
+        _require_scan_deadline(deadline)
+        record = _inspect_entry(workspace, relative_path, deadline=deadline)
+        if record is not None:
+            changed_snapshot[relative_path] = record
+    if _read_harnessignore_rules(workspace.workspace_root) != harnessignore_rules:
+        raise IndexingError("Workspace changed while scanning: .harnessignore")
+    _require_registered_layout(workspace, deadline=deadline)
+
+    snapshot = dict(existing)
+    for relative_path in selected_paths:
+        snapshot.pop(relative_path, None)
+    snapshot.update(changed_snapshot)
+    return _persist_snapshot(
+        connection,
+        workspace,
+        snapshot,
+        eligible_knowledge_ids=eligible_knowledge_ids,
+        deadline=deadline,
+        expected_existing=existing,
+    )
+
+
+def _persist_snapshot(
+    connection: sqlite3.Connection,
+    workspace: WorkspaceRecord,
+    snapshot: dict[str, IndexedFileRecord],
+    *,
+    eligible_knowledge_ids: frozenset[str],
+    deadline: float | None,
+    expected_existing: dict[str, IndexedFileRecord] | None = None,
+) -> ScanResult:
+    workspace_id = workspace.workspace_id
     connection.execute("BEGIN IMMEDIATE")
     try:
         _require_scan_deadline(deadline)
@@ -156,6 +224,8 @@ def scan_workspace(
         existing = {
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
         }
+        if expected_existing is not None and existing != expected_existing:
+            raise IndexingError("Workspace Structural Index changed during incremental scan")
         added = 0
         updated = 0
         for relative_path, record in snapshot.items():
@@ -223,6 +293,21 @@ def scan_workspace(
         updated=updated,
         removed=len(stale_paths),
     )
+
+
+def _normalize_incremental_paths(relative_paths: Sequence[str]) -> tuple[str, ...]:
+    selected = tuple(dict.fromkeys(relative_paths))
+    if not selected:
+        raise ValueError("incremental Workspace scan requires at least one path")
+    if len(selected) > MAX_INCREMENTAL_SCAN_PATHS:
+        raise ValueError(
+            f"incremental Workspace scan accepts at most {MAX_INCREMENTAL_SCAN_PATHS} paths"
+        )
+    for relative_path in selected:
+        path = Path(relative_path)
+        if not relative_path or "\x00" in relative_path or path.is_absolute() or ".." in path.parts:
+            raise ValueError(f"unsafe incremental Workspace path: {relative_path!r}")
+    return tuple(sorted(selected))
 
 
 def list_indexed_files(
@@ -527,6 +612,7 @@ def _candidate_paths(
     harnessignore_rules: bytes | None,
     *,
     deadline: float | None,
+    pathspecs: Sequence[str] = (),
 ) -> tuple[str, ...]:
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
     if harnessignore_rules is None:
@@ -534,6 +620,7 @@ def _candidate_paths(
             workspace_root,
             exclude_arguments,
             deadline=deadline,
+            pathspecs=pathspecs,
         )
 
     try:
@@ -546,6 +633,7 @@ def _candidate_paths(
                 workspace_root,
                 exclude_arguments,
                 deadline=deadline,
+                pathspecs=pathspecs,
             )
     except OSError as exc:
         raise IndexingError("Workspace .harnessignore snapshot could not be prepared") from exc
@@ -556,13 +644,16 @@ def _candidate_paths_from_git(
     exclude_arguments: list[str],
     *,
     deadline: float | None,
+    pathspecs: Sequence[str],
 ) -> tuple[str, ...]:
+    path_arguments = ("--", *pathspecs) if pathspecs else ()
     candidates = _git_ls_files(
         workspace_root,
         "--cached",
         "--others",
         "--exclude-standard",
         *exclude_arguments,
+        *path_arguments,
         deadline=deadline,
     )
     excluded_tracked = set(
@@ -571,6 +662,7 @@ def _candidate_paths_from_git(
             "--cached",
             "--ignored",
             *exclude_arguments,
+            *path_arguments,
             deadline=deadline,
         )
     )
@@ -609,13 +701,15 @@ def _git_ls_files(
     *arguments: str,
     deadline: float | None,
 ) -> tuple[str, ...]:
+    environment = _git_environment()
+    environment["GIT_LITERAL_PATHSPECS"] = "1"
     try:
         result = subprocess.run(
             ["git", "ls-files", "-z", *arguments],
             cwd=workspace_root,
             check=False,
             capture_output=True,
-            env=_git_environment(),
+            env=environment,
             timeout=_remaining_scan_seconds(deadline),
         )
     except subprocess.TimeoutExpired as exc:
