@@ -25,6 +25,7 @@ from harness.mcp_bridge import (
     _PROJECT_CONTEXT_DESCRIPTION,
     _PROJECT_SEARCH_DESCRIPTION,
     _SERVER_INSTRUCTIONS,
+    _STATUS_MAX_BYTES,
     _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
     _unknown_tool_argument_error,
@@ -290,9 +291,30 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                 "pending_operator_feedback",
                 "schema_version",
             }
+            assert set(status.structured_content["git"]) == {
+                "branch",
+                "head",
+                "dirty_path_count",
+            }
+            assert set(status.structured_content["index"]) == {
+                "indexed_file_count",
+                "content_search_document_count",
+            }
+            assert status.structured_content["index"]["indexed_file_count"] == 2
+            assert status.structured_content["index"]["content_search_document_count"] == 2
+            encoded_status = json.dumps(
+                status.structured_content,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            assert len(encoded_status) <= _STATUS_MAX_BYTES
             assert status.structured_content["pending_operator_feedback"] is None
             assert status.structured_content["visibility_mode"] == "normal"
-            assert "scm_write" not in json.dumps(status.structured_content)
+            dumped = json.dumps(status.structured_content)
+            assert "scm_write" not in dumped
+            assert "searchable_file_count" not in dumped
+            assert "pending_changes" not in dumped
+            assert "code_doc_path_searchable_count" not in dumped
             started = await client.call_tool(
                 "task_start",
                 {"title": "MCP continuity", "stack_hints": [" FastAPI ", "POSTGRES"]},

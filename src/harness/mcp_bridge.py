@@ -438,7 +438,10 @@ def build_mcp_server(
                     "head": status.head,
                     "dirty_path_count": status.dirty_path_count,
                 },
-                "index": {"indexed_file_count": status.indexed_file_count},
+                "index": {
+                    "indexed_file_count": status.indexed_file_count,
+                    "content_search_document_count": status.content_search_document_count,
+                },
                 "current_task": current_task,
                 "relevant_waiting_task": relevant_waiting_task,
                 "last_checkpoint": (
