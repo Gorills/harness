@@ -21,7 +21,10 @@ from harness.knowledge import (
 )
 from harness.retrieval import (
     MAX_PROJECT_CONTEXT_REF_BYTES,
+    MAX_SEARCH_EVIDENCE_SNIPPET_BYTES,
+    MAX_SEARCH_EVIDENCE_SNIPPET_LINES,
     ProjectContextItem,
+    ProjectSearchEvidence,
     ProjectSearchHit,
     ProjectSearchKind,
     ProjectSearchScope,
@@ -2699,6 +2702,8 @@ def _project_search_hit_to_wire(hit: ProjectSearchHit) -> dict[str, object]:
         "match_reason": hit.match_reason,
         "freshness": hit.freshness,
         "path": hit.path,
+        "evidence": None if hit.evidence is None else hit.evidence.to_wire(),
+        "evidence_reason": hit.evidence_reason,
     }
 
 
@@ -2712,6 +2717,8 @@ def _project_search_hit_from_wire(value: object) -> ProjectSearchHit:
         "match_reason",
         "freshness",
         "path",
+        "evidence",
+        "evidence_reason",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise IpcProtocolError("daemon project search hit does not match the IPC schema")
@@ -2730,6 +2737,9 @@ def _project_search_hit_from_wire(value: object) -> ProjectSearchHit:
     path = value["path"]
     if path is not None:
         path = _bounded_response_string(path, "path", _INDEX_RELATIVE_PATH_MAX_BYTES)
+    evidence_reason = value["evidence_reason"]
+    if evidence_reason is not None:
+        evidence_reason = _bounded_response_string(evidence_reason, "evidence_reason", 64)
     return ProjectSearchHit(
         ref,
         kind,
@@ -2739,6 +2749,36 @@ def _project_search_hit_from_wire(value: object) -> ProjectSearchHit:
         reason,
         freshness,
         cast(str | None, path),
+        _project_search_evidence_from_wire(value["evidence"]),
+        cast(str | None, evidence_reason),
+    )
+
+
+def _project_search_evidence_from_wire(value: object) -> ProjectSearchEvidence | None:
+    if value is None:
+        return None
+    fields = {"start_line", "end_line", "snippet", "truncated"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise IpcProtocolError("daemon project search evidence does not match the IPC schema")
+    start_line = _bounded_nonnegative_int(value["start_line"], "evidence.start_line")
+    end_line = _bounded_nonnegative_int(value["end_line"], "evidence.end_line")
+    if start_line < 1 or end_line < start_line:
+        raise IpcProtocolError("daemon project search evidence has invalid line range")
+    if end_line - start_line + 1 > MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
+        raise IpcProtocolError("daemon project search evidence exceeds line budget")
+    snippet = _bounded_response_string(
+        value["snippet"],
+        "evidence.snippet",
+        MAX_SEARCH_EVIDENCE_SNIPPET_BYTES + 8,
+    )
+    truncated = value["truncated"]
+    if not isinstance(truncated, bool):
+        raise IpcProtocolError("daemon project search evidence truncated flag is invalid")
+    return ProjectSearchEvidence(
+        start_line=start_line,
+        end_line=end_line,
+        snippet=snippet,
+        truncated=truncated,
     )
 
 

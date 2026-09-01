@@ -273,8 +273,10 @@ def test_project_search_uses_content_for_natural_queries_and_compound_identifier
         assert compound[0].ref == "code:src/refresh_token.py"
         assert compound[0].match_reason == "normalized identifier/title phrase"
         assert test_query[0].ref == "code:tests/test_refresh_token.py"
-        assert "repository.replace" not in repr(natural)
+        assert natural[0].evidence is not None
+        assert "credential" in natural[0].evidence.snippet
         assert natural[0].short_summary is None
+        assert "bm25" not in repr(natural).casefold()
     finally:
         connection.close()
 

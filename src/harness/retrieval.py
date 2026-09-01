@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
-from harness.index import IndexedFileKind, get_indexed_file
+from harness.index import (
+    IndexedFileKind,
+    SearchEvidenceReadStatus,
+    get_indexed_file,
+    read_current_search_text,
+)
 from harness.knowledge import (
     KnowledgeCardRecord,
     KnowledgeError,
     KnowledgeFreshness,
     get_knowledge_card,
 )
-from harness.registry import get_project, get_workspace
+from harness.registry import WorkspaceRecord, get_project, get_workspace
 from harness.search import (
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_QUERY_BYTES,
@@ -46,6 +52,15 @@ _CONTEXT_CHANGED_PATH_LIMIT = 16
 _CONTEXT_CHANGED_PATH_BYTES = 2048
 MAX_PROJECT_CONTEXT_REF_BYTES = 4096 + len("code:")
 _FILE_CANDIDATE_LIMIT = 96
+MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 5
+MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 480
+MAX_SEARCH_EVIDENCE_HITS = 3
+PROJECT_SEARCH_MAX_BYTES = 12 * 1024
+_SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
+EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
+EVIDENCE_REASON_NOT_RELOCATED = "current_match_not_relocated"
+EVIDENCE_REASON_PATH_ONLY = "path_only"
+EVIDENCE_REASON_RESPONSE_BUDGET = "response_budget"
 
 _QUALITY_EXACT_PATH = 0
 _QUALITY_EXACT_FILENAME = 1
@@ -80,6 +95,22 @@ class ProjectSearchKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectSearchEvidence:
+    start_line: int
+    end_line: int
+    snippet: str
+    truncated: bool
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "start_line": self.start_line,
+            "end_line": self.end_line,
+            "snippet": self.snippet,
+            "truncated": self.truncated,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectSearchHit:
     ref: str
     kind: ProjectSearchKind
@@ -89,6 +120,8 @@ class ProjectSearchHit:
     match_reason: str
     freshness: str
     path: str | None = None
+    evidence: ProjectSearchEvidence | None = None
+    evidence_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +160,7 @@ def search_project(
         raise SearchError("project search scope is unsupported")
 
     if scope is ProjectSearchScope.CODE:
-        return _project_hits(
+        hits = _project_hits(
             _file_hits(
                 connection,
                 workspace_id,
@@ -136,8 +169,8 @@ def search_project(
                 limit,
             )
         )
-    if scope is ProjectSearchScope.DOCS:
-        return _project_hits(
+    elif scope is ProjectSearchScope.DOCS:
+        hits = _project_hits(
             _file_hits(
                 connection,
                 workspace_id,
@@ -146,10 +179,10 @@ def search_project(
                 limit,
             )
         )
-    if scope is ProjectSearchScope.KNOWLEDGE:
-        return _project_hits(_knowledge_hits(connection, project.project_id, analyzed, limit))
-    if scope is ProjectSearchScope.TASKS:
-        return _project_hits(
+    elif scope is ProjectSearchScope.KNOWLEDGE:
+        hits = _project_hits(_knowledge_hits(connection, project.project_id, analyzed, limit))
+    elif scope is ProjectSearchScope.TASKS:
+        hits = _project_hits(
             _task_hits(
                 connection,
                 analyzed,
@@ -158,32 +191,33 @@ def search_project(
                 active_workspace_id=workspace_id,
             )
         )
-
-    channels = (
-        _knowledge_hits(connection, project.project_id, analyzed, limit),
-        _file_hits(
-            connection,
-            workspace_id,
-            analyzed,
-            IndexedPathSearchScope.CODE,
-            limit,
-        ),
-        _file_hits(
-            connection,
-            workspace_id,
-            analyzed,
-            IndexedPathSearchScope.DOCS,
-            limit,
-        ),
-        _task_hits(
-            connection,
-            analyzed,
-            limit,
-            project_id=project.project_id,
-            active_workspace_id=workspace_id,
-        ),
-    )
-    return _fuse_ranked_channels(channels, limit)
+    else:
+        channels = (
+            _knowledge_hits(connection, project.project_id, analyzed, limit),
+            _file_hits(
+                connection,
+                workspace_id,
+                analyzed,
+                IndexedPathSearchScope.CODE,
+                limit,
+            ),
+            _file_hits(
+                connection,
+                workspace_id,
+                analyzed,
+                IndexedPathSearchScope.DOCS,
+                limit,
+            ),
+            _task_hits(
+                connection,
+                analyzed,
+                limit,
+                project_id=project.project_id,
+                active_workspace_id=workspace_id,
+            ),
+        )
+        hits = _fuse_ranked_channels(channels, limit)
+    return _attach_current_source_evidence(connection, workspace, analyzed, hits)
 
 
 def search_tasks(
@@ -986,6 +1020,171 @@ def _path_relevance_penalty(relative_path: str, query_terms: tuple[str, ...]) ->
     if not any(term.startswith(("archiv", "архив")) for term in query_terms):
         penalty += int(any(part in {"archive", "archives", "archived"} for part in parts[:-1]))
     return penalty
+
+
+def _attach_current_source_evidence(
+    connection: sqlite3.Connection,
+    workspace: WorkspaceRecord,
+    query: AnalyzedSearchQuery,
+    hits: tuple[ProjectSearchHit, ...],
+) -> tuple[ProjectSearchHit, ...]:
+    annotated: list[ProjectSearchHit] = []
+    reread_budget = MAX_SEARCH_EVIDENCE_HITS
+    for hit in hits:
+        if hit.kind not in {ProjectSearchKind.CODE, ProjectSearchKind.DOC} or hit.path is None:
+            annotated.append(hit)
+            continue
+        indexed_sha = _indexed_content_sha256(connection, workspace.workspace_id, hit.path)
+        if indexed_sha is None:
+            annotated.append(replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_PATH_ONLY))
+            continue
+        if reread_budget <= 0:
+            annotated.append(hit)
+            continue
+        reread_budget -= 1
+        read = read_current_search_text(
+            workspace,
+            hit.path,
+            expected_content_sha256=indexed_sha,
+        )
+        if read.status is SearchEvidenceReadStatus.CHANGED_SINCE_INDEX:
+            annotated.append(
+                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX)
+            )
+            continue
+        if read.status is not SearchEvidenceReadStatus.OK or read.text is None:
+            annotated.append(
+                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_NOT_RELOCATED)
+            )
+            continue
+        evidence = _relocate_search_evidence(read.text, query.terms)
+        if evidence is None:
+            annotated.append(
+                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_NOT_RELOCATED)
+            )
+            continue
+        annotated.append(replace(hit, evidence=evidence, evidence_reason=None))
+    return _fit_search_hits_to_response_budget(annotated, query.normalized)
+
+
+def _indexed_content_sha256(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    relative_path: str,
+) -> str | None:
+    row = connection.execute(
+        """
+        SELECT documents.content_sha256, files.content_sha256, files.kind
+        FROM indexed_search_documents AS documents
+        JOIN indexed_files AS files
+          ON files.workspace_id = documents.workspace_id
+         AND files.relative_path = documents.relative_path
+        WHERE documents.workspace_id = ? AND documents.relative_path = ?
+        """,
+        (workspace_id, relative_path),
+    ).fetchone()
+    if row is None:
+        return None
+    document_sha256, file_sha256, raw_kind = row
+    if (
+        not isinstance(document_sha256, str)
+        or not isinstance(file_sha256, str)
+        or document_sha256 != file_sha256
+        or not isinstance(raw_kind, str)
+    ):
+        raise ProjectRetrievalError("indexed content search crossed authoritative index state")
+    try:
+        kind = IndexedFileKind(raw_kind)
+    except ValueError as exc:
+        raise ProjectRetrievalError(
+            "indexed content search returned an invalid entry kind"
+        ) from exc
+    if kind is not IndexedFileKind.FILE:
+        return None
+    return document_sha256
+
+
+def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearchEvidence | None:
+    present_terms = tuple(term for term in terms if matching_term_count((term,), text) == 1)
+    if not present_terms:
+        return None
+    lines = text.splitlines()
+    if not lines:
+        return None
+    best: tuple[int, int, int] | None = None
+    for start in range(len(lines)):
+        last = min(len(lines) - 1, start + MAX_SEARCH_EVIDENCE_SNIPPET_LINES - 1)
+        for end in range(start, last + 1):
+            window = "\n".join(lines[start : end + 1])
+            if matching_term_count(present_terms, window) < len(present_terms):
+                continue
+            candidate = (end - start, start, end)
+            if best is None or candidate < best:
+                best = candidate
+    if best is None:
+        return None
+    _, start, end = best
+    snippet = "\n".join(lines[start : end + 1])
+    truncated = False
+    if len(snippet.encode("utf-8")) > MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
+        snippet = _truncate_utf8(snippet, MAX_SEARCH_EVIDENCE_SNIPPET_BYTES)
+        truncated = True
+        if matching_term_count(present_terms, snippet) < len(present_terms):
+            return None
+    return ProjectSearchEvidence(
+        start_line=start + 1,
+        end_line=end + 1,
+        snippet=snippet,
+        truncated=truncated,
+    )
+
+
+def _fit_search_hits_to_response_budget(
+    hits: list[ProjectSearchHit],
+    query: str,
+) -> tuple[ProjectSearchHit, ...]:
+    fitted = list(hits)
+    while True:
+        encoded = json.dumps(
+            {
+                "query": query,
+                "scope": "all",
+                "results": [project_search_hit_payload(hit) for hit in fitted],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) + _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES <= PROJECT_SEARCH_MAX_BYTES:
+            return tuple(fitted)
+        trimmed = False
+        for index in range(len(fitted) - 1, -1, -1):
+            hit = fitted[index]
+            if hit.evidence is None:
+                continue
+            fitted[index] = replace(
+                hit, evidence=None, evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET
+            )
+            trimmed = True
+            break
+        if not trimmed:
+            return tuple(fitted)
+
+
+def project_search_hit_payload(hit: ProjectSearchHit) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "ref": hit.ref,
+        "kind": hit.kind.value,
+        "title": hit.title,
+        "location": hit.location,
+        "short_summary": hit.short_summary,
+        "match_reason": hit.match_reason,
+        "freshness": hit.freshness,
+        "evidence": None if hit.evidence is None else hit.evidence.to_wire(),
+        "evidence_reason": hit.evidence_reason,
+    }
+    if hit.path is not None:
+        payload["path"] = hit.path
+    return payload
 
 
 def _project_hits(items: tuple[_RankedProjectHit, ...]) -> tuple[ProjectSearchHit, ...]:

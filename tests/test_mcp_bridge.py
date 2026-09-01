@@ -259,7 +259,10 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             results = searched.structured_content["results"]
             assert len(results) <= 5
             assert results[0]["ref"] == "code:src/token_service.py"
-            assert "TOKEN = 1" not in str(searched.structured_content)
+            assert "bm25" not in str(searched.structured_content).casefold()
+            evidence = results[0].get("evidence")
+            assert evidence is not None
+            assert "TOKEN = 1" in evidence["snippet"]
             with pytest.raises(MCPError, match="Unknown tool argument fields") as status_error:
                 await client.call_tool("project_status", {"unexpected": True})
             assert "no arguments" in str(status_error.value)

@@ -432,7 +432,8 @@ def _build_search_document(
         return None
     body = _read_stable_search_text(
         workspace,
-        record,
+        record.relative_path,
+        expected_content_sha256=record.content_sha256,
         deadline=deadline,
     )
     if body is None:
@@ -451,53 +452,118 @@ def _build_search_document(
     )
 
 
+class SearchEvidenceReadStatus(StrEnum):
+    """Outcome of a current-source search reread that must not fail the whole query."""
+
+    OK = "ok"
+    CHANGED_SINCE_INDEX = "changed_since_index"
+    UNAVAILABLE = "current_match_not_relocated"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchEvidenceRead:
+    """Bounded live UTF-8 text, or a reason that evidence must stay null."""
+
+    status: SearchEvidenceReadStatus
+    text: str | None = None
+
+
+def read_current_search_text(
+    workspace: WorkspaceRecord,
+    relative_path: str,
+    *,
+    expected_content_sha256: str,
+    deadline: float | None = None,
+) -> SearchEvidenceRead:
+    """Reread one indexed path with the same stable-entry invariants as content indexing.
+
+    SHA mismatch is a locator-only miss for search; indexing still raises via
+    ``_read_stable_search_text``.
+    """
+    try:
+        payload = _read_stable_regular_file_bytes(
+            workspace,
+            relative_path,
+            deadline=deadline,
+        )
+        _require_scan_deadline(deadline)
+        if len(payload) > MAX_INDEXED_SEARCH_BODY_BYTES:
+            return SearchEvidenceRead(SearchEvidenceReadStatus.UNAVAILABLE)
+        return _decode_indexed_search_payload(payload, expected_content_sha256)
+    except IndexingError:
+        return SearchEvidenceRead(SearchEvidenceReadStatus.UNAVAILABLE)
+
+
 def _read_stable_search_text(
     workspace: WorkspaceRecord,
-    record: IndexedFileRecord,
+    relative_path: str,
     *,
+    expected_content_sha256: str,
     deadline: float | None,
 ) -> str | None:
-    path = workspace.workspace_root / record.relative_path
+    payload = _read_stable_regular_file_bytes(
+        workspace,
+        relative_path,
+        deadline=deadline,
+    )
+    _require_scan_deadline(deadline)
+    if len(payload) > MAX_INDEXED_SEARCH_BODY_BYTES:
+        raise IndexingError(f"Workspace changed while scanning: {relative_path}")
+    decoded = _decode_indexed_search_payload(payload, expected_content_sha256)
+    if decoded.status is SearchEvidenceReadStatus.CHANGED_SINCE_INDEX:
+        raise IndexingError(f"Workspace changed while scanning: {relative_path}")
+    if decoded.status is SearchEvidenceReadStatus.UNAVAILABLE:
+        return None
+    return decoded.text
+
+
+def _decode_indexed_search_payload(
+    payload: bytes, expected_content_sha256: str
+) -> SearchEvidenceRead:
+    if hashlib.sha256(payload).hexdigest() != expected_content_sha256:
+        return SearchEvidenceRead(SearchEvidenceReadStatus.CHANGED_SINCE_INDEX)
+    if b"\x00" in payload:
+        return SearchEvidenceRead(SearchEvidenceReadStatus.UNAVAILABLE)
+    try:
+        return SearchEvidenceRead(SearchEvidenceReadStatus.OK, payload.decode("utf-8-sig"))
+    except UnicodeDecodeError:
+        return SearchEvidenceRead(SearchEvidenceReadStatus.UNAVAILABLE)
+
+
+def _read_stable_regular_file_bytes(
+    workspace: WorkspaceRecord,
+    relative_path: str,
+    *,
+    deadline: float | None,
+) -> bytes:
+    path = workspace.workspace_root / relative_path
     try:
         parent = path.parent.resolve(strict=True)
         if not parent.is_relative_to(workspace.workspace_root):
             raise WorkspaceIndexMismatchError(
-                f"Workspace path escapes through a symlinked parent: {record.relative_path}"
+                f"Workspace path escapes through a symlinked parent: {relative_path}"
             )
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode):
-            raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
+            raise IndexingError(f"Workspace changed while scanning: {relative_path}")
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(workspace.workspace_root):
             raise WorkspaceIndexMismatchError(
-                f"Workspace file resolves outside root: {record.relative_path}"
+                f"Workspace file resolves outside root: {relative_path}"
             )
         with path.open("rb") as stream:
             opened_before = os.fstat(stream.fileno())
-            _require_stable_entry(record.relative_path, before, opened_before)
+            _require_stable_entry(relative_path, before, opened_before)
             payload = stream.read(MAX_INDEXED_SEARCH_BODY_BYTES + 1)
             opened_after = os.fstat(stream.fileno())
-        _require_stable_entry(record.relative_path, opened_before, opened_after)
+        _require_stable_entry(relative_path, opened_before, opened_after)
         current = path.lstat()
-        _require_stable_entry(record.relative_path, opened_after, current)
+        _require_stable_entry(relative_path, opened_after, current)
     except FileNotFoundError as exc:
-        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}") from exc
+        raise IndexingError(f"Workspace changed while scanning: {relative_path}") from exc
     except OSError as exc:
-        raise IndexingError(
-            f"Workspace search text could not be read: {record.relative_path}"
-        ) from exc
-
-    _require_scan_deadline(deadline)
-    if len(payload) > MAX_INDEXED_SEARCH_BODY_BYTES:
-        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
-    if hashlib.sha256(payload).hexdigest() != record.content_sha256:
-        raise IndexingError(f"Workspace changed while scanning: {record.relative_path}")
-    if b"\x00" in payload:
-        return None
-    try:
-        return payload.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return None
+        raise IndexingError(f"Workspace search text could not be read: {relative_path}") from exc
+    return payload
 
 
 def _reconcile_search_documents(
