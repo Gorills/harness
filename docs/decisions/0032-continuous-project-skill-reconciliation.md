@@ -9,6 +9,8 @@
 - **Host-retirement amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code.
   Durable intent and isolated development default to Codex+Cursor only. Claude-only projection and
   the three-host incompatibility in Decision 5 are historical.
+- **Relevance-key amendment (2026-09-01):** any committed Task mutation that changes the skill
+  relevance key queues watcher reconciliation, not only `task_start`.
 
 ## Context
 
@@ -33,9 +35,16 @@ only from the proprietary CLI during foreground commands and was unavailable to 
 2. After each watcher-owned authoritative Workspace scan, resolve and reconcile skills using the
    current durable profile set. Filesystem/manifest changes therefore update the relevant subset
    without a manual CLI scan.
-3. A successful `task_start` queues the selected Workspace for watcher reconciliation. Task state
-   remains committed independently; projection is the subsequent serialized repairable step. A
-   projection collision does not roll back or duplicate a Task and remains visible to `doctor`.
+3. After a committed Task mutation, compare the Workspace skill-relevance key
+   `(relevant_task_id, relevant_task_stack_hints)` before and after the write.
+   If the key changed, queue the selected Workspace on the existing watcher
+   invalidation channel so skill reconciliation runs. `task_start` create/resume
+   is one such mutation, not the only one. Task state remains committed
+   independently; projection is the subsequent serialized repairable step. A
+   projection collision does not roll back or duplicate a Task and remains
+   visible to `doctor`. A failed Task mutation does not enqueue. A mutation that
+   leaves the relevance key unchanged, including idempotent resume of the already
+   relevant working Task, does not enqueue.
 4. Foreground `harness scan` keeps its synchronous projection and bounded result so operators can
    request immediate convergence and see materialized/removed counts.
 5. In isolated development, `scan` reconciles the built-in pack into the checkout-local registry
@@ -50,7 +59,8 @@ only from the proprietary CLI during foreground commands and was unavailable to 
 
 ## Consequences
 
-- Greenfield Task hints and later manifest changes now converge to native project skills.
+- Greenfield Task hints and later relevant-Task identity or hint changes now converge to native
+  project skills without a manual scan.
 - A daemon restart or periodic watcher reconciliation repairs missing generated projections.
 - Generated paths remain ownership-marked and Git-locally excluded by the existing projection
   transaction; no `.gitignore` or tracked project instructions are changed.
@@ -64,4 +74,29 @@ only from the proprietary CLI during foreground commands and was unavailable to 
 Automated tests must prove Task hints trigger eventual native projection, watcher scans invoke the
 resolver for the complete compatible profile set, Claude install/uninstall records and removes
 durable intent, isolated scan seeds only the local registry and projects through `.agents/skills`,
-and incompatible development profile sets fail before filesystem projection.
+and incompatible development profile sets fail before filesystem projection. They must also prove
+that any committed mutation changing `(relevant_task_id, relevant_task_stack_hints)` enqueues the
+existing watcher invalidation path, that a key-preserving mutation or failed CAS does not enqueue,
+and that a later projection failure leaves the committed Task row intact.
+
+## 2026-09-01 amendment: reconcile on skill-relevance key change
+
+Decision 3 originally queued watcher skill reconciliation only after a successful `task_start`.
+The skill resolver's durable input is the current relevant Task (working first, else newest
+waiting) and that Task's `stack_hints`. Completion, cancel, reopen, operator accept, operator
+feedback, and any other committed mutation can change that input without going through
+`task_start`. Encoding a brittle matrix of transition types would miss later lifecycle actions.
+
+The contract is therefore:
+
+1. Capture `skill_relevance_key(workspace)` before the mutation.
+2. Commit the Task mutation.
+3. Capture the key again. If it changed, enqueue the Workspace on the existing serialized
+   watcher invalidation queue. If it did not change, do not enqueue.
+4. Projection remains asynchronous/serialized repair. A reconcile/projection failure must not
+   roll back the committed Task. A failed Task mutation must not enqueue.
+
+The key does not include Task lifecycle state unless that state change selects a different
+relevant Task or different stack hints. Dashboard Task actions share this gate with daemon
+`task_start` / `task_checkpoint`; relocation continues to always invalidate because it rebuilds
+index identity, not because of skill relevance.
