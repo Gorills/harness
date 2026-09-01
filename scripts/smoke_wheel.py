@@ -475,7 +475,7 @@ def main() -> int:
                 "-c",
                 (
                     "from harness.host_adapters import "
-                    "HostIntegrationError,workspace_hints_from_environment; "
+                    "HostIntegrationError, workspace_hints_from_environment\n"
                     "try:\n"
                     "    workspace_hints_from_environment(environment={"
                     "'HARNESS_HOST_PROFILE':'claude-code',"
