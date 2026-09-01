@@ -606,6 +606,8 @@ Keep a separate matrix because core tests cannot prove proprietary host behavior
 - host switch resumes the same Harness Task;
 - Harness failure preserves the mode contract: Normal stays native/unrestricted by Harness; Hidden keeps agent publication denied while ordinary edits/read-only Git and human Git outside the agent path remain usable.
 
+Optional Codex JSONL classification (`scripts/eval_search_behavior.py`, sanitized metrics on `accept_codex --run-model`) is acceptance evidence for search-vs-native-grep behavior, not a daemon or MCP contract.
+
 No passing unit/integration suite may be described as proof of these host-specific behaviors.
 
 ## 21. Dependency direction for implementation

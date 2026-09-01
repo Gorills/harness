@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import eval_search_behavior
 from accept_codex import (
     _MODEL_USAGE_DISCLOSURE,
     ACCEPTANCE_NEGATIVE_SKILL_ID,
@@ -227,6 +228,60 @@ def test_codex_acceptance_allows_search_after_task_start() -> None:
 
     assert discovery_actions_before_task_start(events) == ()
     assert project_actions_before_harness_status(events) == ()
+
+
+def test_accept_codex_search_behavior_is_metrics_only_when_present() -> None:
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_status",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "task_start",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_search",
+                "status": "completed",
+                "arguments": {"query": "authenticate user"},
+                "result": {
+                    "structured_content": {
+                        "results": [{"kind": "code", "path": "src/auth.py"}],
+                    }
+                },
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "command": "cat src/auth.py",
+                "status": "completed",
+            },
+        },
+    ]
+    payload = eval_search_behavior.sanitized_search_behavior_metrics(
+        events, workspace_root=Path("/tmp/ws")
+    )
+    assert tuple(payload) == eval_search_behavior.SANITIZED_METRIC_KEYS
+    assert "evidence" not in payload
+    assert "candidate_paths" not in payload
+    assert "native_commands" not in payload
+    assert "schema_version" not in payload
 
 
 def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:

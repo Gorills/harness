@@ -182,6 +182,16 @@ and matching `harness.yaml` scalars are JSON-quoted YAML; values that cannot rem
 or that strip empty, fail closed. iOS/iPadOS 44x44 pt and Android 48x48 dp in `frontend-design`
 follow current platform accessibility guidance and are not a frozen Harness constant.
 
+## 2026-09-01 amendment: search-behavior evaluation is acceptance evidence
+
+`scripts/eval_search_behavior.py` classifies Codex `exec --json` JSONL to answer whether a native
+`rg`/`grep` after `project_search` was a targeted follow-up, a justified zero/insufficient-hit
+fallback, or a wasteful duplicate broad search of the same natural query. It does not add daemon
+telemetry, MCP fields, or a core invariant. The CLI JSON includes redacted evidence;
+`scripts/accept_codex.py --run-model` may attach metrics-only `search_behavior` (with
+`workspace_root` of the primary Workspace) to the evidence report. Unit tests classify
+synthetic JSONL without a live model.
+
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
 - High-precision facets prevent ambiguous ecosystem dependencies from selecting the wrong surface
