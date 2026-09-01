@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1528,6 +1528,21 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 DELETE FROM indexed_content_search WHERE rowid = OLD.id;
             END;
             """,
+        )
+        return
+    if target_version == 15:
+        connection.execute(
+            """
+            CREATE TABLE workspace_index_reconcile (
+                workspace_id TEXT PRIMARY KEY
+                    REFERENCES workspaces(id) ON DELETE CASCADE,
+                index_revision INTEGER NOT NULL CHECK (index_revision > 0),
+                last_successful_reconcile_at TEXT NOT NULL
+                    CHECK (last_successful_reconcile_at <> ''),
+                last_reconcile_kind TEXT NOT NULL
+                    CHECK (last_reconcile_kind IN ('full', 'incremental'))
+            )
+            """
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

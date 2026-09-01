@@ -224,7 +224,11 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
             dirty_path_count=1,
             indexed_file_count=1,
             content_search_document_count=1,
+            index_revision=1,
+            last_successful_reconcile_at=status.last_successful_reconcile_at,
+            last_reconcile_kind="full",
         )
+        assert status.last_successful_reconcile_at is not None
 
         raw_payload = {
             "version": PROTOCOL_VERSION,
@@ -259,6 +263,9 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
                 "dirty_path_count": 1,
                 "indexed_file_count": 1,
                 "content_search_document_count": 1,
+                "index_revision": 1,
+                "last_successful_reconcile_at": status.last_successful_reconcile_at,
+                "last_reconcile_kind": "full",
             },
         }
     finally:

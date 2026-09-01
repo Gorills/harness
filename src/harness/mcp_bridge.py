@@ -441,6 +441,9 @@ def build_mcp_server(
                 "index": {
                     "indexed_file_count": status.indexed_file_count,
                     "content_search_document_count": status.content_search_document_count,
+                    "index_revision": status.index_revision,
+                    "last_successful_reconcile_at": status.last_successful_reconcile_at,
+                    "last_reconcile_kind": status.last_reconcile_kind,
                 },
                 "current_task": current_task,
                 "relevant_waiting_task": relevant_waiting_task,

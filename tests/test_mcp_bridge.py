@@ -299,9 +299,19 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             assert set(status.structured_content["index"]) == {
                 "indexed_file_count",
                 "content_search_document_count",
+                "index_revision",
+                "last_successful_reconcile_at",
+                "last_reconcile_kind",
             }
             assert status.structured_content["index"]["indexed_file_count"] == 2
             assert status.structured_content["index"]["content_search_document_count"] == 2
+            assert isinstance(status.structured_content["index"]["index_revision"], int)
+            assert status.structured_content["index"]["index_revision"] >= 1
+            assert status.structured_content["index"]["last_reconcile_kind"] in {
+                "full",
+                "incremental",
+            }
+            assert status.structured_content["index"]["last_successful_reconcile_at"] is not None
             encoded_status = json.dumps(
                 status.structured_content,
                 ensure_ascii=False,
@@ -314,6 +324,8 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             assert "scm_write" not in dumped
             assert "searchable_file_count" not in dumped
             assert "pending_changes" not in dumped
+            assert "is_fresh" not in dumped
+            assert "last_reconciled_at" not in dumped
             assert "code_doc_path_searchable_count" not in dumped
             started = await client.call_tool(
                 "task_start",

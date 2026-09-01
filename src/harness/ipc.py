@@ -146,6 +146,9 @@ class WorkspaceStatusResult:
     dirty_path_count: int
     indexed_file_count: int
     content_search_document_count: int
+    index_revision: int | None
+    last_successful_reconcile_at: str | None
+    last_reconcile_kind: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1028,6 +1031,9 @@ def send_workspace_status_response(
                     "dirty_path_count": status.dirty_path_count,
                     "indexed_file_count": status.indexed_file_count,
                     "content_search_document_count": status.content_search_document_count,
+                    "index_revision": status.index_revision,
+                    "last_successful_reconcile_at": status.last_successful_reconcile_at,
+                    "last_reconcile_kind": status.last_reconcile_kind,
                 },
             }
         )
@@ -2229,6 +2235,9 @@ def _workspace_status_from_response(
         "dirty_path_count",
         "indexed_file_count",
         "content_search_document_count",
+        "index_revision",
+        "last_successful_reconcile_at",
+        "last_reconcile_kind",
     }
     if set(result) != expected_fields:
         raise IpcProtocolError("daemon workspace status result does not match the IPC schema")
@@ -2247,6 +2256,41 @@ def _workspace_status_from_response(
         )
     ):
         raise IpcProtocolError("daemon workspace status counts have invalid field types")
+
+    index_revision = result["index_revision"]
+    last_successful_reconcile_at = result["last_successful_reconcile_at"]
+    last_reconcile_kind = result["last_reconcile_kind"]
+    provenance_present = (
+        index_revision is not None
+        or last_successful_reconcile_at is not None
+        or last_reconcile_kind is not None
+    )
+    provenance_complete = (
+        index_revision is not None
+        and last_successful_reconcile_at is not None
+        and last_reconcile_kind is not None
+    )
+    if provenance_present != provenance_complete:
+        raise IpcProtocolError("daemon workspace status provenance fields are inconsistent")
+    if provenance_complete:
+        if (
+            isinstance(index_revision, bool)
+            or not isinstance(index_revision, int)
+            or index_revision < 1
+        ):
+            raise IpcProtocolError("daemon workspace status has invalid index_revision")
+        last_successful_reconcile_at = _bounded_response_string(
+            last_successful_reconcile_at,
+            "last_successful_reconcile_at",
+            64,
+        )
+        last_reconcile_kind = _bounded_response_string(
+            last_reconcile_kind,
+            "last_reconcile_kind",
+            16,
+        )
+        if last_reconcile_kind not in {"full", "incremental"}:
+            raise IpcProtocolError("daemon workspace status has unsupported last_reconcile_kind")
 
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
     project_id = _bounded_response_string(result["project_id"], "project_id", 128)
@@ -2284,6 +2328,9 @@ def _workspace_status_from_response(
         dirty_path_count=dirty_path_count,
         indexed_file_count=indexed_file_count,
         content_search_document_count=content_search_document_count,
+        index_revision=index_revision,
+        last_successful_reconcile_at=last_successful_reconcile_at,
+        last_reconcile_kind=last_reconcile_kind,
     )
 
 
