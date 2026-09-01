@@ -17,6 +17,7 @@ from accept_codex import (
     ACCEPTANCE_SKILL_ID,
     EXPECTED_GENERATED_SKILLS,
     NEGATIVE_SKILL_PREFLIGHT_POLICY,
+    TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT,
     CodexAcceptanceError,
     _acceptance_prompt,
     _codex_exec_events,
@@ -37,6 +38,7 @@ from accept_codex import (
     main,
     project_actions_before_harness_status,
     prompt_input_contains_bootstrap,
+    reject_skill_delivery_fields,
     skill_marker_values,
     split_portable_skill_markdown,
     verify_synthetic_skill_projection,
@@ -319,6 +321,26 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     ]
 
     assert _validate_wire_tools(tools) == tuple(properties)
+
+    leaked = [
+        {
+            **tool,
+            "description": f"{tool['description']} recommended_skills",
+        }
+        for tool in tools
+    ]
+    with pytest.raises(CodexAcceptanceError, match="skill-delivery field"):
+        _validate_wire_tools(leaked)
+
+
+def test_codex_acceptance_locks_next_session_only_skill_delivery() -> None:
+    assert TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT == "next-session-only"
+    reject_skill_delivery_fields({"task_id": "t", "revision": 1}, surface="task_start")
+    with pytest.raises(CodexAcceptanceError, match="recommended_skills"):
+        reject_skill_delivery_fields(
+            {"task_id": "t", "recommended_skills": ["language-engineering"]},
+            surface="task_start",
+        )
 
 
 def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:

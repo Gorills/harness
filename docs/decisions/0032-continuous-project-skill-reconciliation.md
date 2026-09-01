@@ -100,3 +100,11 @@ The key does not include Task lifecycle state unless that state change selects a
 relevant Task or different stack hints. Dashboard Task actions share this gate with daemon
 `task_start` / `task_checkpoint`; relocation continues to always invalidate because it rebuilds
 index identity, not because of skill relevance.
+
+## 2026-09-01 amendment: current-session skill delivery is next-discovery-boundary
+
+Decision 6 is product intent, not a temporary gap. [ADR-0041](0041-task-skill-session-delivery.md)
+makes Task-selected skills after `task_start` in an already-started session **next-session-only**
+when the host does not hot-reload. Reconciliation still guarantees projected files for the
+next host discovery boundary. Identifier lists such as `recommended_skills` are not instruction
+delivery. MCP does not carry skill bodies.

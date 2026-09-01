@@ -25,6 +25,7 @@ from harness.mcp_bridge import (
     _PROJECT_CONTEXT_DESCRIPTION,
     _PROJECT_SEARCH_DESCRIPTION,
     _SERVER_INSTRUCTIONS,
+    _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
     _unknown_tool_argument_error,
 )
@@ -91,6 +92,13 @@ def test_project_context_description_is_not_mandatory_for_code_docs() -> None:
     assert "already include a path" in description
     assert "metadata only" in description
     assert "Knowledge and Task refs" in description
+
+
+def test_task_start_description_states_next_discovery_boundary() -> None:
+    assert "next host discovery boundary" in _TASK_START_DESCRIPTION
+    assert "not current-session MCP skill delivery" in _TASK_START_DESCRIPTION
+    assert "live skill injection" in _TASK_START_DESCRIPTION
+    assert "stack_hints drive" in _TASK_START_DESCRIPTION
 
 
 def test_server_instruction_budget_remains_bounded() -> None:
@@ -291,6 +299,13 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             )
             assert started.is_error is False
             assert started.structured_content is not None
+            assert set(started.structured_content) == {
+                "workspace_id",
+                "task_id",
+                "state",
+                "wait_reason",
+                "revision",
+            }
             task_id = started.structured_content["task_id"]
             assert started.structured_content["revision"] == 1
             for invalid_revision in (True, "1"):
@@ -718,6 +733,11 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "omit task_id" in by_name["task_start"]["description"]
                 assert "never pass summary" in by_name["task_start"]["description"]
                 assert "read this schema and retry" in by_name["task_start"]["description"]
+                assert "next host discovery boundary" in by_name["task_start"]["description"]
+                assert (
+                    "not current-session MCP skill delivery" in by_name["task_start"]["description"]
+                )
+                assert "live skill injection" in by_name["task_start"]["description"]
                 assert "targeted native read is allowed" in by_name["project_search"]["description"]
                 assert "Not mandatory for code or doc" in by_name["project_context"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
@@ -734,7 +754,16 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                     is False
                 )
                 serialized = json.dumps(tools, sort_keys=True)
-                for forbidden in ("content_sha256", "baseline_head", "source_checkpoint_id"):
+                for forbidden in (
+                    "content_sha256",
+                    "baseline_head",
+                    "source_checkpoint_id",
+                    "recommended_skills",
+                    "skill_body",
+                    "skill_bodies",
+                    "skill_refs",
+                    "selected_skills",
+                ):
                     assert forbidden not in serialized
 
         oversized_ref = "x" * 20_000

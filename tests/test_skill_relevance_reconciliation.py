@@ -1,3 +1,10 @@
+"""Filesystem/watcher skill reconciliation after relevance-key changes.
+
+These tests prove enqueue and projection repair for the next host discovery
+boundary (R-01). They do not prove current-session model instruction delivery
+(ADR-0041).
+"""
+
 from __future__ import annotations
 
 import http.client

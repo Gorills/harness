@@ -446,6 +446,13 @@ Projection design must include:
 - `.git/info/exclude` for generated project artifacts where appropriate, never silent `.gitignore` mutation.
 
 Skill hot reload is an optimization, not a correctness requirement.
+Task-selected skills after `task_start` in an already-started session follow that same
+next-discovery-boundary contract
+([ADR-0041](docs/decisions/0041-task-skill-session-delivery.md)): Harness MCP does not deliver
+skill bodies or treat `recommended_skills` as instruction delivery. Harness MCP does not
+deliver skill bodies into the current session. Optional host hot reload is not scored as
+Harness current-session delivery. Projection and watcher enqueue after a relevance-key
+change remain filesystem repair for the next host discovery boundary.
 
 ADR-0032 closes the lifecycle gap between resolution and projection. Installed host intent for
 every supported profile is durable daemon-adjacent state. Foreground `scan` reconciles skills
