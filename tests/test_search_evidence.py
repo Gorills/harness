@@ -10,8 +10,13 @@ from pathlib import Path
 import pytest
 
 import harness.retrieval as retrieval_module
-from harness.index import SearchEvidenceReadStatus, read_current_search_text, scan_workspace
-from harness.registry import create_project, get_workspace, register_workspace
+from harness.index import (
+    SearchEvidenceRead,
+    SearchEvidenceReadStatus,
+    read_current_search_text,
+    scan_workspace,
+)
+from harness.registry import WorkspaceRecord, create_project, get_workspace, register_workspace
 from harness.retrieval import (
     EVIDENCE_REASON_CHANGED_SINCE_INDEX,
     EVIDENCE_REASON_NOT_RELOCATED,
@@ -56,7 +61,9 @@ def _commit(root: Path) -> None:
     )
 
 
-def _search_code(connection: sqlite3.Connection, workspace_id: str, query: str, limit: int = 5):
+def _search_code(
+    connection: sqlite3.Connection, workspace_id: str, query: str, limit: int = 5
+) -> tuple[ProjectSearchHit, ...]:
     return search_project(
         connection,
         workspace_id,
@@ -265,12 +272,23 @@ def test_search_evidence_respects_global_response_budget(
     try:
         root = tmp_path / "repo"
         workspace_id = _indexed_repo(connection, root)
-        original = retrieval_module.read_current_search_text
+        original = read_current_search_text
         reads: list[str] = []
 
-        def counting_read(workspace, relative_path, **kwargs):
+        def counting_read(
+            workspace: WorkspaceRecord,
+            relative_path: str,
+            *,
+            expected_content_sha256: str,
+            deadline: float | None = None,
+        ) -> SearchEvidenceRead:
             reads.append(relative_path)
-            return original(workspace, relative_path, **kwargs)
+            return original(
+                workspace,
+                relative_path,
+                expected_content_sha256=expected_content_sha256,
+                deadline=deadline,
+            )
 
         monkeypatch.setattr(retrieval_module, "read_current_search_text", counting_read)
         for index in range(1000):

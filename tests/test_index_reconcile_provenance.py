@@ -26,7 +26,7 @@ from harness.index import (
     scan_workspace,
     scan_workspace_paths,
 )
-from harness.ipc import request_workspace_status
+from harness.ipc import WorkspaceStatusResult, request_workspace_status
 from harness.registry import create_project, get_workspace, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint
@@ -62,7 +62,7 @@ def _registered(tmp_path: Path) -> tuple[Path, Path, sqlite3.Connection, str]:
     return root, database, connection, workspace.workspace_id
 
 
-def _status(connection: sqlite3.Connection, root: Path):
+def _status(connection: sqlite3.Connection, root: Path) -> WorkspaceStatusResult:
     return read_workspace_status(connection, [WorkspaceHint(root, "explicit-root")])
 
 
@@ -70,8 +70,9 @@ def _assert_utc_timestamp(value: str | None) -> str:
     assert value is not None
     parsed = datetime.fromisoformat(value)
     assert parsed.tzinfo is not None
-    assert parsed.utcoffset() is not None
-    assert parsed.utcoffset().total_seconds() == 0
+    offset = parsed.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == 0
     return value
 
 
