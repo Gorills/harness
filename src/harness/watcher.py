@@ -256,11 +256,11 @@ class WorkspaceWatcher:
             if stop_requested is not None and stop_requested():
                 return reconciled
             try:
+                self._reset_metadata_state(workspace, state)
                 post_snapshot = read_workspace_change_snapshot(
                     workspace,
                     deadline=monotonic() + self._token_deadline_seconds,
                 )
-                self._reset_metadata_state(workspace, state)
             except WorkspaceWatchError:
                 _clear_idle_metadata(state)
                 state.git_snapshot = None
@@ -268,13 +268,18 @@ class WorkspaceWatcher:
                 state.retry_after = sampled_at + self._retry_seconds
                 state.force_full_reconcile = True
                 return reconciled
-            state.git_snapshot = post_snapshot
             if post_snapshot.token != trigger_snapshot.token:
                 if trigger_snapshot.head != post_snapshot.head:
                     state.pending_since = sampled_at
                     state.force_full_reconcile = True
+                    state.git_snapshot = post_snapshot
                 elif not _oversized_dirty_set(trigger_snapshot, post_snapshot):
                     state.pending_since = sampled_at
+                    state.git_snapshot = trigger_snapshot
+                else:
+                    state.git_snapshot = post_snapshot
+            else:
+                state.git_snapshot = post_snapshot
             return reconciled
 
         return reconciled

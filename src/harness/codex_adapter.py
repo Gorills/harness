@@ -181,9 +181,9 @@ class CodexAdapter:
         )
         if self.forward_env_vars != expected:
             raise ValueError("Codex forwarded environment names must be an ordered known subset")
-        if not self.mcp_http_url.startswith(f"http://{DASHBOARD_HOST}:") or not self.mcp_http_url.endswith(
-            _MCP_HTTP_PATH
-        ):
+        if not self.mcp_http_url.startswith(
+            f"http://{DASHBOARD_HOST}:"
+        ) or not self.mcp_http_url.endswith(_MCP_HTTP_PATH):
             raise ValueError("Codex MCP HTTP URL must be a loopback Harness endpoint")
 
     @property
@@ -634,8 +634,7 @@ def _desired_config(
             "startup_timeout_sec = 30",
             "",
             "[mcp_servers.harness.http_headers]",
-            f"{_MCP_HTTP_AUTHORIZATION_HEADER} = "
-            f"{_toml_string(f'Bearer {mcp_http_token}')}",
+            f"{_MCP_HTTP_AUTHORIZATION_HEADER} = {_toml_string(f'Bearer {mcp_http_token}')}",
             f"{_toml_string(_MCP_HTTP_WORKSPACE_HEADER)} = {_toml_string(root)}",
             "",
         ]
@@ -716,7 +715,9 @@ def _entry_identity(entry: dict[str, object] | None) -> tuple[str | None, str | 
     root = (
         headers.get(_MCP_HTTP_WORKSPACE_HEADER)
         if isinstance(headers, dict)
-        else env.get(_WORKSPACE_ROOT_ENV) if isinstance(env, dict) else None
+        else env.get(_WORKSPACE_ROOT_ENV)
+        if isinstance(env, dict)
+        else None
     )
     return (
         url if isinstance(url, str) else command if isinstance(command, str) else None,
@@ -786,7 +787,8 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
             and entry.get("required") is True
             and entry.get("startup_timeout_sec") == 30
             and isinstance(headers, dict)
-            and set(headers) == {
+            and set(headers)
+            == {
                 _MCP_HTTP_AUTHORIZATION_HEADER,
                 _MCP_HTTP_WORKSPACE_HEADER,
             }

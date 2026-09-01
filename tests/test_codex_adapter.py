@@ -171,8 +171,9 @@ def test_codex_project_reconcile_updates_only_marker_owned_config(tmp_path: Path
 
     assert current.reconcile_project(root) is IntegrationChange.CHANGED
     assert (
-        tomllib.loads(_config(root).read_text(encoding="utf-8"))["mcp_servers"]["harness"]
-        ["http_headers"]["Authorization"]
+        tomllib.loads(_config(root).read_text(encoding="utf-8"))["mcp_servers"]["harness"][
+            "http_headers"
+        ]["Authorization"]
         == "Bearer new-capability"
     )
 
@@ -571,8 +572,9 @@ def test_codex_tracked_manual_config_without_authorization_is_never_adopted(
         adapter.reconcile_project(root, hidden=hidden)
     assert (
         "Authorization"
-        not in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"]
-        ["http_headers"]
+        not in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"][
+            "http_headers"
+        ]
     )
 
 

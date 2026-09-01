@@ -200,9 +200,10 @@ def test_install_foreign_registration_fails_before_daemon_state_mutation(
     assert "non-Harness MCP server" in capsys.readouterr().out
     assert not (state_home / "harness" / "harness.db").exists()
     assert not (runtime_home / "harness" / "harness.sock").exists()
-    assert json.loads(cursor_config.read_text(encoding="utf-8"))["mcpServers"]["harness"][
-        "command"
-    ] == "/foreign/tool"
+    assert (
+        json.loads(cursor_config.read_text(encoding="utf-8"))["mcpServers"]["harness"]["command"]
+        == "/foreign/tool"
+    )
 
 
 def test_install_refuses_unsafe_canonical_database_before_daemon_or_registration_mutation(

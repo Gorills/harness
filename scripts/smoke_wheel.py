@@ -494,8 +494,7 @@ def main() -> int:
             "unsupported Harness host profile: claude-code",
         ]:
             raise RuntimeError(
-                "installed leftover Claude overlay did not fail closed: "
-                f"{leftover_probe.stdout!r}"
+                f"installed leftover Claude overlay did not fail closed: {leftover_probe.stdout!r}"
             )
 
         skill_project = workspace / "skill-project"
@@ -609,9 +608,7 @@ def main() -> int:
             env=isolated_env,
         )
         if ignored.returncode != 0:
-            raise RuntimeError(
-                "installed Cursor skill projection was not ignored by Git"
-            )
+            raise RuntimeError("installed Cursor skill projection was not ignored by Git")
 
         antigravity_project = workspace / "antigravity-skill-project"
         antigravity_project.mkdir()
@@ -805,12 +802,8 @@ raise SystemExit(2)
                 raise RuntimeError(
                     f"installed harness install was not idempotent: {install_again.stdout!r}"
                 )
-            host_state = (
-                Path(fake_env["XDG_STATE_HOME"]) / "harness" / "host-integrations.json"
-            )
-            if json.loads(host_state.read_text(encoding="utf-8")).get("profiles") != [
-                "cursor"
-            ]:
+            host_state = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "host-integrations.json"
+            if json.loads(host_state.read_text(encoding="utf-8")).get("profiles") != ["cursor"]:
                 raise RuntimeError(
                     "default harness install did not record Cursor host intent: "
                     f"{host_state.read_text(encoding='utf-8')!r}"
@@ -970,9 +963,7 @@ raise SystemExit(2)
             _require_codex_config(codex_project_a, upgrade_python, lifecycle_project)
             _require_codex_config(codex_project_b, upgrade_python, lifecycle_worktree)
             _require_codex_config(codex_project_c, upgrade_python, independent_project)
-            lifecycle_projected_skill = (
-                lifecycle_project / ".agents" / "skills" / "python-helper"
-            )
+            lifecycle_projected_skill = lifecycle_project / ".agents" / "skills" / "python-helper"
             if not (lifecycle_projected_skill / "SKILL.md").is_file():
                 raise RuntimeError("Cursor skill projection is missing")
             cursor_language_skill = (
@@ -1093,11 +1084,7 @@ raise SystemExit(2)
             database = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "harness.db"
             if not database.is_file():
                 raise RuntimeError("multi-host uninstall did not preserve Project Intelligence")
-            if (
-                cursor_project_a.exists()
-                or cursor_project_b.exists()
-                or cursor_project_c.exists()
-            ):
+            if cursor_project_a.exists() or cursor_project_b.exists() or cursor_project_c.exists():
                 raise RuntimeError("multi-host uninstall left Harness-owned host registrations")
 
             _run(

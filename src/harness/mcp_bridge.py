@@ -358,7 +358,9 @@ def _mcp_tool_refusal() -> tuple[str, str] | None:
     return None
 
 
-def build_mcp_server(*, workspace_transport: Literal["environment", "http-header"] = "environment") -> MCPServer:
+def build_mcp_server(
+    *, workspace_transport: Literal["environment", "http-header"] = "environment"
+) -> MCPServer:
     """Build the thin MCP adapter for stdio or daemon-owned HTTP transport."""
     refusal = _mcp_tool_refusal()
     server = HarnessMCPServer(

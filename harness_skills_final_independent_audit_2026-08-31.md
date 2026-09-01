@@ -981,12 +981,7 @@ The first isolated scan also reconciles the current built-in skill pack...
 `BuiltinSkill.files()` строит:
 
 ```python
-frontmatter = (
-    f"---\n"
-    f"name: {self.skill_id}\n"
-    f"description: {self.description}\n"
-    f"---\n\n"
-)
+frontmatter = f"---\nname: {self.skill_id}\ndescription: {self.description}\n---\n\n"
 ```
 
 Текущие descriptions проверены и не дают известного malformed frontmatter.

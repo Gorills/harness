@@ -101,8 +101,13 @@ remain the safety net. The five-minute pass no longer force-hashes every indexed
 status is unchanged; an oversized dirty tree is full-scanned at most once per five-minute window
 unless HEAD moved. A post-reconcile metadata and Git sample retains the existing
 changed-during-scan retry rule, except a still-oversized dirty set with unchanged HEAD does not
-immediately queue another full scan. Metadata can still miss deliberately restored inode timestamps,
-so a later Git HEAD move or the next allowed full pass remains required for those rare cases.
+immediately queue another full scan. The metadata baseline is reset before that Git sample so a
+create/modify/delete that lands during the restat cannot be stored as the idle baseline against a
+stale Git snapshot and then treated as quiet until the periodic pass. When the post-scan Git token
+differs from the token the scan used, the retry keeps that pre-scan Git snapshot so the next
+confirmation still sees a dirty delta instead of confirming the already-mutated tree as quiet.
+Metadata can still miss deliberately restored inode timestamps, so a later Git HEAD move or the next
+allowed full pass remains required for those rare cases.
 
 The structural performance gate therefore changes the idle budget from two Git subprocesses per
 poll to zero. It does not impose a wall-clock threshold on shared CI hardware.

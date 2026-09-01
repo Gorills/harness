@@ -319,7 +319,7 @@ def test_idle_watcher_poll_digests_one_directory_shard(
         real_digest = watcher_module._digest_workspace_directories
 
         def counted_digest(
-            digest: object,
+            digest: hashlib._Hash,
             workspace_root: Path,
             directory_paths: Sequence[str],
             *,
@@ -368,11 +368,11 @@ def test_idle_poll_samples_a_bounded_workspace_subset(
 
         def counted_idle(
             workspace: WorkspaceRecord,
-            indexed_files: object,
-            directory_paths: object,
+            indexed_files: Sequence[IndexedFileRecord],
+            directory_paths: Sequence[str],
             *,
             deadline: float,
-        ) -> object:
+        ) -> watcher_module.IdleWorkspaceMetadata:
             sampled_roots.append(workspace.workspace_root)
             return real_idle(workspace, indexed_files, directory_paths, deadline=deadline)
 
@@ -1012,6 +1012,55 @@ def test_periodic_reconcile_repairs_a_missed_change_hint(
             record.relative_path: record for record in list_indexed_files(connection, workspace_id)
         }
         assert records["tracked.txt"].content_sha256 == hashlib.sha256(b"missed\n").hexdigest()
+    finally:
+        connection.close()
+
+
+def test_post_scan_changes_during_metadata_reset_remain_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        added = root / "added.txt"
+        tracked = root / "tracked.txt"
+        tracked.write_text("changed\n", encoding="utf-8")
+        added.write_text("added\n", encoding="utf-8")
+        assert watcher.poll(now=1.0) == 0
+
+        real_reset = watcher._reset_metadata_state
+
+        def mutating_reset(
+            workspace: WorkspaceRecord,
+            state: watcher_module._WorkspaceWatchState,
+        ) -> None:
+            real_reset(workspace, state)
+            tracked.unlink()
+            added.write_text("updated\n", encoding="utf-8")
+
+        monkeypatch.setattr(watcher, "_reset_metadata_state", mutating_reset)
+        assert watcher.poll(now=1.11) == 1
+        monkeypatch.undo()
+        watcher.poll(now=1.22)
+        watcher.poll(now=1.33)
+        records = {
+            record.relative_path: record.content_sha256
+            for record in list_indexed_files(connection, workspace_id)
+        }
+        assert records == {"added.txt": hashlib.sha256(b"updated\n").hexdigest()}
     finally:
         connection.close()
 
