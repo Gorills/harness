@@ -51,7 +51,12 @@ from harness.ipc import (
     request_workspace_task_status,
 )
 from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
-from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchScope
+from harness.retrieval import (
+    MAX_PROJECT_CONTEXT_REF_BYTES,
+    PROJECT_SEARCH_MAX_BYTES,
+    ProjectSearchScope,
+    project_search_hit_payload,
+)
 from harness.runtime_paths import default_runtime_paths
 from harness.tasks import TaskState, TaskWaitReason
 from harness.verification import VerificationDraft, VerificationStatus
@@ -75,9 +80,11 @@ _SERVER_INSTRUCTIONS = (
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search bounded Project Intelligence across local code/doc text and identifiers, "
     "durable Knowledge, and Task history. Natural queries may include conversational "
-    "filler. Results are compact refs. Use after task_start or resume, before broad native "
-    "exploration. If a code or doc hit includes an exact path, targeted native read is "
-    "allowed; project_context is not required for those kinds."
+    "filler. Results are compact refs. Code/doc hits may include a bounded current-source "
+    "evidence snippet after a live-file SHA match; FTS is not a source store. Use after "
+    "task_start or resume, before broad native exploration. If a code or doc hit includes "
+    "an exact path, targeted native read is allowed; project_context is not required for "
+    "those kinds."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
@@ -120,7 +127,7 @@ _SEARCH_DEFAULT_LIMIT = 5
 _SEARCH_HARD_LIMIT = 10
 _CONTEXT_HARD_LIMIT = 10
 _STATUS_MAX_BYTES = 10 * 1024
-_SEARCH_MAX_BYTES = 12 * 1024
+_SEARCH_MAX_BYTES = PROJECT_SEARCH_MAX_BYTES
 _CONTEXT_MAX_BYTES = 12 * 1024
 _TASK_MAX_BYTES = 4 * 1024
 _CONTEXT_REF_MAX_BYTES = MAX_PROJECT_CONTEXT_REF_BYTES
@@ -489,19 +496,7 @@ def build_mcp_server(
             limit=limit,
             scope=ProjectSearchScope(scope),
         )
-        hits = [
-            {
-                "ref": hit.ref,
-                "kind": hit.kind.value,
-                "title": hit.title,
-                "location": hit.location,
-                "short_summary": hit.short_summary,
-                "match_reason": hit.match_reason,
-                "freshness": hit.freshness,
-                **({"path": hit.path} if hit.path is not None else {}),
-            }
-            for hit in result.results[:limit]
-        ]
+        hits = [project_search_hit_payload(hit) for hit in result.results[:limit]]
         return _bounded(
             {"query": query, "scope": scope, "results": hits},
             _SEARCH_MAX_BYTES,

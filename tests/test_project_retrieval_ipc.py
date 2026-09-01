@@ -93,6 +93,25 @@ def test_project_retrieval_round_trips_through_strict_daemon_ipc(tmp_path: Path)
         assert searched.workspace_id == workspace_id
         assert searched.results[0].ref == "knowledge:card"
         assert searched.results[0].kind is ProjectSearchKind.KNOWLEDGE
+        assert searched.results[0].evidence is None
+
+        docs = request_project_search(
+            socket_path,
+            hints,
+            "rotation",
+            scope=ProjectSearchScope.DOCS,
+            limit=1,
+        )
+        assert docs.results[0].ref == "doc:docs/rotation.md"
+        assert docs.results[0].evidence is not None
+        assert docs.results[0].evidence.snippet.strip() == "rotation"
+        assert docs.results[0].evidence_reason is None
+        assert set(docs.results[0].evidence.to_wire()) == {
+            "start_line",
+            "end_line",
+            "snippet",
+            "truncated",
+        }
 
         context = request_project_context(
             socket_path, hints, ("knowledge:card", "doc:docs/rotation.md")

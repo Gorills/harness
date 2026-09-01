@@ -4,6 +4,19 @@
 - **Date:** 2026-08-30
 - **Deciders:** Repository architecture baseline
 
+> **Amended (2026-09-01):** `project_search` may attach bounded **current-source** evidence on
+> code/doc hits. Contentless FTS (`content=''`) remains not a source store: Harness must not use
+> SQLite `snippet()`/`highlight()` as if bodies were stored. Evidence is produced only by mapping
+> the FTS candidate to `indexed_search_documents` / `indexed_files` SHA, safely rereading the live
+> Workspace file with the same containment/regular-file/symlink/size/UTF-8 invariants as indexing,
+> requiring the live SHA to equal the indexed SHA, relocating significant query terms, and returning
+> a bounded line window. SHA mismatch yields `evidence=null` and `evidence_reason=changed_since_index`
+> while keeping the locator. An unsafe or unrelocatable match uses `current_match_not_relocated`.
+> When the global 12 KiB `project_search` payload is full, already-built evidence is dropped with
+> `evidence=null` and `evidence_reason=response_budget` rather than pretending relocate failed.
+> Path-only hits without a content document use `path_only`. `project_context` for code/doc refs
+> stays metadata-only.
+
 ## Context
 
 ADR-0021 made Knowledge and Task history searchable through rebuildable FTS5 indexes, but kept the
@@ -33,7 +46,8 @@ The durable mapping stores only path/corpus/hash plus title and compound-identif
 table uses `content=''` and `contentless_delete=1`; source bodies are supplied for tokenization but
 are not readable back as a SQLite text column. FTS terms remain private local derived data and are
 never returned by IPC/MCP. Selected code/doc results are still reconstructed from authoritative
-`indexed_files`, and `project_context` remains metadata-only. Content rows are updated/deleted in the
+`indexed_files`. `project_search` may additionally attach a bounded live-file evidence window as
+amended above; `project_context` remains metadata-only. Content rows are updated/deleted in the
 same transaction as the Structural Index. A v13→v14 migration creates an empty derived content index;
 the daemon watcher's initial authoritative reconciliation or an explicit scan backfills it from the
 live Workspace rather than pretending stale stored hashes contain source text.
@@ -84,7 +98,8 @@ Automated coverage must prove:
 - v13→v14 migration and rollback are transactional and do not fabricate content from hashes;
 - authoritative scan insert/update/delete and missing-derived-row repair keep content FTS synchronized;
 - binary/NUL and oversized files do not enter content FTS;
-- content FTS has no readable source-body column and code/doc MCP payloads remain metadata-only;
+- content FTS has no readable source-body column; code/doc `project_context` remains metadata-only;
+  `project_search` evidence, when present, comes from a current-file reread rather than FTS snippet;
 - generated `.log`/`.out` artifacts remain mechanically indexed but do not become code/docs hits;
 - natural filler queries, camel/snake identifiers, prefix inflections, and Russian inflections find
   relevant code/docs whose paths do not contain all query terms;

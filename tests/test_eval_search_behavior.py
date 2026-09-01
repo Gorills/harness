@@ -242,6 +242,13 @@ def test_mcp_wire_doc_hit_plus_cat_is_strong_targeted_read() -> None:
                     "match_reason": "lexical content (all terms)",
                     "freshness": "indexed_snapshot",
                     "path": "docs/auth.md",
+                    "evidence": {
+                        "start_line": 1,
+                        "end_line": 3,
+                        "snippet": "authenticate user\n",
+                        "truncated": False,
+                    },
+                    "evidence_reason": None,
                 }
             ],
             scope="docs",

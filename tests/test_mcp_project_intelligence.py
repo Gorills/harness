@@ -244,9 +244,12 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert code.structured_content is not None
             assert code.structured_content["results"][0]["ref"] == ("code:src/token_service.py")
             assert code.structured_content["results"][0]["short_summary"] is None
-            assert "replace_and_invalidate" not in json.dumps(
-                code.structured_content, sort_keys=True
-            )
+            code_hit = code.structured_content["results"][0]
+            assert code_hit["evidence"] is not None
+            assert "replace_and_invalidate" in code_hit["evidence"]["snippet"]
+            assert "bm25" not in json.dumps(code.structured_content).casefold()
+            assert knowledge_results[0].get("evidence") is None
+            assert tasks.structured_content["results"][0].get("evidence") is None
 
             docs = await client.call_tool(
                 "project_search", {"query": "rotation", "scope": "docs", "limit": 2}
