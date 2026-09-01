@@ -1127,8 +1127,9 @@ def harness_main() -> int:
         "dashboard",
         help="print the daemon-owned local Projects dashboard URL",
         description=(
-            "Print the private URL of the daemon-owned loopback Projects dashboard. "
-            "The listener starts with the daemon on a fixed loopback port."
+            "Print the loopback URL of the daemon-owned Projects dashboard. "
+            "The listener starts with the daemon; the canonical URL is "
+            "http://127.0.0.1:17373/."
         ),
     )
     dashboard_parser.add_argument(

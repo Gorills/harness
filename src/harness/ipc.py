@@ -2083,6 +2083,19 @@ def _runtime_diagnostics_from_response(
     )
 
 
+def _is_loopback_dashboard_path(path: str) -> bool:
+    if path == "/":
+        return True
+    if not path.startswith("/") or not path.endswith("/") or path.count("/") != 2:
+        return False
+    token = path[1:-1]
+    return (
+        32 <= len(token) <= 64
+        and token.isascii()
+        and all(character.isalnum() or character in "-_" for character in token)
+    )
+
+
 def _dashboard_url_from_response(
     response: dict[str, Any], *, expected_request_id: str
 ) -> DashboardUrlResult:
@@ -2106,11 +2119,9 @@ def _dashboard_url_from_response(
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or not parsed.path.startswith("/")
-        or parsed.path == "/"
-        or not parsed.path.endswith("/")
+        or not _is_loopback_dashboard_path(parsed.path)
     ):
-        raise IpcProtocolError("daemon dashboard URL is not a private loopback capability URL")
+        raise IpcProtocolError("daemon dashboard URL is not a loopback dashboard URL")
     return DashboardUrlResult(url=url)
 
 

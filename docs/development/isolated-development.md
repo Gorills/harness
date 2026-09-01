@@ -63,7 +63,7 @@ scripts/dev harness search indexed_files
 scripts/dev harness dashboard
 ```
 
-`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints the current private URL. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
+`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
 The first isolated `scan` also reconciles the current built-in skill pack into the checkout-local
 registry (the count is not an invariant; see

@@ -4,6 +4,7 @@
 - **Date:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0025](0025-dashboard-eager-start-and-russian-ui.md)
+- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md)
 
 ## Context
 

@@ -21,9 +21,12 @@ from harness.dashboard import (
     DashboardServerManager,
     dashboard_token_path,
     dashboard_url_path,
+    read_dashboard_home,
+    read_dashboard_project_detail,
     read_dashboard_task_detail,
     read_dashboard_workspace_detail,
     read_dashboard_workspace_rows,
+    render_project_page,
     render_projects_page,
     render_task_page,
     render_workspace_page,
@@ -37,7 +40,7 @@ from harness.ipc import (
     request_runtime_diagnostics,
     request_status,
 )
-from harness.registry import create_project, register_workspace
+from harness.registry import create_project, get_workspace, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.task_checkpoints import checkpoint_task
 from harness.task_workflow import task_start
@@ -139,13 +142,9 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
         parsed = urlsplit(url)
         assert parsed.scheme == "http"
         assert parsed.hostname == "127.0.0.1"
-        assert parsed.path != "/"
+        assert parsed.path == "/"
         assert parsed.query == ""
         assert parsed.fragment == ""
-
-        with pytest.raises(HTTPError) as denied:
-            urlopen(f"http://127.0.0.1:{parsed.port}/", timeout=2)
-        assert denied.value.code == 404
 
         with urlopen(url, timeout=2) as response:
             body = response.read().decode("utf-8")
@@ -153,12 +152,29 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
         assert "Проекты · Harness" in body
-        assert "Проекты, активные задачи и точки внимания" in body
+        assert "Поиск по всем задачам и последние обновления." in body
+        assert "Последние задачи" in body
+        assert 'class="nav-task"' not in body
+        assert "/projects/" not in body
+        assert "Основная копия" not in body
         assert "ревью" in body
+        assert f"workspaces/{workspace_id}/" in body
+        assert "/projects/" not in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
-        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
+        with urlopen(url + f"workspaces/{workspace_id}/", timeout=2) as workspace_response:
+            workspace_body = workspace_response.read().decode("utf-8")
+        assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in workspace_body
         assert "<script>alert('task')</script>" not in body
         assert '<img src=x onerror="alert(1)">' not in body
+
+        token = dashboard_token_path(database).read_text(encoding="ascii").strip()
+        with urlopen(f"http://127.0.0.1:{parsed.port}/{token}/", timeout=2) as legacy:
+            assert legacy.status == 200
+            assert "Проекты · Harness" in legacy.read().decode("utf-8")
+
+        with pytest.raises(HTTPError) as denied:
+            urlopen(f"http://127.0.0.1:{parsed.port}/not-a-dashboard/", timeout=2)
+        assert denied.value.code == 404
     finally:
         manager.close()
 
@@ -194,10 +210,14 @@ def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
     assert row.dirty_path_count is None
     assert row.live_error == "Git status unavailable"
     assert row.indexed_file_count == 1
-    html = render_projects_page(rows, base_path="/cap/")
+    html = render_projects_page(read_dashboard_home(database), base_path="/cap/")
     assert 'class="task-git-branch"' in html
     assert '<strong class="mono">main</strong>' in html
-    assert "Git недоступен" in html
+    workspace_html = render_workspace_page(
+        read_dashboard_workspace_detail(database, workspace_id),
+        base_path="/cap/",
+    )
+    assert "Git недоступен" in workspace_html
 
 
 def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_path: Path) -> None:
@@ -218,7 +238,7 @@ def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_p
         with urlopen(first.url, timeout=2) as response:
             body = response.read().decode("utf-8")
             assert response.status == 200
-        assert "Пока нет рабочих копий" in body
+        assert "Пока нет проектов" in body
         assert "harness scan" in body
         assert 'lang="ru"' in body
     finally:
@@ -355,17 +375,21 @@ def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Pat
     row = rows[0]
     assert row.branch == "main"
     assert row.task_git_branch == DashboardGitBranch(captured=True, name="feature/dashboard-branch")
-    overview = render_projects_page(rows, base_path="/cap/")
+    overview = render_projects_page(read_dashboard_home(database), base_path="/cap/")
     assert 'class="task-git-branch"' in overview
     assert '<strong class="mono">feature/dashboard-branch</strong>' in overview
-    assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in overview
+    project_html = render_project_page(
+        read_dashboard_project_detail(database, row.project_id),
+        base_path="/cap/",
+    )
+    assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in project_html
 
     workspace = read_dashboard_workspace_detail(database, workspace_id)
     assert workspace.recent_tasks[0].git_branch == DashboardGitBranch(
         captured=True, name="feature/dashboard-branch"
     )
     workspace_html = render_workspace_page(workspace, base_path="/cap/")
-    assert 'Ветка <span class="mono">feature/dashboard-branch</span>' in workspace_html
+    assert 'Ветка <strong class="mono">feature/dashboard-branch</strong>' in workspace_html
 
     assert row.task_id is not None
     detail = read_dashboard_task_detail(database, row.task_id)
@@ -437,7 +461,42 @@ def test_dashboard_shows_detached_head_for_task_without_named_branch(tmp_path: P
 
     rows = read_dashboard_workspace_rows(database)
     assert rows[0].task_git_branch == DashboardGitBranch(captured=True, name=None)
-    html = render_projects_page(rows, base_path="/cap/")
+    html = render_projects_page(read_dashboard_home(database), base_path="/cap/")
     assert '<strong class="mono">(detached)</strong>' in html
     assert rows[0].branch is None
-    assert '<div class="mini-stat"><span>Ветка</span><strong>—</strong></div>' in html
+    project_html = render_project_page(
+        read_dashboard_project_detail(database, rows[0].project_id),
+        base_path="/cap/",
+    )
+    assert '<div class="mini-stat"><span>Ветка</span><strong>—</strong></div>' in project_html
+
+
+def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    worktree = tmp_path / "repo-feature"
+    _git(root, "worktree", "add", "--detach", str(worktree))
+    connection = connect_database(database)
+    try:
+        project_id = get_workspace(connection, workspace_id).project_id
+        register_workspace(connection, project_id=project_id, path=worktree)
+    finally:
+        connection.close()
+
+    rows = read_dashboard_workspace_rows(database)
+    html = render_projects_page(read_dashboard_home(database), base_path="/")
+    assert len(rows) == 2
+    assert len({row.project_id for row in rows}) == 1
+    assert any(f"workspaces/{row.workspace_id}/" in html for row in rows)
+    assert "/projects/" not in html
+    assert 'class="nav-task"' not in html
+    assert "Поиск по всем задачам" in html
+    assert "Последние задачи" in html
+    assert "Открыть папку" not in html
+    assert "Основная копия" not in html
+    assert "рабочая копия" not in html.casefold()
+    project_html = render_project_page(
+        read_dashboard_project_detail(database, rows[0].project_id),
+        base_path="/",
+    )
+    assert str(root) in project_html
+    assert str(worktree) in project_html

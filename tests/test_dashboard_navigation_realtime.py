@@ -135,7 +135,11 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert 'lang="ru"' in overview
         assert 'class="app-sidebar"' in overview
         assert 'class="project-navigation"' in overview
-        assert f"projects/{quote(project_id, safe='')}/" in overview
+        assert f"workspaces/{quote(workspace_id, safe='')}/" in overview
+        assert f"projects/{quote(project_id, safe='')}/" not in overview
+        assert 'class="nav-task"' not in overview
+        assert "Поиск по всем задачам" in overview
+        assert "Последние задачи" in overview
         assert '<nav class="breadcrumbs"' in overview
         assert "<ol>" in overview
         assert 'aria-current="page"' in overview
@@ -178,9 +182,9 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "идентификатор" in workspace_page
         assert "ENABLED = True" not in workspace_page
         assert task.task_id[:10] in workspace_page
-        assert 'Ветка <span class="mono">main</span>' in workspace_page
+        assert 'Ветка <strong class="mono">main</strong>' in workspace_page
         assert "Текущая задача" in workspace_page
-        assert "Рабочая копия" in workspace_page
+        assert "Папка" in workspace_page
 
         status, _headers, task_page = _read(task_url)
         assert status == 200
@@ -191,6 +195,8 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert "<b>dashboard</b>" not in task_page
         assert "<mark>needs escaping</mark>" not in task_page
         assert ">Принять<" in task_page
+        assert f"workspaces/{quote(workspace_id, safe='')}/" in task_page
+        assert f'href="/workspaces/{quote(workspace_id, safe="")}/"' in task_page
         assert "<span>Задача</span>" in task_page
         assert '<dt>Ветка</dt><dd class="mono">main</dd>' in task_page
         assert (
@@ -198,12 +204,17 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
             '<span class="mono">main</span></div>'
         ) in task_page
 
-        with pytest.raises(HTTPError) as unscoped:
-            urlopen(f"{origin}/tasks/{quote(task.task_id, safe='')}/", timeout=2)
-        assert unscoped.value.code == 404
-        with pytest.raises(HTTPError) as unscoped_asset:
-            urlopen(f"{origin}/assets/dashboard.css", timeout=2)
-        assert unscoped_asset.value.code == 404
+        status, _headers, root_task = _read(f"{origin}/tasks/{quote(task.task_id, safe='')}/")
+        assert status == 200
+        assert "История" in root_task
+        status, _headers, _root_css = _read(f"{origin}/assets/dashboard.css")
+        assert status == 200
+        with pytest.raises(HTTPError) as unknown_prefix:
+            urlopen(
+                f"{origin}/not-a-dashboard/tasks/{quote(task.task_id, safe='')}/",
+                timeout=2,
+            )
+        assert unknown_prefix.value.code == 404
         with pytest.raises(HTTPError) as malformed_events:
             urlopen(base_url + "events?view=projects", timeout=2)
         assert malformed_events.value.code == 400
@@ -211,6 +222,15 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         with pytest.raises(HTTPError) as malformed_search:
             urlopen(workspace_url + "?q=feature&extra=1", timeout=2)
         assert malformed_search.value.code == 400
+
+        status, _headers, home_search = _read(base_url + "?" + urlencode({"q": "Polish dashboard"}))
+        assert status == 200
+        assert "search-hit" in home_search
+        assert "Polish" in home_search
+        assert "ENABLED = True" not in home_search
+        with pytest.raises(HTTPError) as malformed_home_search:
+            urlopen(base_url + "?q=feature&extra=1", timeout=2)
+        assert malformed_home_search.value.code == 400
     finally:
         manager.close()
 

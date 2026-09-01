@@ -134,7 +134,8 @@ def test_dashboard_feedback_is_same_origin_cas_and_resumes_same_task(tmp_path: P
         url = manager.get_url()
         parsed = urlsplit(url)
         origin = f"http://127.0.0.1:{parsed.port}"
-        with urlopen(url, timeout=2) as response:
+        workspace_url = url + f"workspaces/{quote(workspace_id, safe='')}/"
+        with urlopen(workspace_url, timeout=2) as response:
             body = response.read().decode("utf-8")
         assert ">Принять<" in body
         assert ">Замечание<" in body
@@ -601,20 +602,19 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         workspace_url = url + f"workspaces/{quote(workspace_id, safe='')}/"
         with urlopen(url, timeout=2) as response:
             body = response.read().decode("utf-8")
-        assert ">Скрытый<" in body
-        assert f'action="{parsed.path}"' in body
-        assert "Cursor не блокирует git-команды агента" not in body
+        assert 'name="visibility_mode"' not in body
         with urlopen(workspace_url, timeout=2) as response:
             workspace_body = response.read().decode("utf-8")
         assert ">Скрытый<" in workspace_body
         assert f'action="{urlsplit(workspace_url).path}"' in workspace_body
+        assert "Cursor не блокирует git-команды агента" not in workspace_body
 
         fields: dict[str, str | int] = {
             "action": "set_visibility",
             "project_id": project_id,
             "visibility_mode": "hidden",
         }
-        status, headers, payload = _post(url, fields, origin=origin)
+        status, headers, payload = _post(workspace_url, fields, origin=origin)
         assert status == 303
         assert payload == b""
         _assert_hardened(headers)
@@ -630,10 +630,6 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         )
         assert gitignore_after == gitignore_before
 
-        with urlopen(url, timeout=2) as response:
-            hidden_home = response.read().decode("utf-8")
-        assert ">Обычный<" in hidden_home
-        assert "Cursor не блокирует git-команды агента" in hidden_home
         with urlopen(workspace_url, timeout=2) as response:
             hidden_workspace = response.read().decode("utf-8")
         assert ">Обычный<" in hidden_workspace

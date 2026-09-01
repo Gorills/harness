@@ -355,7 +355,7 @@ Use a simple fusion strategy such as Reciprocal Rank Fusion before introducing m
 
 Search must explain why a result matched and must penalize stale semantic evidence.
 
-Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; both channels return metadata/history only and never raw source.
+Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; the home dashboard searches Task history across every registered Project. Both channels return metadata/history only and never raw source.
 
 The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace, the daemon validates its live Git identity before and after the read, and one read transaction fixes the corresponding Project identity. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge.
 
@@ -516,7 +516,7 @@ Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
+The dashboard uses the Python stdlib loopback HTTP server. HTML/CSS/JavaScript assets, Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints live at the loopback root without a path token. Realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
 
 The daemon also owns Codex's Streamable HTTP MCP endpoint on `127.0.0.1:17375` (isolated
 development: `17376`). It is a separate authenticated protocol surface, not part of the dashboard
@@ -527,16 +527,17 @@ both daemon reachability and Workspace identity before returning success. See AD
 Dashboard rules:
 
 - bind loopback only by default, on `127.0.0.1:17373` for the canonical per-user daemon and `127.0.0.1:17374` for an isolated checkout;
-- persist the capability path token next to the selected database so the operator URL stays stable across daemon restarts;
+- serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
+- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and recent Tasks; do not present Workspaces as copies or a second dashboard;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
-- Hidden/Normal operator control is on the home dashboard and Workspace detail; a nested Project-id page is not required;
+- Hidden/Normal operator control is on Project and Workspace detail;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
-- dashboard assets stay capability-scoped and same-origin so CSP can forbid inline script/style.
+- dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.

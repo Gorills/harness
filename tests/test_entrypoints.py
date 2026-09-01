@@ -192,7 +192,7 @@ def test_harness_dashboard_uses_canonical_daemon_and_prints_private_url(
     )
     autostarted: list[RuntimePaths] = []
     requested: list[Path] = []
-    dashboard_url = "http://127.0.0.1:43123/private-token/"
+    dashboard_url = "http://127.0.0.1:43123/"
 
     def request_dashboard(ipc_socket: Path) -> DashboardUrlResult:
         requested.append(ipc_socket)
@@ -224,7 +224,7 @@ def test_harness_dashboard_explicit_socket_does_not_autostart(
         entrypoints,
         "request_dashboard_url",
         lambda path: (
-            DashboardUrlResult(url="http://127.0.0.1:43123/private-token/")
+            DashboardUrlResult(url="http://127.0.0.1:43123/")
             if path == socket_path
             else (_ for _ in ()).throw(AssertionError("unexpected socket"))
         ),

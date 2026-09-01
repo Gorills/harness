@@ -535,6 +535,7 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .task-row-title a { text-decoration: none; }
 .task-row-title a:hover { color: var(--accent-hover); }
 .task-row-meta { display: flex; flex-wrap: wrap; gap: 7px 13px; margin-top: 7px; color: var(--text-muted); font-size: 11px; }
+.task-row-meta .task-git-branch { display: inline-flex; margin: 0; }
 .task-row-aside { display: flex; align-items: center; gap: 13px; }
 .row-arrow { color: var(--text-muted); transition: transform .14s ease, color .14s ease; }
 .task-row:hover .row-arrow { color: var(--accent-hover); transform: translateX(3px); }

@@ -29,10 +29,14 @@ def test_dashboard_hardens_unscoped_and_unsupported_http_responses(tmp_path: Pat
         url = manager.get_url()
         parsed = urlsplit(url)
         root = f"http://127.0.0.1:{parsed.port}/"
-        with pytest.raises(HTTPError) as root_error:
-            urlopen(root, timeout=2)
-        assert root_error.value.code == 404
-        _assert_hardened(root_error.value)
+        with urlopen(root, timeout=2) as response:
+            assert response.status == 200
+            assert response.headers["Cache-Control"] == "no-store"
+
+        with pytest.raises(HTTPError) as unknown_error:
+            urlopen(f"{root}not-a-dashboard/", timeout=2)
+        assert unknown_error.value.code == 404
+        _assert_hardened(unknown_error.value)
 
         post = Request(
             url,
