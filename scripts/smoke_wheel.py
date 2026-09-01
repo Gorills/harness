@@ -16,6 +16,7 @@ from mcp.client.stdio import stdio_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "0.1.0.dev0"
+DECLARED_MCP_REQUIREMENT = "mcp==2.0.0"
 
 
 def _run(
@@ -43,6 +44,23 @@ def _venv_scripts_dir(venv: Path) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin")
 
 
+def _install_wheel(uv: str, python: Path, wheel: Path, workspace: Path) -> None:
+    """Install the built wheel, then its declared MCP runtime dependency.
+
+    ``--no-deps`` keeps undeclared packages out of the smoke venv. ADR-0037
+    starts daemon-owned Streamable HTTP during ``harnessd serve``, so the
+    pinned MCP SDK (and its uvicorn/starlette graph) must still be present.
+    """
+    _run(
+        (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
+        cwd=workspace,
+    )
+    _run(
+        (uv, "pip", "install", "--python", str(python), DECLARED_MCP_REQUIREMENT),
+        cwd=workspace,
+    )
+
+
 def _isolated_wheel_env() -> dict[str, str]:
     """Copy the process environment without the source-checkout overlay identity."""
     values = os.environ.copy()
@@ -52,6 +70,8 @@ def _isolated_wheel_env() -> dict[str, str]:
         "HARNESS_SKILL_REGISTRY",
         "HARNESS_DEV_SAVED_XDG_STATE_HOME",
         "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT",
     ):
         values.pop(key, None)
     return values
@@ -350,7 +370,7 @@ def main() -> int:
             if len(metadata_names) != 1:
                 raise RuntimeError("wheel must contain exactly one dist-info/METADATA file")
             metadata = archive.read(metadata_names[0]).decode("utf-8")
-        if "Requires-Dist: mcp==2.0.0" not in metadata:
+        if f"Requires-Dist: {DECLARED_MCP_REQUIREMENT}" not in metadata:
             raise RuntimeError(
                 "wheel metadata does not pin the official MCP SDK runtime dependency"
             )
@@ -358,12 +378,18 @@ def main() -> int:
         _run((uv, "venv", "--python", "3.13", "--no-project", str(venv)), cwd=workspace)
         scripts_dir = _venv_scripts_dir(venv)
         python = scripts_dir / ("python.exe" if os.name == "nt" else "python")
-        _run(
-            (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
-            cwd=workspace,
-        )
+        _install_wheel(uv, python, wheel, workspace)
 
         isolated_env = _isolated_wheel_env()
+        _run(
+            (
+                str(python),
+                "-c",
+                "import mcp, uvicorn; from harness.mcp_http_server import MCPHTTPServerManager",
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
         suffix = ".exe" if os.name == "nt" else ""
         for name in ("harness", "harnessd"):
             executable = scripts_dir / f"{name}{suffix}"
@@ -503,6 +529,7 @@ def main() -> int:
         skill_registry = workspace / "skill-registry"
         skill = skill_registry / "fastapi"
         skill.mkdir(parents=True)
+        skill_registry.chmod(0o700)
         (skill / "SKILL.md").write_text(
             "---\n"
             "name: fastapi\n"
@@ -768,6 +795,7 @@ raise SystemExit(2)
             fake_home.mkdir()
             canonical_skill = fake_home / ".harness" / "skills" / "python-helper"
             canonical_skill.mkdir(parents=True)
+            (fake_home / ".harness").chmod(0o700)
             (fake_home / ".harness" / "skills").chmod(0o700)
             (canonical_skill / "SKILL.md").write_text(
                 "---\nname: python-helper\ndescription: Python conventions\n---\n\n"
@@ -917,18 +945,7 @@ raise SystemExit(2)
             )
             upgrade_scripts = _venv_scripts_dir(upgrade_venv)
             upgrade_python = upgrade_scripts / "python"
-            _run(
-                (
-                    uv,
-                    "pip",
-                    "install",
-                    "--python",
-                    str(upgrade_python),
-                    "--no-deps",
-                    str(wheel),
-                ),
-                cwd=workspace,
-            )
+            _install_wheel(uv, upgrade_python, wheel, workspace)
             upgraded_harness = upgrade_scripts / "harness"
             cursor_upgrade = _run(
                 (str(upgraded_harness), "install", "--host", "cursor"),

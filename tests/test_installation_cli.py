@@ -14,6 +14,7 @@ from fake_hosts import path_without_agent, write_fake_codex, write_fake_cursor_a
 
 from harness.builtin_skills import BUILTIN_SKILLS
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
+from harness.daemon_autostart import DaemonAutostartError
 from harness.entrypoints import harness_main
 from harness.installation import (
     InstallationError,
@@ -163,6 +164,32 @@ def test_install_harness_refuses_retired_claude_code() -> None:
         install_harness(host="claude-code")
     with pytest.raises(InstallationError, match="no longer a supported Harness host"):
         uninstall_harness(host="claude-code")
+
+
+def test_install_reports_daemon_prepare_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    _skill_registry(home)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("PATH", path_without_agent())
+
+    def fail_daemon(*_args: object, **_kwargs: object) -> None:
+        raise DaemonAutostartError(
+            "Harness daemon exited before becoming ready (exit 1): No module named uvicorn"
+        )
+
+    monkeypatch.setattr("harness.installation.ensure_canonical_daemon", fail_daemon)
+    monkeypatch.setattr(sys, "argv", ["harness", "install"])
+    assert harness_main() == 1
+    output = capsys.readouterr().out
+    assert "Harness daemon could not be prepared" in output
+    assert "No module named uvicorn" in output
 
 
 def test_install_foreign_registration_fails_before_daemon_state_mutation(

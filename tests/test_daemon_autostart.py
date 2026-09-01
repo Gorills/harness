@@ -35,6 +35,12 @@ def _transport_failure(cause: OSError) -> IpcTransportError:
     return error
 
 
+class _RunningProcess:
+    @staticmethod
+    def poll() -> None:
+        return None
+
+
 def test_canonical_autostart_reuses_reachable_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +102,7 @@ def test_canonical_autostart_starts_package_module_when_runtime_directory_is_mis
         assert kwargs["start_new_session"] is True
         paths.socket.parent.mkdir(mode=0o700)
         paths.socket.parent.chmod(0o700)
-        return object()
+        return _RunningProcess()
 
     monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
     monkeypatch.setattr(autostart, "request_status", lambda *_args, **_kwargs: _ready_status())
@@ -128,7 +134,7 @@ def test_canonical_autostart_recovers_confirmed_absence_with_one_spawn(
     def spawn(*_args: object, **_kwargs: object) -> object:
         nonlocal spawn_count
         spawn_count += 1
-        return object()
+        return _RunningProcess()
 
     monkeypatch.setattr(autostart, "request_status", request_status)
     monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
@@ -159,7 +165,7 @@ def test_canonical_autostart_accepts_busy_endpoint_during_readiness_race(
     def spawn(*_args: object, **_kwargs: object) -> object:
         nonlocal spawn_count
         spawn_count += 1
-        return object()
+        return _RunningProcess()
 
     monkeypatch.setattr(autostart, "request_status", request_status)
     monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
@@ -243,7 +249,6 @@ def test_canonical_autostart_reports_bounded_child_startup_failure(
         return FailedProcess()
 
     monkeypatch.setattr("harness.daemon_autostart.subprocess.Popen", spawn)
-    monkeypatch.setattr(autostart, "_DAEMON_START_TIMEOUT_SECONDS", 0.0)
 
     with pytest.raises(
         DaemonAutostartError,

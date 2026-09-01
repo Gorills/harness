@@ -175,7 +175,7 @@ def install_harness(
     try:
         daemon_status = _ensure_current_daemon(paths, environment)
     except (RuntimePathError, IpcError, RuntimeIdentityError) as exc:
-        raise InstallationError("Harness daemon could not be prepared") from exc
+        raise InstallationError(f"Harness daemon could not be prepared: {exc}") from exc
 
     workspaces = _registered_workspaces(paths)
     live_workspaces, unavailable_workspaces = _partition_registered_workspaces(workspaces)
