@@ -244,6 +244,8 @@ Write targeting rule:
 
 `project_status` includes the effective `visibility_mode` (`normal` or `hidden`) as a compact domain field so the model can obey the current publication policy. Host capability diagnostics and enforcement internals stay out of the model-visible payload and belong in `doctor`/dashboard surfaces.
 
+The model-visible `index` object is a cheap SQLite snapshot: `indexed_file_count` is the current Structural Index inventory, and `content_search_document_count` is the number of those current search documents that actually participate in code/docs content FTS retrieval (`indexed_search_documents` joined to `indexed_content_search`). Binary, NUL, invalid-UTF-8, symlink, oversized, and generated `.log`/`.out` paths can remain in the mechanical inventory without becoming content documents. A zero search hit is therefore not proof of absence across every indexed file. Status must not reread Workspace source, run a freshness scan, or add Git work to compute these counts.
+
 Each tool contract owns:
 
 - explicit allowed fields;

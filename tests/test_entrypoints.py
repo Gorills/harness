@@ -278,6 +278,7 @@ def test_harness_status_resolves_location_and_prints_bounded_status(
             branch="main",
             dirty_path_count=2,
             indexed_file_count=17,
+            content_search_document_count=11,
         )
 
     monkeypatch.setattr(
@@ -307,6 +308,7 @@ def test_harness_status_resolves_location_and_prints_bounded_status(
         "Git branch: main",
         "Dirty paths: 2",
         "Indexed files: 17",
+        "Content search documents: 11",
         "Schema: 3",
     ]
 
@@ -339,6 +341,7 @@ def test_harness_status_uses_canonical_socket_without_override(
             branch="main",
             dirty_path_count=0,
             indexed_file_count=0,
+            content_search_document_count=0,
         )
 
     monkeypatch.setattr(sys, "argv", ["harness", "status", str(workspace_root)])
@@ -373,6 +376,7 @@ def test_harness_status_explicit_socket_does_not_autostart(
             branch="main",
             dirty_path_count=0,
             indexed_file_count=0,
+            content_search_document_count=0,
         )
 
     monkeypatch.setattr(
@@ -410,6 +414,7 @@ def test_harness_status_defaults_to_current_directory(
             branch="main",
             dirty_path_count=0,
             indexed_file_count=0,
+            content_search_document_count=0,
         )
 
     monkeypatch.chdir(workspace_root)

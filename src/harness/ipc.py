@@ -145,6 +145,7 @@ class WorkspaceStatusResult:
     branch: str | None
     dirty_path_count: int
     indexed_file_count: int
+    content_search_document_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -1026,6 +1027,7 @@ def send_workspace_status_response(
                     "branch": status.branch,
                     "dirty_path_count": status.dirty_path_count,
                     "indexed_file_count": status.indexed_file_count,
+                    "content_search_document_count": status.content_search_document_count,
                 },
             }
         )
@@ -2226,6 +2228,7 @@ def _workspace_status_from_response(
         "branch",
         "dirty_path_count",
         "indexed_file_count",
+        "content_search_document_count",
     }
     if set(result) != expected_fields:
         raise IpcProtocolError("daemon workspace status result does not match the IPC schema")
@@ -2233,9 +2236,15 @@ def _workspace_status_from_response(
     schema_version = result["schema_version"]
     dirty_path_count = result["dirty_path_count"]
     indexed_file_count = result["indexed_file_count"]
+    content_search_document_count = result["content_search_document_count"]
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
-        for value in (schema_version, dirty_path_count, indexed_file_count)
+        for value in (
+            schema_version,
+            dirty_path_count,
+            indexed_file_count,
+            content_search_document_count,
+        )
     ):
         raise IpcProtocolError("daemon workspace status counts have invalid field types")
 
@@ -2274,6 +2283,7 @@ def _workspace_status_from_response(
         branch=branch,
         dirty_path_count=dirty_path_count,
         indexed_file_count=indexed_file_count,
+        content_search_document_count=content_search_document_count,
     )
 
 

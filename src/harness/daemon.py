@@ -271,6 +271,9 @@ def read_workspace_status(
             raise WorkspaceResolutionError("workspace registry identity changed during status read")
         project = get_project(connection, workspace.project_id)
         indexed_file_count = _indexed_file_count(connection, workspace.workspace_id)
+        content_search_document_count = _content_search_document_count(
+            connection, workspace.workspace_id
+        )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
@@ -287,6 +290,7 @@ def read_workspace_status(
         branch=git_status.branch,
         dirty_path_count=git_status.dirty_path_count,
         indexed_file_count=indexed_file_count,
+        content_search_document_count=content_search_document_count,
     )
 
 
@@ -1993,6 +1997,22 @@ def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> in
     ).fetchone()
     if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
         raise sqlite3.DatabaseError("invalid indexed file count")
+    return row[0]
+
+
+def _content_search_document_count(connection: sqlite3.Connection, workspace_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM indexed_search_documents AS documents
+        JOIN indexed_content_search
+            ON documents.id = indexed_content_search.rowid
+        WHERE documents.workspace_id = ?
+        """,
+        (workspace_id,),
+    ).fetchone()
+    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
+        raise sqlite3.DatabaseError("invalid content search document count")
     return row[0]
 
 

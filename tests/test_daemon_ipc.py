@@ -223,6 +223,7 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
             branch=branch,
             dirty_path_count=1,
             indexed_file_count=1,
+            content_search_document_count=1,
         )
 
         raw_payload = {
@@ -257,6 +258,7 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
                 "branch": branch,
                 "dirty_path_count": 1,
                 "indexed_file_count": 1,
+                "content_search_document_count": 1,
             },
         }
     finally:

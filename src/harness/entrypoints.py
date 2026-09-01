@@ -223,6 +223,7 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Git branch: {status.branch if status.branch is not None else '(detached)'}")
     print(f"Dirty paths: {status.dirty_path_count}")
     print(f"Indexed files: {status.indexed_file_count}")
+    print(f"Content search documents: {status.content_search_document_count}")
     print(f"Schema: {status.schema_version}")
 
 

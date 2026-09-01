@@ -116,8 +116,11 @@ acceptance remain in the matrix below. The prompt-input check applies to a fresh
 When Harness changes a Codex project config, its CLI guidance requires fully quitting and reopening
 the client and then creating a new Task. Existing Tasks retain their original instruction snapshot.
 The acceptance check for that new Task is behavioral: `project_status` is the first project
-action; diagnosis and `project_search` occur only after `task_start` or resume. Only tool
-discovery needed to locate and call Harness is allowed before status. Harness does
+action; diagnosis and `project_search` occur only after `task_start` or resume. Compact
+`project_status.index` remains a snapshot (`indexed_file_count` plus
+`content_search_document_count` for code/docs content FTS coverage) and is not a live
+freshness or absence proof. Only tool discovery needed to locate and call Harness is
+allowed before status. Harness does
 not generate or merge root `AGENTS.md`:
 that file is user-owned, and claiming it would be unsafe across existing instructions and linked
 worktrees. MCP server instructions carry the same deferred-tool bootstrap in their first 512
