@@ -125,7 +125,9 @@ from harness.tasks import (
     TaskTransitionError,
     TaskValidationError,
     TaskWorkspaceConflictError,
+    enqueue_skill_reconcile_if_relevance_changed,
     get_relevant_task,
+    skill_relevance_key,
 )
 from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
@@ -597,9 +599,12 @@ def _workspace_index_entry_result(
 def mutate_task_start(
     connection: sqlite3.Connection,
     request: TaskStartRequestData,
+    *,
+    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> TaskStartResult:
     """Resolve one Workspace and delegate Task create/resume to the domain workflow."""
     workspace = _resolve_task_workspace(connection, request.workspace_hints)
+    before = skill_relevance_key(connection, workspace.workspace_id)
     if request.task_id is None:
         if request.title is None:
             raise TaskValidationError("new task_start requires title")
@@ -616,6 +621,12 @@ def mutate_task_start(
             request.task_id,
             expected_revision=request.expected_revision,
         )
+    enqueue_skill_reconcile_if_relevance_changed(
+        watcher_invalidations,
+        workspace.workspace_id,
+        before,
+        skill_relevance_key(connection, workspace.workspace_id),
+    )
     return TaskStartResult(
         schema_version=SCHEMA_VERSION,
         workspace_id=workspace.workspace_id,
@@ -629,9 +640,12 @@ def mutate_task_start(
 def mutate_task_checkpoint(
     connection: sqlite3.Connection,
     request: TaskCheckpointRequestData,
+    *,
+    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> TaskCheckpointResult:
     """Resolve one Workspace and delegate one explicit revision-CAS checkpoint."""
     workspace = _resolve_task_workspace(connection, request.workspace_hints)
+    before = skill_relevance_key(connection, workspace.workspace_id)
     mutation = domain_task_checkpoint(
         connection,
         workspace.workspace_id,
@@ -643,6 +657,12 @@ def mutate_task_checkpoint(
         wait_reason=request.wait_reason,
         verification=request.verification,
         knowledge=request.knowledge,
+    )
+    enqueue_skill_reconcile_if_relevance_changed(
+        watcher_invalidations,
+        workspace.workspace_id,
+        before,
+        skill_relevance_key(connection, workspace.workspace_id),
     )
     return TaskCheckpointResult(
         schema_version=SCHEMA_VERSION,
@@ -1046,7 +1066,13 @@ def _serve_client(
         )
         return
     if request.method == "task_checkpoint" and request.task_checkpoint is not None:
-        _serve_task_checkpoint(client, database, request.request_id, request.task_checkpoint)
+        _serve_task_checkpoint(
+            client,
+            database,
+            request.request_id,
+            request.task_checkpoint,
+            watcher_invalidations,
+        )
         return
     if request.method == "scan_workspace" and request.scan_path is not None:
         _serve_workspace_scan(
@@ -1490,7 +1516,11 @@ def _serve_task_start(
     watcher_invalidations: SimpleQueue[str],
 ) -> None:
     try:
-        result = mutate_task_start(database, request)
+        result = mutate_task_start(
+            database,
+            request,
+            watcher_invalidations=watcher_invalidations,
+        )
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client,
@@ -1552,7 +1582,6 @@ def _serve_task_start(
             message="daemon could not mutate Task state",
         )
         return
-    watcher_invalidations.put(result.workspace_id)
     try:
         send_task_start_response(client, request_id, result)
     except IpcMessageTooLargeError:
@@ -1569,9 +1598,14 @@ def _serve_task_checkpoint(
     database: sqlite3.Connection,
     request_id: str,
     request: TaskCheckpointRequestData,
+    watcher_invalidations: SimpleQueue[str],
 ) -> None:
     try:
-        result = mutate_task_checkpoint(database, request)
+        result = mutate_task_checkpoint(
+            database,
+            request,
+            watcher_invalidations=watcher_invalidations,
+        )
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client,

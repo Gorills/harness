@@ -444,8 +444,10 @@ Skill hot reload is an optimization, not a correctness requirement.
 ADR-0032 closes the lifecycle gap between resolution and projection. Installed host intent for
 every supported profile is durable daemon-adjacent state. Foreground `scan` reconciles skills
 synchronously, while the Workspace watcher repeats resolution after authoritative index changes
-and after a successful `task_start` invalidation. This makes manifest/dependency changes and
-greenfield Task hints converge without requiring another manual scan. Projection failure remains a
+and after any committed Task mutation that changes the skill-relevance key
+`(relevant_task_id, relevant_task_stack_hints)`. This makes manifest/dependency changes and
+greenfield Task hints, as well as later relevant-Task identity or hint changes, converge without
+requiring another manual scan. Projection failure remains a
 repairable integration condition reported by doctor; it never rolls back or duplicates committed
 Task state.
 

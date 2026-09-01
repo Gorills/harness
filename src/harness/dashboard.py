@@ -196,10 +196,12 @@ from harness.tasks import (
     TaskValidationError,
     TaskWaitReason,
     TaskWorkspaceConflictError,
+    enqueue_skill_reconcile_if_relevance_changed,
     get_latest_task,
     get_relevant_task,
     get_task,
     get_task_stack_hints,
+    skill_relevance_key,
 )
 from harness.visibility import set_project_visibility
 
@@ -774,10 +776,19 @@ def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> in
     return row[0]
 
 
-def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) -> None:
-    """Delegate one dashboard action to the authoritative Task domain workflow."""
+def mutate_dashboard_task(
+    database_path: Path,
+    request: DashboardActionRequest,
+    *,
+    watcher_invalidations: SimpleQueue[str] | None = None,
+) -> bool:
+    """Delegate one dashboard action to the authoritative Task domain workflow.
+
+    Returns whether the skill-relevance key changed after a successful commit.
+    """
     connection = connect_database(database_path)
     try:
+        before = skill_relevance_key(connection, request.workspace_id)
         if request.action == "accept":
             task_accept(
                 connection,
@@ -785,8 +796,7 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 request.task_id,
                 expected_revision=request.expected_revision,
             )
-            return
-        if request.action == "feedback":
+        elif request.action == "feedback":
             assert request.feedback is not None
             task_feedback(
                 connection,
@@ -795,24 +805,21 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 expected_revision=request.expected_revision,
                 feedback=request.feedback,
             )
-            return
-        if request.action == "cancel":
+        elif request.action == "cancel":
             task_cancel(
                 connection,
                 request.workspace_id,
                 request.task_id,
                 expected_revision=request.expected_revision,
             )
-            return
-        if request.action == "reopen":
+        elif request.action == "reopen":
             task_reopen(
                 connection,
                 request.workspace_id,
                 request.task_id,
                 expected_revision=request.expected_revision,
             )
-            return
-        if request.action == "comment":
+        elif request.action == "comment":
             assert request.comment is not None
             task_comment(
                 connection,
@@ -821,8 +828,7 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 expected_revision=request.expected_revision,
                 comment=request.comment,
             )
-            return
-        if request.action == "set_jira":
+        elif request.action == "set_jira":
             task_set_jira_url(
                 connection,
                 request.workspace_id,
@@ -830,8 +836,7 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 expected_revision=request.expected_revision,
                 jira_url=request.jira_url,
             )
-            return
-        if request.action == "set_operator_status":
+        elif request.action == "set_operator_status":
             task_set_operator_status(
                 connection,
                 request.workspace_id,
@@ -839,8 +844,15 @@ def mutate_dashboard_task(database_path: Path, request: DashboardActionRequest) 
                 expected_revision=request.expected_revision,
                 operator_status=request.operator_status,
             )
-            return
-        raise TaskValidationError("unsupported dashboard Task action")
+        else:
+            raise TaskValidationError("unsupported dashboard Task action")
+        after = skill_relevance_key(connection, request.workspace_id)
+        return enqueue_skill_reconcile_if_relevance_changed(
+            watcher_invalidations,
+            request.workspace_id,
+            before,
+            after,
+        )
     finally:
         connection.close()
 
@@ -2391,7 +2403,11 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     self.workspace_invalidations.put(request.workspace_id)
                 redirect_target = page.redirect_target
             else:
-                mutate_dashboard_task(self.database_path, request)
+                mutate_dashboard_task(
+                    self.database_path,
+                    request,
+                    watcher_invalidations=self.workspace_invalidations,
+                )
             if not isinstance(
                 request,
                 (DashboardProjectDeleteRequest, DashboardWorkspaceRelocationRequest),
