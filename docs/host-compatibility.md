@@ -117,8 +117,9 @@ When Harness changes a Codex project config, its CLI guidance requires fully qui
 the client and then creating a new Task. Existing Tasks retain their original instruction snapshot.
 The acceptance check for that new Task is behavioral: `project_status` is the first project
 action; diagnosis and `project_search` occur only after `task_start` or resume. Compact
-`project_status.index` remains a snapshot (`indexed_file_count` plus
-`content_search_document_count` for code/docs content FTS coverage) and is not a live
+`project_status.index` remains a snapshot (`indexed_file_count`,
+`content_search_document_count` for code/docs content FTS coverage, and last-known
+reconcile provenance) and is not a live
 freshness or absence proof. Only tool discovery needed to locate and call Harness is
 allowed before status. Harness does
 not generate or merge root `AGENTS.md`:

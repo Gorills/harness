@@ -274,6 +274,9 @@ def read_workspace_status(
         content_search_document_count = _content_search_document_count(
             connection, workspace.workspace_id
         )
+        index_revision, last_successful_reconcile_at, last_reconcile_kind = (
+            _index_reconcile_provenance(connection, workspace.workspace_id)
+        )
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
@@ -291,6 +294,9 @@ def read_workspace_status(
         dirty_path_count=git_status.dirty_path_count,
         indexed_file_count=indexed_file_count,
         content_search_document_count=content_search_document_count,
+        index_revision=index_revision,
+        last_successful_reconcile_at=last_successful_reconcile_at,
+        last_reconcile_kind=last_reconcile_kind,
     )
 
 
@@ -2014,6 +2020,32 @@ def _content_search_document_count(connection: sqlite3.Connection, workspace_id:
     if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
         raise sqlite3.DatabaseError("invalid content search document count")
     return row[0]
+
+
+def _index_reconcile_provenance(
+    connection: sqlite3.Connection, workspace_id: str
+) -> tuple[int | None, str | None, str | None]:
+    row = connection.execute(
+        """
+        SELECT index_revision, last_successful_reconcile_at, last_reconcile_kind
+        FROM workspace_index_reconcile
+        WHERE workspace_id = ?
+        """,
+        (workspace_id,),
+    ).fetchone()
+    if row is None:
+        return None, None, None
+    revision, timestamp, kind = row
+    if (
+        isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or not isinstance(timestamp, str)
+        or not timestamp
+        or kind not in {"full", "incremental"}
+    ):
+        raise sqlite3.DatabaseError("invalid index reconcile provenance")
+    return revision, timestamp, kind
 
 
 def _prepare_socket_parent(parent: Path) -> None:

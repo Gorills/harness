@@ -244,7 +244,7 @@ Write targeting rule:
 
 `project_status` includes the effective `visibility_mode` (`normal` or `hidden`) as a compact domain field so the model can obey the current publication policy. Host capability diagnostics and enforcement internals stay out of the model-visible payload and belong in `doctor`/dashboard surfaces.
 
-The model-visible `index` object is a cheap SQLite snapshot: `indexed_file_count` is the current Structural Index inventory, and `content_search_document_count` is the number of those current search documents that actually participate in code/docs content FTS retrieval (`indexed_search_documents` joined to `indexed_content_search`). Binary, NUL, invalid-UTF-8, symlink, oversized, and generated `.log`/`.out` paths can remain in the mechanical inventory without becoming content documents. A zero search hit is therefore not proof of absence across every indexed file. Status must not reread Workspace source, run a freshness scan, or add Git work to compute these counts.
+The model-visible `index` object is a cheap SQLite snapshot: `indexed_file_count` is the current Structural Index inventory, `content_search_document_count` is the number of those current search documents that actually participate in code/docs content FTS retrieval (`indexed_search_documents` joined to `indexed_content_search`), and last-known reconcile provenance (`index_revision`, `last_successful_reconcile_at`, `last_reconcile_kind`) records when and how the index last successfully reconciled, including a no-op persist that still advances the watermark. Binary, NUL, invalid-UTF-8, symlink, oversized, and generated `.log`/`.out` paths can remain in the mechanical inventory without becoming content documents. A zero search hit is therefore not proof of absence across every indexed file. Provenance is last-known success, not proof that nothing changed afterwards and not a live freshness claim. Status must not reread Workspace source, run a freshness scan, or add Git work to compute these index fields.
 
 Each tool contract owns:
 
@@ -345,6 +345,14 @@ same transaction as `indexed_files`. Generated `.log`/`.out` diagnostic artifact
 mechanical inventory but are not treated as code/docs search content. The durable mapping contains
 no readable source body. A schema migration creates only the empty derived structure; live source is
 backfilled by the next watcher or explicit scan.
+
+Successful full and incremental reconciles persist last-known provenance in the same SQLite
+transaction (`workspace_index_reconcile`: monotonic per-Workspace `index_revision`, timezone-aware
+UTC `last_successful_reconcile_at`, and `last_reconcile_kind` `full` or `incremental`). A failed
+reconcile rolls back without advancing those fields. An unchanged inventory that still commits is a
+successful reconcile and still advances those fields. Watcher in-memory `last_reconciled_at` is not
+the source of truth. New Workspaces have no provenance row until the first successful scan; status
+then reports JSON nulls rather than fake zeros.
 
 ## 12. Search
 

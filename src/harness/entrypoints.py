@@ -224,6 +224,16 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Dirty paths: {status.dirty_path_count}")
     print(f"Indexed files: {status.indexed_file_count}")
     print(f"Content search documents: {status.content_search_document_count}")
+    print(
+        "Index revision: "
+        f"{status.index_revision if status.index_revision is not None else '(none)'}"
+    )
+    reconcile_at = status.last_successful_reconcile_at
+    print(f"Last successful reconcile: {reconcile_at if reconcile_at is not None else '(none)'}")
+    print(
+        "Last reconcile kind: "
+        f"{status.last_reconcile_kind if status.last_reconcile_kind is not None else '(none)'}"
+    )
     print(f"Schema: {status.schema_version}")
 
 

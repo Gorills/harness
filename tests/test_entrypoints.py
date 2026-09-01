@@ -279,6 +279,9 @@ def test_harness_status_resolves_location_and_prints_bounded_status(
             dirty_path_count=2,
             indexed_file_count=17,
             content_search_document_count=11,
+            index_revision=4,
+            last_successful_reconcile_at="2026-09-01T12:00:00.000000+00:00",
+            last_reconcile_kind="full",
         )
 
     monkeypatch.setattr(
@@ -309,6 +312,9 @@ def test_harness_status_resolves_location_and_prints_bounded_status(
         "Dirty paths: 2",
         "Indexed files: 17",
         "Content search documents: 11",
+        "Index revision: 4",
+        "Last successful reconcile: 2026-09-01T12:00:00.000000+00:00",
+        "Last reconcile kind: full",
         "Schema: 3",
     ]
 
@@ -342,6 +348,9 @@ def test_harness_status_uses_canonical_socket_without_override(
             dirty_path_count=0,
             indexed_file_count=0,
             content_search_document_count=0,
+            index_revision=None,
+            last_successful_reconcile_at=None,
+            last_reconcile_kind=None,
         )
 
     monkeypatch.setattr(sys, "argv", ["harness", "status", str(workspace_root)])
@@ -377,6 +386,9 @@ def test_harness_status_explicit_socket_does_not_autostart(
             dirty_path_count=0,
             indexed_file_count=0,
             content_search_document_count=0,
+            index_revision=None,
+            last_successful_reconcile_at=None,
+            last_reconcile_kind=None,
         )
 
     monkeypatch.setattr(
@@ -415,6 +427,9 @@ def test_harness_status_defaults_to_current_directory(
             dirty_path_count=0,
             indexed_file_count=0,
             content_search_document_count=0,
+            index_revision=None,
+            last_successful_reconcile_at=None,
+            last_reconcile_kind=None,
         )
 
     monkeypatch.chdir(workspace_root)

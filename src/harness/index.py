@@ -7,6 +7,7 @@ import stat
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -60,6 +61,13 @@ class IndexedFileKind(StrEnum):
 
     FILE = "file"
     SYMLINK = "symlink"
+
+
+class IndexReconcileKind(StrEnum):
+    """Kind of last successful Structural Index reconciliation."""
+
+    FULL = "full"
+    INCREMENTAL = "incremental"
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +162,7 @@ def scan_workspace(
         snapshot,
         eligible_knowledge_ids=eligible_knowledge_ids,
         deadline=deadline,
+        kind=IndexReconcileKind.FULL,
     )
 
 
@@ -200,6 +209,7 @@ def scan_workspace_paths(
         snapshot,
         eligible_knowledge_ids=eligible_knowledge_ids,
         deadline=deadline,
+        kind=IndexReconcileKind.INCREMENTAL,
         expected_existing=existing,
     )
 
@@ -211,6 +221,7 @@ def _persist_snapshot(
     *,
     eligible_knowledge_ids: frozenset[str],
     deadline: float | None,
+    kind: IndexReconcileKind,
     expected_existing: dict[str, IndexedFileRecord] | None = None,
 ) -> ScanResult:
     workspace_id = workspace.workspace_id
@@ -280,6 +291,7 @@ def _persist_snapshot(
             },
             eligible_knowledge_ids=eligible_knowledge_ids,
         )
+        _write_index_reconcile_provenance(connection, workspace_id, kind=kind)
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
@@ -293,6 +305,30 @@ def _persist_snapshot(
         updated=updated,
         removed=len(stale_paths),
     )
+
+
+def _write_index_reconcile_provenance(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    kind: IndexReconcileKind,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO workspace_index_reconcile(
+            workspace_id, index_revision, last_successful_reconcile_at, last_reconcile_kind
+        ) VALUES (?, 1, ?, ?)
+        ON CONFLICT(workspace_id) DO UPDATE SET
+            index_revision = workspace_index_reconcile.index_revision + 1,
+            last_successful_reconcile_at = excluded.last_successful_reconcile_at,
+            last_reconcile_kind = excluded.last_reconcile_kind
+        """,
+        (workspace_id, _utc_timestamp(), kind.value),
+    )
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def _normalize_incremental_paths(relative_paths: Sequence[str]) -> tuple[str, ...]:
