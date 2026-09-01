@@ -109,6 +109,7 @@ Codex and Cursor production MCP are project-only and use Harness-owned intent ra
 - [ADR-0037: Serve Codex MCP through an authenticated daemon-owned loopback endpoint](docs/decisions/0037-codex-daemon-owned-streamable-http.md)
 - [ADR-0039: Retire Claude Code as a Harness host](docs/decisions/0039-retire-claude-code-host.md)
 - [ADR-0040: Dashboard is one loopback-root Project index](docs/decisions/0040-dashboard-root-url-and-project-index.md)
+- [ADR-0041: Task-selected skills are next-discovery-boundary, not current-session delivery](docs/decisions/0041-task-skill-session-delivery.md)
 
 ## Development state
 

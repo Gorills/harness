@@ -51,6 +51,19 @@ EXPECTED_GENERATED_SKILLS = (
 # other. Preflight proves its nonce is absent from the positive prompt; --run-model
 # additionally requires a second exec whose prompt does not match this description.
 NEGATIVE_SKILL_PREFLIGHT_POLICY = "projected; nonce absent from the positive skill-read prompt"
+# ADR-0041 Option A. Synthetic gate: session starts; skill X was not task-selected;
+# task_start selects X; host never hot reloads. Expected result is next-session-only.
+TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT = "next-session-only"
+FORBIDDEN_SKILL_DELIVERY_FIELD_NAMES = (
+    "recommended_skills",
+    "skill_body",
+    "skill_bodies",
+    "skill_refs",
+    "selected_skills",
+)
+TASK_START_STRUCTURED_KEYS = frozenset(
+    {"workspace_id", "task_id", "state", "wait_reason", "revision"}
+)
 EXPECTED_TOOL_INPUT_PROPERTIES = {
     "project_status": frozenset(),
     "project_search": frozenset({"query", "scope", "limit"}),
@@ -98,6 +111,14 @@ _GLOBAL_INSTALL_DISCLOSURE = (
 
 class CodexAcceptanceError(RuntimeError):
     """Raised when real Codex CLI acceptance cannot be proven."""
+
+
+def reject_skill_delivery_fields(payload: object, *, surface: str) -> None:
+    """Reject identifier/body fields used as fake current-session skill delivery."""
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    for name in FORBIDDEN_SKILL_DELIVERY_FIELD_NAMES:
+        if name in serialized:
+            raise CodexAcceptanceError(f"{surface} disclosed skill-delivery field {name!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +632,7 @@ def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     names = tuple(str(tool.get("name")) for tool in tools)
     if names != EXPECTED_TOOLS:
         raise CodexAcceptanceError(f"installed MCP five-tool surface changed: {names!r}")
+    reject_skill_delivery_fields(tools, surface="tools/list")
     serialized = json.dumps(tools, sort_keys=True)
     for forbidden in ("content_sha256", "baseline_head", "source_checkpoint_id"):
         if forbidden in serialized:
@@ -742,6 +764,11 @@ async def _verify_mcp_wire_async(
                     {"title": "Локальная проверка Codex MCP", "stack_hints": ["python"]},
                 ),
             )
+            reject_skill_delivery_fields(started, surface="task_start")
+            if set(started) != TASK_START_STRUCTURED_KEYS:
+                raise CodexAcceptanceError(
+                    f"installed MCP task_start disclosed extra fields: {sorted(started)!r}"
+                )
             task_id = started.get("task_id")
             revision = started.get("revision")
             if not isinstance(task_id, str) or not isinstance(revision, int):
@@ -1121,6 +1148,8 @@ def run_acceptance(
 
                 if run_model and workspace == primary_workspace:
                     # Prove native skill discovery against the scan-projected set first.
+                    # ADR-0041: this is session-start native discovery, not mid-session
+                    # task_start delivery. The synthetic no-reload gate is next-session-only.
                     # Codex bootstrap task_start plus the daemon watcher can task-focus
                     # projection even without the later runner _verify_mcp_wire call.
                     # No separate timeout or cost cap in this runner skips the negative exec.
@@ -1245,6 +1274,9 @@ def run_acceptance(
                 "generated_skill_names": list(projected_skill_names),
                 "generated_skill_count_per_workspace": len(projected_skill_names),
                 "negative_skill_preflight_policy": NEGATIVE_SKILL_PREFLIGHT_POLICY,
+                "task_skill_session_delivery_expected_result": (
+                    TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT
+                ),
                 "skill_read_verified": skill_read_verified,
                 "skill_negative_verified": skill_negative_verified,
                 "wire_verified_harness_tool_calls": list(wire_calls),

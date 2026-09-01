@@ -84,6 +84,17 @@ _PROJECT_CONTEXT_DESCRIPTION = (
     "information. Not mandatory for code or doc refs that already include a path; those "
     "expose metadata only. Knowledge and Task refs expose bounded durable semantic context."
 )
+_TASK_START_DESCRIPTION = (
+    "Create a new durable Harness task, or explicitly resume an existing task. Required "
+    f"before diagnosis, project_search, and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
+    "Create with title and optional stack_hints only; omit task_id; never pass summary or "
+    "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
+    "A schema error is a blocker: read this schema and retry. For a new Task, stack_hints "
+    "should name only affected technologies and work kinds (for example fastapi, alembic, "
+    "expo, apk, bugfix) so native skill projection stays task-focused. stack_hints drive "
+    "the next host discovery boundary, not current-session MCP skill delivery. Do not treat "
+    "mid-session task_start as live skill injection."
+)
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
     "Do not call Harness MCP tools. Isolated checkout MCP is the project server "
@@ -536,17 +547,7 @@ def build_mcp_server(
             "project_context response exceeds model exposure budget",
         )
 
-    @server.tool(
-        description=(
-            "Create a new durable Harness task, or explicitly resume an existing task. Required "
-            f"before diagnosis, project_search, and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
-            "Create with title and optional stack_hints only; omit task_id; never pass summary or "
-            "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
-            "A schema error is a blocker: read this schema and retry. For a new Task, stack_hints "
-            "should name only affected technologies and work kinds (for example fastapi, alembic, "
-            "expo, apk, bugfix) so native skill projection stays task-focused."
-        )
-    )
+    @server.tool(description=_TASK_START_DESCRIPTION)
     def task_start(
         ctx: Context[Any, Any],
         title: str | None = None,
