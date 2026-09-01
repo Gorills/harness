@@ -48,11 +48,40 @@ ADR-0029. The written contract must not itself supply the skip.
 - Previously generated Codex `developer_instructions` that used the changes-only bootstrap remain
   owned and are reconciled to the current body.
 
+## 2026-09-01 amendment: one canonical MCP workflow
+
+Always-on MCP, Codex, and checkout bootstrap texts previously allowed two readings after
+`project_status`: search then Task, and Task then search. The second is the only allowed order.
+`project_context` was also written as a mandatory ritual before native reads; for code and doc
+refs that already include an exact path, that call is optional metadata verification.
+
+Canonical sequence:
+
+1. `project_status`
+2. `task_start` or explicit Task resume
+3. `project_search` before broad native repository exploration
+4. `project_context` only for selected refs when it adds semantic information
+5. targeted native source tools
+6. `task_checkpoint` after each logical stage
+
+Knowledge and Task refs still use `project_context` for selected semantic context. Tool discovery
+before `project_status` remains allowed when the host needs it to call Harness. This remains a
+soft instruction, not a model proxy. Previously generated Codex `developer_instructions` that
+used the search-then-task bootstrap remain owned and are reconciled to the current body.
+
 ## Verification
 
 - MCP and Codex bootstrap tests prove the new phrases, reject the changes-only ritual in current
   bodies, and keep the 1 KiB / first-512 contracts;
+- current instruction bodies prove a unique status → task → search order and reject
+  status → search → task wording;
+- `project_search` / `project_context` descriptions prove targeted native read after a code/doc
+  path hit and that `project_context` is not mandatory for those kinds;
+- MCP `_SERVER_INSTRUCTIONS` (Cursor always-on initialize / `namespaceUseInstructions`) prove the
+  same code/doc native-read exemption; `test_cursor_bootstrap_matches_canonical_workflow` covers
+  that MCP surface, not checkout `AGENTS.md`;
 - unknown-argument tests prove allowed field names appear, unknown names do not, and retry text
   is present;
 - `task_start` description tests prove create-with-title-only and diagnosis-before-edits wording;
-- checkout `AGENTS.md` bootstrap tests prove diagnosis, retry, and stage-checkpoint requirements.
+- checkout `AGENTS.md` bootstrap tests prove diagnosis, retry, stage-checkpoint, and the same
+  canonical sequence.

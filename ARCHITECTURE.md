@@ -192,11 +192,17 @@ project_status
 → task_checkpoint
 ```
 
+`project_context` is not a mandatory step after every search hit. Knowledge and Task refs use it
+for selected semantic context. Code and doc hits that already include an exact path may be read
+with targeted native tools immediately; `project_context` remains available for metadata
+verification.
+
 `task_start` / resume is required before diagnosis and native edits, including read-only
-investigation. A failed schema or tool call is a blocker: retry from the public schema rather than
-skipping Harness. Checkpoint after each logical stage, even when no files changed. A new operator
-request or a diagnosis-to-implementation shift completes or waits the current Task, then starts a
-new one. Specification §71's "before meaningful changes" reading is superseded by
+investigation. Broad discovery, including `project_search`, happens inside that Task. A failed
+schema or tool call is a blocker: retry from the public schema rather than skipping Harness.
+Checkpoint after each logical stage, even when no files changed. A new operator request or a
+diagnosis-to-implementation shift completes or waits the current Task, then starts a new one.
+Specification §71's "before meaningful changes" reading is superseded by
 [ADR-0038](docs/decisions/0038-task-required-for-diagnosis-and-schema-retry.md).
 
 But the implementation is explicitly workspace-domain based and write-safe:

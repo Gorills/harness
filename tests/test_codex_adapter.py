@@ -125,11 +125,23 @@ def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> N
     assert "initial visible tool list" in first_512
     assert "only action allowed before `project_status`" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "Before broad repository exploration" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "allowed only after the initial status call" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "before diagnosis or" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "never skip" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "before changes and checkpoint progress" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+
+
+def test_codex_bootstrap_matches_canonical_workflow() -> None:
+    text = CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    after_status = text.split("After successful `project_status`", maxsplit=1)[1]
+    task_at = after_status.find("start or resume a Harness Task")
+    search_at = after_status.find("`project_search`")
+    assert 0 <= task_at < search_at
+    assert "After successful `project_status`, use `project_search`" not in text
+    assert "expand selected refs with" not in text
+    assert "then use native tools. Start or resume a Harness Task" not in text
+    assert "a code/doc path may be read natively" in text
+    assert len(text.encode("utf-8")) < 1024
 
 
 def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: Path) -> None:
@@ -221,6 +233,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
         codex_module._LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])
