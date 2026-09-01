@@ -271,7 +271,8 @@ IPC requirements:
 - explicit request/response schema independent of MCP wire types;
 - bounded message sizes;
 - protocol versioning between bridge and daemon;
-- cancellation/timeouts;
+- cancellation/timeouts, with command-specific bounds (status stays short; search is longer than
+  status so a large Workspace inventory cannot surface to MCP as `local IPC request timed out`);
 - bounded concurrent client handling so one slow request does not head-of-line block unrelated callers;
 - one SQLite connection per accepted IPC worker rather than sharing a connection across threads;
 - no source/context logging by default;

@@ -15,6 +15,7 @@ import pytest
 import harness.watcher as watcher_module
 from harness.daemon import serve_daemon
 from harness.index import (
+    MAX_INCREMENTAL_SCAN_PATHS,
     IndexedFileRecord,
     IndexingError,
     ScanResult,
@@ -32,6 +33,8 @@ from harness.registry import (
 )
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.watcher import (
+    WATCH_IDLE_WORKSPACE_SAMPLE_LIMIT,
+    WATCH_METADATA_FILE_SAMPLE_LIMIT,
     WorkspaceGitSnapshot,
     WorkspaceMetadataSnapshot,
     WorkspaceWatcher,
@@ -260,6 +263,169 @@ def test_idle_watcher_poll_uses_no_git_subprocess(
         connection.close()
 
 
+def test_idle_watcher_poll_does_not_reload_full_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, database, _workspace_id = _registered(tmp_path)
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        def unexpected_list(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+            raise AssertionError("idle watcher poll must not reload the full indexed inventory")
+
+        monkeypatch.setattr("harness.watcher.list_indexed_files", unexpected_list)
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=2.0) == 0
+    finally:
+        connection.close()
+
+
+def test_idle_watcher_poll_digests_one_directory_shard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, _workspace_id = _registered(tmp_path)
+    for index in range(WATCH_METADATA_FILE_SAMPLE_LIMIT + 40):
+        directory = root / f"pkg{index:03d}"
+        directory.mkdir()
+        (directory / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=2.0,
+            scan_deadline_seconds=5.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+
+        sampled_directory_counts: list[int] = []
+        real_digest = watcher_module._digest_workspace_directories
+
+        def counted_digest(
+            digest: object,
+            workspace_root: Path,
+            directory_paths: Sequence[str],
+            *,
+            deadline: float,
+        ) -> None:
+            sampled_directory_counts.append(len(directory_paths))
+            real_digest(digest, workspace_root, directory_paths, deadline=deadline)
+
+        monkeypatch.setattr(watcher_module, "_digest_workspace_directories", counted_digest)
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=2.0) == 0
+        assert sampled_directory_counts
+        assert max(sampled_directory_counts) <= WATCH_METADATA_FILE_SAMPLE_LIMIT
+    finally:
+        connection.close()
+
+
+def test_idle_poll_samples_a_bounded_workspace_subset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        for name in ("one", "two", "three"):
+            root = _repository(tmp_path / name)
+            workspace = register_workspace(connection, project_id=project.project_id, path=root)
+            scan_workspace(connection, workspace.workspace_id)
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=1.0,
+            scan_deadline_seconds=2.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+        assert watcher.poll(now=0.22) == 1
+        assert watcher.poll(now=0.33) == 1
+
+        sampled_roots: list[Path] = []
+        real_idle = watcher_module.read_idle_workspace_metadata
+
+        def counted_idle(
+            workspace: WorkspaceRecord,
+            indexed_files: object,
+            directory_paths: object,
+            *,
+            deadline: float,
+        ) -> object:
+            sampled_roots.append(workspace.workspace_root)
+            return real_idle(workspace, indexed_files, directory_paths, deadline=deadline)
+
+        monkeypatch.setattr(watcher_module, "read_idle_workspace_metadata", counted_idle)
+        assert watcher.poll(now=1.0) == 0
+        assert len(sampled_roots) <= WATCH_IDLE_WORKSPACE_SAMPLE_LIMIT
+        assert len(sampled_roots) == WATCH_IDLE_WORKSPACE_SAMPLE_LIMIT
+    finally:
+        connection.close()
+
+
+def test_directory_listing_skips_unreadable_subdirectory(tmp_path: Path) -> None:
+    root, _database, _workspace_id = _registered(tmp_path)
+    blocked = root / "blocked"
+    blocked.mkdir()
+    (blocked / "inside.txt").write_text("secret\n", encoding="utf-8")
+    os.chmod(blocked, 0)
+    try:
+        directories = watcher_module.list_workspace_metadata_directories(
+            root, deadline=time.monotonic() + 2.0
+        )
+    finally:
+        os.chmod(blocked, 0o700)
+    assert "" in directories
+    assert "blocked" in directories
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory mode bits")
+def test_unreadable_subdirectory_does_not_hot_loop_full_scan(tmp_path: Path) -> None:
+    root, database, _workspace_id = _registered(tmp_path)
+    blocked = root / "blocked"
+    blocked.mkdir()
+    os.chmod(blocked, 0)
+    connection = connect_database(database)
+    try:
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=2.0,
+            scan_deadline_seconds=5.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=2.0) == 0
+    finally:
+        os.chmod(blocked, 0o700)
+        connection.close()
+
+
 def test_watcher_uses_incremental_scan_for_bounded_dirty_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -325,6 +491,54 @@ def test_watcher_uses_incremental_scan_for_bounded_dirty_paths(
         connection.close()
 
 
+def test_oversized_dirty_workspace_does_not_hot_loop_full_scans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, _workspace_id = _registered(tmp_path)
+    noise = root / "noise"
+    noise.mkdir()
+    for index in range(MAX_INCREMENTAL_SCAN_PATHS + 20):
+        (noise / f"f{index:03d}.txt").write_text("n\n", encoding="utf-8")
+    connection = connect_database(database)
+    try:
+        full_calls = 0
+        real_full_scan = scan_workspace
+
+        def counted_full_scan(
+            scan_connection: sqlite3.Connection,
+            selected_workspace_id: str,
+            *,
+            deadline: float | None = None,
+        ) -> ScanResult:
+            nonlocal full_calls
+            full_calls += 1
+            return real_full_scan(scan_connection, selected_workspace_id, deadline=deadline)
+
+        monkeypatch.setattr(watcher_module, "scan_workspace", counted_full_scan)
+        watcher = WorkspaceWatcher(
+            connection,
+            Lock(),
+            debounce_seconds=0.1,
+            full_reconcile_seconds=100.0,
+            retry_seconds=0.2,
+            token_deadline_seconds=2.0,
+            scan_deadline_seconds=5.0,
+        )
+        assert watcher.poll(now=0.0) == 0
+        assert watcher.poll(now=0.11) == 1
+        assert full_calls == 1
+
+        (noise / "f000.txt").write_text("changed\n", encoding="utf-8")
+        assert watcher.poll(now=1.0) == 0
+        assert watcher.poll(now=1.11) == 0
+        assert watcher.poll(now=2.0) == 0
+        assert full_calls == 1
+        assert watcher.poll(now=100.12) == 1
+        assert full_calls == 2
+    finally:
+        connection.close()
+
+
 def test_rotating_metadata_shards_detect_rewrite_beyond_first_sample(tmp_path: Path) -> None:
     root, database, workspace_id = _registered(tmp_path)
     bulk = root / "bulk"
@@ -332,6 +546,18 @@ def test_rotating_metadata_shards_detect_rewrite_beyond_first_sample(tmp_path: P
     for index in range(300):
         (bulk / f"file_{index:03d}.txt").write_text(f"{index}\n", encoding="utf-8")
     _git(root, "add", "bulk")
+    _git(
+        root,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "-m",
+        "bulk",
+    )
     connection = connect_database(database)
     try:
         scan_workspace(connection, workspace_id)
@@ -637,27 +863,27 @@ def test_watcher_rescans_after_sampling_failure_invalidates_prior_token(
     try:
         calls = 0
 
-        real_metadata_snapshot = watcher_module.read_workspace_metadata_snapshot
+        real_idle = watcher_module.read_idle_workspace_metadata
 
         def flaky_token(
             workspace: WorkspaceRecord,
             indexed_files: Sequence[IndexedFileRecord],
+            directory_paths: Sequence[str],
             *,
             deadline: float,
-            directory_paths: Sequence[str] | None = None,
-        ) -> WorkspaceMetadataSnapshot:
+        ) -> watcher_module.IdleWorkspaceMetadata:
             nonlocal calls
             calls += 1
             if calls == 4:
                 raise watcher_module.WorkspaceWatchError("transient token failure")
-            return real_metadata_snapshot(
+            return real_idle(
                 workspace,
                 indexed_files,
+                directory_paths,
                 deadline=deadline,
-                directory_paths=directory_paths,
             )
 
-        monkeypatch.setattr(watcher_module, "read_workspace_metadata_snapshot", flaky_token)
+        monkeypatch.setattr(watcher_module, "read_idle_workspace_metadata", flaky_token)
         watcher = WorkspaceWatcher(
             connection,
             Lock(),

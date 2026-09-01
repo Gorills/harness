@@ -63,6 +63,7 @@ _HINT_SOURCE_MAX_LENGTH = 64
 _HINT_PATH_MAX_LENGTH = 4096
 _MAX_WORKSPACE_HINTS = 4
 _DEFAULT_TIMEOUT_SECONDS = 2.0
+_SEARCH_REQUEST_TIMEOUT_SECONDS = 8.0
 _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
 _TASK_REQUEST_TIMEOUT_SECONDS = 60.0
 _TASK_ID_MAX_LENGTH = 128
@@ -584,7 +585,7 @@ def request_workspace_search(
     query: str,
     *,
     limit: int = DEFAULT_SEARCH_LIMIT,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float = _SEARCH_REQUEST_TIMEOUT_SECONDS,
     scope: IndexedPathSearchScope | None = None,
 ) -> WorkspaceSearchResult:
     """Request bounded deterministic indexed-path search for one registered Workspace."""
@@ -620,7 +621,7 @@ def request_project_search(
     *,
     scope: ProjectSearchScope,
     limit: int = DEFAULT_SEARCH_LIMIT,
-    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    timeout: float = _SEARCH_REQUEST_TIMEOUT_SECONDS,
 ) -> ProjectSearchResult:
     """Request one daemon-owned bounded Project Intelligence search."""
     _validate_search_query(query)
