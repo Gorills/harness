@@ -51,6 +51,8 @@ from harness.dashboard_i18n import (
     FEEDBACK_SUBMIT,
     FEEDBACK_SUMMARY,
     GIT_UNAVAILABLE,
+    HOME_SEARCH_LABEL,
+    HOME_SEARCH_PLACEHOLDER,
     INDEX,
     INDEXED_PATHS,
     JIRA,
@@ -74,7 +76,6 @@ from harness.dashboard_i18n import (
     NO_TASK,
     NO_TASKS_TITLE,
     OPEN_NAVIGATION,
-    OPEN_PROJECT,
     OPEN_TASK,
     OPEN_WORKSPACE,
     OPERATOR_STATUS,
@@ -84,12 +85,12 @@ from harness.dashboard_i18n import (
     OPERATOR_STATUS_SAVE,
     PAGE_PROJECTS,
     PAGE_PROJECTS_LEAD,
-    PRIMARY_WORKSPACE,
     PROJECT,
     PROJECT_MANAGEMENT,
     PROJECT_OVERVIEW,
     PROJECTS_NAV,
     RECENT_TASKS,
+    RECENT_TASKS_HOME,
     REOPEN_TASK,
     REVISION,
     SEARCH,
@@ -161,7 +162,7 @@ from harness.registry import (
     list_workspaces,
     relocate_workspace,
 )
-from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project
+from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
 from harness.storage import DatabaseError, connect_database
@@ -295,6 +296,17 @@ class DashboardTaskRow:
 
     task: TaskRecord
     git_branch: DashboardGitBranch
+    project_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardHomePage:
+    """Loopback home: Project navigation, recent Tasks, and optional daemon-wide Task search."""
+
+    workspaces: tuple[DashboardWorkspaceRow, ...]
+    recent_tasks: tuple[DashboardTaskRow, ...]
+    search_query: str | None
+    task_search_results: tuple[ProjectSearchHit, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,7 +344,7 @@ class DashboardTaskDetail:
 
 @dataclass(frozen=True, slots=True)
 class DashboardActionRequest:
-    """One validated capability-scoped human Task mutation from the dashboard UI."""
+    """One validated human Task mutation from the dashboard UI."""
 
     action: str
     workspace_id: str
@@ -393,6 +405,84 @@ def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspa
     return tuple(_with_live_workspace_status(row) for row in rows)
 
 
+def _load_recent_dashboard_tasks(
+    connection: sqlite3.Connection,
+    *,
+    workspace_id: str | None = None,
+) -> tuple[DashboardTaskRow, ...]:
+    if workspace_id is None:
+        rows = connection.execute(
+            """
+            SELECT tasks.id, workspaces.project_id
+            FROM tasks
+            INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
+            ORDER BY tasks.updated_at DESC, tasks.id DESC
+            LIMIT ?
+            """,
+            (_DASHBOARD_RECENT_TASK_LIMIT,),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT tasks.id, workspaces.project_id
+            FROM tasks
+            INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
+            WHERE tasks.workspace_id = ?
+            ORDER BY tasks.updated_at DESC, tasks.id DESC
+            LIMIT ?
+            """,
+            (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
+        ).fetchall()
+    loaded = tuple((get_task(connection, task_id), project_id) for task_id, project_id in rows)
+    recorded_branches = _read_recorded_git_branches(
+        connection,
+        tuple(task.task_id for task, _project_id in loaded),
+    )
+    return tuple(
+        DashboardTaskRow(
+            task=task,
+            git_branch=recorded_branches[task.task_id],
+            project_id=project_id,
+        )
+        for task, project_id in loaded
+    )
+
+
+def read_dashboard_home(
+    database_path: Path,
+    *,
+    search_query: str | None = None,
+) -> DashboardHomePage:
+    """Read the loopback home page: Projects, recent Tasks, and optional Task search."""
+    connection = connect_database(database_path)
+    try:
+        connection.execute("BEGIN")
+        try:
+            workspaces = list_workspaces(connection)
+            persisted = tuple(
+                _read_workspace_row_persisted(connection, item) for item in workspaces
+            )
+            recent_tasks = _load_recent_dashboard_tasks(connection)
+            results = (
+                ()
+                if search_query is None
+                else search_tasks(connection, search_query, limit=_DASHBOARD_SEARCH_LIMIT)
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+    finally:
+        connection.close()
+    return DashboardHomePage(
+        workspaces=tuple(_with_live_workspace_status(row) for row in persisted),
+        recent_tasks=recent_tasks,
+        search_query=search_query,
+        task_search_results=results,
+    )
+
+
 def read_dashboard_project_detail(
     database_path: Path,
     project_id: str,
@@ -431,25 +521,7 @@ def read_dashboard_workspace_detail(
         try:
             workspace = get_workspace(connection, workspace_id)
             row = _read_workspace_row_persisted(connection, workspace)
-            task_ids = connection.execute(
-                """
-                SELECT id
-                FROM tasks
-                WHERE workspace_id = ?
-                ORDER BY updated_at DESC, id DESC
-                LIMIT ?
-                """,
-                (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
-            ).fetchall()
-            loaded_tasks = tuple(get_task(connection, task_id[0]) for task_id in task_ids)
-            recorded_branches = _read_recorded_git_branches(
-                connection,
-                tuple(task.task_id for task in loaded_tasks),
-            )
-            recent_tasks = tuple(
-                DashboardTaskRow(task=task, git_branch=recorded_branches[task.task_id])
-                for task in loaded_tasks
-            )
+            recent_tasks = _load_recent_dashboard_tasks(connection, workspace_id=workspace_id)
             results = (
                 ()
                 if search_query is None
@@ -1221,6 +1293,26 @@ def _project_display_name(rows: tuple[DashboardWorkspaceRow, ...], project_id: s
     return candidate.removesuffix(".git") or project_crumb(project_id)
 
 
+def _attention_workspace(rows: tuple[DashboardWorkspaceRow, ...]) -> DashboardWorkspaceRow:
+    def rank(row: DashboardWorkspaceRow) -> tuple[int, str]:
+        if (
+            row.task_state == TaskState.WAITING.value
+            and row.task_wait_reason == TaskWaitReason.OPERATOR_REVIEW.value
+        ):
+            priority = 0
+        elif row.task_state == TaskState.WORKING.value:
+            priority = 1
+        elif row.task_state == TaskState.WAITING.value:
+            priority = 2
+        elif row.task_id is not None:
+            priority = 3
+        else:
+            priority = 4
+        return (priority, row.workspace_id)
+
+    return min(rows, key=rank)
+
+
 def _group_navigation_rows(
     rows: tuple[DashboardWorkspaceRow, ...],
 ) -> tuple[tuple[str, tuple[DashboardWorkspaceRow, ...]], ...]:
@@ -1228,11 +1320,6 @@ def _group_navigation_rows(
     for row in rows:
         grouped.setdefault(row.project_id, []).append(row)
     return tuple((project_id, tuple(project_rows)) for project_id, project_rows in grouped.items())
-
-
-def _workspace_navigation_name(row: DashboardWorkspaceRow, project_name: str) -> str:
-    workspace_name = row.workspace_root.name or WORKSPACE_FALLBACK
-    return PRIMARY_WORKSPACE if workspace_name == project_name else workspace_name
 
 
 def _render_project_navigation(
@@ -1243,7 +1330,7 @@ def _render_project_navigation(
     current_workspace_id: str | None,
     current_task_id: str | None,
 ) -> str:
-    overview_current = current_project_id is None
+    overview_current = current_project_id is None and current_workspace_id is None
     parts = [
         f'<nav class="project-navigation" aria-label="{escape(PROJECTS_NAV, quote=True)}">',
         f'<a class="overview-link{" is-current" if overview_current else ""}" '
@@ -1253,41 +1340,24 @@ def _render_project_navigation(
         f'<p class="nav-label">{escape(PROJECTS_NAV)}</p>',
     ]
     for project_id, project_rows in _group_navigation_rows(rows):
-        project_current = project_id == current_project_id
-        project_url = _url(base_path, "projects", project_id)
+        project_current = project_id == current_project_id or (
+            current_workspace_id is not None
+            and any(item.workspace_id == current_workspace_id for item in project_rows)
+        )
+        nav_workspace = _attention_workspace(project_rows)
+        workspace_url = _url(base_path, "workspaces", nav_workspace.workspace_id)
         project_name = _project_display_name(rows, project_id)
+        link_current = (
+            current_workspace_id == nav_workspace.workspace_id and current_task_id is None
+        )
         parts.append(
             f'<section class="nav-project{" is-context" if project_current else ""}">'
-            f'<a class="nav-project-link" href="{escape(project_url, quote=True)}"'
-            + (' aria-current="page"' if project_current and current_workspace_id is None else "")
+            f'<a class="nav-project-link" href="{escape(workspace_url, quote=True)}"'
+            + (' aria-current="page"' if link_current else "")
             + f'><span class="nav-project-name">{escape(project_name)}</span>'
-            f'<span class="nav-project-id mono">{escape(project_id[:8])}</span></a>'
-            '<div class="nav-workspaces">'
+            f'<span class="nav-project-id mono">{escape(nav_workspace.workspace_id[:8])}</span></a>'
+            "</section>"
         )
-        for row in project_rows:
-            workspace_current = row.workspace_id == current_workspace_id
-            workspace_name = _workspace_navigation_name(row, project_name)
-            workspace_url = _url(base_path, "workspaces", row.workspace_id)
-            state = row.task_state or "idle"
-            parts.append(
-                f'<a class="nav-workspace{" is-current" if workspace_current and current_task_id is None else ""}" '
-                f'href="{escape(workspace_url, quote=True)}"'
-                + (' aria-current="page"' if workspace_current and current_task_id is None else "")
-                + f'><span class="nav-state" data-state="{escape(state, quote=True)}" aria-hidden="true"></span>'
-                '<span class="nav-workspace-copy">'
-                f'<span class="nav-workspace-name">{escape(workspace_name)}</span>'
-                f'<span class="nav-workspace-meta">{escape(row.branch or EM_DASH)}</span></span></a>'
-            )
-            if row.task_id is not None:
-                task_current = row.task_id == current_task_id
-                task_url = _url(base_path, "tasks", row.task_id)
-                parts.append(
-                    f'<a class="nav-task{" is-current" if task_current else ""}" '
-                    f'href="{escape(task_url, quote=True)}"'
-                    + (' aria-current="page"' if task_current else "")
-                    + f"><span>{escape(row.task_title or row.task_id)}</span></a>"
-                )
-        parts.append("</div></section>")
     if not rows:
         parts.append(f'<p class="nav-empty">{escape(EMPTY_WORKSPACES_TITLE)}</p>')
     parts.append("</nav>")
@@ -1458,66 +1528,43 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
     )
 
 
-def _render_project_section(
-    project_id: str,
-    rows: tuple[DashboardWorkspaceRow, ...],
-    *,
-    base_path: str,
-    visibility_action: str,
-) -> str:
-    project_url = _url(base_path, "projects", project_id)
-    name = _project_display_name(rows, project_id)
-    return (
-        f'<section class="project-section" data-project="{escape(project_id, quote=True)}">'
-        '<header class="project-section-head"><div class="project-heading">'
-        f'<p class="project-kicker">{escape(PROJECT_OVERVIEW)} · '
-        f'<span class="mono">{escape(project_id[:8])}</span></p>'
-        f'<h2 class="project-title"><a href="{escape(project_url, quote=True)}">'
-        f"{escape(name)}</a></h2>"
-        f'<p class="project-meta">{escape(workspace_count_label(len(rows)))}</p></div>'
-        '<div class="project-controls">'
-        f'<a class="text-link" href="{escape(project_url, quote=True)}">{escape(OPEN_PROJECT)} '
-        '<span aria-hidden="true">→</span></a>'
-        + _render_visibility_form(
-            project_id,
-            rows[0].visibility_mode,
-            action=visibility_action,
-            compact=True,
-        )
-        + '</div></header><div class="workspace-list">'
-        + "".join(_render_workspace_card(row, base_path) for row in rows)
-        + "</div></section>"
-    )
-
-
-def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: str = "/") -> str:
-    """Render the capability-scoped Projects overview with navigation and live refresh hints."""
-    if rows:
-        workspace_html = "".join(
-            _render_project_section(
-                project_id,
-                project_rows,
-                base_path=base_path,
-                visibility_action=base_path,
-            )
-            for project_id, project_rows in _group_navigation_rows(rows)
-        )
-    else:
-        workspace_html = (
-            f'<div class="empty-state"><strong>{escape(EMPTY_WORKSPACES_TITLE)}</strong>'
-            f"<span>{escape(EMPTY_WORKSPACES_HINT)}</span></div>"
-        )
+def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> str:
+    """Render the loopback home: daemon-wide Task search and recent Tasks."""
+    rows = home.workspaces
     content = (
         '<section class="page-intro"><div>'
         f'<p class="eyebrow">{escape(PAGE_PROJECTS)}</p>'
         f"<h1>{escape(WORKSPACE_HOME)}</h1>"
         f'<p class="hero-copy">{escape(PAGE_PROJECTS_LEAD)}</p></div></section>'
         + _render_metrics(rows)
-        + '<section class="project-stack" aria-label="'
-        + escape(SECTION_WORKSPACES, quote=True)
-        + '">'
-        + workspace_html
-        + "</section>"
+        + '<section class="panel search-panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(HOME_SEARCH_LABEL)}</h2>'
+        '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
+        + _render_search(
+            query=home.search_query or "",
+            submitted=home.search_query is not None,
+            task_results=home.task_search_results,
+            placeholder=HOME_SEARCH_PLACEHOLDER,
+            label=HOME_SEARCH_LABEL,
+            action=base_path,
+            base_path=base_path,
+        )
+        + '</div></section><section class="panel"><div class="panel-head"><div>'
+        f'<p class="panel-kicker">{escape(RECENT_TASKS_HOME)}</p>'
+        f"<h2>{escape(RECENT_TASKS_HOME)}</h2></div></div>"
+        '<div class="panel-body">'
+        + (
+            f'<div class="empty-state"><strong>{escape(EMPTY_WORKSPACES_TITLE)}</strong>'
+            f"<span>{escape(EMPTY_WORKSPACES_HINT)}</span></div>"
+            if not rows
+            else _render_recent_tasks(
+                home.recent_tasks,
+                base_path,
+                navigation_rows=rows,
+                show_project=True,
+            )
+        )
+        + "</div></section>"
     )
     return _render_shell(
         base_path=base_path,
@@ -1526,7 +1573,8 @@ def render_projects_page(rows: tuple[DashboardWorkspaceRow, ...], *, base_path: 
         events_url=_events_url(
             base_path,
             view="projects",
-            snapshot=_snapshot_fingerprint(rows),
+            search_query=home.search_query,
+            snapshot=_snapshot_fingerprint(home),
         ),
         content=content,
         navigation_rows=rows,
@@ -1592,7 +1640,13 @@ def render_project_page(
     )
 
 
-def _render_recent_tasks(tasks: tuple[DashboardTaskRow, ...], base_path: str) -> str:
+def _render_recent_tasks(
+    tasks: tuple[DashboardTaskRow, ...],
+    base_path: str,
+    *,
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] = (),
+    show_project: bool = False,
+) -> str:
     if not tasks:
         return f'<div class="empty-state"><strong>{escape(NO_TASKS_TITLE)}</strong></div>'
     parts = ['<div class="task-list">']
@@ -1611,14 +1665,23 @@ def _render_recent_tasks(tasks: tuple[DashboardTaskRow, ...], base_path: str) ->
             else f'<a class="task-jira" href="{escape(task.jira_url, quote=True)}" '
             f'target="_blank" rel="noreferrer noopener">{escape(JIRA)}</a>'
         )
+        project_html = ""
+        if show_project:
+            workspace_url = _url(base_path, "workspaces", task.workspace_id)
+            project_name = _project_display_name(navigation_rows, row.project_id)
+            project_html = (
+                f'<span><a href="{escape(workspace_url, quote=True)}">'
+                f"{escape(project_name)}</a></span>"
+            )
         parts.append(
             f'<article class="task-row" data-state="{escape(task.state.value, quote=True)}"><div>'
             f'<p class="task-row-title"><a href="{escape(task_url, quote=True)}">{escape(task.title)}</a></p>'
             '<div class="task-row-meta">'
+            f"{project_html}"
             f'<span class="mono">{escape(task.task_id[:10])}</span>'
             f"<span>{escape(REVISION)} {task.revision}</span>"
-            f'<span>{escape(BRANCH)} <span class="mono">'
-            f"{escape(_display_recorded_branch(row.git_branch))}</span></span>"
+            f'<span class="task-git-branch">{escape(BRANCH)} '
+            f'<strong class="mono">{escape(_display_recorded_branch(row.git_branch))}</strong></span>'
             f"<span>{escape(task.updated_at)}</span>{operator_status}{jira}</div></div>"
             f'<div class="task-row-aside">{_state_pill(task.state.value, wait_reason)}'
             f'<span class="row-arrow" aria-hidden="true">→</span></div></article>'
@@ -1627,13 +1690,22 @@ def _render_recent_tasks(tasks: tuple[DashboardTaskRow, ...], base_path: str) ->
     return "".join(parts)
 
 
-def _render_search(detail: DashboardWorkspaceDetail, base_path: str) -> str:
-    query = detail.search_query or ""
+def _render_search(
+    *,
+    query: str,
+    submitted: bool,
+    task_results: tuple[ProjectSearchHit, ...],
+    path_results: tuple[IndexedPathSearchResult, ...] = (),
+    placeholder: str,
+    label: str,
+    action: str | None = None,
+    base_path: str,
+) -> str:
     result_html = ""
-    if detail.search_query is not None:
-        if detail.search_results or detail.task_search_results:
+    if submitted:
+        if task_results or path_results:
             hits = []
-            for task_hit in detail.task_search_results:
+            for task_hit in task_results:
                 task_id = task_hit.ref.removeprefix("task:").partition("#")[0]
                 task_url = _url(base_path, "tasks", task_id)
                 summary = "" if task_hit.short_summary is None else f" · {task_hit.short_summary}"
@@ -1645,7 +1717,7 @@ def _render_search(detail: DashboardWorkspaceDetail, base_path: str) -> str:
                     + escape(task_hit.match_reason)
                     + "</div></div>"
                 )
-            for path_hit in detail.search_results:
+            for path_hit in path_results:
                 hits.append(
                     '<div class="search-hit"><div class="search-hit-path">'
                     + escape(path_hit.relative_path)
@@ -1660,11 +1732,12 @@ def _render_search(detail: DashboardWorkspaceDetail, base_path: str) -> str:
             result_html = (
                 f'<div class="empty-state"><strong>{escape(NO_SEARCH_HITS_TITLE)}</strong></div>'
             )
+    action_attr = "" if action is None else f' action="{escape(action, quote=True)}"'
     return (
-        '<form method="get" class="search-box" role="search">'
+        f'<form method="get" class="search-box" role="search"{action_attr}>'
         f'<input class="search-input" type="search" name="q" value="{escape(query, quote=True)}" '
-        f'maxlength="256" placeholder="{escape(SEARCH_PLACEHOLDER, quote=True)}" '
-        f'aria-label="{escape(SEARCH_LABEL, quote=True)}">'
+        f'maxlength="256" placeholder="{escape(placeholder, quote=True)}" '
+        f'aria-label="{escape(label, quote=True)}">'
         f'<button class="btn btn-primary" type="submit">{escape(SEARCH)}</button></form>'
         + result_html
     )
@@ -1737,9 +1810,6 @@ def render_workspace_page(
     project_url = _url(base_path, "projects", row.project_id)
     navigation = (row,) if navigation_rows is None else navigation_rows
     project_name = _project_display_name(navigation, row.project_id)
-    breadcrumb_workspace_name = (
-        WORKSPACE_OVERVIEW if workspace_name == project_name else workspace_name
-    )
     content = (
         '<section class="page-intro compact"><div>'
         f'<p class="eyebrow">{escape(WORKSPACE_OVERVIEW)}</p>'
@@ -1748,7 +1818,15 @@ def render_workspace_page(
         '<section class="panel search-panel"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(SEARCH_LABEL)}</h2>'
         '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
-        + _render_search(detail, base_path)
+        + _render_search(
+            query=detail.search_query or "",
+            submitted=detail.search_query is not None,
+            task_results=detail.task_search_results,
+            path_results=detail.search_results,
+            placeholder=SEARCH_PLACEHOLDER,
+            label=SEARCH_LABEL,
+            base_path=base_path,
+        )
         + '</div></section><section class="workspace-layout"><div class="workspace-main">'
         + _render_workspace_current_task(row, base_path=base_path, actions=actions)
         + '<section class="panel"><div class="panel-head"><div>'
@@ -1777,8 +1855,7 @@ def render_workspace_page(
         page_title=document_title(workspace_name),
         breadcrumbs=(
             (BREADCRUMB_PROJECTS, base_path),
-            (project_name, project_url),
-            (breadcrumb_workspace_name, None),
+            (project_name, None),
         ),
         events_url=_events_url(
             base_path,
@@ -1968,11 +2045,9 @@ def render_task_page(
     )
     task_breadcrumbs: list[tuple[str, str | None]] = [
         (BREADCRUMB_PROJECTS, base_path),
-        (project_name, project_url),
+        (project_name, workspace_url),
+        (task_crumb(task.task_id), None),
     ]
-    if workspace_name != project_name:
-        task_breadcrumbs.append((workspace_name, workspace_url))
-    task_breadcrumbs.append((task_crumb(task.task_id), None))
     return _render_shell(
         base_path=base_path,
         page_title=document_title(task.title),
@@ -1991,6 +2066,16 @@ def render_task_page(
         current_workspace_id=row.workspace_id,
         current_task_id=task.task_id,
     )
+
+
+def _normalize_legacy_capability_path(path: str, access_token: str) -> str:
+    prefix = f"/{access_token}"
+    if path == prefix:
+        return "/"
+    if path.startswith(f"{prefix}/"):
+        remainder = path[len(prefix) :]
+        return remainder if remainder else "/"
+    return path
 
 
 def _decode_identity_component(component: str) -> str:
@@ -2029,11 +2114,11 @@ def _parse_search_query(query: str) -> str | None:
 
 def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPageRequest:
     if path == base_path:
-        if query:
-            raise DashboardError("Projects route does not accept query fields")
-        return _DashboardPageRequest("projects", None, None, base_path)
+        search_query = _parse_search_query(query)
+        redirect = path + (f"?{query}" if query else "")
+        return _DashboardPageRequest("projects", None, search_query, redirect)
     if not path.startswith(base_path):
-        raise DashboardError("dashboard path is outside the capability route")
+        raise DashboardError("dashboard path is outside the dashboard route")
     relative = path[len(base_path) :]
     parts = relative.split("/")
     if (
@@ -2060,12 +2145,12 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
 
 
 def _render_page(database_path: Path, base_path: str, request: _DashboardPageRequest) -> str:
-    navigation_rows = read_dashboard_workspace_rows(database_path)
     if request.kind == "projects":
         return render_projects_page(
-            navigation_rows,
+            read_dashboard_home(database_path, search_query=request.search_query),
             base_path=base_path,
         )
+    navigation_rows = read_dashboard_workspace_rows(database_path)
     assert request.identity is not None
     if request.kind == "project":
         return render_project_page(
@@ -2113,9 +2198,18 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
         raise DashboardError("dashboard event snapshot is invalid")
     view = parsed["view"][0]
     if view == "projects":
-        if set(parsed) != {"view", "snapshot"}:
+        if set(parsed) - {"view", "snapshot", "q"}:
             raise DashboardError("Projects event query has unexpected fields")
-        return view, None, None, snapshot
+        search_query: str | None = None
+        if "q" in parsed:
+            if len(parsed["q"]) != 1:
+                raise DashboardError("dashboard event search query must be singular")
+            search_query = parsed["q"][0].strip() or None
+            if search_query is not None and (
+                "\x00" in search_query or len(search_query.encode("utf-8")) > 256
+            ):
+                raise DashboardError("dashboard event search query is invalid")
+        return view, None, search_query, snapshot
     if view not in {"project", "workspace", "task"}:
         raise DashboardError("dashboard event view is unsupported")
     identity_key = f"{view}_id"
@@ -2127,7 +2221,7 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
     identity = parsed[identity_key][0]
     if not identity or len(identity.encode("utf-8")) > 128 or "\x00" in identity:
         raise DashboardError("dashboard event identity is invalid")
-    search_query: str | None = None
+    search_query = None
     if "q" in parsed:
         if len(parsed["q"]) != 1:
             raise DashboardError("dashboard event search query must be singular")
@@ -2146,7 +2240,7 @@ def _view_fingerprint(
     search_query: str | None,
 ) -> str:
     if view == "projects":
-        value: object = read_dashboard_workspace_rows(database_path)
+        value: object = read_dashboard_home(database_path, search_query=search_query)
     elif view == "project":
         assert identity is not None
         value = read_dashboard_project_detail(database_path, identity)
@@ -2182,6 +2276,7 @@ class _DashboardHttpServer(ThreadingHTTPServer):
 class _DashboardRequestHandler(BaseHTTPRequestHandler):
     database_path: ClassVar[Path]
     route_path: ClassVar[str]
+    access_token: ClassVar[str]
     expected_host: ClassVar[str]
     expected_origin: ClassVar[str]
     stop_event: ClassVar[Event]
@@ -2193,17 +2288,18 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         if self.headers.get("Host") != self.expected_host:
             self._send_html(404, "")
             return
-        if parsed.path == f"{self.route_path}assets/dashboard.css" and not parsed.query:
+        path = _normalize_legacy_capability_path(parsed.path, self.access_token)
+        if path == f"{self.route_path}assets/dashboard.css" and not parsed.query:
             self._send_bytes(200, "text/css; charset=utf-8", DASHBOARD_CSS.encode("utf-8"))
             return
-        if parsed.path == f"{self.route_path}assets/dashboard.js" and not parsed.query:
+        if path == f"{self.route_path}assets/dashboard.js" and not parsed.query:
             self._send_bytes(
                 200,
                 "application/javascript; charset=utf-8",
                 DASHBOARD_JS.encode("utf-8"),
             )
             return
-        if parsed.path == f"{self.route_path}events":
+        if path == f"{self.route_path}events":
             try:
                 view, identity, search_query, snapshot = _parse_sse_view(parsed.query)
             except DashboardError:
@@ -2212,7 +2308,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             self._serve_events(view, identity, search_query, snapshot)
             return
         try:
-            page = _parse_page_request(self.route_path, parsed.path, parsed.query)
+            page = _parse_page_request(self.route_path, path, parsed.query)
             html = _render_page(self.database_path, self.route_path, page)
         except SearchError:
             self._send_html(400, "")
@@ -2240,8 +2336,9 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
+        path = _normalize_legacy_capability_path(parsed.path, self.access_token)
         try:
-            page = _parse_page_request(self.route_path, parsed.path, parsed.query)
+            page = _parse_page_request(self.route_path, path, parsed.query)
         except (DashboardError, SearchError):
             self._send_html(404, "")
             return
@@ -2432,7 +2529,8 @@ def _request_handler(
         pass
 
     Handler.database_path = database_path
-    Handler.route_path = f"/{access_token}/"
+    Handler.route_path = "/"
+    Handler.access_token = access_token
     Handler.stop_event = stop_event
     Handler.sse_slots = BoundedSemaphore(_DASHBOARD_SSE_MAX_CLIENTS)
     Handler.workspace_invalidations = workspace_invalidations
@@ -2447,6 +2545,17 @@ def dashboard_url_path(socket_path: Path) -> Path:
 def dashboard_token_path(database_path: Path) -> Path:
     """Return the durable capability-token file next to the selected database."""
     return database_path.parent / _DASHBOARD_TOKEN_FILENAME
+
+
+def load_or_create_dashboard_access_token(database_path: Path) -> str:
+    """Return the stable private capability shared by daemon-owned loopback services."""
+    return _load_or_create_access_token(dashboard_token_path(database_path))
+
+
+def read_dashboard_access_token(database_path: Path) -> str | None:
+    """Read the existing private loopback capability without creating state."""
+    token = _read_private_ascii_line(dashboard_token_path(database_path))
+    return token if token is not None and _DASHBOARD_TOKEN_PATTERN.fullmatch(token) else None
 
 
 def _write_private_url_file(path: Path, url: str) -> None:
@@ -2588,14 +2697,14 @@ class DashboardServerManager:
         )
 
     def get_url(self) -> str:
-        """Return the capability-bearing loopback URL, starting the listener if needed."""
+        """Return the loopback dashboard URL, starting the listener if needed."""
         if self._server is not None and self._thread is not None and self._thread.is_alive():
             assert self._url is not None
             self._publish_url_file(self._url)
             return self._url
         self.close()
 
-        access_token = _load_or_create_access_token(self._token_file)
+        access_token = load_or_create_dashboard_access_token(self._database_path)
         stop_event = Event()
         started_event = Event()
         self._failure = None
@@ -2633,7 +2742,7 @@ class DashboardServerManager:
             self._thread = thread
             self._stop_event = stop_event
             self._started_event = started_event
-            self._url = f"http://{DASHBOARD_HOST}:{port}/{access_token}/"
+            self._url = f"http://{DASHBOARD_HOST}:{port}/"
             thread.start()
             self._wait_until_started(thread, started_event)
             self._publish_url_file(self._url)

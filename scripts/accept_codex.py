@@ -3,22 +3,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import tomllib
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import anyio
-from mcp import Client, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 from harness.codex_adapter import (
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
-    CODEX_MCP_FORWARD_ENV_VARS,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -29,7 +32,23 @@ EXPECTED_TOOLS = (
     "task_start",
     "task_checkpoint",
 )
-EXPECTED_GENERATED_SKILLS = ("secure-by-design", "testing-strategy")
+ACCEPTANCE_SKILL_ID = "acceptance-skill"
+ACCEPTANCE_NEGATIVE_SKILL_ID = "acceptance-negative"
+ACCEPTANCE_SKILL_DESCRIPTION = "Use when asked to perform the synthetic acceptance workflow."
+ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION = (
+    "Use when asked to perform the unrelated negative-control workflow."
+)
+EXPECTED_GENERATED_SKILLS = (
+    ACCEPTANCE_NEGATIVE_SKILL_ID,
+    ACCEPTANCE_SKILL_ID,
+    "secure-by-design",
+    "testing-strategy",
+)
+# Negative sibling is projected with the same python/software-project applies and the same
+# python task_hints so Codex bootstrap task_start cannot drop one sibling while keeping the
+# other. Preflight proves its nonce is absent from the positive prompt; --run-model
+# additionally requires a second exec whose prompt does not match this description.
+NEGATIVE_SKILL_PREFLIGHT_POLICY = "projected; nonce absent from the positive skill-read prompt"
 EXPECTED_TOOL_INPUT_PROPERTIES = {
     "project_status": frozenset(),
     "project_search": frozenset({"query", "scope", "limit"}),
@@ -51,10 +70,13 @@ EXPECTED_TOOL_INPUT_PROPERTIES = {
 _DEFAULT_TIMEOUT_SECONDS = 300
 _MODEL_USAGE_DISCLOSURE = (
     "External destination: the OpenAI Codex service selected by the Codex CLI.\n"
-    "Account effect: one model run consumes usage for the explicitly supplied CODEX_API_KEY. "
+    "Account effect: each model run consumes usage for the explicitly supplied CODEX_API_KEY. "
     "The key is inherited by the temporary Codex process and may be inherited by its trusted "
-    "Harness MCP child; the runner never prints or stores it outside temporary Codex state.\n"
-    "Payload: the fixed acceptance prompt; metadata from a temporary Git repository containing "
+    "Harness MCP child; the runner never prints or stores it outside temporary Codex state. "
+    "Model mode runs the MCP-tool proof plus native skill-read and negative-control execs.\n"
+    "Payload: the fixed MCP acceptance prompt; a skill-read prompt describing the synthetic "
+    "acceptance workflow without skill-body secrets; a negative-control prompt that does not "
+    "match the negative skill description; metadata from a temporary Git repository containing "
     "only README.md and pyproject.toml fixture text; and Harness MCP results containing temporary "
     "Workspace/Task IDs, path metadata, and acceptance Task text. No user repository source is "
     "included.\n"
@@ -74,6 +96,198 @@ _GLOBAL_INSTALL_DISCLOSURE = (
 
 class CodexAcceptanceError(RuntimeError):
     """Raised when real Codex CLI acceptance cannot be proven."""
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptanceSkillNonces:
+    """Per-run SKILL.md body markers that must never enter the model prompt."""
+
+    positive: str
+    negative: str
+
+
+def generate_acceptance_skill_nonces() -> AcceptanceSkillNonces:
+    """Return unique runtime nonces for the synthetic acceptance skills."""
+    positive = secrets.token_hex(16)
+    negative = secrets.token_hex(16)
+    if not positive or not negative or positive == negative:
+        raise CodexAcceptanceError("acceptance skill nonces were not unique")
+    return AcceptanceSkillNonces(positive=positive, negative=negative)
+
+
+def split_portable_skill_markdown(text: str) -> tuple[str, str]:
+    """Split portable SKILL.md into the frontmatter block (including fences) and body."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return "", text
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            frontmatter = "\n".join(lines[: index + 1])
+            body = "\n".join(lines[index + 1 :])
+            return frontmatter, body
+    return text, ""
+
+
+def write_synthetic_acceptance_skills(registry_root: Path, nonces: AcceptanceSkillNonces) -> None:
+    """Install temporary user-owned acceptance skills into the isolated registry."""
+    _write_synthetic_skill(
+        registry_root,
+        skill_id=ACCEPTANCE_SKILL_ID,
+        description=ACCEPTANCE_SKILL_DESCRIPTION,
+        nonce=nonces.positive,
+        heading="Synthetic acceptance",
+    )
+    _write_synthetic_skill(
+        registry_root,
+        skill_id=ACCEPTANCE_NEGATIVE_SKILL_ID,
+        description=ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION,
+        nonce=nonces.negative,
+        heading="Negative-control acceptance",
+    )
+
+
+def verify_synthetic_skill_projection(
+    workspace: Path,
+    nonces: AcceptanceSkillNonces,
+    *,
+    positive_prompt: str,
+) -> None:
+    """Require projected synthetic skills to hide nonces in SKILL.md bodies only."""
+    if nonces.positive in positive_prompt or nonces.negative in positive_prompt:
+        raise CodexAcceptanceError("positive skill-read prompt leaked a runtime skill nonce")
+    _verify_projected_skill_nonce(
+        workspace,
+        skill_id=ACCEPTANCE_SKILL_ID,
+        nonce=nonces.positive,
+        required=True,
+    )
+    _verify_projected_skill_nonce(
+        workspace,
+        skill_id=ACCEPTANCE_NEGATIVE_SKILL_ID,
+        nonce=nonces.negative,
+        required=True,
+    )
+
+
+def skill_marker_values(events: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Extract skill_marker fields from Codex JSONL events and nested JSON text."""
+    markers: list[str] = []
+
+    def walk(value: object) -> None:
+        if isinstance(value, Mapping):
+            marker = value.get("skill_marker")
+            if isinstance(marker, str) and marker:
+                markers.append(marker)
+            for nested in value.values():
+                walk(nested)
+            return
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped[:1] in {"{", "["}:
+                try:
+                    parsed: object = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return
+                walk(parsed)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            for nested in value:
+                walk(nested)
+
+    for event in events:
+        walk(event)
+    return tuple(markers)
+
+
+def evidence_contains_skill_marker(events: Sequence[Mapping[str, Any]], nonce: str) -> bool:
+    """Return whether JSONL evidence contains the exact skill_marker nonce."""
+    if not nonce:
+        return False
+    if nonce in skill_marker_values(events):
+        return True
+    return any(nonce in blob for blob in _iter_jsonl_strings(events))
+
+
+def _iter_jsonl_strings(value: object) -> tuple[str, ...]:
+    blobs: list[str] = []
+    if isinstance(value, str):
+        blobs.append(value)
+        return tuple(blobs)
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            blobs.extend(_iter_jsonl_strings(nested))
+        return tuple(blobs)
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        for nested in value:
+            blobs.extend(_iter_jsonl_strings(nested))
+    return tuple(blobs)
+
+
+def _write_synthetic_skill(
+    registry_root: Path,
+    *,
+    skill_id: str,
+    description: str,
+    nonce: str,
+    heading: str,
+) -> None:
+    if nonce in description or nonce in skill_id or nonce in heading:
+        raise CodexAcceptanceError("synthetic skill metadata leaked the runtime nonce")
+    directory = registry_root / skill_id
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    skill_text = (
+        f"---\nname: {skill_id}\ndescription: {description}\n---\n\n"
+        f"# {heading}\n"
+        "When this skill is applied, return this exact marker in field skill_marker:\n"
+        f"{nonce}\n"
+    )
+    metadata_text = (
+        f"id: {skill_id}\n"
+        "applies:\n"
+        "  languages:\n"
+        "    - python\n"
+        "  facets:\n"
+        "    - software-project\n"
+        "task_hints:\n"
+        "  - python\n"
+    )
+    skill_path = directory / "SKILL.md"
+    metadata_path = directory / "harness.yaml"
+    skill_path.write_text(skill_text, encoding="utf-8")
+    metadata_path.write_text(metadata_text, encoding="utf-8")
+    skill_path.chmod(0o600)
+    metadata_path.chmod(0o600)
+    os.chmod(directory, 0o700)
+
+
+def _verify_projected_skill_nonce(
+    workspace: Path,
+    *,
+    skill_id: str,
+    nonce: str,
+    required: bool,
+) -> None:
+    skill_path = workspace / ".agents" / "skills" / skill_id / "SKILL.md"
+    if not skill_path.is_file():
+        if required:
+            raise CodexAcceptanceError(
+                f"synthetic skill {skill_id!r} was not projected into {workspace}"
+            )
+        return
+    text = skill_path.read_text(encoding="utf-8")
+    frontmatter, body = split_portable_skill_markdown(text)
+    if nonce not in body:
+        raise CodexAcceptanceError(
+            f"synthetic skill {skill_id!r} body does not contain the runtime nonce"
+        )
+    if nonce in frontmatter:
+        raise CodexAcceptanceError(
+            f"synthetic skill {skill_id!r} frontmatter leaked the runtime nonce"
+        )
+
+
+def _redact_skill_nonces(text: str, nonces: AcceptanceSkillNonces) -> str:
+    return text.replace(nonces.positive, "<redacted>").replace(nonces.negative, "<redacted>")
 
 
 def _run(
@@ -120,13 +334,31 @@ def _isolated_environment(root: Path, codex: Path) -> dict[str, str]:
         "HARNESS_WORKSPACE_ROOT",
         "CLAUDE_PROJECT_DIR",
         "WORKSPACE_FOLDER_PATHS",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT",
     ):
         values.pop(key, None)
     values["XDG_STATE_HOME"] = str(root / "state")
     values["XDG_RUNTIME_DIR"] = str(root / "runtime")
     values["HARNESS_SKILL_REGISTRY"] = str(root / "skills")
+    dashboard_port, mcp_http_port = _unused_loopback_ports(2)
+    values["HARNESS_ACCEPTANCE_DASHBOARD_PORT"] = str(dashboard_port)
+    values["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"] = str(mcp_http_port)
     values["PATH"] = str(codex.parent) + os.pathsep + values.get("PATH", "")
     return values
+
+
+def _unused_loopback_ports(count: int) -> tuple[int, ...]:
+    listeners: list[socket.socket] = []
+    try:
+        for _ in range(count):
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listeners.append(listener)
+        return tuple(int(listener.getsockname()[1]) for listener in listeners)
+    finally:
+        for listener in listeners:
+            listener.close()
 
 
 def _prepare_temporary_codex_home(root: Path, workspaces: Sequence[Path]) -> Path:
@@ -195,10 +427,9 @@ def _init_repository(
 
 def _verify_project_config(
     path: Path,
-    python: Path,
     workspace: Path,
-    local_environment: Mapping[str, str],
-) -> dict[str, str]:
+    expected_url: str,
+) -> dict[str, object]:
     try:
         value = tomllib.loads(path.read_text(encoding="utf-8"))
         entry = value["mcp_servers"]["harness"]
@@ -209,48 +440,83 @@ def _verify_project_config(
         raise CodexAcceptanceError(
             f"generated Codex project config has no exact Harness bootstrap instructions: {path}"
         )
-    static_environment: dict[str, str] = {
-        "HARNESS_HOST_PROFILE": "codex",
-        "HARNESS_WORKSPACE_ROOT": expected_root,
-    }
+    headers = entry.get("http_headers")
+    if not isinstance(headers, dict):
+        raise CodexAcceptanceError("generated Codex HTTP MCP config has no headers")
+    authorization = headers.get("Authorization")
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise CodexAcceptanceError("generated Codex HTTP MCP config has no bearer capability")
     expected: dict[str, object] = {
-        "command": str(python.absolute()),
-        "args": ["-m", "harness.mcp_process"],
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
-        "cwd": expected_root,
-        "env": static_environment,
+        "url": expected_url,
+        "required": True,
+        "startup_timeout_sec": 30,
+        "http_headers": {
+            "Authorization": authorization,
+            "X-Harness-Workspace-Root": expected_root,
+        },
     }
     if entry != expected:
         raise CodexAcceptanceError(
-            f"generated Codex project config does not match the acceptance runtime: {entry!r}"
+            "generated Codex project config does not match the acceptance runtime"
         )
-    server_environment = static_environment.copy()
-    for name in CODEX_MCP_FORWARD_ENV_VARS:
-        forwarded_value = local_environment.get(name)
-        if forwarded_value is not None:
-            server_environment[name] = forwarded_value
-    return server_environment
+    return {"url": entry["url"], "headers": headers}
 
 
-def _verify_codex_inspection(payload: object, python: Path, workspace: Path) -> None:
+def _verify_codex_inspection(payload: object, workspace: Path, expected_url: str) -> None:
     if not isinstance(payload, dict):
         raise CodexAcceptanceError("codex mcp get did not return an object")
     expected_root = str(workspace.resolve())
-    expected_transport = {
-        "type": "stdio",
-        "command": str(python.absolute()),
-        "args": ["-m", "harness.mcp_process"],
-        "env": {
-            "HARNESS_HOST_PROFILE": "codex",
-            "HARNESS_WORKSPACE_ROOT": expected_root,
-        },
-        "env_vars": list(CODEX_MCP_FORWARD_ENV_VARS),
-        "cwd": expected_root,
+    transport = payload.get("transport")
+    if not isinstance(transport, dict):
+        raise CodexAcceptanceError("Codex reported no Harness MCP transport")
+    headers = transport.get("http_headers")
+    expected_headers = {
+        "Authorization": headers.get("Authorization") if isinstance(headers, dict) else None,
+        "X-Harness-Workspace-Root": expected_root,
     }
-    if payload.get("name") != "harness" or payload.get("transport") != expected_transport:
-        raise CodexAcceptanceError(f"Codex loaded an unexpected Harness MCP transport: {payload!r}")
+    if (
+        payload.get("name") != "harness"
+        or transport.get("type") != "streamable_http"
+        or transport.get("url") != expected_url
+        or headers != expected_headers
+        or not isinstance(expected_headers["Authorization"], str)
+        or not expected_headers["Authorization"].startswith("Bearer ")
+    ):
+        raise CodexAcceptanceError("Codex loaded an unexpected Harness MCP transport")
     if payload.get("enabled") is not True or payload.get("disabled_reason") is not None:
-        raise CodexAcceptanceError(f"Codex did not enable the Harness MCP server: {payload!r}")
+        raise CodexAcceptanceError("Codex did not enable the Harness MCP server")
+
+
+def prompt_input_contains_bootstrap(value: object) -> bool:
+    """Return whether rendered model input contains the exact Harness bootstrap text."""
+    if isinstance(value, str):
+        return CODEX_BOOTSTRAP_INSTRUCTION_BODY in value
+    if isinstance(value, Mapping):
+        return any(prompt_input_contains_bootstrap(item) for item in value.values())
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return any(prompt_input_contains_bootstrap(item) for item in value)
+    return False
+
+
+def _verify_codex_prompt_input(
+    codex: Path,
+    workspace: Path,
+    environment: Mapping[str, str],
+) -> None:
+    rendered = _run(
+        (str(codex), "debug", "prompt-input", "Harness acceptance prompt probe"),
+        cwd=workspace,
+        environment=environment,
+        show_output=False,
+    )
+    try:
+        payload = json.loads(rendered.stdout)
+    except json.JSONDecodeError as exc:
+        raise CodexAcceptanceError("codex debug prompt-input emitted invalid JSON") from exc
+    if not prompt_input_contains_bootstrap(payload):
+        raise CodexAcceptanceError(
+            "Codex model-visible prompt input omitted the Harness bootstrap instructions"
+        )
 
 
 def _verify_untrusted_project_fail_closed(
@@ -365,6 +631,10 @@ def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
         schema = tool.get("inputSchema")
         if not isinstance(description, str) or not description:
             raise CodexAcceptanceError(f"installed MCP tool has no description: {name}")
+        if name == "project_status" and "Required first repository action" not in description:
+            raise CodexAcceptanceError(
+                "installed MCP project_status description does not require first action"
+            )
         if not isinstance(schema, dict) or schema.get("additionalProperties") is not False:
             raise CodexAcceptanceError(f"installed MCP tool schema is not fail-closed: {name}")
         properties = schema.get("properties")
@@ -378,6 +648,24 @@ def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     return names
 
 
+def _validate_wire_instructions(instructions: str | None) -> None:
+    """Require the unambiguous first-action bootstrap from the installed MCP server."""
+    if not isinstance(instructions, str):
+        raise CodexAcceptanceError("installed MCP server returned no instructions")
+    first_512 = instructions[:512]
+    for required in (
+        "project_status must be the first repository action",
+        "Before any shell command",
+        "only allowed pre-status action",
+    ):
+        if required not in first_512:
+            raise CodexAcceptanceError(
+                f"installed MCP instructions omit strict bootstrap phrase: {required}"
+            )
+    if "Before broad repository exploration" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions retain ambiguous broad-work wording")
+
+
 def _structured_result(name: str, result: Any) -> dict[str, Any]:
     if result.is_error:
         raise CodexAcceptanceError(f"installed MCP {name} call returned an error")
@@ -388,132 +676,152 @@ def _structured_result(name: str, result: Any) -> dict[str, Any]:
 
 
 async def _verify_mcp_wire_async(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    parameters = StdioServerParameters(
-        command=str(python.absolute()),
-        args=["-m", "harness.mcp_process"],
-        env=dict(environment),
-        cwd=str(workspace.resolve()),
-    )
-    async with Client(stdio_client(parameters)) as client:
-        listed = await client.list_tools()
-        tools = tuple(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
-        names = _validate_wire_tools(tools)
-
-        status = _structured_result("project_status", await client.call_tool("project_status"))
-        workspace_id = status.get("workspace_id")
-        if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
-            workspace_id, str
-        ):
-            raise CodexAcceptanceError(
-                f"installed MCP resolved the wrong Workspace identity: {status!r}"
+    url = connection.get("url")
+    headers = connection.get("headers")
+    if (
+        not isinstance(url, str)
+        or not isinstance(headers, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
+        )
+    ):
+        raise CodexAcceptanceError("generated HTTP MCP connection is invalid")
+    async with create_mcp_http_client(headers=headers) as http_client:
+        transport = streamable_http_client(url, http_client=http_client)
+        async with Client(transport, mode="legacy") as client:
+            _validate_wire_instructions(client.instructions)
+            listed = await client.list_tools()
+            tools = tuple(
+                tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools
             )
-        searched = _structured_result(
-            "project_search",
-            await client.call_tool(
-                "project_search", {"query": "pyproject", "scope": "code", "limit": 5}
-            ),
-        )
-        results = searched.get("results")
-        if not isinstance(results, list) or not results or not isinstance(results[0], dict):
-            raise CodexAcceptanceError("installed MCP project_search returned no fixture result")
-        selected_ref = results[0].get("ref")
-        if not isinstance(selected_ref, str):
-            raise CodexAcceptanceError("installed MCP project_search returned no usable ref")
-        context = _structured_result(
-            "project_context",
-            await client.call_tool("project_context", {"refs": [selected_ref]}),
-        )
-        items = context.get("items")
-        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
-            raise CodexAcceptanceError("installed MCP project_context returned no fixture item")
-        if items[0].get("ref") != selected_ref:
-            raise CodexAcceptanceError("installed MCP project_context returned the wrong ref")
+            names = _validate_wire_tools(tools)
 
-        started = _structured_result(
-            "task_start",
-            await client.call_tool(
+            status = _structured_result("project_status", await client.call_tool("project_status"))
+            workspace_id = status.get("workspace_id")
+            if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
+                workspace_id, str
+            ):
+                raise CodexAcceptanceError(
+                    f"installed MCP resolved the wrong Workspace identity: {status!r}"
+                )
+            searched = _structured_result(
+                "project_search",
+                await client.call_tool(
+                    "project_search", {"query": "pyproject", "scope": "code", "limit": 5}
+                ),
+            )
+            results = searched.get("results")
+            if not isinstance(results, list) or not results or not isinstance(results[0], dict):
+                raise CodexAcceptanceError(
+                    "installed MCP project_search returned no fixture result"
+                )
+            selected_ref = results[0].get("ref")
+            if not isinstance(selected_ref, str):
+                raise CodexAcceptanceError("installed MCP project_search returned no usable ref")
+            context = _structured_result(
+                "project_context",
+                await client.call_tool("project_context", {"refs": [selected_ref]}),
+            )
+            items = context.get("items")
+            if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+                raise CodexAcceptanceError("installed MCP project_context returned no fixture item")
+            if items[0].get("ref") != selected_ref:
+                raise CodexAcceptanceError("installed MCP project_context returned the wrong ref")
+
+            started = _structured_result(
                 "task_start",
-                {"title": "Локальная проверка Codex MCP", "stack_hints": ["python"]},
-            ),
-        )
-        task_id = started.get("task_id")
-        revision = started.get("revision")
-        if not isinstance(task_id, str) or not isinstance(revision, int):
-            raise CodexAcceptanceError("installed MCP task_start returned invalid Task identity")
-        checkpoint = _structured_result(
-            "task_checkpoint",
-            await client.call_tool(
+                await client.call_tool(
+                    "task_start",
+                    {"title": "Локальная проверка Codex MCP", "stack_hints": ["python"]},
+                ),
+            )
+            task_id = started.get("task_id")
+            revision = started.get("revision")
+            if not isinstance(task_id, str) or not isinstance(revision, int):
+                raise CodexAcceptanceError(
+                    "installed MCP task_start returned invalid Task identity"
+                )
+            checkpoint = _structured_result(
                 "task_checkpoint",
-                {
-                    "task_id": task_id,
-                    "expected_revision": revision,
-                    "state": "completed",
-                    "summary": "Пять MCP-инструментов проверены локальным wire-клиентом",
-                    "next_step": None,
-                    "verification": [
-                        {
-                            "name": "Installed MCP wire acceptance",
-                            "status": "passed",
-                            "evidence": "Official MCP SDK completed all five calls",
-                        }
-                    ],
-                },
-            ),
-        )
-        if (
-            checkpoint.get("task_id") != task_id
-            or checkpoint.get("state") != "completed"
-            or checkpoint.get("revision") != revision + 1
-        ):
-            raise CodexAcceptanceError("installed MCP task_checkpoint returned invalid continuity")
-        return names, workspace_id
+                await client.call_tool(
+                    "task_checkpoint",
+                    {
+                        "task_id": task_id,
+                        "expected_revision": revision,
+                        "state": "completed",
+                        "summary": "Пять MCP-инструментов проверены локальным wire-клиентом",
+                        "next_step": None,
+                        "verification": [
+                            {
+                                "name": "Installed MCP wire acceptance",
+                                "status": "passed",
+                                "evidence": "Official MCP SDK completed all five calls",
+                            }
+                        ],
+                    },
+                ),
+            )
+            if (
+                checkpoint.get("task_id") != task_id
+                or checkpoint.get("state") != "completed"
+                or checkpoint.get("revision") != revision + 1
+            ):
+                raise CodexAcceptanceError(
+                    "installed MCP task_checkpoint returned invalid continuity"
+                )
+            return names, workspace_id
 
 
 async def _verify_mcp_read_only_async(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
     """Verify the production catalog and status without creating Task or Project state."""
-    parameters = StdioServerParameters(
-        command=str(python.absolute()),
-        args=["-m", "harness.mcp_process"],
-        env=dict(environment),
-        cwd=str(workspace.resolve()),
-    )
-    async with Client(stdio_client(parameters)) as client:
-        listed = await client.list_tools()
-        tools = tuple(tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools)
-        names = _validate_wire_tools(tools)
-        status = _structured_result("project_status", await client.call_tool("project_status"))
-        workspace_id = status.get("workspace_id")
-        if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
-            workspace_id, str
-        ):
-            raise CodexAcceptanceError(
-                f"installed MCP resolved the wrong Workspace identity: {status!r}"
+    url = connection.get("url")
+    headers = connection.get("headers")
+    if (
+        not isinstance(url, str)
+        or not isinstance(headers, dict)
+        or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in headers.items()
+        )
+    ):
+        raise CodexAcceptanceError("generated HTTP MCP connection is invalid")
+    async with create_mcp_http_client(headers=headers) as http_client:
+        transport = streamable_http_client(url, http_client=http_client)
+        async with Client(transport, mode="legacy") as client:
+            _validate_wire_instructions(client.instructions)
+            listed = await client.list_tools()
+            tools = tuple(
+                tool.model_dump(by_alias=True, exclude_none=True) for tool in listed.tools
             )
-        return names, workspace_id
+            names = _validate_wire_tools(tools)
+            status = _structured_result("project_status", await client.call_tool("project_status"))
+            workspace_id = status.get("workspace_id")
+            if status.get("workspace_root") != str(workspace.resolve()) or not isinstance(
+                workspace_id, str
+            ):
+                raise CodexAcceptanceError(
+                    f"installed MCP resolved the wrong Workspace identity: {status!r}"
+                )
+            return names, workspace_id
 
 
 def verify_mcp_read_only(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    return anyio.run(_verify_mcp_read_only_async, python, workspace, environment)
+    return anyio.run(_verify_mcp_read_only_async, connection, workspace)
 
 
 def _verify_mcp_wire(
-    python: Path,
+    connection: Mapping[str, object],
     workspace: Path,
-    environment: Mapping[str, str],
 ) -> tuple[tuple[str, ...], str]:
-    return anyio.run(_verify_mcp_wire_async, python, workspace, environment)
+    return anyio.run(_verify_mcp_wire_async, connection, workspace)
 
 
 def _acceptance_prompt() -> str:
@@ -527,6 +835,76 @@ def _acceptance_prompt() -> str:
         "work-record identity, final revision, and audit result. Never invent a result if a tool "
         "call fails."
     )
+
+
+def _skill_read_prompt() -> str:
+    return (
+        "Perform the synthetic acceptance workflow for this temporary Python package. "
+        "Do not edit files. Return one short JSON object that includes field skill_marker "
+        "with the exact marker required when that workflow skill is applied."
+    )
+
+
+def _skill_negative_prompt() -> str:
+    return (
+        "Summarize this temporary Python package README in one sentence. "
+        "Do not edit files. Return one short JSON object with field package_summary only."
+    )
+
+
+def _codex_exec_events(
+    codex: Path,
+    workspace: Path,
+    environment: Mapping[str, str],
+    *,
+    prompt: str,
+    timeout: int,
+    model: str | None,
+    require_harness_mcp: bool = True,
+) -> list[dict[str, Any]]:
+    command: list[str] = [
+        str(codex),
+        "exec",
+        "--ephemeral",
+        "--sandbox",
+        "read-only",
+        "--json",
+        "--cd",
+        str(workspace),
+    ]
+    if require_harness_mcp:
+        command.extend(("-c", "mcp_servers.harness.required=true"))
+    if model is not None:
+        command.extend(("--model", model))
+    command.append(prompt)
+    executed = _run(
+        command,
+        cwd=workspace,
+        environment=environment,
+        timeout=timeout,
+        show_output=False,
+    )
+    return _parse_json_lines(executed.stdout)
+
+
+def _prove_native_skill_read(
+    events: Sequence[Mapping[str, Any]],
+    nonce: str,
+) -> None:
+    if not nonce or nonce not in skill_marker_values(events):
+        raise CodexAcceptanceError(
+            "Codex JSONL evidence did not return the projected skill_marker nonce"
+        )
+
+
+def _prove_native_skill_negative(
+    events: Sequence[Mapping[str, Any]],
+    nonce: str,
+) -> None:
+    if evidence_contains_skill_marker(events, nonce):
+        raise CodexAcceptanceError(
+            "negative-control Codex JSONL evidence returned the unmatched skill nonce"
+        )
 
 
 def _build_installed_wheel(
@@ -643,7 +1021,8 @@ def run_acceptance(
     with tempfile.TemporaryDirectory(prefix="harness-codex-real-host-") as temporary:
         root = Path(temporary)
         environment = _isolated_environment(root, codex)
-        harness, python = (
+        expected_mcp_url = f"http://127.0.0.1:{environment['HARNESS_ACCEPTANCE_MCP_HTTP_PORT']}/mcp"
+        harness, _python = (
             global_runtime
             if global_runtime is not None
             else _build_installed_wheel(root, uv, environment)
@@ -660,6 +1039,8 @@ def run_acceptance(
         installed = False
         primary_error: BaseException | None = None
         report: dict[str, object] = {}
+        skill_nonces = generate_acceptance_skill_nonces()
+        skill_read_prompt = _skill_read_prompt()
         try:
             _run(
                 (str(harness), "install", "--host", "codex"),
@@ -667,9 +1048,15 @@ def run_acceptance(
                 environment=environment,
             )
             installed = True
+            write_synthetic_acceptance_skills(
+                Path(environment["HARNESS_SKILL_REGISTRY"]),
+                skill_nonces,
+            )
             wire_calls: tuple[str, ...] = ()
             wire_workspace_ids: list[str] = []
             projected_skill_names: tuple[str, ...] | None = None
+            skill_read_verified = False
+            skill_negative_verified = False
             for workspace in workspaces:
                 _run(
                     (str(harness), "scan", str(workspace)),
@@ -679,11 +1066,10 @@ def run_acceptance(
                 if workspace == primary_workspace:
                     _verify_untrusted_project_fail_closed(codex, workspace, environment)
                 config = workspace / ".codex" / "config.toml"
-                mcp_environment = _verify_project_config(
+                mcp_connection = _verify_project_config(
                     config,
-                    python,
                     workspace,
-                    environment,
+                    expected_mcp_url,
                 )
                 skills = tuple(
                     sorted(
@@ -695,6 +1081,11 @@ def run_acceptance(
                     raise CodexAcceptanceError(
                         f"Codex received unexpected relevant/irrelevant project skills: {skills!r}"
                     )
+                verify_synthetic_skill_projection(
+                    workspace,
+                    skill_nonces,
+                    positive_prompt=skill_read_prompt,
+                )
                 if projected_skill_names is None:
                     projected_skill_names = skills
                 elif skills != projected_skill_names:
@@ -720,12 +1111,47 @@ def run_acceptance(
                     inspection_payload = json.loads(inspected.stdout)
                 except json.JSONDecodeError as exc:
                     raise CodexAcceptanceError("codex mcp get emitted invalid JSON") from exc
-                _verify_codex_inspection(inspection_payload, python, workspace)
+                _verify_codex_inspection(inspection_payload, workspace, expected_mcp_url)
+                _verify_codex_prompt_input(codex, workspace, environment)
+
+                if run_model and workspace == primary_workspace:
+                    # Prove native skill discovery against the scan-projected set first.
+                    # Codex bootstrap task_start plus the daemon watcher can task-focus
+                    # projection even without the later runner _verify_mcp_wire call.
+                    # No separate timeout or cost cap in this runner skips the negative exec.
+                    model_environment = environment.copy()
+                    model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
+                    try:
+                        positive_events = _codex_exec_events(
+                            codex,
+                            workspace,
+                            model_environment,
+                            prompt=skill_read_prompt,
+                            timeout=timeout,
+                            model=model,
+                            require_harness_mcp=False,
+                        )
+                        _prove_native_skill_read(positive_events, skill_nonces.positive)
+                        negative_events = _codex_exec_events(
+                            codex,
+                            workspace,
+                            model_environment,
+                            prompt=_skill_negative_prompt(),
+                            timeout=timeout,
+                            model=model,
+                            require_harness_mcp=False,
+                        )
+                        _prove_native_skill_negative(negative_events, skill_nonces.negative)
+                    except CodexAcceptanceError as exc:
+                        raise CodexAcceptanceError(
+                            _redact_skill_nonces(str(exc), skill_nonces)
+                        ) from exc
+                    skill_read_verified = True
+                    skill_negative_verified = True
 
                 observed_calls, wire_workspace_id = _verify_mcp_wire(
-                    python,
+                    mcp_connection,
                     workspace,
-                    mcp_environment,
                 )
                 if wire_calls and observed_calls != wire_calls:
                     raise CodexAcceptanceError("installed MCP catalogs differ across Workspaces")
@@ -740,31 +1166,16 @@ def run_acceptance(
 
             model_calls: tuple[str, ...] = ()
             if run_model:
-                command: list[str] = [
-                    str(codex),
-                    "exec",
-                    "--ephemeral",
-                    "--sandbox",
-                    "read-only",
-                    "--json",
-                    "--cd",
-                    str(primary_workspace),
-                    "-c",
-                    "mcp_servers.harness.required=true",
-                ]
-                if model is not None:
-                    command.extend(("--model", model))
-                command.append(_acceptance_prompt())
                 model_environment = environment.copy()
                 model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
-                executed = _run(
-                    command,
-                    cwd=primary_workspace,
-                    environment=model_environment,
+                events = _codex_exec_events(
+                    codex,
+                    primary_workspace,
+                    model_environment,
+                    prompt=_acceptance_prompt(),
                     timeout=timeout,
-                    show_output=False,
+                    model=model,
                 )
-                events = _parse_json_lines(executed.stdout)
                 model_calls = completed_harness_tool_calls(events)
                 premature_actions = project_actions_before_harness_status(events)
                 if premature_actions:
@@ -806,7 +1217,7 @@ def run_acceptance(
                 show_output=False,
             ).stdout.strip()
             report = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "runtime_source": "user-global-uv-tool" if global_install else "temporary-wheel",
                 "codex_version": version,
                 "workspace_identities": [str(workspace.resolve()) for workspace in workspaces],
@@ -815,8 +1226,12 @@ def run_acceptance(
                 "untrusted_project_fail_closed_verified": True,
                 "project_configs_verified": len(workspaces),
                 "codex_project_config_discoveries_verified": len(workspaces),
+                "codex_prompt_bootstrap_verified": True,
                 "generated_skill_names": list(projected_skill_names),
                 "generated_skill_count_per_workspace": len(projected_skill_names),
+                "negative_skill_preflight_policy": NEGATIVE_SKILL_PREFLIGHT_POLICY,
+                "skill_read_verified": skill_read_verified,
+                "skill_negative_verified": skill_negative_verified,
                 "wire_verified_harness_tool_calls": list(wire_calls),
                 "model_completed_harness_tool_calls": list(model_calls),
                 "model_run": run_model,
@@ -824,6 +1239,10 @@ def run_acceptance(
                 "all_five_model_tools_verified": run_model,
                 "doctor_zero_fail": True,
             }
+        except CodexAcceptanceError as exc:
+            redacted = CodexAcceptanceError(_redact_skill_nonces(str(exc), skill_nonces))
+            primary_error = redacted
+            raise redacted from exc
         except BaseException as exc:
             primary_error = exc
             raise
@@ -845,9 +1264,10 @@ def run_acceptance(
                 if (workspace / ".codex" / "config.toml").exists()
             ]
             surviving_skills = [
-                workspace / ".agents" / "skills" / "testing-strategy" / "SKILL.md"
+                workspace / ".agents" / "skills" / skill_id / "SKILL.md"
                 for workspace in workspaces
-                if (workspace / ".agents" / "skills" / "testing-strategy" / "SKILL.md").exists()
+                for skill_id in EXPECTED_GENERATED_SKILLS
+                if (workspace / ".agents" / "skills" / skill_id / "SKILL.md").exists()
             ]
             if primary_error is None and (surviving_configs or surviving_skills):
                 raise CodexAcceptanceError(
@@ -885,7 +1305,10 @@ def _parser() -> argparse.ArgumentParser:
     execution.add_argument(
         "--preflight-only",
         action="store_true",
-        help="verify exact wheel/config/skills/doctor/cleanup without invoking a model",
+        help=(
+            "verify exact wheel/config/skills/doctor/cleanup without invoking a model, "
+            "including synthetic skill projection and nonce placement"
+        ),
     )
     parser.add_argument("--codex", type=Path, help="Codex CLI executable (default: PATH)")
     parser.add_argument("--uv", type=Path, help="uv executable (default: PATH)")

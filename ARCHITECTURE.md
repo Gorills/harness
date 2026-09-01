@@ -25,10 +25,10 @@ When these goals conflict, choose the simplest design that keeps correctness and
                        Dashboard
                            │
                            ▼
-Claude Code ─┐
-Codex       ─┤
-Cursor      ─┼─ stdio MCP ─ harness mcp ─ local IPC ─ harnessd
-Antigravity ─┘                                      │
+Cursor      ─┐
+Antigravity ─┴─ stdio MCP ─ harness mcp ─ local IPC ─ harnessd
+                                                    │
+Codex ─ authenticated Streamable HTTP MCP ──────────┤
                                                     ├─ SQLite
                                                     ├─ Registry
                                                     ├─ Tasks
@@ -60,11 +60,13 @@ One daemon per OS user. It owns:
 
 The daemon is the only process allowed to perform business-state transitions directly.
 
-### `harness mcp`
+### MCP adapters
 
-A small process spawned by an agent host through stdio. It:
+A thin host-facing adapter exposed through stdio where accepted and through daemon-owned
+Streamable HTTP for Codex. It:
 
-1. establishes a local authenticated-by-OS-user IPC channel to `harnessd`;
+1. reaches daemon-owned state through local IPC; the Codex HTTP adapter runs with `harnessd`, so
+   Codex never needs access to the Unix socket;
 2. resolves the current Workspace using host-specific and generic hints;
 3. exposes the five model-facing MCP tools;
 4. applies exposure limits at the model boundary;
@@ -170,7 +172,8 @@ Resolution order:
 
 Examples:
 
-- Claude Code provides `CLAUDE_PROJECT_DIR` to stdio MCP servers: strong documented signal.
+- Cursor interpolates `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` into project `.cursor/mcp.json`: the implemented stdio root signal.
+- A leftover `HARNESS_HOST_PROFILE=claude-code` process is an unsupported profile ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md)); overlay refuse may still use `CLAUDE_PROJECT_DIR`.
 - Codex, Cursor, and Antigravity require adapter-specific validation of how a globally configured stdio process is associated with the active workspace. Configuration support alone is not proof of runtime current-directory semantics.
 
 No core logic should special-case host names. Adapters produce normalized hints; core resolves Workspace identity.
@@ -188,6 +191,13 @@ project_status
 → native work
 → task_checkpoint
 ```
+
+`task_start` / resume is required before diagnosis and native edits, including read-only
+investigation. A failed schema or tool call is a blocker: retry from the public schema rather than
+skipping Harness. Checkpoint after each logical stage, even when no files changed. A new operator
+request or a diagnosis-to-implementation shift completes or waits the current Task, then starts a
+new one. Specification §71's "before meaningful changes" reading is superseded by
+[ADR-0038](docs/decisions/0038-task-required-for-diagnosis-and-schema-retry.md).
 
 But the implementation is explicitly workspace-domain based and write-safe:
 
@@ -246,7 +256,7 @@ Keep server-wide guidance short and front-loaded. Codex documents use of MCP ser
 
 Front-load that operator-facing Task `title`, checkpoint `summary`/`next_step`, and Knowledge title/body are written in Russian for the dashboard. Tool names, field names, and enums stay English. Harness stores the supplied UTF-8 as-is and does not language-detect.
 
-Keep operator-facing chat short. Checkpoints own durable continuity; chat carries only the human-relevant delta. Lead with the result, do not restate the Task/checkpoint or recap diffs/file lists, and report only material decisions, risks, blockers, and verification unless detail is requested. This is a soft native-host instruction, not a claimed hard output-token limit or model proxy.
+Keep operator-facing chat short. Checkpoints own durable continuity; chat carries only the human-relevant delta. Lead with the result, do not restate the Task/checkpoint or recap diffs/file lists, and report only material decisions, risks, blockers, and verification unless detail is requested. This is a soft native-host instruction, not a claimed hard output-token limit or model proxy. Unknown-argument errors name the tool's public allowed fields and tell the caller to retry; they do not echo unknown names.
 
 ## 9. Local IPC
 
@@ -261,7 +271,8 @@ IPC requirements:
 - explicit request/response schema independent of MCP wire types;
 - bounded message sizes;
 - protocol versioning between bridge and daemon;
-- cancellation/timeouts;
+- cancellation/timeouts, with command-specific bounds (status stays short; search is longer than
+  status so a large Workspace inventory cannot surface to MCP as `local IPC request timed out`);
 - bounded concurrent client handling so one slow request does not head-of-line block unrelated callers;
 - one SQLite connection per accepted IPC worker rather than sharing a connection across threads;
 - no source/context logging by default;
@@ -344,7 +355,7 @@ Use a simple fusion strategy such as Reciprocal Rank Fusion before introducing m
 
 Search must explain why a result matched and must penalize stale semantic evidence.
 
-Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; both channels return metadata/history only and never raw source.
+Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; the home dashboard searches Task history across every registered Project. Both channels return metadata/history only and never raw source.
 
 The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace, the daemon validates its live Git identity before and after the read, and one read transaction fixes the corresponding Project identity. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge.
 
@@ -377,7 +388,7 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 
 ## 14. Skills architecture
 
-Canonical Harness skill registry lives outside repositories. The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten.
+Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
 
 The quality baseline includes explicit local/test/production container operations, Google/Yandex
 public-route discoverability and web performance, project architecture, legacy compatibility,
@@ -388,10 +399,19 @@ existing portable exact-token contract, while deterministic derived facets captu
 project roles such as `web-frontend`, `mobile-app`, `backend-service`, `godot-project`, and
 `deployment-ops`. Facets are calculated with manifest locality where needed: an Expo/React Native
 package is mobile even when its compatibility dependencies include React DOM, and it does not make
-`public-frontend` relevant unless independent web evidence exists. `secure-by-design` applies to
-detected software projects and progressively routes to web/backend, browser, mobile,
+`public-frontend` relevant unless independent web evidence exists. Stack detection also parses Dart
+`pubspec.yaml`, Ruby `Gemfile.lock` (`Gemfile` only when that directory has no sibling lockfile), Maven
+`pom.xml`, conservative Gradle/version-catalog text, and `.csproj` PackageReference/web SDK. Gradle
+Groovy/KTS uses quoted coordinates and plugin ids only; TOML `module=`/`id=`/`group=`/`name=` applies
+only to `libs.versions.toml`. Indexed XML manifests fail closed unless they are UTF-8 without a
+document type declaration, then parse with ElementTree `fromstring`. Gradle remains text evidence,
+not a full evaluator.
+`secure-by-design` applies to detected software projects and progressively routes to web/backend,
+browser, mobile,
 infrastructure/supply-chain, and verification controls; it reduces risk but never claims that a
-system cannot be compromised. `frontend-design` accompanies recognized web and mobile frontend
+system cannot be compromised. It shares the `backend-security` and `server-auth-review` Task
+hints so Task-focused projection cannot keep the specialized backend checklist while dropping that
+guidance. `frontend-design` accompanies recognized web and mobile frontend
 surfaces through matching facets and Task hints. Its compact entrypoint requires a subject-specific
 design contract, progressively routes marketing/editorial versus product/mobile guidance, rejects
 unjustified model-default aesthetics, and requires bounded rendered visual review before a design
@@ -416,9 +436,8 @@ Projection design must include:
 - Harness ownership marker/manifest outside portable `SKILL.md` where necessary;
 - exact cleanup of Harness-owned artifacts only;
 - preference for shared `.agents/skills` where multiple active hosts natively support it and semantics match;
-- Claude-specific `.claude/skills` only when required, with Cursor duplicate visibility covered by acceptance tests;
+- leftover `.claude/skills` remains on Cursor's visible compatibility roots so retired Harness-owned files can be cleaned, not as an active Claude projection ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md));
 - `.git/info/exclude` for generated project artifacts where appropriate, never silent `.gitignore` mutation.
-- early rejection when simultaneous Claude + Codex + Cursor would make Cursor observe both native copies.
 
 Skill hot reload is an optimization, not a correctness requirement.
 
@@ -471,9 +490,14 @@ Responsibilities:
 
 Adapters must be idempotent and preserve unknown user configuration.
 
-The implemented Linux/POSIX installation slice supports Claude Code, local Codex CLI/IDE/desktop project config, and local Cursor IDE/CLI. `harness install --host claude-code|codex|cursor|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` remains Claude Code. `--host all` install is rejected because the three-host skill graph is incompatible; uninstall-all remains supported. Claude uses the official `claude mcp` CLI and `CLAUDE_PROJECT_DIR`. Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with explicit absolute `cwd` and `HARNESS_WORKSPACE_ROOT`; it forwards the bounded local environment needed to select the host's canonical Harness runtime/state rather than fallback paths under a reduced stdio environment. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Codex/Cursor processes without their required root list no tools. Tracked project configs are manual-adoption/removal only; generated configs and markers use Git-local exclusions. The Harness source checkout has tracked `harness-dev` overlays for Codex and Cursor; both launch `scripts/dev harness mcp` against checkout-local state, and production lifecycle never rewrites them.
+The implemented Linux/POSIX installation slice supports local Codex CLI/IDE/desktop project config and local Cursor IDE/CLI. `harness install --host cursor|codex|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` selects Cursor. `--host all` installs the Codex+Cursor pair. Claude Code is no longer a supported Harness host ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md)). Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with an authenticated daemon-owned Streamable HTTP URL and exact absolute `X-Harness-Workspace-Root`; required initialization validates daemon connectivity, capability, and Workspace before Codex starts. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with interpolated `${workspaceFolder}`, official enable/tool verification, and owned JSON cleanup. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Generated configs and markers use Git-local exclusions. The Harness source checkout keeps a tracked Cursor overlay; Codex uses the same locally generated private HTTP config as production Workspaces.
 
-`harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Claude registration, Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio and installed-wheel tests prove Claude → Codex → Cursor continuity and cross-interpreter project-config refresh; proprietary-host acceptance remains a separate gate.
+`harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Cursor → Codex continuity; real Codex acceptance exercises the configured HTTP path.
+
+ADR-0036 defines source-checkout global dogfood. Its `scan --global-dogfood` path is accepted only
+from an external tool-installed interpreter and returns after registration/indexing, before host or
+skill reconciliation. A versioned ignored marker selects the route atomically; invalid marker
+state fails closed, and disabling preserves canonical Project Intelligence.
 
 The isolated source checkout seeds built-ins into `.harness/skills` during `scripts/dev harness
 scan` and projects the relevant subset for the compatible development profile graph. The default
@@ -482,30 +506,38 @@ compatible graph without reading or mutating user-global host state.
 
 Current target profiles:
 
-- Claude Code
 - Codex (shared CLI/IDE/desktop MCP config where documented)
 - Cursor
 - Antigravity IDE/CLI behavior represented by explicit adapter capabilities/profile data where their skill/config surfaces differ
+
+Claude Code is retired as a Harness host; leftover `.claude/skills` visibility and Hidden-rule cleanup remain on Cursor ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md)).
 
 Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-The dashboard uses the Python stdlib loopback HTTP server with capability-scoped HTML/CSS/JavaScript assets. Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints are implemented without an async web stack; realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
+The dashboard uses the Python stdlib loopback HTTP server. HTML/CSS/JavaScript assets, Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints live at the loopback root without a path token. Realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
+
+The daemon also owns Codex's Streamable HTTP MCP endpoint on `127.0.0.1:17375` (isolated
+development: `17376`). It is a separate authenticated protocol surface, not part of the dashboard
+UI. Both listeners reuse the same persistent private capability, but Codex sends it as a bearer
+header and must also send the exact project-scoped Workspace root. MCP initialization validates
+both daemon reachability and Workspace identity before returning success. See ADR-0037.
 
 Dashboard rules:
 
 - bind loopback only by default, on `127.0.0.1:17373` for the canonical per-user daemon and `127.0.0.1:17374` for an isolated checkout;
-- persist the capability path token next to the selected database so the operator URL stays stable across daemon restarts;
+- serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
+- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and recent Tasks; do not present Workspaces as copies or a second dashboard;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
-- Hidden/Normal operator control is on the home dashboard and Workspace detail; a nested Project-id page is not required;
+- Hidden/Normal operator control is on Project and Workspace detail;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
-- dashboard assets stay capability-scoped and same-origin so CSP can forbid inline script/style.
+- dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.

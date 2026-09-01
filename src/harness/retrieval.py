@@ -150,7 +150,13 @@ def search_project(
         return _project_hits(_knowledge_hits(connection, project.project_id, analyzed, limit))
     if scope is ProjectSearchScope.TASKS:
         return _project_hits(
-            _task_hits(connection, project.project_id, workspace_id, analyzed, limit)
+            _task_hits(
+                connection,
+                analyzed,
+                limit,
+                project_id=project.project_id,
+                active_workspace_id=workspace_id,
+            )
         )
 
     channels = (
@@ -169,9 +175,30 @@ def search_project(
             IndexedPathSearchScope.DOCS,
             limit,
         ),
-        _task_hits(connection, project.project_id, workspace_id, analyzed, limit),
+        _task_hits(
+            connection,
+            analyzed,
+            limit,
+            project_id=project.project_id,
+            active_workspace_id=workspace_id,
+        ),
     )
     return _fuse_ranked_channels(channels, limit)
+
+
+def search_tasks(
+    connection: sqlite3.Connection,
+    query: str,
+    *,
+    limit: int,
+) -> tuple[ProjectSearchHit, ...]:
+    """Search durable Task history across every registered Project on this daemon."""
+    normalized = _normalize_query(query)
+    analyzed = analyze_search_query(normalized)
+    if not analyzed.terms:
+        raise SearchError("project search query has no searchable tokens")
+    _validate_limit(limit)
+    return _project_hits(_task_hits(connection, analyzed, limit))
 
 
 def read_project_context(
@@ -493,34 +520,49 @@ def _knowledge_hits(
 
 def _task_hits(
     connection: sqlite3.Connection,
-    project_id: str,
-    active_workspace_id: str,
     query: AnalyzedSearchQuery,
     limit: int,
+    *,
+    project_id: str | None = None,
+    active_workspace_id: str | None = None,
 ) -> tuple[_RankedProjectHit, ...]:
-    rows = connection.execute(
-        """
+    sql = """
         SELECT
             fragment_ref,
             task_id,
             workspace_id,
+            project_id,
             title,
             body,
             bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
         FROM task_search
-        WHERE task_search MATCH ? AND project_id = ?
-        ORDER BY score, rowid
-        LIMIT ?
-        """,
-        (query.fts_expression, project_id, _candidate_limit(limit)),
-    ).fetchall()
-    current = get_relevant_task(connection, active_workspace_id)
-    best: dict[str, tuple[str, str, float, int, int]] = {}
-    for fragment_ref, task_id, workspace_id, title, body, raw_score in rows:
+        WHERE task_search MATCH ?
+    """
+    params: list[object] = [query.fts_expression]
+    if project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
+    sql += " ORDER BY score, rowid LIMIT ?"
+    params.append(_candidate_limit(limit))
+    rows = connection.execute(sql, params).fetchall()
+    current = (
+        None if active_workspace_id is None else get_relevant_task(connection, active_workspace_id)
+    )
+    best: dict[str, tuple[str, str, str, float, int, int]] = {}
+    for (
+        fragment_ref,
+        task_id,
+        workspace_id,
+        indexed_project_id,
+        title,
+        body,
+        raw_score,
+    ) in rows:
         if (
             not isinstance(fragment_ref, str)
             or not isinstance(task_id, str)
             or not isinstance(workspace_id, str)
+            or not isinstance(indexed_project_id, str)
             or not isinstance(title, str)
             or not isinstance(body, str)
             or not isinstance(raw_score, (int, float))
@@ -533,21 +575,33 @@ def _task_hits(
             quality = _QUALITY_ALL_TERMS
         else:
             quality = _QUALITY_PARTIAL
-        candidate = (fragment_ref, workspace_id, float(raw_score), quality, matched_terms)
+        candidate = (
+            fragment_ref,
+            workspace_id,
+            indexed_project_id,
+            float(raw_score),
+            quality,
+            matched_terms,
+        )
         previous = best.get(task_id)
         if previous is None or (quality, -matched_terms, float(raw_score), fragment_ref) < (
+            previous[4],
+            -previous[5],
             previous[3],
-            -previous[4],
-            previous[2],
             previous[0],
         ):
             best[task_id] = candidate
 
     ranked: list[_RankedProjectHit] = []
-    for task_id, (fragment_ref, workspace_id, score, quality, matched_terms) in best.items():
+    for (
+        task_id,
+        (fragment_ref, workspace_id, indexed_project_id, score, quality, matched_terms),
+    ) in best.items():
         task = get_task(connection, task_id)
         owner = get_workspace(connection, task.workspace_id)
-        if owner.project_id != project_id or workspace_id != task.workspace_id:
+        if owner.project_id != indexed_project_id or workspace_id != task.workspace_id:
+            raise ProjectRetrievalError("Task search index crossed Project ownership")
+        if project_id is not None and owner.project_id != project_id:
             raise ProjectRetrievalError("Task search index crossed Project ownership")
         result_ref, reason, summary, location = _task_fragment_projection(
             connection, task_id, fragment_ref

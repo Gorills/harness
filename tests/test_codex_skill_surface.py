@@ -5,7 +5,10 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from harness.host_adapters import ClaudeCodeAdapter, codex_skill_projection_surface
+from harness.host_adapters import (
+    codex_skill_projection_surface,
+    cursor_skill_projection_surface,
+)
 from harness.skills import (
     DetectedProjectStack,
     ResolvedSkill,
@@ -124,19 +127,6 @@ def test_codex_projection_accepts_non_empty_block_scalar_description(tmp_path: P
     )
 
 
-def test_claude_projection_does_not_inherit_codex_frontmatter_requirement(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    resolved = _resolved_skill(tmp_path / "registry", "# FastAPI\n\nPortable instructions.\n")
-    claude = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
-
-    plan = plan_skill_projection(workspace, resolved, (claude,))
-
-    assert tuple(target.relative_root for target in plan.targets) == (
-        PurePosixPath(".claude/skills"),
-    )
-
-
 def test_codex_projection_does_not_copy_registry_content_changed_after_resolution(
     tmp_path: Path,
 ) -> None:
@@ -161,7 +151,7 @@ def test_codex_projection_does_not_copy_registry_content_changed_after_resolutio
     assert not (workspace / ".agents" / "skills" / "fastapi").exists()
 
 
-def test_claude_and_codex_projection_materializes_both_native_roots(tmp_path: Path) -> None:
+def test_codex_and_cursor_projection_shares_agents_root(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     _git(workspace, "init", "-b", "main")
@@ -173,21 +163,20 @@ def test_claude_and_codex_projection_materializes_both_native_roots(tmp_path: Pa
         "# FastAPI\n\nPortable instructions.\n"
     )
     resolved = _resolved_skill(tmp_path / "registry", skill_text)
-    claude = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
-    codex = codex_skill_projection_surface()
-
-    plan = plan_skill_projection(workspace, resolved, (claude, codex))
+    plan = plan_skill_projection(
+        workspace,
+        resolved,
+        (codex_skill_projection_surface(), cursor_skill_projection_surface()),
+    )
     result = apply_skill_projection(plan)
 
     assert tuple(target.relative_root for target in plan.targets) == (
         PurePosixPath(".agents/skills"),
-        PurePosixPath(".claude/skills"),
     )
-    assert result.materialized == 2
-    for relative in (".agents/skills/fastapi", ".claude/skills/fastapi"):
-        target = workspace / relative
-        assert (target / "SKILL.md").read_text(encoding="utf-8") == skill_text
-        assert (target / ".harness-skill.json").is_file()
-        assert not (target / "harness.yaml").exists()
-        ignored = _git(workspace, "check-ignore", "-q", f"{relative}/SKILL.md")
-        assert ignored.returncode == 0
+    assert result.materialized == 1
+    target = workspace / ".agents" / "skills" / "fastapi"
+    assert (target / "SKILL.md").read_text(encoding="utf-8") == skill_text
+    assert (target / ".harness-skill.json").is_file()
+    assert not (target / "harness.yaml").exists()
+    ignored = _git(workspace, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md")
+    assert ignored.returncode == 0

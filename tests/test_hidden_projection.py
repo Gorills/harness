@@ -13,13 +13,16 @@ import pytest
 
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
 from harness.daemon import serve_daemon
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.hidden_projection import (
+    CLAUDE_HIDDEN_MARKER_RELATIVE,
     CLAUDE_HIDDEN_RULE_RELATIVE,
     CURSOR_HIDDEN_MARKER_RELATIVE,
     CURSOR_HIDDEN_RULE_RELATIVE,
     HiddenProjectionCollisionError,
     HiddenProjectionError,
     apply_hidden_projection,
+    inspect_hidden_workspace,
     remove_hidden_projection,
 )
 from harness.ipc import (
@@ -75,6 +78,22 @@ def _exclude_path(root: Path) -> Path:
     raw = _git(root, "rev-parse", "--git-path", "info/exclude").stdout.decode().strip()
     path = Path(raw)
     return path if path.is_absolute() else root / path
+
+
+def _seed_leftover_claude_hidden(root: Path) -> None:
+    rule = root / CLAUDE_HIDDEN_RULE_RELATIVE.as_posix()
+    marker = root / CLAUDE_HIDDEN_MARKER_RELATIVE.as_posix()
+    rule.parent.mkdir(parents=True)
+    rule.write_text(HIDDEN_INSTRUCTION_BODY, encoding="utf-8")
+    marker.write_text(
+        json.dumps(
+            {"kind": "hidden-instruction", "profile": "claude-code", "version": 1},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _start_daemon(
@@ -218,36 +237,49 @@ def test_set_visibility_projects_then_persists_and_restores(tmp_path: Path) -> N
     root = tmp_path / "repo"
     _make_repo(root, {".gitignore": "keep\n", "README.md": "repo\n"})
     original_gitignore = (root / ".gitignore").read_bytes()
+    _seed_leftover_claude_hidden(root)
     database = tmp_path / "harness.db"
     initialize_database(database)
     connection = connect_database(database)
     try:
         project = create_project(connection)
         register_workspace(connection, project_id=project.project_id, path=root)
+        inspection = inspect_hidden_workspace(
+            root, required_profiles=("cursor",), expect_hidden=False
+        )
+        assert CLAUDE_HIDDEN_RULE_RELATIVE.as_posix() in inspection.orphans
+
         hidden = set_project_visibility(
             connection,
             mode=VisibilityMode.HIDDEN,
-            host_profiles=("cursor", "claude-code"),
+            host_profiles=("cursor",),
             project_id=project.project_id,
         )
         assert hidden.project.visibility_mode is VisibilityMode.HIDDEN
         assert get_project(connection, project.project_id).visibility_mode is VisibilityMode.HIDDEN
         assert (root / CURSOR_HIDDEN_RULE_RELATIVE.as_posix()).is_file()
-        assert (root / CLAUDE_HIDDEN_RULE_RELATIVE.as_posix()).is_file()
+        assert not (root / CLAUDE_HIDDEN_RULE_RELATIVE.as_posix()).exists()
+        assert not (root / CLAUDE_HIDDEN_MARKER_RELATIVE.as_posix()).exists()
         assert (root / ".gitignore").read_bytes() == original_gitignore
 
         restored = set_project_visibility(
             connection,
             mode=VisibilityMode.NORMAL,
-            host_profiles=("cursor", "claude-code"),
+            host_profiles=("cursor",),
             project_id=project.project_id,
         )
         assert restored.project.visibility_mode is VisibilityMode.NORMAL
         assert not (root / CURSOR_HIDDEN_RULE_RELATIVE.as_posix()).exists()
-        assert not (root / CLAUDE_HIDDEN_RULE_RELATIVE.as_posix()).exists()
         assert (root / ".gitignore").read_bytes() == original_gitignore
     finally:
         connection.close()
+
+
+def test_retired_claude_code_is_not_an_active_hidden_profile(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root, {"README.md": "repo\n"})
+    with pytest.raises(HiddenProjectionError, match="unsupported Hidden host profile"):
+        apply_hidden_projection((root,), ("claude-code",))
 
 
 def test_collision_does_not_change_visibility_mode(tmp_path: Path) -> None:

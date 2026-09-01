@@ -29,7 +29,7 @@ from harness.ipc import (
 )
 from harness.knowledge import KnowledgeDraft, KnowledgeKind
 from harness.registry import create_project, register_workspace
-from harness.skill_runtime import reconcile_workspace_skills
+from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.tasks import TaskState, TaskWaitReason, get_task_stack_hints
 from harness.workspace_resolution import WorkspaceHint
@@ -73,6 +73,71 @@ def _registered_database(tmp_path: Path) -> tuple[Path, Path, str]:
         return root, database, workspace.workspace_id
     finally:
         connection.close()
+
+
+def test_global_skill_reconcile_refuses_source_checkout_but_isolated_runtime_allows_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, workspace_id = _registered_database(tmp_path)
+    cursor = root / ".cursor"
+    cursor.mkdir()
+    (cursor / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "harness-dev": {
+                        "type": "stdio",
+                        "command": "${workspaceFolder}/scripts/dogfood",
+                        "args": ["mcp"],
+                        "env": {"HARNESS_WORKSPACE_ROOT": "${workspaceFolder}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry = tmp_path / "skills"
+    skill = registry / "python-helper"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: python-helper\ndescription: Python helper.\n---\n\n# Python helper\n",
+        encoding="utf-8",
+    )
+    (skill / "harness.yaml").write_text(
+        "id: python-helper\napplies:\n  languages:\n    - python\n",
+        encoding="utf-8",
+    )
+    (root / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    connection = connect_database(database)
+    try:
+        scan_workspace(connection, workspace_id)
+        monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
+        with pytest.raises(
+            SkillRuntimeError,
+            match="global Harness does not project skills into a source-checkout overlay",
+        ):
+            reconcile_workspace_skills(
+                connection,
+                workspace_id,
+                ("codex",),
+                registry_root=registry,
+            )
+        assert not (root / ".agents" / "skills" / "python-helper").exists()
+
+        monkeypatch.setenv("HARNESS_DEV_ROOT", str(root))
+        result = reconcile_workspace_skills(
+            connection,
+            workspace_id,
+            ("codex",),
+            registry_root=registry,
+        )
+    finally:
+        connection.close()
+
+    assert result.selected_skill_ids == ("python-helper",)
+    assert (root / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
 
 
 def _start_server(

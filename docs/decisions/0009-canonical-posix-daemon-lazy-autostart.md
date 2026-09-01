@@ -37,7 +37,7 @@ The child redirects stdin to the null device, closes unrelated inherited file de
 
 Autostart requires positive evidence that the canonical endpoint is absent. For the current POSIX Unix-socket transport, only `ENOENT` and `ECONNREFUSED` from the bounded IPC probe are treated as absence after the runtime directory has passed its trust check.
 
-A probe timeout is not evidence of absence. The daemon currently serves clients sequentially and a deterministic scan may occupy it for substantially longer than the short autostart probe; a timeout therefore means the endpoint may be live/busy and must not trigger a duplicate process. The original Workspace request then uses its command-specific IPC timeout. Other unclassified transport failures, protocol errors, and structured remote errors fail closed rather than starting another daemon.
+A probe timeout is not evidence of absence. The daemon currently serves clients sequentially and a deterministic scan may occupy it for substantially longer than the short autostart probe; a timeout therefore means the endpoint may be live/busy and must not trigger a duplicate process. The original Workspace request then uses its command-specific IPC timeout (`status` remains a short bound; indexed/project search uses a longer bound than status). Other unclassified transport failures, protocol errors, and structured remote errors fail closed rather than starting another daemon.
 
 Autostart readiness is bounded. A spawn failure or an endpoint that remains positively absent through the deadline is returned as a bounded CLI failure; the client does not loop indefinitely.
 

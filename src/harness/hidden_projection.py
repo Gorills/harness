@@ -20,10 +20,9 @@ if TYPE_CHECKING:
     from harness.codex_adapter import CodexAdapter
 
 CURSOR_PROFILE = "cursor"
-CLAUDE_CODE_PROFILE = "claude-code"
 CODEX_PROFILE = "codex"
-IMPLEMENTED_HIDDEN_PROFILES = (CLAUDE_CODE_PROFILE, CURSOR_PROFILE)
-SUPPORTED_HIDDEN_PROFILES = (CLAUDE_CODE_PROFILE, CODEX_PROFILE, CURSOR_PROFILE)
+IMPLEMENTED_HIDDEN_PROFILES = (CURSOR_PROFILE,)
+SUPPORTED_HIDDEN_PROFILES = (CODEX_PROFILE, CURSOR_PROFILE)
 HIDDEN_OWNERSHIP_KIND = "hidden-instruction"
 HIDDEN_OWNERSHIP_VERSION = 1
 SCM_WRITE_ENFORCEMENT_UNSUPPORTED = "unsupported"
@@ -132,6 +131,9 @@ def apply_hidden_projection(
                 continue
             if _remove_owned_surface(root, _surface_for_profile(profile)):
                 removed += 1
+        for leftover in _leftover_hidden_surfaces():
+            if _remove_owned_surface(root, leftover):
+                removed += 1
         for surface in surfaces:
             created = _materialize_surface(root, surface, deadline=deadline)
             if created:
@@ -183,7 +185,10 @@ def remove_hidden_projection(
             tuple(profile for profile in requested_profiles if profile != CODEX_PROFILE)
         )
         if profiles
-        else tuple(_surface_for_profile(profile) for profile in IMPLEMENTED_HIDDEN_PROFILES)
+        else (
+            tuple(_surface_for_profile(profile) for profile in IMPLEMENTED_HIDDEN_PROFILES)
+            + _leftover_hidden_surfaces()
+        )
     )
     live_roots = tuple(
         root
@@ -289,6 +294,9 @@ def inspect_hidden_workspace(
             surface = _surface_for_profile(profile)
             if _is_owned_surface(root, surface):
                 orphans.append(surface.rule_relative.as_posix())
+        for leftover in _leftover_hidden_surfaces():
+            if _is_owned_surface(root, leftover):
+                orphans.append(leftover.rule_relative.as_posix())
         if codex_requested:
             try:
                 from harness.codex_adapter import codex_owned_hidden_instructions_active
@@ -337,22 +345,29 @@ def _surface_for_profile(profile: str) -> HiddenInstructionSurface:
                 "utf-8"
             ),
         )
-    if profile == CLAUDE_CODE_PROFILE:
-        return HiddenInstructionSurface(
-            profile=CLAUDE_CODE_PROFILE,
+    raise HiddenProjectionError(f"unsupported Hidden host profile: {profile}")
+
+
+def _leftover_hidden_surfaces() -> tuple[HiddenInstructionSurface, ...]:
+    """Harness-owned Claude Hidden files are cleanup-only after ADR-0039."""
+    return (
+        HiddenInstructionSurface(
+            profile="claude-code",
             rule_relative=CLAUDE_HIDDEN_RULE_RELATIVE,
             marker_relative=CLAUDE_HIDDEN_MARKER_RELATIVE,
             rule_bytes=HIDDEN_INSTRUCTION_BODY.encode("utf-8"),
-        )
-    raise HiddenProjectionError(f"unsupported Hidden host profile: {profile}")
+        ),
+    )
 
 
 def _codex_adapter() -> CodexAdapter:
     from harness.codex_adapter import CodexAdapter
+    from harness.runtime_paths import default_runtime_paths
 
     return CodexAdapter(
         executable=Path("codex"),
         python_executable=Path(os.path.abspath(sys.executable)),
+        mcp_http_database=default_runtime_paths().database,
     )
 
 

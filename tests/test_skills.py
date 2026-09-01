@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -11,9 +12,13 @@ from time import monotonic
 import pytest
 
 import harness.skills as skills_module
-from harness.host_adapters import ClaudeCodeAdapter
+from harness.host_adapters import (
+    codex_skill_projection_surface,
+    cursor_skill_projection_surface,
+)
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
+from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
 from harness.skills import (
     SKILL_METADATA_FILE_NAME,
     SKILL_OWNERSHIP_MARKER_NAME,
@@ -21,7 +26,6 @@ from harness.skills import (
     ResolvedSkill,
     SkillProjectionCollisionError,
     SkillProjectionError,
-    SkillProjectionSurface,
     SkillRegistryError,
     SkillResolutionError,
     SkillResolutionPolicy,
@@ -99,8 +103,13 @@ def _write_skill(
 ) -> Path:
     directory = registry / skill_id
     directory.mkdir(parents=True)
+    registry.chmod(0o700)
     (directory / "SKILL.md").write_text(
-        skill_text or f"# {skill_id}\n\nPortable instructions.\n",
+        skill_text
+        or (
+            f"---\nname: {skill_id}\ndescription: Portable {skill_id} instructions.\n"
+            f"---\n\n# {skill_id}\n\nPortable instructions.\n"
+        ),
         encoding="utf-8",
     )
     lines = [f"id: {skill_id}"]
@@ -192,6 +201,62 @@ def test_registry_rejects_symlinks_and_unknown_metadata(tmp_path: Path) -> None:
     )
     with pytest.raises(SkillRegistryError, match="unsupported skill metadata field"):
         load_skill_registry(registry)
+
+
+def test_load_skill_registry_missing_is_empty(tmp_path: Path) -> None:
+    assert load_skill_registry(tmp_path / "missing") == ()
+
+
+def test_load_skill_registry_accepts_current_user_0700(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    _write_skill(registry, "fastapi")
+    definitions = load_skill_registry(registry)
+    assert tuple(item.skill_id for item in definitions) == ("fastapi",)
+
+
+def test_load_skill_registry_rejects_group_writable_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o770)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+
+
+def test_load_skill_registry_rejects_world_writable_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o702)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+
+
+def test_load_skill_registry_rejects_foreign_owned_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    foreign_uid = os.geteuid() + 1
+    monkeypatch.setattr(os, "geteuid", lambda: foreign_uid)
+    with pytest.raises(SkillRegistryError, match="current-user"):
+        load_skill_registry(registry)
+
+
+def test_reconcile_workspace_skills_fails_closed_on_unsafe_registry(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(tmp_path, {"main.py": "VALUE = 1\n"})
+    registry = tmp_path / "registry"
+    _write_skill(registry, "python-helper", languages=("python",))
+    registry.chmod(0o770)
+    with pytest.raises(SkillRuntimeError, match="could not be reconciled") as raised:
+        reconcile_workspace_skills(
+            connection,
+            workspace_id,
+            ("codex",),
+            registry_root=registry,
+        )
+    assert isinstance(raised.value.__cause__, SkillRegistryError)
 
 
 def test_resolver_selects_only_relevant_legacy_stack(tmp_path: Path) -> None:
@@ -346,6 +411,377 @@ require (
     assert {"backend-service", "database-backed", "software-project"} <= stack.facets
 
 
+def test_stack_detection_reads_flutter_pubspec_and_dart_language(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "lib/main.dart": "void main() {}\n",
+            "pubspec.yaml": """\
+name: hello
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "dart" in stack.languages
+    assert "flutter" in stack.dependencies
+    assert {"mobile-app", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gemfile_lock_rails_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.1.0)
+    rails (8.0.0)
+      rack (= 3.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails
+""",
+            "app.rb": "require 'rails'\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gemfile_when_lockfile_is_absent(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile": """\
+source "https://rubygems.org"
+gem "sinatra"
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "sinatra" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_maven_spring_boot_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "pom.xml": """\
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>demo</artifactId>
+  <parent>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-parent</artifactId>
+    <version>3.4.5</version>
+  </parent>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gradle_spring_boot_text_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "build.gradle": """\
+plugins {
+    id 'org.springframework.boot' version '3.4.5'
+    id 'java'
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+}
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_reads_gradle_version_catalog_spring_boot(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "gradle/libs.versions.toml": """\
+[libraries]
+spring-boot-web = { module = "org.springframework.boot:spring-boot-starter-web" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version = "3.4.5" }
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert {
+        "org-springframework-boot",
+        "spring-boot-starter-web",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_settings_gradle_root_project_name_is_not_a_dependency(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"settings.gradle": 'rootProject.name = "rails"\n'},
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" not in stack.dependencies
+    assert "backend-service" not in stack.facets
+
+
+def test_stack_detection_reads_nested_gemfile_when_unrelated_lockfile_exists(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "other-gem/Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rake (13.2.1)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rake
+""",
+            "app/Gemfile": """\
+source "https://rubygems.org"
+gem "rails"
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert "rake" in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_prefers_gemfile_lock_over_gemfile(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Gemfile": 'source "https://rubygems.org"\ngem "sinatra"\n',
+            "Gemfile.lock": """\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    rack (3.1.0)
+    rails (8.0.0)
+      rack (= 3.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  rails
+""",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "rails" in stack.dependencies
+    assert "sinatra" not in stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_parse_indexed_xml_rejects_utf8_doctype() -> None:
+    payload = (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n'
+        b"<!DOCTYPE project [\n"
+        b'  <!ENTITY xxe "rails">\n'
+        b"]>\n"
+        b"<project><artifactId>&xxe;</artifactId></project>\n"
+    )
+    with pytest.raises(SkillResolutionError, match="malformed"):
+        skills_module._parse_indexed_xml(payload, "pom.xml")
+
+
+def test_parse_indexed_xml_rejects_utf16_dtd() -> None:
+    xml = (
+        '<?xml version="1.0"?>\n'
+        "<!DOCTYPE project [\n"
+        '  <!ENTITY xxe "rails">\n'
+        "]>\n"
+        "<project><artifactId>&xxe;</artifactId></project>\n"
+    )
+    payload = xml.encode("utf-16-le")
+    assert b"<!DOCTYPE" not in payload
+    with pytest.raises(SkillResolutionError):
+        skills_module._parse_indexed_xml(payload, "pom.xml")
+
+
+def test_parse_indexed_xml_accepts_utf8_pom_and_csproj_without_dtd() -> None:
+    pom = skills_module._parse_indexed_xml(
+        b'<?xml version="1.0" encoding="UTF-8"?><project><artifactId>demo</artifactId></project>',
+        "pom.xml",
+    )
+    csproj = skills_module._parse_indexed_xml(
+        b'<Project Sdk="Microsoft.NET.Sdk.Web">'
+        b'<PackageReference Include="Swashbuckle.AspNetCore" />'
+        b"</Project>",
+        "Web.csproj",
+    )
+    assert skills_module._xml_local_name(pom.tag) == "project"
+    assert skills_module._xml_local_name(csproj.tag) == "Project"
+    assert csproj.attrib.get("Sdk") == "Microsoft.NET.Sdk.Web"
+
+
+def test_stack_detection_reads_web_sdk_csproj_as_backend(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Web.csproj": """\
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="7.0.0" />
+  </ItemGroup>
+</Project>
+""",
+            "Program.cs": "var builder = WebApplication.CreateBuilder(args);\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "csharp" in stack.languages
+    assert {
+        "microsoft-net-sdk-web",
+        "swashbuckle-aspnetcore",
+    } <= stack.dependencies
+    assert {"backend-service", "software-project"} <= stack.facets
+
+
+def test_stack_detection_classlib_csproj_is_not_backend_from_sdk_alone(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "Lib.csproj": """\
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+</Project>
+""",
+            "Class1.cs": "namespace Lib;\npublic class Class1 {}\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "microsoft-net-sdk-web" not in stack.dependencies
+    assert "backend-service" not in stack.facets
+    assert "software-project" in stack.facets
+
+
+def test_stack_detection_fails_closed_on_malformed_pubspec(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"pubspec.yaml": "dependencies: [\n"},
+    )
+    try:
+        with pytest.raises(SkillResolutionError, match="malformed"):
+            detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+
+def test_stack_detection_fails_closed_on_malformed_pom(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"pom.xml": "<project><unclosed\n"},
+    )
+    try:
+        with pytest.raises(SkillResolutionError, match="malformed"):
+            detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+
 def test_stack_detection_recognizes_godot_shell_ci_and_deployment_facets(
     tmp_path: Path,
 ) -> None:
@@ -494,7 +930,7 @@ def test_resolver_budget_is_bounded_deterministic_and_explicit_wins(tmp_path: Pa
         )
 
 
-def test_projection_planner_avoids_compatibility_duplicates_or_fails_closed(tmp_path: Path) -> None:
+def test_projection_planner_shares_agents_root_for_codex_and_cursor(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _make_repo(root, {"README.md": "repo\n"})
     registry = tmp_path / "registry"
@@ -505,41 +941,18 @@ def test_projection_planner_avoids_compatibility_duplicates_or_fails_closed(tmp_
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("shared",),
     )
-    claude = SkillProjectionSurface(
-        profile="claude-code",
-        target_root=PurePosixPath(".claude/skills"),
-        visible_roots=(PurePosixPath(".claude/skills"),),
-    )
-    codex = SkillProjectionSurface(
-        profile="codex",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(PurePosixPath(".agents/skills"),),
-    )
-    cursor = SkillProjectionSurface(
-        profile="cursor",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(
-            PurePosixPath(".agents/skills"),
-            PurePosixPath(".cursor/skills"),
-            PurePosixPath(".claude/skills"),
-            PurePosixPath(".codex/skills"),
-        ),
-    )
+    cursor = cursor_skill_projection_surface()
+    codex = codex_skill_projection_surface()
 
-    claude_cursor = plan_skill_projection(root, resolved, (claude, cursor))
-    codex_cursor = plan_skill_projection(root, resolved, (codex, cursor))
+    plan = plan_skill_projection(root, resolved, (codex, cursor))
 
-    assert tuple(target.relative_root for target in claude_cursor.targets) == (
-        PurePosixPath(".claude/skills"),
-    )
-    assert tuple(target.relative_root for target in codex_cursor.targets) == (
+    assert tuple(target.relative_root for target in plan.targets) == (
         PurePosixPath(".agents/skills"),
     )
-    with pytest.raises(SkillProjectionCollisionError, match="duplicate-free"):
-        plan_skill_projection(root, resolved, (claude, codex, cursor))
+    assert PurePosixPath(".claude/skills") in cursor.visible_roots
 
 
-def test_projection_reconciles_stale_compatibility_roots_and_refuses_user_duplicates(
+def test_projection_reconciles_leftover_claude_skills_visible_to_cursor(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "repo"
@@ -551,45 +964,36 @@ def test_projection_reconciles_stale_compatibility_roots_and_refuses_user_duplic
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("shared",),
     )
-    claude = SkillProjectionSurface(
-        profile="claude-code",
-        target_root=PurePosixPath(".claude/skills"),
-        visible_roots=(PurePosixPath(".claude/skills"),),
-    )
-    codex = SkillProjectionSurface(
-        profile="codex",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(PurePosixPath(".agents/skills"),),
-    )
-    cursor = SkillProjectionSurface(
-        profile="cursor",
-        target_root=PurePosixPath(".agents/skills"),
-        visible_roots=(
-            PurePosixPath(".agents/skills"),
-            PurePosixPath(".cursor/skills"),
-            PurePosixPath(".claude/skills"),
-            PurePosixPath(".codex/skills"),
-        ),
+    cursor = cursor_skill_projection_surface()
+
+    leftover = root / ".claude" / "skills" / "shared"
+    leftover.mkdir(parents=True)
+    (leftover / "SKILL.md").write_text("# leftover\n", encoding="utf-8")
+    (leftover / SKILL_OWNERSHIP_MARKER_NAME).write_text(
+        json.dumps(
+            {"content_sha256": "0" * 64, "skill_id": "shared", "version": 1},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
-    apply_skill_projection(plan_skill_projection(root, resolved, (codex, cursor)))
-    assert (root / ".agents" / "skills" / "shared").is_dir()
-
-    changed = apply_skill_projection(plan_skill_projection(root, resolved, (claude, cursor)))
+    changed = apply_skill_projection(plan_skill_projection(root, resolved, (cursor,)))
 
     assert changed.materialized == 1
     assert changed.removed == 1
-    assert not (root / ".agents" / "skills" / "shared").exists()
-    assert (root / ".claude" / "skills" / "shared").is_dir()
+    assert not leftover.exists()
+    assert (root / ".agents" / "skills" / "shared").is_dir()
 
-    apply_skill_projection(plan_skill_projection(root, (), (claude, cursor)))
-    user_duplicate = root / ".agents" / "skills" / "shared"
+    apply_skill_projection(plan_skill_projection(root, (), (cursor,)))
+    user_duplicate = root / ".claude" / "skills" / "shared"
     user_duplicate.mkdir(parents=True)
     (user_duplicate / "SKILL.md").write_text("# user duplicate\n", encoding="utf-8")
     with pytest.raises(SkillProjectionCollisionError, match="duplicate Harness projection"):
-        apply_skill_projection(plan_skill_projection(root, resolved, (claude, cursor)))
+        apply_skill_projection(plan_skill_projection(root, resolved, (cursor,)))
     assert (user_duplicate / "SKILL.md").read_text(encoding="utf-8") == "# user duplicate\n"
-    assert not (root / ".claude" / "skills" / "shared").exists()
+    assert not (root / ".agents" / "skills" / "shared").exists()
 
 
 def test_projection_inspection_honors_expired_deadline_before_git_or_mutation(
@@ -597,13 +1001,13 @@ def test_projection_inspection_honors_expired_deadline_before_git_or_mutation(
 ) -> None:
     root = tmp_path / "repo"
     _make_repo(root, {"README.md": "repo\n"})
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, (), (surface,))
 
     with pytest.raises(SkillProjectionError, match="inspection deadline exceeded"):
         inspect_skill_projection(plan, deadline=0.0)
 
-    assert not (root / ".claude").exists()
+    assert not (root / ".agents").exists()
 
 
 def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> None:
@@ -630,13 +1034,13 @@ def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> No
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
 
     first = apply_skill_projection(plan)
     second = apply_skill_projection(plan)
 
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     assert first.materialized == 1
     assert first.removed == 0
     assert first.exclude_changed is True
@@ -648,10 +1052,10 @@ def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> No
     assert not (target / SKILL_METADATA_FILE_NAME).exists()
     assert (target / SKILL_OWNERSHIP_MARKER_NAME).is_file()
     assert (root / ".gitignore").read_bytes() == original_gitignore
-    assert _git(root, "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md").returncode == 0
+    assert _git(root, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
     assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == b""
 
-    user_skill = root / ".claude" / "skills" / "user-owned"
+    user_skill = root / ".agents" / "skills" / "user-owned"
     user_skill.mkdir(parents=True)
     (user_skill / "SKILL.md").write_text("# user\n", encoding="utf-8")
     empty_plan = plan_skill_projection(root, (), (surface,))
@@ -676,7 +1080,7 @@ def test_projection_rechecks_target_state_immediately_before_mutation(
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
     original_build = skills_module._build_projected_skill
 
@@ -692,7 +1096,7 @@ def test_projection_rechecks_target_state_immediately_before_mutation(
     with pytest.raises(SkillProjectionCollisionError, match="changed before mutation"):
         apply_skill_projection(plan)
 
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     assert (target / "SKILL.md").read_text(encoding="utf-8") == "# late user\n"
     assert not (target / SKILL_OWNERSHIP_MARKER_NAME).exists()
 
@@ -709,9 +1113,9 @@ def test_projection_rollback_does_not_overwrite_concurrent_target_change(
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
 
     def fail_after_concurrent_change(path: Path, original: bytes, updated: bytes) -> None:
         del path, original, updated
@@ -743,7 +1147,7 @@ def test_projection_uses_git_path_info_exclude_for_linked_worktree(tmp_path: Pat
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(worktree, resolved, (surface,))
     raw_exclude = _git(worktree, "rev-parse", "--git-path", "info/exclude").stdout.decode().strip()
     exclude_path = Path(raw_exclude)
@@ -753,7 +1157,7 @@ def test_projection_uses_git_path_info_exclude_for_linked_worktree(tmp_path: Pat
 
     apply_skill_projection(plan)
 
-    assert _git(worktree, "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md").returncode == 0
+    assert _git(worktree, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
     assert (worktree / ".git").is_file()
     apply_skill_projection(plan_skill_projection(worktree, (), (surface,)))
     assert exclude_path.read_bytes() == original
@@ -770,9 +1174,9 @@ def test_projection_refuses_user_owned_or_tracked_target_before_mutation(tmp_pat
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
         task_hints=("fastapi",),
     )
-    surface = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
+    surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
-    user_target = root / ".claude" / "skills" / "fastapi"
+    user_target = root / ".agents" / "skills" / "fastapi"
     user_target.mkdir(parents=True)
     (user_target / "SKILL.md").write_text("# user\n", encoding="utf-8")
 
@@ -780,10 +1184,10 @@ def test_projection_refuses_user_owned_or_tracked_target_before_mutation(tmp_pat
         apply_skill_projection(plan)
     assert (user_target / "SKILL.md").read_text(encoding="utf-8") == "# user\n"
 
-    shutil.rmtree(root / ".claude")
+    shutil.rmtree(root / ".agents")
     user_target.mkdir(parents=True)
     (user_target / "SKILL.md").write_text("# tracked\n", encoding="utf-8")
-    _git(root, "add", "-f", ".claude/skills/fastapi/SKILL.md")
+    _git(root, "add", "-f", ".agents/skills/fastapi/SKILL.md")
     _git(
         root,
         "-c",

@@ -18,7 +18,6 @@ help:
 	  '' \
 	  '  make install-global                       refresh the user-global uv-tool Harness' \
 	  '  make install-global HOST=cursor           install one profile only' \
-	  '  make install-global HOST=claude-code' \
 	  '  make install-global HOST=codex' \
 	  '  make install-global HOST=cursor,codex   install an explicit profile set' \
 	  '  make accept-global-codex                 install package, test Codex with temporary state' \

@@ -6,7 +6,9 @@
 - **Deciders:** Repository architecture baseline
 - **Later amendment:** [ADR-0026](0026-cursor-project-scoped-workspace-mcp.md) supersedes owned global `user-harness`. Production Cursor MCP is project-only `.cursor/mcp.json` `harness`, enabled with official `agent mcp enable harness`. `WORKSPACE_FOLDER_PATHS` is not Workspace identity. Overlay-refuse on a Cursor-profile process applies only when interpolated `HARNESS_WORKSPACE_ROOT` is the overlay.
 - **Codex amendment:** [ADR-0030](0030-codex-project-scoped-workspace-mcp.md) adds Codex and makes install-all incompatible while preserving uninstall-all.
+- **Source-dogfood amendment:** [ADR-0036](0036-source-checkout-global-dogfood.md) replaces the direct checkout MCP launch with an isolated-by-default router and one explicit tool-installed index-only route.
 - **Unavailable-root amendment:** 2026-08-30. Cursor/Codex install and uninstall skip registered Workspace roots that cannot be resolved as directories. That is the same unavailable class doctor already WARNs. Live Workspaces remain fail-closed for ownership and tracked-config collisions. Registry rows are not deleted; `harness doctor` still names them.
+- **Host-retirement amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code. Supported hosts are Codex and Cursor; omitted `--host` installs Cursor; `--host all` installs that pair.
 
 ## Context
 
@@ -30,7 +32,15 @@ Cursor JSON mutation is ownership-aware and fail-closed. Harness preserves unkno
 
 For project config, an untracked pre-existing file is preserved and only the Harness entry is changed. A Git-tracked `.cursor/mcp.json` is never automatically dirtied: an exact current Harness entry is accepted as manual adoption, while any required install/update/removal fails with an actionable manual-adoption/manual-removal error. When Harness creates a project config from absence, it writes a Workspace-local ownership marker and maintains exact Harness-owned entries in Git `info/exclude`; this marker, not the shared exclude file, is the proof that the config container may be deleted when it becomes empty. Linked worktrees share one Git common `info/exclude`, so each Workspace marker records whether that Workspace's creation transaction introduced the shared exclude block. Unknown or ambiguous exclude content is preserved.
 
-The Harness source checkout is a special tracked overlay: `.cursor/mcp.json` launches `${workspaceFolder}/scripts/dev harness mcp` with `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and without `HARNESS_HOST_PROFILE`. Extra JSON keys on that entry do not drop isolation. That overlay is the intended checkout-local server; Cursor IDE still connects global `user-harness` unless the project overlay is approved. Production MCP with `HARNESS_HOST_PROFILE` against this overlay lists no tools, so a user-level process whose interpolated root is the checkout also refuses. Production Cursor install/scan/uninstall must not rewrite or delete the overlay. A system `harness scan` of that checkout is refused unless `HARNESS_DEV_ROOT` matches the overlay root; isolated `scripts/dev harness scan` may index the checkout but skips host/skill reconciliation. Isolated `harness install`/`uninstall` are refused because they would mutate user-global host MCP.
+The Harness source checkout is a special tracked overlay: `.cursor/mcp.json` launches
+`${workspaceFolder}/scripts/dogfood mcp` with `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and
+without `HARNESS_HOST_PROFILE`. The router defaults to `scripts/dev`; ADR-0036 permits an explicit
+tool-installed global route only after an index-only scan. Extra JSON keys on that entry do not
+drop overlay classification. Production MCP with `HARNESS_HOST_PROFILE` against this overlay lists
+no tools. Production Cursor install/scan/uninstall must not rewrite or delete the overlay. A plain
+system `harness scan` of that checkout is refused; isolated `scripts/dev harness scan` may index and
+reconcile development skills, while installed `scan --global-dogfood` indexes without host/skill
+reconciliation. Isolated `harness install`/`uninstall` remain refused.
 
 A production MCP process (`HARNESS_HOST_PROFILE` set, typically `python -m harness.mcp_process`) must not expose tools when it is launched against that overlay checkout. The Cursor documented root hint is `HARNESS_WORKSPACE_ROOT`; Claude Code's is `CLAUDE_PROJECT_DIR`. Overlay detection consults process cwd when that hint is absent or does not resolve to an existing path; cwd is not Workspace identity. The tracked overlay without `HARNESS_HOST_PROFILE` still serves the five tools against checkout-local state once that project server is the process Cursor launched. If a host launches the user-global server with a documented root that is not the overlay worktree, this refuse does not activate.
 

@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from harness.cursor_adapter import find_isolated_development_root
 from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
 from harness.host_adapters import (
-    claude_code_skill_projection_surface,
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
@@ -31,7 +31,7 @@ from harness.skills import (
     validate_skill_projection_surface_combination,
 )
 
-_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"claude-code", "codex", "cursor"})
+_SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"codex", "cursor"})
 _DEFAULT_DEVELOPMENT_PROFILES: Final[tuple[str, ...]] = ("codex", "cursor")
 _DEVELOPMENT_PROFILES_ENV: Final[str] = "HARNESS_DEV_SKILL_PROFILES"
 
@@ -128,6 +128,13 @@ def reconcile_workspace_skills(
     """Resolve and reconcile relevant skills for one registered live Workspace."""
     workspace = get_workspace(connection, workspace_id)
     _validate_workspace_identity(workspace)
+    if (
+        not os.environ.get("HARNESS_DEV_ROOT")
+        and find_isolated_development_root(workspace.workspace_root) == workspace.workspace_root
+    ):
+        raise SkillRuntimeError(
+            "global Harness does not project skills into a source-checkout overlay"
+        )
     surfaces = _surfaces_for_profiles(profiles)
     root = default_skill_registry() if registry_root is None else registry_root
     try:
@@ -222,9 +229,7 @@ def _surfaces_for_profiles(profiles: Sequence[str]) -> tuple[SkillProjectionSurf
         raise SkillRuntimeError("unsupported host skill profile")
     surfaces = []
     for profile in normalized:
-        if profile == "claude-code":
-            surfaces.append(claude_code_skill_projection_surface())
-        elif profile == "codex":
+        if profile == "codex":
             surfaces.append(codex_skill_projection_surface())
         elif profile == "cursor":
             surfaces.append(cursor_skill_projection_surface())

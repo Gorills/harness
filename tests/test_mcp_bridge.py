@@ -21,6 +21,11 @@ from mcp.shared.exceptions import MCPError
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import request_dashboard_url
+from harness.mcp_bridge import (
+    _SERVER_INSTRUCTIONS,
+    _TOOL_ARGUMENTS,
+    _unknown_tool_argument_error,
+)
 from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import (
@@ -33,6 +38,53 @@ from harness.tasks import TaskState, get_task, get_task_stack_hints
 from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
+
+
+def test_server_instructions_require_task_before_diagnosis_within_budget() -> None:
+    encoded = _SERVER_INSTRUCTIONS.encode("utf-8")
+    first_512 = _SERVER_INSTRUCTIONS[:512]
+    assert len(encoded) < 1024
+    assert "must be the first repository action" in first_512
+    assert "Before any shell command" in first_512
+    assert "Russian" in first_512
+    assert "title" in first_512
+    assert "next_step" in first_512
+    assert "stack_hints" in first_512
+    assert "task-focused" in first_512
+    assert "before diagnosis" in _SERVER_INSTRUCTIONS
+    assert "never skip" in _SERVER_INSTRUCTIONS
+    assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
+    assert "implement-after-diagnosis" in _SERVER_INSTRUCTIONS
+    assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
+
+
+def test_unknown_tool_argument_error_names_allowed_fields_not_unknown_names() -> None:
+    start_error = _unknown_tool_argument_error(
+        "task_start",
+        _TOOL_ARGUMENTS["task_start"],
+        {"summary", "taskID"},
+    )
+    start_text = start_error.message
+    assert "Unknown tool argument fields" in start_text
+    assert "title" in start_text
+    assert "stack_hints" in start_text
+    assert "task_id" in start_text
+    assert "expected_revision" in start_text
+    assert "retry" in start_text
+    assert "do not skip" in start_text
+    assert "summary" not in start_text
+    assert "taskID" not in start_text
+    assert start_error.data == {"tool": "task_start", "unknown_field_count": 2}
+
+    status_error = _unknown_tool_argument_error(
+        "project_status",
+        _TOOL_ARGUMENTS["project_status"],
+        {"unexpected"},
+    )
+    status_text = status_error.message
+    assert "no arguments" in status_text
+    assert "unexpected" not in status_text
+    assert status_error.data == {"tool": "project_status", "unknown_field_count": 1}
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -107,15 +159,12 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
     socket_path = runtime / "harness" / "harness.sock"
     stop, executor, future = _start_daemon(database, socket_path)
     env = dict(os.environ)
-    generic_root = tmp_path / "generic-root-must-not-win"
-    generic_root.mkdir()
     env.update(
         {
             "XDG_STATE_HOME": str(state),
             "XDG_RUNTIME_DIR": str(runtime),
-            "HARNESS_HOST_PROFILE": "claude-code",
-            "CLAUDE_PROJECT_DIR": str(root),
-            "HARNESS_WORKSPACE_ROOT": str(generic_root),
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": str(root),
         }
     )
     # The explicitly started daemon uses the same canonical socket, while its DB path is selected
@@ -128,7 +177,16 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             cwd=str(tmp_path),
         )
         async with Client(stdio_client(params)) as client:
+            assert client.instructions is not None
+            first_512 = client.instructions[:512]
+            assert "must be the first repository action" in first_512
+            assert "Before any shell command" in first_512
+            assert "project_status" in first_512
+            assert "deferred" in first_512
+            assert "initial visible tool list" in first_512
             listed = await client.list_tools()
+            assert listed.tools[0].description is not None
+            assert "Required first repository action" in listed.tools[0].description
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
                 "project_search",
@@ -145,12 +203,19 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             assert len(results) <= 5
             assert results[0]["ref"] == "code:src/token_service.py"
             assert "TOKEN = 1" not in str(searched.structured_content)
-            with pytest.raises(MCPError, match="Unknown tool argument fields"):
+            with pytest.raises(MCPError, match="Unknown tool argument fields") as status_error:
                 await client.call_tool("project_status", {"unexpected": True})
-            with pytest.raises(MCPError, match="Unknown tool argument fields"):
+            assert "no arguments" in str(status_error.value)
+            assert "unexpected" not in str(status_error.value)
+            with pytest.raises(MCPError, match="Unknown tool argument fields") as start_error:
                 await client.call_tool(
                     "task_start", {"taskID": "typo-must-not-be-ignored", "title": "Unsafe"}
                 )
+            start_text = str(start_error.value)
+            assert "title" in start_text
+            assert "retry" in start_text
+            assert "do not skip" in start_text
+            assert "taskID" not in start_text
 
             status = await client.call_tool("project_status")
             assert status.is_error is False
@@ -579,6 +644,9 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "briefly" in instructions
                 assert "unchanged source" in instructions
                 assert "recap diffs" in instructions
+                assert "before diagnosis" in instructions
+                assert "never skip" in instructions
+                assert "Start/resume a Task before changes." not in instructions
                 assert "scm_write" not in instructions
                 assert "info/exclude" not in instructions
             else:
@@ -595,7 +663,12 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 by_name = {tool["name"]: tool for tool in tools}
                 assert "Russian" in by_name["task_start"]["description"]
                 assert "affected technologies" in by_name["task_start"]["description"]
+                assert "before diagnosis" in by_name["task_start"]["description"]
+                assert "omit task_id" in by_name["task_start"]["description"]
+                assert "never pass summary" in by_name["task_start"]["description"]
+                assert "read this schema and retry" in by_name["task_start"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
+                assert "each logical stage" in by_name["task_checkpoint"]["description"]
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
                 checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
@@ -1193,13 +1266,13 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
         return env
 
     try:
-        claude_params = StdioServerParameters(
+        cursor_params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "harness.mcp_process"],
-            env=host_env("claude-code", root),
+            env=host_env("cursor", root),
             cwd=str(tmp_path),
         )
-        async with Client(stdio_client(claude_params)) as client:
+        async with Client(stdio_client(cursor_params)) as client:
             listed = await client.list_tools()
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
@@ -1309,13 +1382,13 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
                 linked_search.structured_content["results"][0]["ref"] == "code:src/linked_only.py"
             )
 
-        claude_again = StdioServerParameters(
+        cursor_again = StdioServerParameters(
             command=sys.executable,
             args=["-m", "harness.mcp_process"],
-            env=host_env("claude-code", root),
+            env=host_env("cursor", root),
             cwd=str(linked),
         )
-        async with Client(stdio_client(claude_again)) as client:
+        async with Client(stdio_client(cursor_again)) as client:
             status = await client.call_tool("project_status")
             assert status.is_error is False
             assert status.structured_content is not None

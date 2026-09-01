@@ -326,3 +326,23 @@ def test_search_result_does_not_expose_source_or_internal_index_fields(
         assert "never expose through path search" not in repr(result)
     finally:
         connection.close()
+
+
+def test_path_search_does_not_materialize_the_full_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, workspace_id = _registered(tmp_path)
+
+    def unexpected_list(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        raise AssertionError("path search must not load the full indexed inventory")
+
+    monkeypatch.setattr("harness.index.list_indexed_files", unexpected_list)
+    try:
+        results = search_indexed_paths(connection, workspace_id, "rotate refresh token")
+        assert [result.relative_path for result in results] == [
+            "src/rotateRefreshToken.py",
+            "tests/rotate_refresh_token_test.py",
+        ]
+    finally:
+        connection.close()

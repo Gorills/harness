@@ -7,7 +7,6 @@ import pytest
 
 import harness.skills as skills_module
 from harness.host_adapters import (
-    ClaudeCodeAdapter,
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
@@ -160,37 +159,19 @@ def test_cursor_only_projection_materializes_agents_root(tmp_path: Path) -> None
     assert _git(workspace, "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md").returncode == 0
 
 
-def test_cursor_reuses_single_root_with_claude_or_codex(tmp_path: Path) -> None:
+def test_cursor_reuses_single_root_with_codex(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text())
     cursor = cursor_skill_projection_surface()
-    claude = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
     codex = codex_skill_projection_surface()
 
-    claude_cursor = plan_skill_projection(workspace, resolved, (claude, cursor))
-    codex_cursor = plan_skill_projection(workspace, resolved, (codex, cursor))
+    plan = plan_skill_projection(workspace, resolved, (codex, cursor))
 
-    assert tuple(target.relative_root for target in claude_cursor.targets) == (
-        PurePosixPath(".claude/skills"),
-    )
-    assert tuple(target.relative_root for target in codex_cursor.targets) == (
+    assert tuple(target.relative_root for target in plan.targets) == (
         PurePosixPath(".agents/skills"),
     )
-
-
-def test_cursor_fails_closed_when_claude_and_codex_would_be_duplicate_visible(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text())
-    cursor = cursor_skill_projection_surface()
-    claude = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
-    codex = codex_skill_projection_surface()
-
-    with pytest.raises(SkillProjectionCollisionError, match="duplicate-free"):
-        plan_skill_projection(workspace, resolved, (claude, codex, cursor))
+    assert PurePosixPath(".claude/skills") in cursor.visible_roots
 
 
 @pytest.mark.parametrize(

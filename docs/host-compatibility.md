@@ -16,8 +16,8 @@ This file is evidence for adapter design, not a promise that undocumented host i
 
 | Host | Global/user MCP | Project MCP | Project root signal | Project skills | Global/user skills | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude.json` user scope | `.mcp.json` | `CLAUDE_PROJECT_DIR` documented for stdio server | `.claude/skills/` | `~/.claude/skills/` | MCP registration/root adapter implemented; real-host acceptance still required. Reads `CLAUDE.md`, not `AGENTS.md`; use `CLAUDE.md` importing `@AGENTS.md`. |
-| Codex CLI / IDE / ChatGPT desktop local config | Not used by Harness until a safe active-root contract is proven | `.codex/config.toml` in trusted project | Exact project `cwd` + Harness-owned `HARNESS_WORKSPACE_ROOT`; lifecycle/wire integration is implemented, real-host acceptance remains | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | Ownership-aware project adapter implemented; MCP server instructions are used and the first 512 chars should be self-contained. |
+| Claude Code | leftover user-scope `~/.claude.json` is operator-owned | leftover `.mcp.json` is not a Harness overlay | leftover `CLAUDE_PROJECT_DIR` overlay refuse only | leftover `.claude/skills/` on Cursor visible roots | `~/.claude/skills/` | Retired as a Harness host ([ADR-0039](../decisions/0039-retire-claude-code-host.md)). Leftover overlay refuse and Cursor compatibility-root cleanup remain; Harness no longer registers `claude mcp`. |
+| Codex CLI / IDE / ChatGPT desktop local config | Not written by Harness | `.codex/config.toml` in trusted project | Authenticated daemon-owned Streamable HTTP plus exact `X-Harness-Workspace-Root`; lifecycle/wire integration is implemented, real-host acceptance remains | `.agents/skills/` from CWD through repo root | `~/.agents/skills/`; admin `/etc/codex/skills` | Ownership-aware project adapter implemented; required initialization validates the daemon and Workspace before use. MCP server instructions are used and the first 512 chars should be self-contained. |
 | Cursor | leftover `~/.cursor/mcp.json` is removed if Harness-owned | `.cursor/mcp.json` | Project `${workspaceFolder}` mapped to `HARNESS_WORKSPACE_ROOT`. Leftover `user-harness` is not Workspace identity; Cursor-injected `WORKSPACE_FOLDER_PATHS` is ignored | `.agents/skills/`, `.cursor/skills/`, plus compatibility roots | `~/.agents/skills/`, `~/.cursor/skills/`, plus compatibility roots | Local IDE + CLI adapter implemented; production MCP is project-only and enabled with `agent mcp enable harness`. Cursor Cloud Agents are a separate out-of-scope profile. |
 | Antigravity | `~/.gemini/config/mcp_config.json` | `.agents/mcp_config.json` | Needs real-host acceptance for global stdio current-root behavior | IDE + current CLI: `.agents/skills/<skill>/SKILL.md`; IDE also supports legacy `.agent/skills/` | IDE: `~/.gemini/antigravity/skills/`; CLI: `~/.gemini/antigravity-cli/skills/` | IDE and current CLI both use folder-based `SKILL.md`; CLI 1.1.9 runtime `/skills` also exposed Shared `~/.gemini/skills/`, but current 1.1.20 docs do not document that root. Treat it as versioned runtime evidence pending acceptance. CLI does not claim the IDE legacy `.agent/skills/` compatibility root. Keep separate profiles because their visibility contracts differ. |
 
@@ -30,19 +30,17 @@ This file is evidence for adapter design, not a promise that undocumented host i
 - Project/personal skills use `.claude/skills` and `~/.claude/skills`.
 - Claude Code reads `CLAUDE.md`, not `AGENTS.md`, and explicitly documents importing `@AGENTS.md` to share instructions.
 
-### Implemented Claude Code adapter boundary
+### Retired Claude Code adapter boundary
 
-The Claude adapter uses the official `claude mcp` CLI rather than editing Claude configuration files directly. The supported Linux/POSIX `harness install`/`uninstall` lifecycle now wires this adapter into canonical daemon preparation/shutdown and generated project-skill reconciliation/cleanup. Harness registers one user-scope stdio server named `harness` with a Harness-owned `HARNESS_HOST_PROFILE=claude-code` environment marker and launches the installed Python interpreter with `-m harness.mcp_process`. Registration is idempotent for the exact owned entry, replaces only a stale entry carrying the same Harness ownership marker, and fails on a same-name foreign entry instead of overwriting it. Removal likewise requires the Harness marker before invoking the host CLI.
+Claude Code is not a supported Harness host ([ADR-0039](../decisions/0039-retire-claude-code-host.md)). Harness no longer ships `ClaudeCodeAdapter`, does not register `claude mcp`, and does not project `.claude/skills` as an active target. Cursor still lists `.claude/skills` as a visible compatibility root so leftover Harness-owned files collide and can be cleaned. Hidden apply removes leftover `.claude/rules/harness-hidden.md`. A leftover `HARNESS_HOST_PROFILE=claude-code` process is unsupported; overlay refuse may still use `CLAUDE_PROJECT_DIR` so a leftover production process against this checkout lists no tools. `CLAUDE.md` remains a one-line `@AGENTS.md` pointer for editors.
 
-When that marker is present in the bridge process, Workspace hint construction is adapter-owned: `CLAUDE_PROJECT_DIR` is required and becomes an exact `ROOT` hint. A generic `HARNESS_WORKSPACE_ROOT` value or process cwd cannot override that stronger documented host signal. Without a Harness host-profile marker, the pre-adapter generic behavior remains available for manual/development launches.
-
-Automated tests prove command construction, registration-state classification, ownership/collision handling, idempotence, error fail-closed behavior, normalized root-hint selection, a real Harness MCP stdio subprocess using the Claude profile, daemon-owned skill reconcile/cleanup, clean shutdown, full read-only operational doctor state, a full fake-Claude install→scan→uninstall/purge lifecycle, and installed-wheel reinstall through a second Python 3.13 environment with stale-daemon replacement. They do **not** prove that a proprietary Claude Code build discovers the registration, injects `CLAUDE_PROJECT_DIR`, exposes all five tools, or preserves continuity across real host restarts; those items remain unchecked in the real-host acceptance matrix below.
+Official Claude Code evidence below is leftover-host documentation, not a current Harness install contract.
 
 ### Implemented skill resolver/projection boundary
 
 The current core skills slice loads Harness-owned canonical skills from `~/.harness/skills/`, with portable `SKILL.md` content separated from strict Harness applicability metadata in `harness.yaml`. Deterministic relevance combines indexed languages/manifests/dependencies, durable Task `stack_hints`, and explicit resolver include/exclude inputs under a bounded visible-skill budget. No proprietary host is trusted to perform that selection.
 
-Projection planning takes explicit host visibility surfaces and chooses a minimal set of native project roots where every active profile sees exactly one generated Harness copy; if the compatibility graph cannot satisfy that invariant, projection fails closed. Reconciliation removes only exact Harness-owned stale projections, refuses user-owned or Git-tracked collisions, rechecks filesystem identity before mutation, and maintains generated-path exclusions through `git rev-parse --git-path info/exclude` without changing `.gitignore`. Claude uses `.claude/skills`; Codex uses `.agents/skills`; Cursor prefers `.agents/skills` while also observing its Claude/Codex compatibility roots. This lets Codex+Cursor reuse one projection and makes the simultaneous Claude+Codex+Cursor graph fail closed before mutation. Antigravity can reuse `.agents/skills` where its active graph permits it. Codex and Cursor local MCP/root integration are implemented; Antigravity MCP/root integration and proprietary-host visibility remain later/acceptance work.
+Projection planning takes explicit host visibility surfaces and chooses a minimal set of native project roots where every active profile sees exactly one generated Harness copy; if the compatibility graph cannot satisfy that invariant, projection fails closed. Reconciliation removes only exact Harness-owned stale projections, refuses user-owned or Git-tracked collisions, rechecks filesystem identity before mutation, and maintains generated-path exclusions through `git rev-parse --git-path info/exclude` without changing `.gitignore`. Codex and Cursor share `.agents/skills`. Cursor also observes leftover `.claude/skills` and `.codex/skills` compatibility roots so retired Harness-owned files can be cleaned; Claude Code is not an active projection profile ([ADR-0039](../decisions/0039-retire-claude-code-host.md)). `--host all` is the Codex+Cursor pair. Antigravity can reuse `.agents/skills` where its active graph permits it. Codex and Cursor local MCP/root integration are implemented; Antigravity MCP/root integration and proprietary-host visibility remain later/acceptance work.
 
 Installed profile intent is persisted for all supported local hosts. Foreground `scan` projects
 synchronously; the daemon watcher repeats resolution after authoritative index changes and after a
@@ -50,7 +48,7 @@ successful Task start invalidation. Thus Task `stack_hints`, manifests, dependen
 converge to project skills without another manual scan. Host-side live discovery is still
 acceptance-owned; restart is the fallback documented by each adapter.
 
-Automated tests prove registry parsing, legacy and greenfield relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Claude Code, Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
+Automated tests prove registry parsing, legacy and greenfield relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
 
 ### Codex
 
@@ -63,9 +61,12 @@ Automated tests prove registry parsing, legacy and greenfield relevance, bounded
 ### Implemented Codex local project adapter boundary
 
 ADR-0030 selects project-scoped Codex MCP rather than a user-level shared process whose active
-Workspace is not established by current documentation. The adapter writes the canonical Workspace
-root into both `mcp_servers.harness.cwd` and `HARNESS_WORKSPACE_ROOT`, with
-`HARNESS_HOST_PROFILE=codex`. Automatic mutation is limited to an absent `.codex/config.toml` or a
+Workspace is not established by current documentation. ADR-0037 replaces the failed stdio-to-Unix
+socket route with a daemon-owned authenticated Streamable HTTP endpoint. The adapter writes the
+canonical Workspace root as `X-Harness-Workspace-Root` and writes the private daemon capability as
+an `Authorization` header. The generated server is required; initialization validates the bearer,
+registered Workspace, and daemon path before Codex can start. Automatic mutation is limited to an
+absent `.codex/config.toml` or a
 complete container proven by Harness's adjacent ownership marker. Existing exact config may be
 adopted manually; arbitrary user TOML, foreign same-name servers, tracked mutation, malformed
 files, symlinks, and unknown additions to an owned container fail closed without rewrite.
@@ -73,16 +74,16 @@ files, symlinks, and unknown additions to an owned container fail closed without
 Harness-created Codex config and marker files are kept untracked through exact root-anchored Git
 `info/exclude` entries without changing `.gitignore`; cleanup preserves unrelated exclude content
 and keeps the shared block while another linked worktree remains owned. Unit tests prove exact TOML,
-ownership, idempotence, stale-Python refresh, manual adoption, collision refusal, cleanup, explicit
-root hints, and CLI discovery. `install --host codex` records project-only intent; `scan` reconciles
-the Workspace config and `.agents/skills`; doctor reports expected/configured Python, root, and
-ownership state; uninstall removes only marker-owned config. A Codex-profile MCP process without
-the explicit root publishes no tools. Wire tests prove Claude → Codex → Cursor Task/Knowledge
+ownership, idempotence, capability refresh, stdio-to-HTTP migration, manual adoption, collision
+refusal, cleanup, explicit root headers, and CLI discovery. `install --host codex` records project-only intent; `scan` reconciles
+the Workspace config and `.agents/skills`; doctor reports expected/configured endpoint, root, and
+ownership state; uninstall removes only marker-owned config. An HTTP initialization without the
+explicit root fails before publishing a usable tool session. Wire tests prove Cursor → Codex Task/Knowledge
 continuity.
 
-Codex and Cursor share one `.agents/skills` projection, while Codex and Claude use two native
-roots. The simultaneous Claude + Codex + Cursor surface is rejected before mutation because Cursor
-would observe both copies. Hidden uses exact `developer_instructions` in the trusted marker-owned
+Codex and Cursor share one `.agents/skills` projection. Cursor leftover cleanup still lists
+`.claude/skills` as a visible compatibility root; Claude Code is not an active host
+([ADR-0039](../decisions/0039-retire-claude-code-host.md)). Hidden uses exact `developer_instructions` in the trusted marker-owned
 project config and never replaces existing `AGENTS.md`; returning to Normal removes only that exact
 owned key. This is hygiene-effective policy, not host SCM-write enforcement. Installed-wheel cross-interpreter upgrade continuity is automated;
 proprietary CLI/IDE/desktop acceptance remains open.
@@ -91,16 +92,25 @@ proprietary CLI/IDE/desktop acceptance remains open.
 prints the external destination, exact temporary fixture/MCP payload class, account-usage effect,
 API-key scope, and local isolation guarantees without invoking a model. With explicit
 `--run-model` approval and an invocation-scoped `CODEX_API_KEY`, it builds the exact wheel, requires
-real Codex JSONL evidence for successful calls to all five Harness tools, checks
-doctor/skills/config/cleanup, and emits a sanitized report. The key is passed only to `codex exec`;
+real Codex JSONL evidence for successful calls to all five Harness tools, a native skill-read
+`skill_marker` field proof, and a negative-control exec, checks
+doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
+bootstrap in model-visible input, and emits a sanitized report. The key is passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or
-writes user trust/config. A local-only preflight passed on 2026-08-28 with `codex-cli 0.147.0`,
-including project MCP discovery, exact configured stdio launch through the official MCP SDK, all
-five schemas and successful tool calls in two simultaneous repositories, distinct exact Workspace
-identities, the exact relevant/no irrelevant or duplicate generated skill set, `doctor` with zero failures,
-untrusted-project refusal without created trust/config, owned cleanup, and byte-unchanged user
-config. Codex model arbitration, IDE
-extension, and desktop acceptance remain open.
+writes user trust/config. A local-only stdio preflight passed on 2026-08-28 with `codex-cli 0.147.0`.
+ADR-0037 replaced that transport; current automated proof uses the official MCP SDK against the
+generated Streamable HTTP endpoint. Real Codex model-selected HTTP MCP, IDE extension, and desktop
+acceptance remain in the matrix below. The prompt-input check applies to a fresh CLI process.
+
+When Harness changes a Codex project config, its CLI guidance requires fully quitting and reopening
+the client and then creating a new Task. Existing Tasks retain their original instruction snapshot.
+The acceptance check for that new Task is behavioral: `project_status` precedes shell search,
+browser inspection, repository file reads, and changes. Only tool discovery needed to locate and
+call Harness is allowed first; targeted native search begins after the status call. Harness does
+not generate or merge root `AGENTS.md`:
+that file is user-owned, and claiming it would be unsafe across existing instructions and linked
+worktrees. MCP server instructions carry the same deferred-tool bootstrap in their first 512
+characters as a second supported delivery path after server discovery.
 
 ### Cursor
 
@@ -119,9 +129,9 @@ The production Linux Cursor adapter edits only Cursor's documented local JSON MC
 
 Config mutation preserves unrelated top-level fields and MCP servers, refuses a foreign same-name `harness`, revalidates bytes before mutation, and uses atomic no-clobber replacement/recovery. Harness never deletes the global config container on uninstall because it cannot prove file ownership across runs. Project config is stricter: tracked config may be accepted only when it already contains the exact current Harness entry, while any required tracked mutation fails closed for manual adoption/removal. If Harness creates an untracked project config, a Workspace-local ownership marker records that fact and Git `info/exclude` keeps the generated config/marker untracked without touching `.gitignore`; linked worktrees are handled against their shared Git common exclude file.
 
-`harness install --host cursor` records Cursor intent, removes leftover global `user-harness`, reconciles all already registered Workspace overrides, and enable/verifies each project MCP. Compatible profiles are installed explicitly; uninstall-all remains available, while install-all is rejected because the expanded Claude + Codex + Cursor skill graph would duplicate skills in Cursor. `scan` reconciles one combined active profile set, reusing a single compatible projection where possible. Partial uninstall recalculates skills for the remaining host and leaves the daemon alive. When any Cursor MCP config is actually changed, or when `agent` is missing, the CLI tells the user to fully quit/reopen Cursor and shows the current host-side inspection commands. Doctor reports leftover/foreign/absent global Cursor MCP, on-disk project overrides, Cursor approval/tool catalog, daemon runtime, and Project index separately, including expected/configured Python, the project path, the `${workspaceFolder}` contract, ownership/adoption failures, and an actionable remediation while remaining read-only. Isolated doctor does not inspect user-global host MCP or `~/.harness/skills`.
+`harness install --host cursor` records Cursor intent, removes leftover global `user-harness`, reconciles all already registered Workspace overrides, and enable/verifies each project MCP. Compatible profiles are installed explicitly; `--host all` installs the Codex+Cursor pair. Claude Code is not a supported host ([ADR-0039](../decisions/0039-retire-claude-code-host.md)). `scan` reconciles one combined active profile set, reusing a single compatible projection where possible. Partial uninstall recalculates skills for the remaining host and leaves the daemon alive. When any Cursor MCP config is actually changed, or when `agent` is missing, the CLI tells the user to fully quit/reopen Cursor and shows the current host-side inspection commands. Doctor reports leftover/foreign/absent global Cursor MCP, on-disk project overrides, Cursor approval/tool catalog, daemon runtime, and Project index separately, including expected/configured Python, the project path, the `${workspaceFolder}` contract, ownership/adoption failures, and an actionable remediation while remaining read-only. Isolated doctor does not inspect user-global host MCP or `~/.harness/skills`.
 
-Automated acceptance now includes a real Harness MCP subprocess switching Claude → Cursor → Claude, two linked Workspaces with distinct IDs, Project-wide Knowledge/Task retrieval, Workspace-local current Task/index isolation, and installed-wheel multi-host upgrade/uninstall lifecycle. Proprietary Cursor IDE/CLI discovery remains in the real-host matrix. Cursor Cloud Agents are not covered by the local `.cursor/mcp.json` adapter; their personal/team/cloud MCP configuration and API are a separate future profile.
+Automated acceptance now includes a real Harness MCP subprocess switching Cursor → Codex → Cursor, two linked Workspaces with distinct IDs, Project-wide Knowledge/Task retrieval, Workspace-local current Task/index isolation, and installed-wheel multi-host upgrade/uninstall lifecycle. Proprietary Cursor IDE/CLI discovery remains in the real-host matrix. Cursor Cloud Agents are not covered by the local `.cursor/mcp.json` adapter; their personal/team/cloud MCP configuration and API are a separate future profile.
 
 ### Antigravity
 
@@ -139,7 +149,7 @@ Hidden mode is stricter than ordinary project instructions. Prompt/rule loading 
 
 | Host/profile | Project/local rule or settings surface | SCM-write enforcement evidence | Attribution evidence | Hidden status before acceptance |
 | --- | --- | --- | --- | --- |
-| Claude Code local CLI/IDE | Harness-owned `.claude/rules/harness-hidden.md` plus Git `info/exclude`; do not write `CLAUDE.local.md` | Official permissions + OS-level sandbox support deny rules / filesystem write restrictions; bypass/unsandboxed escape must be disabled for the tested profile | Official `attribution.commit` / `attribution.pr` can be empty; built-in Git instructions can be disabled | Hygiene-effective Hidden instructions are implemented; SCM-write enforcement remains a candidate pending real-host acceptance |
+| Claude Code local CLI/IDE | leftover Harness-owned `.claude/rules/harness-hidden.md` is removed when applying supported Hidden; do not write `CLAUDE.local.md` | Not a supported Hidden profile | leftover only | Leftover cleanup only; Claude Code is not a supported Hidden profile ([ADR-0039](../decisions/0039-retire-claude-code-host.md)) |
 | Codex local CLI/IDE | Trusted project `.codex/config.toml` `developer_instructions`; Harness leaves `AGENTS.md` unchanged | Safe project-local hard SCM denial is not established by docs reviewed here | No host-injected attribution contract established here | Hygiene-effective Hidden (ADR-0028/0030): exact owned developer instructions + git-local ignore; not host-enforced SCM denial |
 | Cursor IDE/CLI | `.cursor/rules/harness-hidden.mdc` (`alwaysApply: true`) plus Git `info/exclude` | Safe project-local hard SCM denial is not established by docs reviewed here | Cursor changelog documents per-user/admin attribution control | Hygiene-effective Hidden (ADR-0028): instructions + git-local ignore; not host-enforced SCM denial |
 | Cursor Cloud/background | Cloud profile is separate from local project execution | Local project settings cannot be assumed to control server-side branch/commit/PR behavior | Official docs reviewed do not establish a complete cloud suppression contract; Cursor staff support has separately reported cloud `Co-authored-by: Cursor` attribution as independent of the local setting | Unsupported until current vendor behavior and acceptance prove suppression |
@@ -167,6 +177,9 @@ support; Codex claims only ADR-0028 hygiene-effective support until real-host en
 - [ ] No duplicate Harness skill appears because of compatibility directory scanning.
 - [ ] Removing Harness deletes only Harness-owned integration artifacts.
 - [ ] Codex trusted-project config is discovered independently by the current CLI, IDE extension, and ChatGPT desktop local client; untrusted projects remain fail-closed without Harness changing trust.
+- [ ] After the required restart/reload, each Codex client includes the exact Harness bootstrap in
+  the actual model-visible developer input; an already-running app with a stale config snapshot is
+  reported as needing restart rather than accepted.
 - [ ] Hidden projection leaves `.gitignore` byte-for-byte unchanged and all Harness-owned project artifacts untracked/ignored.
 - [ ] Hidden agent attempts to stage/commit/amend/create refs or tags/push/create or edit PRs/issues/reviews/comments are denied by the host profile, not merely discouraged by prompt text.
 - [ ] Hidden enforcement configuration is tamper-resistant for the tested profile: the agent cannot edit/disable it or escalate into a bypass/full-access mode.

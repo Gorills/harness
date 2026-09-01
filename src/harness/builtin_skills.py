@@ -11,12 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
-from harness.skills import SKILL_FILE_NAME, SKILL_METADATA_FILE_NAME
+from harness.skills import (
+    SKILL_FILE_NAME,
+    SKILL_METADATA_FILE_NAME,
+    SkillRegistryError,
+    validate_skill_registry_trust,
+)
 
 _BUILTIN_MANIFEST_NAME: Final[str] = ".harness-builtin-skills.json"
 _BUILTIN_MANIFEST_VERSION: Final[int] = 1
 _BUILTIN_FILE_MODE: Final[int] = 0o600
 _BUILTIN_DIR_MODE: Final[int] = 0o700
+_YAML_LINE_BREAKS: Final[str] = "\n\r\u2028\u2029"
 
 
 class BuiltinSkillError(RuntimeError):
@@ -25,6 +31,18 @@ class BuiltinSkillError(RuntimeError):
 
 class BuiltinSkillCollisionError(BuiltinSkillError):
     """Raised when a built-in id collides with unknown or user-modified registry content."""
+
+
+def _yaml_quoted_scalar(value: str, *, field: str) -> str:
+    """Serialize a built-in metadata scalar as a quoted YAML string (JSON syntax)."""
+    if not value.strip():
+        raise BuiltinSkillError(f"built-in skill {field} must be non-empty text")
+    quoted = json.dumps(value, ensure_ascii=False)
+    if any(character in quoted for character in _YAML_LINE_BREAKS):
+        raise BuiltinSkillError(
+            f"built-in skill {field} cannot be serialized as a single-line YAML scalar"
+        )
+    return quoted
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +58,10 @@ class BuiltinSkill:
     references: tuple[tuple[str, str], ...] = ()
 
     def files(self) -> dict[str, bytes]:
-        frontmatter = f"---\nname: {self.skill_id}\ndescription: {self.description}\n---\n\n"
-        metadata = [f"id: {self.skill_id}"]
+        name = _yaml_quoted_scalar(self.skill_id, field="name")
+        description = _yaml_quoted_scalar(self.description, field="description")
+        frontmatter = f"---\nname: {name}\ndescription: {description}\n---\n\n"
+        metadata = [f"id: {_yaml_quoted_scalar(self.skill_id, field='id')}"]
         applies = (
             ("languages", self.applies_languages),
             ("dependencies", self.applies_dependencies),
@@ -53,9 +73,13 @@ class BuiltinSkill:
             for field, values in applies:
                 if values:
                     metadata.append(f"  {field}:")
-                    metadata.extend(f"    - {value}" for value in values)
+                    metadata.extend(
+                        f"    - {_yaml_quoted_scalar(value, field=field)}" for value in values
+                    )
         metadata.append("task_hints:")
-        metadata.extend(f"  - {hint}" for hint in self.task_hints)
+        metadata.extend(
+            f"  - {_yaml_quoted_scalar(hint, field='task_hints')}" for hint in self.task_hints
+        )
         files = {
             SKILL_FILE_NAME: (frontmatter + self.body.strip() + "\n").encode(),
             SKILL_METADATA_FILE_NAME: ("\n".join(metadata) + "\n").encode(),
@@ -88,6 +112,8 @@ class BuiltinSkillSyncResult:
     updated: int
     unchanged: int
     adopted: int
+    retired: int
+    released: int
     skill_ids: tuple[str, ...]
 
 
@@ -153,6 +179,8 @@ Use this skill when a change alters a durable boundary, data model, protocol, se
             "authentication",
             "authorization",
             "api-security",
+            "backend-security",
+            "server-auth-review",
             "secrets",
             "hardening",
             "new-project",
@@ -602,6 +630,10 @@ Official platform guidance:
 - Prefer structured events with stable names and correlation/request identifiers.
 - Never log secrets, credentials, raw tokens, or unnecessary personal data.
 - Add metrics for user-impacting outcomes and saturation/error signals, not every internal variable.
+- Keep metric labels/attributes bounded. Never use user IDs, emails, request IDs, raw URLs,
+  arbitrary exception text, or other unbounded values as metric dimensions; use normalized
+  route/error classes and put high-cardinality detail in logs/traces.
+- Define units and histogram/bucket semantics deliberately and account for telemetry cost.
 - Trace cross-boundary latency only where it helps diagnose real flows; preserve propagation across service calls.
 - Alerts should correspond to actionable symptoms and link to a concise runbook or recovery path.
 - During incidents, preserve evidence, form one hypothesis at a time, and verify recovery with user-visible health signals.
@@ -637,6 +669,13 @@ Official platform guidance:
         """
 # CI and release
 - Treat the repository's existing CI contract as authoritative; extend it rather than replacing it with generic conventions.
+- Preserve repository and organization workflow, review, and deployment policy rather than substituting generic defaults.
+- Pin third-party Actions to a reviewed full-length commit SHA where repository policy supports it, and verify that SHA belongs to the expected upstream repository.
+- Keep GITHUB_TOKEN and other workflow token permissions at the minimum the job needs.
+- Never expose privileged secrets to untrusted fork pull-request code.
+- Prefer short-lived OIDC credentials over static cloud keys where the platform supports it.
+- Use protected environments and required approval for privileged release and production deploy jobs.
+- Preserve artifact provenance and attestations when the repository already produces them.
 - Keep dependency lockfiles current and use reproducible tool versions.
 - PR checks should cover the affected behavior; required main/release gates remain mandatory even when focused local tests are green.
 - Keep deployment credentials in the platform's secret mechanism and minimize permission scope.
@@ -979,9 +1018,10 @@ the product's existing mental model. Do not trade recognition for novelty.
 
 ## Treat mobile as a distinct composition
 Respect platform navigation, safe areas, keyboards, system bars, back behavior, permissions, and
-dynamic type. Place frequent actions within comfortable reach without obscuring content. Primary
-touch controls should usually be at least 44 x 44 logical pixels; never go below the applicable
-accessibility minimum or rely on tiny adjacent targets.
+dynamic type. Place frequent actions within comfortable reach without obscuring content. Follow the
+target platform's current accessibility guidance. For iOS/iPadOS, 44x44 pt is the normal default
+control size. For Android, touch targets should normally provide at least 48x48 dp. Do not go below
+the applicable platform/accessibility minimum or rely on tiny adjacent targets.
 
 Mobile is not desktop squeezed into one column. Reorder by priority, collapse secondary controls,
 replace hover-only behavior, choose deliberate sheet/dialog/navigation patterns, and preserve context
@@ -1781,8 +1821,9 @@ def sync_builtin_skills(registry_root: Path) -> BuiltinSkillSyncResult:
     manifest_path = registry_root / _BUILTIN_MANIFEST_NAME
     owned = _load_manifest(manifest_path)
     desired = {skill.skill_id: _tree_sha256(skill.files()) for skill in BUILTIN_SKILLS}
+    stale_ids = tuple(sorted(set(owned) - desired.keys()))
     replacements = []
-    installed = updated = unchanged = adopted = 0
+    installed = updated = unchanged = adopted = retired = released = 0
     try:
         for skill in BUILTIN_SKILLS:
             target = registry_root / skill.skill_id
@@ -1805,13 +1846,38 @@ def sync_builtin_skills(registry_root: Path) -> BuiltinSkillSyncResult:
                 installed += 1
             else:
                 updated += 1
+        for skill_id in stale_ids:
+            target = registry_root / skill_id
+            recorded = owned[skill_id]
+            if not _path_exists(target):
+                del owned[skill_id]
+                continue
+            current = _directory_sha256(target)
+            del owned[skill_id]
+            if current == recorded:
+                replacements.append(_retire_owned_directory(registry_root, target))
+                retired += 1
+            else:
+                released += 1
         _write_manifest(manifest_path, owned)
     except Exception:
-        _rollback_replacements(replacements)
+        rollback_error = _rollback_replacements(replacements)
+        if rollback_error is not None:
+            message = "built-in skill sync failed and prior registry state could not be restored"
+            detail = str(rollback_error)
+            if "preserved at" in detail:
+                message = f"{message}; {detail}"
+            raise BuiltinSkillError(message) from rollback_error
         raise
     _finalize_replacements(replacements)
     return BuiltinSkillSyncResult(
-        installed, updated, unchanged, adopted, tuple(s.skill_id for s in BUILTIN_SKILLS)
+        installed,
+        updated,
+        unchanged,
+        adopted,
+        retired,
+        released,
+        tuple(s.skill_id for s in BUILTIN_SKILLS),
     )
 
 
@@ -1823,14 +1889,19 @@ def _prepare_registry(root: Path) -> None:
             raise BuiltinSkillError("skill registry parent must be a real directory")
         if hasattr(os, "geteuid") and pm.st_uid != os.geteuid():
             raise BuiltinSkillError("skill registry parent must be owned by the current user")
+        if stat.S_IMODE(pm.st_mode) & 0o022:
+            raise BuiltinSkillError(
+                "skill registry parent must not have group or other write access"
+            )
         root.mkdir(exist_ok=True, mode=_BUILTIN_DIR_MODE)
-        m = root.lstat()
     except OSError as exc:
         raise BuiltinSkillError("skill registry cannot be prepared") from exc
-    if stat.S_ISLNK(m.st_mode) or not stat.S_ISDIR(m.st_mode):
-        raise BuiltinSkillError("skill registry must be a real directory")
-    if hasattr(os, "geteuid") and m.st_uid != os.geteuid():
-        raise BuiltinSkillError("skill registry must be owned by the current user")
+    try:
+        validate_skill_registry_trust(root)
+    except FileNotFoundError as exc:
+        raise BuiltinSkillError("skill registry cannot be prepared") from exc
+    except SkillRegistryError as exc:
+        raise BuiltinSkillError(str(exc)) from exc
 
 
 def _load_manifest(path: Path) -> dict[str, str]:
@@ -1891,6 +1962,14 @@ def _write_manifest(path: Path, owned: dict[str, str]) -> None:
         raise BuiltinSkillError("built-in skill manifest could not be persisted") from exc
 
 
+def _retire_owned_directory(root: Path, target: Path) -> _Replacement:
+    _require_real_skill_directory(target)
+    backup = Path(tempfile.mkdtemp(prefix=f".{target.name}.builtin-backup-", dir=root))
+    backup.rmdir()
+    os.replace(target, backup)
+    return _Replacement(target, backup)
+
+
 def _materialize_replacement(root: Path, target: Path, files: dict[str, bytes]) -> _Replacement:
     stage = Path(tempfile.mkdtemp(prefix=f".{target.name}.builtin-stage-", dir=root))
     os.chmod(stage, _BUILTIN_DIR_MODE)
@@ -1918,15 +1997,30 @@ def _materialize_replacement(root: Path, target: Path, files: dict[str, bytes]) 
         raise
 
 
-def _rollback_replacements(items: Sequence[_Replacement]) -> None:
+def _rollback_replacements(items: Sequence[_Replacement]) -> Exception | None:
+    first_error: Exception | None = None
     for item in reversed(items):
         try:
-            if _path_exists(item.target):
-                _remove_path(item.target)
-            if item.backup is not None and _path_exists(item.backup):
-                os.replace(item.backup, item.target)
-        except OSError:
-            continue
+            _restore_replacement(item)
+        except (OSError, BuiltinSkillError) as exc:
+            if first_error is None:
+                first_error = exc
+    return first_error
+
+
+def _restore_replacement(item: _Replacement) -> None:
+    backup = item.backup
+    try:
+        if _path_exists(item.target):
+            _remove_path(item.target)
+        if backup is not None and _path_exists(backup):
+            os.replace(backup, item.target)
+    except (OSError, BuiltinSkillError) as exc:
+        if backup is None:
+            raise
+        raise BuiltinSkillError(
+            f"built-in skill registry entry could not be restored; preserved at {backup}"
+        ) from exc
 
 
 def _finalize_replacements(items: Sequence[_Replacement]) -> None:

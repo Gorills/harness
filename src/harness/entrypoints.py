@@ -1,6 +1,7 @@
 import errno
 import json
 import os
+import sys
 from argparse import ArgumentParser
 from importlib.metadata import version as distribution_version
 from pathlib import Path
@@ -24,7 +25,6 @@ from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationState,
     IntegrationChange,
-    discover_claude_code_adapter,
 )
 from harness.host_integration_state import load_host_integration_state
 from harness.installation import InstallationError, install_harness, uninstall_harness
@@ -248,10 +248,18 @@ def _print_cursor_manual_enable(commands: tuple[str, ...]) -> None:
 
 
 def _print_codex_reload_guidance(*, expect_harness: bool) -> None:
-    print("Codex restart required: restart the Codex client after project MCP config changes.")
+    print(
+        "Codex restart required: fully quit and reopen the Codex client after project MCP "
+        "config changes, then create a new task; existing tasks keep their original instruction "
+        "snapshot."
+    )
     if expect_harness:
         print("Codex trust: open and trust the Workspace so project .codex/config.toml is loaded.")
         print("Codex verification: run `codex mcp get harness --json` from the Workspace root.")
+        print(
+            "Codex task verification: in the new task, `project_status` must be the first "
+            "project action, before shell search, browser inspection, or changes."
+        )
     else:
         print(
             "Codex verification: confirm the Harness-owned project .codex/config.toml was removed."
@@ -369,6 +377,10 @@ def _run_skills_sync() -> int:
     print(f"Unchanged: {result.unchanged}")
     if result.adopted:
         print(f"Adopted exact built-ins: {result.adopted}")
+    if result.retired:
+        print(f"Retired: {result.retired}")
+    if result.released:
+        print(f"Released: {result.released}")
     return 0
 
 
@@ -435,9 +447,29 @@ def _isolated_development_host_lifecycle_error() -> str | None:
     )
 
 
-def _isolated_development_canonical_scan_error(location: Path) -> str | None:
+def _isolated_development_canonical_scan_error(
+    location: Path, *, global_dogfood: bool = False
+) -> str | None:
     overlay_root = find_isolated_development_root(location)
     if overlay_root is None:
+        if global_dogfood:
+            return "--global-dogfood is valid only for a Harness source checkout overlay"
+        return None
+    if global_dogfood:
+        if os.environ.get("HARNESS_DEV_ROOT"):
+            return (
+                "--global-dogfood requires the tool-installed Harness outside "
+                "scripts/dev/HARNESS_DEV_ROOT"
+            )
+        try:
+            interpreter = Path(sys.executable).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            return f"tool-installed Harness interpreter cannot be resolved: {exc}"
+        if interpreter.is_relative_to(overlay_root):
+            return (
+                "--global-dogfood requires the tool-installed Harness; "
+                f"checkout interpreter refused: {interpreter}"
+            )
         return None
     configured = os.environ.get("HARNESS_DEV_ROOT")
     if configured:
@@ -452,7 +484,12 @@ def _isolated_development_canonical_scan_error(location: Path) -> str | None:
     )
 
 
-def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
+def _run_scan(
+    workspace_location: Path,
+    socket_path: Path | None,
+    *,
+    global_dogfood: bool = False,
+) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
@@ -461,7 +498,9 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return _scan_failure(f"workspace path is not a directory: {location}")
     blocked = None
     try:
-        blocked = _isolated_development_canonical_scan_error(location)
+        blocked = _isolated_development_canonical_scan_error(
+            location, global_dogfood=global_dogfood
+        )
     except HostIntegrationError as exc:
         return _scan_failure(str(exc))
     if blocked is not None:
@@ -484,6 +523,20 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return _scan_failure(
             f"index reconciliation succeeded but isolated-development overlay could not be inspected: {exc}"
         )
+    if global_dogfood:
+        if overlay_root != result.workspace_root:
+            return _scan_failure(
+                "source checkout overlay changed during global dogfood registration; "
+                "host and skill reconciliation was not attempted"
+            )
+        if result.visibility_mode != "normal":
+            return _scan_failure(
+                "global dogfood requires Normal visibility because host policy reconciliation "
+                "is intentionally skipped"
+            )
+        _print_workspace_scan(result)
+        print("Global dogfood: index registered; host and skill reconciliation skipped")
+        return 0
     if overlay_root == result.workspace_root:
         try:
             sync_builtin_skills(default_skill_registry())
@@ -516,16 +569,6 @@ def _run_scan(workspace_location: Path, socket_path: Path | None) -> int:
         return 0
 
     active_profiles: list[str] = []
-    claude = discover_claude_code_adapter()
-    if claude is not None:
-        try:
-            registration_state = claude.registration_state()
-        except HostIntegrationError as exc:
-            return _scan_failure(
-                f"index reconciliation succeeded but Claude integration could not be inspected: {exc}"
-            )
-        if registration_state is HostRegistrationState.CURRENT:
-            active_profiles.append(claude.profile)
 
     try:
         integration_state = load_host_integration_state(default_runtime_paths())
@@ -848,15 +891,14 @@ def harness_main() -> int:
         help="install a supported local Harness integration",
         description=(
             "Prepare the canonical local daemon and idempotently register Harness with one local "
-            "host profile. The explicit 'all' selection is rejected while the three-profile "
-            "skill visibility graph cannot be projected without duplicates."
+            "host profile. The explicit 'all' selection installs Codex and Cursor."
         ),
     )
     install_parser.add_argument(
         "--host",
-        choices=("claude-code", "codex", "cursor", "all"),
-        default="claude-code",
-        help="host integration to install (default: claude-code)",
+        choices=("codex", "cursor", "all"),
+        default="cursor",
+        help="host integration to install (default: cursor)",
     )
     uninstall_parser = subparsers.add_parser(
         "uninstall",
@@ -868,9 +910,9 @@ def harness_main() -> int:
     )
     uninstall_parser.add_argument(
         "--host",
-        choices=("claude-code", "codex", "cursor", "all"),
-        default="claude-code",
-        help="host integration to remove (default: claude-code)",
+        choices=("codex", "cursor", "all"),
+        default="cursor",
+        help="host integration to remove (default: cursor)",
     )
     uninstall_parser.add_argument(
         "--purge",
@@ -989,6 +1031,14 @@ def harness_main() -> int:
         metavar="PATH",
         help="override the canonical per-user Unix-domain socket path",
     )
+    scan_parser.add_argument(
+        "--global-dogfood",
+        action="store_true",
+        help=(
+            "register the Harness source checkout with a tool-installed runtime while skipping "
+            "checkout host and skill reconciliation"
+        ),
+    )
     visibility_parser = subparsers.add_parser(
         "visibility",
         help="set Project Hidden or Normal visibility for one Git Workspace",
@@ -1077,8 +1127,9 @@ def harness_main() -> int:
         "dashboard",
         help="print the daemon-owned local Projects dashboard URL",
         description=(
-            "Print the private URL of the daemon-owned loopback Projects dashboard. "
-            "The listener starts with the daemon on a fixed loopback port."
+            "Print the loopback URL of the daemon-owned Projects dashboard. "
+            "The listener starts with the daemon; the canonical URL is "
+            "http://127.0.0.1:17373/."
         ),
     )
     dashboard_parser.add_argument(
@@ -1113,7 +1164,7 @@ def harness_main() -> int:
     if args.command == "status":
         return _run_status(args.path, args.socket)
     if args.command == "scan":
-        return _run_scan(args.path, args.socket)
+        return _run_scan(args.path, args.socket, global_dogfood=args.global_dogfood)
     if args.command == "visibility":
         return _run_visibility(args.mode, args.path, args.socket)
     if args.command == "search":

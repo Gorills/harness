@@ -4,15 +4,16 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 import harness.doctor as doctor
+from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
 from harness.doctor import run_doctor_checks
 from harness.git_workspace import GitWorkspaceDeadlineExceededError
 from harness.hidden_projection import apply_hidden_projection
-from harness.host_adapters import HostIntegrationError, HostRegistrationState
 from harness.index import IndexingError, ScanDeadlineExceededError
 from harness.ipc import IpcRemoteError
 from harness.registry import (
@@ -23,7 +24,12 @@ from harness.registry import (
     update_project_visibility,
 )
 from harness.skill_runtime import SkillRuntimeError
-from harness.skills import SkillProjectionError
+from harness.skills import (
+    SkillProjectionError,
+    SkillRegistryError,
+    load_skill_registry,
+    validate_skill_registry_trust,
+)
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.visibility import set_project_visibility
 
@@ -125,57 +131,10 @@ def test_run_system_doctor_on_clean_machine_is_read_only_and_warning_only(tmp_pa
     by_name = {check.name: check for check in report.checks}
     assert by_name["Database"].severity is doctor.DoctorSeverity.WARN
     assert by_name["Daemon"].severity is doctor.DoctorSeverity.WARN
-    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.WARN
-
-
-def test_run_system_doctor_warns_when_claude_registration_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _AbsentClaude:
-        executable = tmp_path / "claude"
-
-        def registration_state(self) -> HostRegistrationState:
-            return HostRegistrationState.ABSENT
-
-    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _AbsentClaude())
-    home = tmp_path / "home"
-    home.mkdir()
-    report = doctor.run_system_doctor(
-        environment={
-            "HOME": str(home),
-            "XDG_STATE_HOME": str(tmp_path / "state"),
-            "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
-            "PATH": os.environ.get("PATH", ""),
-        }
-    )
-    by_name = {check.name: check for check in report.checks}
-    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.WARN
-    assert "absent" in by_name["Claude Code MCP registration"].detail
-
-
-def test_run_system_doctor_fails_closed_on_unexpected_claude_inspect(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _BrokenClaude:
-        executable = tmp_path / "claude"
-
-        def registration_state(self) -> HostRegistrationState:
-            raise HostIntegrationError("Claude Code MCP inspection command failed with exit code 2")
-
-    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _BrokenClaude())
-    home = tmp_path / "home"
-    home.mkdir()
-    report = doctor.run_system_doctor(
-        environment={
-            "HOME": str(home),
-            "XDG_STATE_HOME": str(tmp_path / "state"),
-            "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
-            "PATH": os.environ.get("PATH", ""),
-        }
-    )
-    by_name = {check.name: check for check in report.checks}
-    assert by_name["Claude Code MCP registration"].severity is doctor.DoctorSeverity.FAIL
-    assert report.failure_count >= 1
+    assert by_name["Cursor MCP registration"].severity is doctor.DoctorSeverity.OK
+    assert "no user-harness" in by_name["Cursor MCP registration"].detail
+    assert "Claude Code MCP registration" not in by_name
+    assert "Claude Code adapter" not in by_name
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX isolated-development overlay")
@@ -206,6 +165,21 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
     overlay_path.parent.mkdir()
     overlay_text = json.dumps(overlay) + "\n"
     overlay_path.write_text(overlay_text, encoding="utf-8")
+    codex_overlay = root / ".codex" / "config.toml"
+    codex_overlay.parent.mkdir()
+    codex_text = f"""developer_instructions = {json.dumps(CODEX_BOOTSTRAP_INSTRUCTION_BODY)}
+
+[mcp_servers.harness-dev]
+command = "./scripts/dogfood"
+args = ["mcp"]
+startup_timeout_sec = 30
+required = true
+experimental_environment = "local"
+
+[mcp_servers.harness-dev.env]
+HARNESS_WORKSPACE_ROOT = "."
+"""
+    codex_overlay.write_text(codex_text, encoding="utf-8")
     (root / "README.md").write_text("repo\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=root, check=True, capture_output=True)
     subprocess.run(
@@ -257,6 +231,18 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
         for check in report.checks
         if check.severity is doctor.DoctorSeverity.FAIL
     )
+    codex_checks = [
+        check for check in report.checks if check.name.startswith("Codex project MCP config ")
+    ]
+    assert codex_checks
+    assert all(check.severity is doctor.DoctorSeverity.OK for check in codex_checks)
+    assert any("isolated-development overlay" in check.detail for check in codex_checks)
+    codex_summary = next(
+        check for check in report.checks if check.name == "Codex project MCP configs"
+    )
+    assert codex_summary.severity is doctor.DoctorSeverity.OK
+    assert "isolated-development" in codex_summary.detail
+    assert codex_overlay.read_text(encoding="utf-8") == codex_text
 
 
 def test_run_system_doctor_refuses_database_symlink_without_following_target(
@@ -332,6 +318,33 @@ def test_run_system_doctor_refuses_group_writable_skill_registry(tmp_path: Path)
     by_name = {check.name: check for check in report.checks}
     assert by_name["Skill registry permissions"].severity is doctor.DoctorSeverity.FAIL
     assert report.failure_count >= 1
+
+
+def test_doctor_and_runtime_use_identical_skill_registry_trust_decision(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o700)
+    validate_skill_registry_trust(registry)
+    assert load_skill_registry(registry) == ()
+    ok_checks: list[doctor.DoctorCheck] = []
+    assert doctor._inspect_skill_registry_permissions(registry, ok_checks) is True
+    assert ok_checks[0].severity is doctor.DoctorSeverity.OK
+
+    missing_checks: list[doctor.DoctorCheck] = []
+    assert load_skill_registry(tmp_path / "missing") == ()
+    assert doctor._inspect_skill_registry_permissions(tmp_path / "missing", missing_checks) is True
+    assert missing_checks == []
+
+    registry.chmod(0o770)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        validate_skill_registry_trust(registry)
+    with pytest.raises(SkillRegistryError, match="group/other write"):
+        load_skill_registry(registry)
+    fail_checks: list[doctor.DoctorCheck] = []
+    assert doctor._inspect_skill_registry_permissions(registry, fail_checks) is False
+    assert fail_checks[0].name == "Skill registry permissions"
+    assert fail_checks[0].severity is doctor.DoctorSeverity.FAIL
+    assert "group/other write" in fail_checks[0].detail
 
 
 def test_run_system_doctor_reports_relative_home_as_failure_without_mutation(
@@ -545,16 +558,11 @@ def test_doctor_labels_index_timeout_with_workspace_identity(
 def test_doctor_labels_skill_timeout_with_workspace_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class _CurrentClaude:
-        executable = tmp_path / "claude"
-
-        def registration_state(self) -> HostRegistrationState:
-            return HostRegistrationState.CURRENT
-
     environment = _doctor_environment(tmp_path)
     root = _git_repository(tmp_path / "repo")
     [workspace] = _register_doctor_workspaces(environment, [root])
-    monkeypatch.setattr(doctor, "discover_claude_code_adapter", lambda **_kwargs: _CurrentClaude())
+    _write_host_profiles(environment, "cursor")
+    _write_cursor_project_mcp(root)
 
     def fail_skills(*_args: object, **_kwargs: object) -> None:
         raise SkillRuntimeError(
@@ -750,6 +758,30 @@ def _write_host_profiles(environment: dict[str, str], *profiles: str) -> None:
         encoding="utf-8",
     )
     path.chmod(0o600)
+
+
+def _write_cursor_project_mcp(root: Path) -> None:
+    path = root / ".cursor" / "mcp.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "harness": {
+                        "type": "stdio",
+                        "command": os.path.abspath(sys.executable),
+                        "args": ["-m", "harness.mcp_process"],
+                        "env": {
+                            "HARNESS_HOST_PROFILE": "cursor",
+                            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+                        },
+                    }
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def test_doctor_reports_hidden_projection_and_cursor_scm_gap(tmp_path: Path) -> None:

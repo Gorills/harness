@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+# shellcheck source=scripts/dev-uv.sh
+source "$script_dir/dev-uv.sh"
+
+mode_dir="$repo_root/.harness"
+mode_marker="$mode_dir/global-dogfood-mode"
+global_mode_value="global-v1"
+
+usage() {
+    cat <<'EOF'
+Route this source checkout to isolated or user-global Harness state.
+
+Usage:
+  scripts/dogfood enable-global
+  scripts/dogfood disable-global
+  scripts/dogfood mode
+  scripts/dogfood <harness-command> [args...]
+
+The default mode is isolated and delegates to `scripts/dev harness`. Enabling
+global mode first indexes this checkout with the tool-installed Harness using
+`scan --global-dogfood`, then atomically records the opt-in under ignored
+`.harness/`. Host MCP and skill projections are not reconciled for that scan.
+
+Restart the active host after changing mode. Disabling global mode keeps the
+global Project, Task, Knowledge, and index state; it only changes this checkout's
+MCP/CLI route back to the isolated daemon.
+EOF
+}
+
+path_is_under() {
+    local value="$1"
+    local prefix="$2"
+    local resolved_value resolved_prefix
+    [[ -n "$value" ]] || return 1
+    if [[ -d "$prefix" ]]; then
+        resolved_prefix="$(cd -- "$prefix" && pwd)"
+    else
+        resolved_prefix="$prefix"
+    fi
+    if [[ -d "$value" ]]; then
+        resolved_value="$(cd -- "$value" && pwd)"
+    else
+        resolved_value="$value"
+    fi
+    case "$resolved_value" in
+        "$resolved_prefix" | "$resolved_prefix"/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+strip_path_entry() {
+    local remove="$1"
+    local result=""
+    local entry resolved remaining
+    remaining="${PATH-}:"
+    while [[ -n "$remaining" ]]; do
+        entry="${remaining%%:*}"
+        remaining="${remaining#*:}"
+        [[ -n "$entry" ]] || continue
+        if [[ "$entry" == "$remove" ]]; then
+            continue
+        fi
+        if [[ -d "$entry" && -d "$remove" ]]; then
+            resolved="$(cd -- "$entry" && pwd)"
+            if [[ "$resolved" == "$remove" ]]; then
+                continue
+            fi
+        fi
+        result="${result:+$result:}$entry"
+    done
+    PATH="$result"
+    export PATH
+}
+
+restore_canonical_xdg() {
+    local current="$1"
+    local overlay="$2"
+    local saved="$3"
+    if ! path_is_under "$current" "$overlay"; then
+        printf '%s\n' "$current"
+        return 0
+    fi
+    if [[ -n "$saved" ]] && ! path_is_under "$saved" "$overlay"; then
+        printf '%s\n' "$saved"
+    fi
+}
+
+resolve_global_harness() {
+    local uv_bin tool_bin harness_bin resolved
+    if ! uv_bin="$(resolve_uv)"; then
+        echo "scripts/dogfood: uv $REQUIRED_UV_VERSION is required to locate the tool install" >&2
+        echo "Run make install-global after explicit authorization, then retry." >&2
+        return 1
+    fi
+    if ! tool_bin="$($uv_bin tool dir --bin)"; then
+        echo "scripts/dogfood: uv could not resolve its tool binary directory" >&2
+        return 1
+    fi
+    harness_bin="$tool_bin/harness"
+    if [[ ! -x "$harness_bin" ]]; then
+        echo "scripts/dogfood: tool-installed Harness is missing at $harness_bin" >&2
+        echo "Run make install-global after explicit authorization, then retry." >&2
+        return 1
+    fi
+    if ! resolved="$(readlink -f -- "$harness_bin")" || [[ -z "$resolved" ]]; then
+        echo "scripts/dogfood: tool-installed Harness path cannot be resolved: $harness_bin" >&2
+        return 1
+    fi
+    if path_is_under "$resolved" "$repo_root"; then
+        echo "scripts/dogfood: refusing checkout executable as global Harness: $resolved" >&2
+        return 1
+    fi
+    printf '%s\n' "$resolved"
+}
+
+prepare_global_environment() {
+    local overlay="$repo_root/.harness"
+    local restored venv_bin
+
+    unset HARNESS_DEV_ROOT
+    unset HARNESS_DEV_SKILL_PROFILES
+    if path_is_under "${HARNESS_SKILL_REGISTRY:-}" "$overlay"; then
+        unset HARNESS_SKILL_REGISTRY
+    fi
+    unset HARNESS_HOST_PROFILE
+    unset PYTHONHOME
+    unset PYTHONPATH
+    unset UV_CACHE_DIR
+
+    restored="$(
+        restore_canonical_xdg \
+            "${XDG_STATE_HOME:-}" \
+            "$overlay" \
+            "${HARNESS_DEV_SAVED_XDG_STATE_HOME-}"
+    )"
+    if [[ -n "$restored" ]]; then
+        export XDG_STATE_HOME="$restored"
+    else
+        unset XDG_STATE_HOME
+    fi
+    restored="$(
+        restore_canonical_xdg \
+            "${XDG_RUNTIME_DIR:-}" \
+            "$overlay" \
+            "${HARNESS_DEV_SAVED_XDG_RUNTIME_DIR-}"
+    )"
+    if [[ -n "$restored" ]]; then
+        export XDG_RUNTIME_DIR="$restored"
+    else
+        unset XDG_RUNTIME_DIR
+    fi
+    unset HARNESS_DEV_SAVED_XDG_STATE_HOME
+    unset HARNESS_DEV_SAVED_XDG_RUNTIME_DIR
+
+    venv_bin="$repo_root/.venv/bin"
+    strip_path_entry "$venv_bin"
+    if [[ -n "${VIRTUAL_ENV:-}" ]] && path_is_under "$VIRTUAL_ENV" "$repo_root/.venv"; then
+        unset VIRTUAL_ENV
+    fi
+    export HARNESS_WORKSPACE_ROOT="$repo_root"
+    cd -- "$repo_root"
+}
+
+selected_mode() {
+    if [[ -L "$mode_dir" ]]; then
+        echo "scripts/dogfood: mode directory must not be a symlink: $mode_dir" >&2
+        return 1
+    fi
+    if [[ -e "$mode_dir" && ! -d "$mode_dir" ]]; then
+        echo "scripts/dogfood: mode directory is not a directory: $mode_dir" >&2
+        return 1
+    fi
+    if [[ -L "$mode_marker" ]]; then
+        echo "scripts/dogfood: mode marker must not be a symlink: $mode_marker" >&2
+        return 1
+    fi
+    if [[ ! -e "$mode_marker" ]]; then
+        printf '%s\n' "isolated"
+        return 0
+    fi
+    if [[ ! -f "$mode_marker" ]]; then
+        echo "scripts/dogfood: mode marker is not a regular file: $mode_marker" >&2
+        return 1
+    fi
+    local value
+    value="$(<"$mode_marker")"
+    if [[ "$value" != "$global_mode_value" ]]; then
+        echo "scripts/dogfood: invalid dogfood mode marker: $mode_marker" >&2
+        return 1
+    fi
+    printf '%s\n' "global"
+}
+
+enable_global() {
+    local harness_bin temp_marker
+    selected_mode >/dev/null
+    harness_bin="$(resolve_global_harness)"
+    prepare_global_environment
+    "$harness_bin" scan --global-dogfood "$repo_root"
+
+    selected_mode >/dev/null
+    mkdir -p -- "$mode_dir"
+    if [[ -L "$mode_dir" ]]; then
+        echo "scripts/dogfood: mode directory became a symlink during enable: $mode_dir" >&2
+        return 1
+    fi
+    chmod 700 -- "$mode_dir"
+    temp_marker="$(mktemp "$mode_dir/.global-dogfood-mode.XXXXXX")"
+    trap 'rm -f -- "$temp_marker"' EXIT
+    printf '%s\n' "$global_mode_value" >"$temp_marker"
+    chmod 600 -- "$temp_marker"
+    selected_mode >/dev/null
+    mv -f -- "$temp_marker" "$mode_marker"
+    trap - EXIT
+    echo "Global Harness dogfood enabled for $repo_root"
+    echo "Restart the active Codex/Cursor/Claude host to reload the MCP process."
+}
+
+disable_global() {
+    local mode
+    mode="$(selected_mode)"
+    if [[ "$mode" == "isolated" ]]; then
+        echo "Global Harness dogfood is already disabled for $repo_root"
+        return 0
+    fi
+    rm -f -- "$mode_marker"
+    echo "Global Harness dogfood disabled for $repo_root"
+    echo "Global Project, Task, Knowledge, and index state were preserved."
+    echo "Restart the active Codex/Cursor/Claude host to reload the MCP process."
+}
+
+if [[ $# -eq 0 ]]; then
+    usage >&2
+    exit 1
+fi
+
+case "$1" in
+    help | -h | --help)
+        usage
+        exit 0
+        ;;
+    enable-global)
+        enable_global
+        exit 0
+        ;;
+    disable-global)
+        disable_global
+        exit 0
+        ;;
+    mode)
+        mode="$(selected_mode)"
+        echo "mode=$mode"
+        if [[ "$mode" == "global" ]]; then
+            echo "harness=$(resolve_global_harness)"
+        else
+            echo "harness=$repo_root/scripts/dev harness"
+        fi
+        exit 0
+        ;;
+    install | uninstall)
+        echo "scripts/dogfood: install/uninstall is not routed from the source checkout" >&2
+        echo "Use make install-global with explicit authorization." >&2
+        exit 1
+        ;;
+esac
+
+mode="$(selected_mode)"
+if [[ "$mode" == "isolated" ]]; then
+    unset HARNESS_GLOBAL_DOGFOOD_ROOT
+    exec "$repo_root/scripts/dev" harness "$@"
+fi
+
+harness_bin="$(resolve_global_harness)"
+prepare_global_environment
+if [[ "$1" == "visibility" ]]; then
+    echo "scripts/dogfood: visibility changes are not routed through global dogfood" >&2
+    echo "Disable global dogfood before changing source-checkout visibility." >&2
+    exit 1
+fi
+if [[ "$1" == "scan" ]]; then
+    shift
+    exec "$harness_bin" scan --global-dogfood "$@"
+fi
+exec "$harness_bin" "$@"

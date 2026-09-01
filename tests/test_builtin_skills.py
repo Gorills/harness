@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
+import shutil
+import stat
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -33,6 +37,21 @@ def _ids(items: Sequence[ResolvedSkill]) -> tuple[str, ...]:
     return tuple(item.definition.skill_id for item in items)
 
 
+def _builtin_by_id(skill_id: str) -> BuiltinSkill:
+    return next(skill for skill in BUILTIN_SKILLS if skill.skill_id == skill_id)
+
+
+def _materialize_builtin(registry: Path, skill: BuiltinSkill) -> None:
+    registry.mkdir(parents=True, exist_ok=True)
+    registry.chmod(0o700)
+    directory = registry / skill.skill_id
+    directory.mkdir()
+    for relative, payload in skill.files().items():
+        target = directory / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+
+
 def test_builtin_pack_sync_is_idempotent_and_host_compatible(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     first = sync_builtin_skills(registry)
@@ -43,6 +62,10 @@ def test_builtin_pack_sync_is_idempotent_and_host_compatible(tmp_path: Path) -> 
     assert second.unchanged == len(BUILTIN_SKILLS)
     assert len(definitions) == len(BUILTIN_SKILLS)
     assert all("_" not in d.skill_id for d in definitions)
+    for skill in BUILTIN_SKILLS:
+        text = (registry / skill.skill_id / "SKILL.md").read_text(encoding="utf-8")
+        assert f"name: {json.dumps(skill.skill_id, ensure_ascii=False)}" in text
+        assert f"description: {json.dumps(skill.description, ensure_ascii=False)}" in text
 
 
 def test_builtin_pack_uses_task_hints_for_bounded_composition(tmp_path: Path) -> None:
@@ -66,6 +89,45 @@ def test_builtin_pack_uses_task_hints_for_bounded_composition(tmp_path: Path) ->
     assert {"mobile-application", "secure-by-design"} <= set(
         _ids(resolve_skills(definitions, empty, task_hints=("expo",)))
     )
+
+
+def test_secure_by_design_accompanies_backend_security_task_hints(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+    software_project_stack = DetectedProjectStack(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset({"software-project"}),
+    )
+    unrelated = frozenset({"public-frontend", "mobile-application", "frontend-design"})
+
+    for hint in ("backend-security", "server-auth-review"):
+        selected = resolve_skills(
+            definitions,
+            software_project_stack,
+            task_hints=(hint,),
+        )
+        ids = set(_ids(selected))
+        assert "backend-security" in ids
+        assert "secure-by-design" in ids
+        assert ids.isdisjoint(unrelated)
+        assert "testing-strategy" not in ids
+
+    baseline = set(_ids(resolve_skills(definitions, software_project_stack)))
+    unrecognized = set(
+        _ids(
+            resolve_skills(
+                definitions,
+                software_project_stack,
+                task_hints=("apk-signing",),
+            )
+        )
+    )
+    assert unrecognized == baseline
+    assert "secure-by-design" in unrecognized
+    assert "backend-security" not in unrecognized
 
 
 def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path: Path) -> None:
@@ -318,6 +380,46 @@ def test_builtin_descriptions_state_their_activation_boundary() -> None:
         assert "when" in skill.description.casefold(), skill.skill_id
 
 
+def test_ci_release_is_self_contained_for_github_actions_supply_chain(tmp_path: Path) -> None:
+    body = _builtin_by_id("ci-release").body
+    for needle in (
+        "Preserve repository and organization",
+        "full-length commit SHA",
+        "expected upstream",
+        "GITHUB_TOKEN",
+        "untrusted fork pull-request",
+        "OIDC",
+        "protected environments",
+        "provenance and attestations",
+    ):
+        assert needle in body, needle
+    assert "secure-by-design" not in body
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
+    selected = set(_ids(resolve_skills(definitions, empty, task_hints=("github-actions",))))
+    assert "ci-release" in selected
+    assert "secure-by-design" not in selected
+
+
+def test_observability_requires_bounded_metric_cardinality() -> None:
+    body = _builtin_by_id("observability").body
+    assert "Keep metric labels/attributes bounded." in body
+    assert "user IDs" in body
+    assert "histogram/bucket" in body
+
+
+def test_frontend_design_uses_current_platform_touch_targets() -> None:
+    product = dict(_builtin_by_id("frontend-design").references)["product-interfaces.md"]
+    compact = " ".join(product.split())
+    assert "44 x 44 logical pixels" not in product
+    assert "current accessibility guidance" in compact
+    assert "44x44 pt" in compact
+    assert "48x48 dp" in compact
+    assert "Do not go below the applicable platform/accessibility minimum" in compact
+
+
 def test_builtin_reference_files_are_routed_from_their_entrypoint() -> None:
     for skill in BUILTIN_SKILLS:
         files = skill.files()
@@ -346,6 +448,52 @@ def test_builtin_pack_rejects_reference_paths_outside_flat_reference_root(name: 
         skill.files()
 
 
+@pytest.mark.parametrize(
+    "description",
+    (
+        "Use when the pipeline uses env: production.",
+        "Use when a workflow comment would look like # not-a-comment.",
+        "Use when the host says \"quoted\" and 'single'.",
+        "Use when café naïve 日本語 is in scope.",
+        "Use when the first line stays.\nThe second line is still one YAML scalar.",
+    ),
+)
+def test_builtin_files_quote_yaml_sensitive_frontmatter(tmp_path: Path, description: str) -> None:
+    skill = BuiltinSkill("quoted-skill", description, ("quoted-skill",), "# Quoted\nBody.\n")
+    quoted_name = json.dumps("quoted-skill", ensure_ascii=False)
+    quoted_description = json.dumps(description, ensure_ascii=False)
+    markdown = skill.files()["SKILL.md"].decode()
+    assert f"name: {quoted_name}\n" in markdown
+    description_line = next(
+        line for line in markdown.splitlines() if line.startswith("description:")
+    )
+    assert description_line == f"description: {quoted_description}"
+    registry = tmp_path / "skills"
+    _materialize_builtin(registry, skill)
+    definitions = load_skill_registry(registry)
+    validate_skill_definitions_for_profiles(definitions, tuple(sorted(supported_skill_profiles())))
+    fields = dict(definitions[0].frontmatter_text_fields)
+    assert fields["name"] == "quoted-skill"
+    assert fields["description"] == description.strip()
+
+
+@pytest.mark.parametrize(
+    "description",
+    (
+        "",
+        "   ",
+        "\n",
+        "\n\n",
+        "Use when line\u2028separator appears.",
+        "Use when paragraph\u2029separator appears.",
+    ),
+)
+def test_builtin_files_fail_closed_on_unserializable_description(description: str) -> None:
+    skill = BuiltinSkill("quoted-skill", description, ("quoted-skill",), "# Quoted\nBody.\n")
+    with pytest.raises(BuiltinSkillError, match="description"):
+        skill.files()
+
+
 def test_isolated_runtime_uses_one_explicit_compatible_skill_profile_set(
     tmp_path: Path,
 ) -> None:
@@ -354,14 +502,15 @@ def test_isolated_runtime_uses_one_explicit_compatible_skill_profile_set(
         database,
         environment={"HARNESS_DEV_ROOT": str(tmp_path)},
     ) == ("codex", "cursor")
-    assert active_skill_profiles_for_runtime(
-        database,
-        environment={
-            "HARNESS_DEV_ROOT": str(tmp_path),
-            "HARNESS_DEV_SKILL_PROFILES": "claude-code",
-        },
-    ) == ("claude-code",)
-    with pytest.raises(SkillRuntimeError, match="duplicate-free"):
+    with pytest.raises(SkillRuntimeError, match="unsupported host skill profile"):
+        active_skill_profiles_for_runtime(
+            database,
+            environment={
+                "HARNESS_DEV_ROOT": str(tmp_path),
+                "HARNESS_DEV_SKILL_PROFILES": "claude-code",
+            },
+        )
+    with pytest.raises(SkillRuntimeError, match="unsupported host skill profile"):
         active_skill_profiles_for_runtime(
             database,
             environment={
@@ -375,6 +524,7 @@ def test_builtin_pack_refuses_foreign_collision_without_mutation(tmp_path: Path)
     registry = tmp_path / "skills"
     foreign = registry / "backend-security"
     foreign.mkdir(parents=True)
+    registry.chmod(0o700)
     (foreign / "SKILL.md").write_text("user skill\n")
     (foreign / "harness.yaml").write_text("id: backend-security\n")
     before = {p.name: p.read_bytes() for p in foreign.iterdir()}
@@ -387,9 +537,20 @@ def test_builtin_pack_refuses_foreign_collision_without_mutation(tmp_path: Path)
 def test_builtin_pack_refuses_dangling_symlink_collision(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     registry.mkdir()
+    registry.chmod(0o700)
     (registry / "backend-security").symlink_to(tmp_path / "missing", target_is_directory=True)
     with pytest.raises(BuiltinSkillCollisionError, match="unsafe"):
         sync_builtin_skills(registry)
+
+
+def test_sync_refuses_group_writable_preexisting_registry(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    registry.mkdir()
+    registry.chmod(0o770)
+    with pytest.raises(BuiltinSkillError, match="group/other write"):
+        sync_builtin_skills(registry)
+    assert stat.S_IMODE(registry.stat().st_mode) & 0o022
+    assert list(registry.iterdir()) == []
 
 
 def test_builtin_pack_updates_only_manifest_owned_unmodified_skill(
@@ -398,9 +559,7 @@ def test_builtin_pack_updates_only_manifest_owned_unmodified_skill(
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     original = next(s for s in BUILTIN_SKILLS if s.skill_id == "observability")
-    changed = replace(
-        original, body=original.body + "\n- Prefer bounded cardinality for metric labels.\n"
-    )
+    changed = replace(original, body=original.body + "\n- Unique owned-content update probe.\n")
     monkeypatch.setattr(
         builtin_module,
         "BUILTIN_SKILLS",
@@ -408,7 +567,10 @@ def test_builtin_pack_updates_only_manifest_owned_unmodified_skill(
     )
     result = sync_builtin_skills(registry)
     assert result.updated == 1
-    assert "bounded cardinality" in (registry / "observability" / "SKILL.md").read_text()
+    assert (
+        "Unique owned-content update probe."
+        in (registry / "observability" / "SKILL.md").read_text()
+    )
 
 
 def test_builtin_pack_refuses_update_after_user_modifies_owned_skill(tmp_path: Path) -> None:
@@ -418,3 +580,463 @@ def test_builtin_pack_refuses_update_after_user_modifies_owned_skill(tmp_path: P
     target.write_text(target.read_text() + "\nUser customization.\n")
     with pytest.raises(BuiltinSkillCollisionError):
         sync_builtin_skills(registry)
+
+
+def _retirement_skill(skill_id: str = "retired-example") -> BuiltinSkill:
+    return BuiltinSkill(
+        skill_id,
+        f"Use when testing built-in retirement of {skill_id}.",
+        (skill_id,),
+        f"# {skill_id}\nValid body so the skill would load if left in place.\n",
+    )
+
+
+def _manifest_skill_ids(registry: Path) -> set[str]:
+    payload = json.loads((registry / ".harness-builtin-skills.json").read_text(encoding="utf-8"))
+    skills = payload["skills"]
+    assert isinstance(skills, dict)
+    return set(skills)
+
+
+def _skill_files(target: Path) -> dict[Path, bytes]:
+    return {
+        path.relative_to(target): path.read_bytes() for path in target.rglob("*") if path.is_file()
+    }
+
+
+def _backup_leftovers(registry: Path) -> list[Path]:
+    return sorted(path for path in registry.iterdir() if ".builtin-backup-" in path.name)
+
+
+def _persist_error() -> BuiltinSkillError:
+    return BuiltinSkillError("built-in skill manifest could not be persisted")
+
+
+def test_builtin_pack_removes_unmodified_retired_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    assert (registry / extra.skill_id).is_dir()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    result = sync_builtin_skills(registry)
+    assert result.retired == 1
+    assert result.released == 0
+    assert extra.skill_id not in result.skill_ids
+    assert result.skill_ids == tuple(skill.skill_id for skill in BUILTIN_SKILLS)
+    assert not (registry / extra.skill_id).exists()
+    assert extra.skill_id not in _manifest_skill_ids(registry)
+
+
+def test_builtin_pack_rename_removes_old_and_installs_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    old = _retirement_skill("old-quality-skill")
+    new = _retirement_skill("new-quality-skill")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, old))
+    sync_builtin_skills(registry)
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, new))
+    result = sync_builtin_skills(registry)
+    assert result.installed == 1
+    assert result.retired == 1
+    assert result.released == 0
+    assert result.unchanged == len(BUILTIN_SKILLS)
+    assert old.skill_id not in result.skill_ids
+    assert new.skill_id in result.skill_ids
+    assert not (registry / old.skill_id).exists()
+    assert (registry / new.skill_id).is_dir()
+    owned = _manifest_skill_ids(registry)
+    assert old.skill_id not in owned
+    assert new.skill_id in owned
+
+
+def test_retired_missing_directory_drops_manifest_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    shutil.rmtree(registry / extra.skill_id)
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    result = sync_builtin_skills(registry)
+    assert result.retired == 0
+    assert result.released == 0
+    assert extra.skill_id not in result.skill_ids
+    assert extra.skill_id not in _manifest_skill_ids(registry)
+    assert not (registry / extra.skill_id).exists()
+
+
+def test_modified_retired_skill_is_preserved_and_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    target = registry / extra.skill_id / "SKILL.md"
+    target.write_text(
+        target.read_text(encoding="utf-8") + "User customization.\n",
+        encoding="utf-8",
+    )
+    customized = target.read_bytes()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    result = sync_builtin_skills(registry)
+    assert result.released == 1
+    assert result.retired == 0
+    assert extra.skill_id not in result.skill_ids
+    assert extra.skill_id not in _manifest_skill_ids(registry)
+    assert (registry / extra.skill_id).is_dir()
+    assert target.read_bytes() == customized
+    definitions = load_skill_registry(registry)
+    assert extra.skill_id in {definition.skill_id for definition in definitions}
+
+
+def test_retired_skill_no_longer_loads_after_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    loaded = {definition.skill_id for definition in load_skill_registry(registry)}
+    assert extra.skill_id in loaded
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    sync_builtin_skills(registry)
+    loaded = {definition.skill_id for definition in load_skill_registry(registry)}
+    assert extra.skill_id not in loaded
+
+
+def test_retired_skill_no_longer_projects_after_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    before = load_skill_registry(registry)
+    assert extra.skill_id in _ids(resolve_skills(before, empty, task_hints=extra.task_hints))
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    sync_builtin_skills(registry)
+    after = load_skill_registry(registry)
+    assert extra.skill_id not in {definition.skill_id for definition in after}
+    assert extra.skill_id not in _ids(resolve_skills(after, empty, task_hints=extra.task_hints))
+
+
+def test_retirement_rolls_back_if_manifest_commit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    target = registry / extra.skill_id
+    before_files = _skill_files(target)
+    before_owned = _manifest_skill_ids(registry)
+    before_manifest = (registry / ".harness-builtin-skills.json").read_bytes()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    write_calls = 0
+
+    def fail_write_after_retirement(_path: Path, owned: dict[str, str]) -> None:
+        nonlocal write_calls
+        write_calls += 1
+        assert extra.skill_id not in owned
+        assert not target.exists()
+        raise _persist_error()
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write_after_retirement)
+    with pytest.raises(BuiltinSkillError, match="could not be persisted"):
+        sync_builtin_skills(registry)
+    assert write_calls == 1
+    assert target.is_dir()
+    assert _skill_files(target) == before_files
+    assert _manifest_skill_ids(registry) == before_owned
+    assert (registry / ".harness-builtin-skills.json").read_bytes() == before_manifest
+    restored_ids = {definition.skill_id for definition in load_skill_registry(registry)}
+    assert extra.skill_id in restored_ids
+    assert _backup_leftovers(registry) == []
+
+
+def test_manifest_write_failure_after_one_replacement_restores_old_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    skill = _retirement_skill("owned-quality")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (skill,))
+    sync_builtin_skills(registry)
+    target = registry / skill.skill_id
+    before_files = _skill_files(target)
+    before_manifest = (registry / ".harness-builtin-skills.json").read_bytes()
+    updated = replace(skill, body=skill.body + "Updated owned quality body.\n")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (updated,))
+    write_calls = 0
+
+    def fail_write_after_replacement(_path: Path, owned: dict[str, str]) -> None:
+        nonlocal write_calls
+        write_calls += 1
+        assert skill.skill_id in owned
+        assert "Updated owned quality body." in (target / "SKILL.md").read_text(encoding="utf-8")
+        raise _persist_error()
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write_after_replacement)
+    with pytest.raises(BuiltinSkillError, match="could not be persisted"):
+        sync_builtin_skills(registry)
+    assert write_calls == 1
+    assert _skill_files(target) == before_files
+    assert (registry / ".harness-builtin-skills.json").read_bytes() == before_manifest
+    assert _backup_leftovers(registry) == []
+
+
+def test_manifest_write_failure_after_multiple_replacements_restores_all_old_states(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    first = _retirement_skill("first-quality")
+    second = _retirement_skill("second-quality")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (first, second))
+    sync_builtin_skills(registry)
+    first_target = registry / first.skill_id
+    second_target = registry / second.skill_id
+    before = {
+        first.skill_id: _skill_files(first_target),
+        second.skill_id: _skill_files(second_target),
+    }
+    before_manifest = (registry / ".harness-builtin-skills.json").read_bytes()
+    monkeypatch.setattr(
+        builtin_module,
+        "BUILTIN_SKILLS",
+        (
+            replace(first, body=first.body + "First replacement body.\n"),
+            replace(second, body=second.body + "Second replacement body.\n"),
+        ),
+    )
+
+    def fail_write_after_both(_path: Path, owned: dict[str, str]) -> None:
+        assert set(owned) == {first.skill_id, second.skill_id}
+        assert "First replacement body." in (first_target / "SKILL.md").read_text(encoding="utf-8")
+        assert "Second replacement body." in (second_target / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        raise _persist_error()
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write_after_both)
+    with pytest.raises(BuiltinSkillError, match="could not be persisted"):
+        sync_builtin_skills(registry)
+    assert _skill_files(first_target) == before[first.skill_id]
+    assert _skill_files(second_target) == before[second.skill_id]
+    assert (registry / ".harness-builtin-skills.json").read_bytes() == before_manifest
+    assert _backup_leftovers(registry) == []
+
+
+def test_rollback_target_removal_failure_is_explicit_recovery_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    skill = _retirement_skill("removal-quality")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (skill,))
+    sync_builtin_skills(registry)
+    target = registry / skill.skill_id
+    monkeypatch.setattr(
+        builtin_module,
+        "BUILTIN_SKILLS",
+        (replace(skill, body=skill.body + "New removal body.\n"),),
+    )
+    real_remove = builtin_module._remove_path
+    write_failed = False
+
+    def fail_write(_path: Path, _owned: dict[str, str]) -> None:
+        nonlocal write_failed
+        write_failed = True
+        raise _persist_error()
+
+    def fail_remove(path: Path) -> None:
+        if write_failed and path == target:
+            raise OSError("cannot remove replacement target")
+        real_remove(path)
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write)
+    monkeypatch.setattr(builtin_module, "_remove_path", fail_remove)
+    with pytest.raises(
+        BuiltinSkillError, match="prior registry state could not be restored"
+    ) as caught:
+        sync_builtin_skills(registry)
+    assert write_failed
+    outer = str(caught.value)
+    assert "could not be persisted" not in outer
+    assert "preserved at" in outer
+    leftovers = _backup_leftovers(registry)
+    assert len(leftovers) == 1
+    assert leftovers[0].is_dir()
+    assert str(leftovers[0]) in outer
+    cause = caught.value.__cause__
+    assert cause is not None
+    assert "preserved at" in str(cause)
+    assert str(leftovers[0]) in str(cause)
+    assert "New removal body." in (target / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_rollback_backup_restore_failure_preserves_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    skill = _retirement_skill("restore-quality")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (skill,))
+    sync_builtin_skills(registry)
+    target = registry / skill.skill_id
+    before_files = _skill_files(target)
+    monkeypatch.setattr(
+        builtin_module,
+        "BUILTIN_SKILLS",
+        (replace(skill, body=skill.body + "New restore body.\n"),),
+    )
+    real_replace = os.replace
+    write_failed = False
+
+    def fail_write(_path: Path, _owned: dict[str, str]) -> None:
+        nonlocal write_failed
+        write_failed = True
+        raise _persist_error()
+
+    def fail_restore(source: Path, dest: Path) -> None:
+        if write_failed and dest == target:
+            raise OSError("cannot restore backup")
+        real_replace(source, dest)
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write)
+    monkeypatch.setattr("harness.builtin_skills.os.replace", fail_restore)
+    with pytest.raises(
+        BuiltinSkillError, match="prior registry state could not be restored"
+    ) as caught:
+        sync_builtin_skills(registry)
+    assert write_failed
+    outer = str(caught.value)
+    assert "could not be persisted" not in outer
+    assert "preserved at" in outer
+    leftovers = _backup_leftovers(registry)
+    assert len(leftovers) == 1
+    assert leftovers[0].is_dir()
+    assert str(leftovers[0]) in outer
+    cause = caught.value.__cause__
+    assert cause is not None
+    assert "preserved at" in str(cause)
+    assert str(leftovers[0]) in str(cause)
+    assert _skill_files(leftovers[0]) == before_files
+    assert not target.exists()
+
+
+def test_rollback_continues_after_one_item_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    first = _retirement_skill("first-rollback")
+    second = _retirement_skill("second-rollback")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (first, second))
+    sync_builtin_skills(registry)
+    first_target = registry / first.skill_id
+    second_target = registry / second.skill_id
+    before_first = _skill_files(first_target)
+    monkeypatch.setattr(
+        builtin_module,
+        "BUILTIN_SKILLS",
+        (
+            replace(first, body=first.body + "First rollback body.\n"),
+            replace(second, body=second.body + "Second rollback body.\n"),
+        ),
+    )
+    real_exists = builtin_module._path_exists
+    write_failed = False
+    inspected_after_write: list[Path] = []
+
+    def fail_write(_path: Path, _owned: dict[str, str]) -> None:
+        nonlocal write_failed
+        write_failed = True
+        assert "First rollback body." in (first_target / "SKILL.md").read_text(encoding="utf-8")
+        assert "Second rollback body." in (second_target / "SKILL.md").read_text(encoding="utf-8")
+        raise _persist_error()
+
+    def fail_second_inspection(path: Path) -> bool:
+        if write_failed:
+            inspected_after_write.append(path)
+            if path == second_target:
+                raise BuiltinSkillError(f"skill registry entry cannot be inspected: {path.name}")
+        return real_exists(path)
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write)
+    monkeypatch.setattr(builtin_module, "_path_exists", fail_second_inspection)
+    with pytest.raises(
+        BuiltinSkillError, match="prior registry state could not be restored"
+    ) as caught:
+        sync_builtin_skills(registry)
+    assert write_failed
+    assert second_target in inspected_after_write
+    assert first_target in inspected_after_write
+    assert inspected_after_write.index(second_target) < inspected_after_write.index(first_target)
+    assert _skill_files(first_target) == before_first
+    assert "Second rollback body." in (second_target / "SKILL.md").read_text(encoding="utf-8")
+    leftovers = _backup_leftovers(registry)
+    assert len(leftovers) == 1
+    assert leftovers[0].name.startswith(f".{second.skill_id}.builtin-backup-")
+    outer = str(caught.value)
+    assert "could not be persisted" not in outer
+    assert "preserved at" in outer
+    assert str(leftovers[0]) in outer
+
+
+def test_rename_rolls_back_if_manifest_commit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    old = _retirement_skill("old-quality-skill")
+    new = _retirement_skill("new-quality-skill")
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (old,))
+    sync_builtin_skills(registry)
+    old_target = registry / old.skill_id
+    new_target = registry / new.skill_id
+    before_files = _skill_files(old_target)
+    before_manifest = (registry / ".harness-builtin-skills.json").read_bytes()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (new,))
+    write_calls = 0
+
+    def fail_write_after_rename(_path: Path, owned: dict[str, str]) -> None:
+        nonlocal write_calls
+        write_calls += 1
+        assert old.skill_id not in owned
+        assert new.skill_id in owned
+        assert not old_target.exists()
+        assert new_target.is_dir()
+        raise _persist_error()
+
+    monkeypatch.setattr(builtin_module, "_write_manifest", fail_write_after_rename)
+    with pytest.raises(BuiltinSkillError, match="could not be persisted"):
+        sync_builtin_skills(registry)
+    assert write_calls == 1
+    assert old_target.is_dir()
+    assert _skill_files(old_target) == before_files
+    assert not new_target.exists()
+    assert (registry / ".harness-builtin-skills.json").read_bytes() == before_manifest
+    assert old.skill_id in _manifest_skill_ids(registry)
+    assert new.skill_id not in _manifest_skill_ids(registry)
+    assert _backup_leftovers(registry) == []
+
+
+def test_retired_unsafe_symlink_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "skills"
+    extra = _retirement_skill()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
+    sync_builtin_skills(registry)
+    target = registry / extra.skill_id
+    shutil.rmtree(target)
+    target.symlink_to(tmp_path / "missing", target_is_directory=True)
+    before_manifest = (registry / ".harness-builtin-skills.json").read_bytes()
+    monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
+    with pytest.raises(BuiltinSkillCollisionError, match="unsafe"):
+        sync_builtin_skills(registry)
+    assert target.is_symlink()
+    assert (registry / ".harness-builtin-skills.json").read_bytes() == before_manifest
+    assert extra.skill_id in _manifest_skill_ids(registry)

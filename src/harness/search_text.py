@@ -165,6 +165,11 @@ def identifier_expansion(value: str, *, maximum_bytes: int) -> str:
     return " ".join(expanded)
 
 
+def query_term_prefixes(term: str) -> tuple[str, ...]:
+    """Return the exact term plus the one optional inflection prefix used by lexical matching."""
+    return _query_prefixes(term)
+
+
 def matching_term_count(terms: tuple[str, ...], *values: str) -> int:
     """Count query terms represented by exact or FTS-equivalent prefix tokens."""
     candidates = frozenset(token for value in values for token in identifier_tokens(value))

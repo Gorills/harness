@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from time import monotonic
 
 from harness.host_adapters import (
     HostIntegrationError,
@@ -36,6 +37,8 @@ _ISOLATED_DEV_SERVER_NAME = "harness-dev"
 _WORKSPACE_FOLDER = "${workspaceFolder}"
 _ISOLATED_DEV_COMMAND = f"{_WORKSPACE_FOLDER}/scripts/dev"
 _ISOLATED_DEV_ARGS = ["harness", "mcp"]
+_DOGFOOD_COMMAND = f"{_WORKSPACE_FOLDER}/scripts/dogfood"
+_DOGFOOD_ARGS = ["mcp"]
 _OWNER_MARKER = ".harness-mcp-owner.json"
 _OWNER_VERSION = 1
 _EXCLUDE_BEGIN = "# BEGIN HARNESS CURSOR MCP"
@@ -285,12 +288,14 @@ class CursorAdapter:
                 detail="Cursor CLI was not found on PATH",
                 enable_command=command,
             )
+        timeout = _AGENT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        deadline = None if timeout_seconds is None else monotonic() + max(timeout, 0.0)
         listed = _run_cursor_agent(
             agent,
             ["mcp", "list-tools", _SERVER_NAME],
             cwd=root,
             environment=environment,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout,
         )
         agent_tools = _parse_cursor_mcp_tools(listed.stdout)
         if listed.returncode == 0 and agent_tools == CURSOR_PROJECT_MCP_TOOLS:
@@ -300,11 +305,16 @@ class CursorAdapter:
                 tools=agent_tools,
                 detail="project harness exposes the five Harness tools",
             )
-        owned_tools = _probe_owned_project_mcp_tools(
-            root,
-            python_executable=self.python_executable,
-            environment=environment,
-            timeout_seconds=timeout_seconds,
+        remaining = None if deadline is None else deadline - monotonic()
+        owned_tools = (
+            _probe_owned_project_mcp_tools(
+                root,
+                python_executable=self.python_executable,
+                environment=environment,
+                timeout_seconds=remaining,
+            )
+            if remaining is None or remaining > 0
+            else ()
         )
         if owned_tools == CURSOR_PROJECT_MCP_TOOLS:
             return CursorProjectRuntimeResult(
@@ -880,7 +890,8 @@ def is_isolated_development_overlay_entry(value: object) -> bool:
     """Return True for the checkout overlay that launches isolated Harness MCP.
 
     Extra JSON keys are ignored so a host round-trip cannot drop isolation. The
-    launch must remain ``scripts/dev harness mcp`` with
+    launch must remain either the legacy ``scripts/dev harness mcp`` form or the
+    source-checkout ``scripts/dogfood mcp`` router with
     ``HARNESS_WORKSPACE_ROOT=${workspaceFolder}`` and without ``HARNESS_HOST_PROFILE``.
     The Cursor server name may be ``harness-dev`` or the previous ``harness``.
     """
@@ -893,8 +904,13 @@ def is_isolated_development_overlay_entry(value: object) -> bool:
     if not isinstance(env, dict):
         return False
     return (
-        value.get("command") == _ISOLATED_DEV_COMMAND
-        and value.get("args") == _ISOLATED_DEV_ARGS
+        (
+            (
+                value.get("command") == _ISOLATED_DEV_COMMAND
+                and value.get("args") == _ISOLATED_DEV_ARGS
+            )
+            or (value.get("command") == _DOGFOOD_COMMAND and value.get("args") == _DOGFOOD_ARGS)
+        )
         and env.get(_WORKSPACE_ROOT_ENV) == _WORKSPACE_FOLDER
         and env.get(_HOST_PROFILE_ENV) is None
     )
@@ -941,8 +957,8 @@ def production_mcp_isolated_checkout_root(
     that resolves to the overlay. ``WORKSPACE_FOLDER_PATHS`` is not an identity
     alternative and cannot keep tools attached to another window. Missing or
     literal ``${workspaceFolder}`` is the missing-root path, not overlay refuse.
-    Claude Code still consults ``CLAUDE_PROJECT_DIR``, then process cwd when that
-    hint is absent or does not resolve to an existing path. Cwd is never Workspace
+    Claude Code leftovers still consult ``CLAUDE_PROJECT_DIR`` so a retired host
+    process against this checkout lists no tools. Cwd is never Workspace
     identity.
     """
     values = os.environ if environment is None else environment

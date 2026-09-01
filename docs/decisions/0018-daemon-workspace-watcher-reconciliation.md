@@ -76,21 +76,38 @@ observable metadata changes.
 
 The watcher now uses two levels of hints:
 
-1. Every ordinary poll computes a subprocess-free metadata token from known directory metadata,
-   bounded Git control metadata (`HEAD`, index, refs, packed refs, and local exclude state), and one
-   rotating shard of at most 128 indexed path identities. It does not hash source contents and does
-   not traverse Git objects or known generated roots. New/deleted paths change their parent
+1. Every ordinary poll computes a subprocess-free metadata token from one rotating shard of at
+   most 128 known directory identities, bounded Git control metadata (`HEAD`, index, refs, packed
+   refs, and local exclude state), and one rotating shard of at most 128 indexed path identities.
+   It does not hash source contents, does not restat the full directory inventory, and
+   does not traverse Git objects or known generated roots. One ordinary poll samples at most
+   two established Workspaces for those idle hints and rotates through the registry, so idle
+   cost stays bounded as registered Workspace count grows. Unreadable directories (EACCES/EPERM)
+   are omitted from descent rather than aborting the hint; a single permission-denied path must not
+   force a full-scan retry loop. New/deleted paths change their parent
    directory metadata; an existing-file rewrite is detected within one shard rotation.
 2. Only a changed/unknown metadata token runs the existing Git status/HEAD confirmation. If HEAD
    is unchanged and the union of previous/current dirty paths is bounded to 256 paths, the watcher
    reconciles those paths through the same Git ignore/default-exclude, stable-read, transactional
    index/FTS, and Knowledge-staleness rules. `.harnessignore` changes always force a full scan.
+   If both the previous and current Git snapshots stay above that 256-path bound with HEAD
+   unchanged, the watcher does not immediately full-scan again; it waits for the five-minute
+   periodic safety pass. Persistent oversized dirty trees (untracked media, scratch) must not
+   hash the whole Workspace on every metadata blip.
 
 Initial/restart reconciliation, manual invalidation, Workspace relocation, Git HEAD changes,
-unknown/oversized path sets, sampling failures, and the five-minute periodic safety pass remain
-full authoritative reconciliations. A post-reconcile metadata and Git sample retains the existing
-changed-during-scan retry rule. Metadata can still miss deliberately restored inode timestamps, so
-the periodic full pass remains a correctness requirement rather than an optional maintenance job.
+unknown/oversized path sets, sampling failures, and a Git-confirmation pass every five minutes
+remain the safety net. The five-minute pass no longer force-hashes every indexed file when Git
+status is unchanged; an oversized dirty tree is full-scanned at most once per five-minute window
+unless HEAD moved. A post-reconcile metadata and Git sample retains the existing
+changed-during-scan retry rule, except a still-oversized dirty set with unchanged HEAD does not
+immediately queue another full scan. The metadata baseline is reset before that Git sample so a
+create/modify/delete that lands during the restat cannot be stored as the idle baseline against a
+stale Git snapshot and then treated as quiet until the periodic pass. When the post-scan Git token
+differs from the token the scan used, the retry keeps that pre-scan Git snapshot so the next
+confirmation still sees a dirty delta instead of confirming the already-mutated tree as quiet.
+Metadata can still miss deliberately restored inode timestamps, so a later Git HEAD move or the next
+allowed full pass remains required for those rare cases.
 
 The structural performance gate therefore changes the idle budget from two Git subprocesses per
 poll to zero. It does not impose a wall-clock threshold on shared CI hardware.

@@ -6,6 +6,9 @@
 - **Builds on:** [ADR-0002](0002-host-integration-and-workspace-resolution.md), [ADR-0022](0022-linux-claude-installation-lifecycle.md), [ADR-0024](0024-linux-cursor-multi-host-lifecycle.md), [ADR-0029](0029-quality-discipline-verification-and-response-economy.md)
 - **Amends:** ADR-0024's decision that isolated `scan` skips skill reconciliation; production
   host-configuration isolation is unchanged.
+- **Host-retirement amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code.
+  Durable intent and isolated development default to Codex+Cursor only. Claude-only projection and
+  the three-host incompatibility in Decision 5 are historical.
 
 ## Context
 

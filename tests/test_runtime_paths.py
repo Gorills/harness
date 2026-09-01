@@ -7,11 +7,15 @@ import pytest
 from harness.runtime_paths import (
     DASHBOARD_ISOLATED_PORT,
     DASHBOARD_PORT,
+    MCP_HTTP_ISOLATED_PORT,
+    MCP_HTTP_PORT,
     InsecureStateDirectoryError,
+    RuntimePathError,
     RuntimePaths,
     dashboard_listen_port,
     default_runtime_paths,
     ensure_private_state_directory,
+    mcp_http_listen_port,
 )
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX runtime-path slice")
@@ -128,3 +132,42 @@ def test_dashboard_listen_port_uses_fixed_canonical_and_isolated_ports() -> None
         )
         == 0
     )
+
+
+def test_mcp_http_listen_port_uses_distinct_canonical_and_isolated_ports() -> None:
+    environment = {
+        "XDG_STATE_HOME": "/state/alice",
+        "XDG_RUNTIME_DIR": "/run/user/1001",
+    }
+    canonical = Path("/run/user/1001/harness/harness.sock")
+
+    assert mcp_http_listen_port(canonical, environment=environment) == MCP_HTTP_PORT
+    assert (
+        mcp_http_listen_port(
+            canonical,
+            environment={**environment, "HARNESS_DEV_ROOT": "/checkout"},
+        )
+        == MCP_HTTP_ISOLATED_PORT
+    )
+    assert mcp_http_listen_port(Path("/tmp/override/harness.sock"), environment=environment) == 0
+
+
+def test_acceptance_ports_override_canonical_ports() -> None:
+    environment = {
+        "XDG_STATE_HOME": "/state/alice",
+        "XDG_RUNTIME_DIR": "/run/user/1001",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT": "28101",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT": "28102",
+    }
+    canonical = Path("/run/user/1001/harness/harness.sock")
+
+    assert dashboard_listen_port(canonical, environment=environment) == 28101
+    assert mcp_http_listen_port(canonical, environment=environment) == 28102
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "not-a-port"])
+def test_acceptance_port_override_rejects_invalid_values(value: str) -> None:
+    environment = {"HARNESS_ACCEPTANCE_MCP_HTTP_PORT": value}
+
+    with pytest.raises(RuntimePathError, match="HARNESS_ACCEPTANCE_MCP_HTTP_PORT"):
+        mcp_http_listen_port(Path("/tmp/harness.sock"), environment=environment)

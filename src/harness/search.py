@@ -4,13 +4,14 @@ import sqlite3
 from dataclasses import dataclass
 from enum import StrEnum
 
-from harness.index import IndexedFileKind, list_indexed_files
+from harness.index import IndexedFileKind, IndexingError
 from harness.registry import get_workspace
 from harness.search_text import (
     analyze_search_query,
     is_document_path,
     is_generated_text_output_path,
     matching_term_count,
+    query_term_prefixes,
 )
 
 DEFAULT_SEARCH_LIMIT = 10
@@ -68,28 +69,39 @@ def search_indexed_paths(
     query_terms = analyze_search_query(normalized_query).terms
     ranked: list[tuple[int, str, IndexedPathSearchResult]] = []
 
-    for record in list_indexed_files(connection, workspace_id):
-        is_document = is_document_path(record.relative_path)
-        if scope is not IndexedPathSearchScope.ALL and is_generated_text_output_path(
-            record.relative_path
-        ):
+    for relative_path, kind_value, size_bytes in _iter_indexed_path_candidates(
+        connection,
+        workspace_id,
+        query_path,
+        query_terms,
+    ):
+        if not isinstance(relative_path, str) or not isinstance(kind_value, str):
+            raise IndexingError("indexed file row has invalid persisted types")
+        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes < 0:
+            raise IndexingError("indexed file row has invalid persisted types")
+        try:
+            kind = IndexedFileKind(kind_value)
+        except ValueError as exc:
+            raise IndexingError(f"indexed file row has unsupported kind: {kind_value!r}") from exc
+        is_document = is_document_path(relative_path)
+        if scope is not IndexedPathSearchScope.ALL and is_generated_text_output_path(relative_path):
             continue
         if scope is IndexedPathSearchScope.DOCS and not is_document:
             continue
         if scope is IndexedPathSearchScope.CODE and is_document:
             continue
-        match = _match_path(record.relative_path, query_path, query_terms)
+        match = _match_path(relative_path, query_path, query_terms)
         if match is None:
             continue
         rank, match_kind = match
         ranked.append(
             (
                 rank,
-                record.relative_path.casefold(),
+                relative_path.casefold(),
                 IndexedPathSearchResult(
-                    relative_path=record.relative_path,
-                    kind=record.kind,
-                    size_bytes=record.size_bytes,
+                    relative_path=relative_path,
+                    kind=kind,
+                    size_bytes=size_bytes,
                     match_kind=match_kind,
                 ),
             )
@@ -97,6 +109,45 @@ def search_indexed_paths(
 
     ranked.sort(key=lambda item: (item[0], item[1], item[2].relative_path))
     return tuple(item[2] for item in ranked[:limit])
+
+
+def _iter_indexed_path_candidates(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query_path: str,
+    query_terms: tuple[str, ...],
+) -> sqlite3.Cursor:
+    needles = _path_candidate_needles(query_path, query_terms)
+    clauses = ["LOWER(relative_path) = ?"]
+    params: list[object] = [workspace_id, query_path]
+    for needle in needles:
+        clauses.append("LOWER(relative_path) LIKE ? ESCAPE '!'")
+        params.append(_like_contains(needle))
+    return connection.execute(
+        f"""
+        SELECT relative_path, kind, size_bytes
+        FROM indexed_files
+        WHERE workspace_id = ?
+          AND ({" OR ".join(clauses)})
+        """,
+        params,
+    )
+
+
+def _path_candidate_needles(query_path: str, query_terms: tuple[str, ...]) -> tuple[str, ...]:
+    needles: list[str] = [query_path]
+    seen = {query_path}
+    for term in query_terms:
+        for prefix in query_term_prefixes(term):
+            if prefix and prefix not in seen:
+                seen.add(prefix)
+                needles.append(prefix)
+    return tuple(needles)
+
+
+def _like_contains(value: str) -> str:
+    escaped = value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    return f"%{escaped}%"
 
 
 def _validate_query(query: str) -> str:

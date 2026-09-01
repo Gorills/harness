@@ -18,8 +18,8 @@ def test_russian_plural_forms() -> None:
 
 
 def test_count_labels() -> None:
-    assert workspace_count_label(1) == "1 рабочая копия"
-    assert workspace_count_label(3) == "3 рабочие копии"
-    assert workspace_count_label(12) == "12 рабочих копий"
+    assert workspace_count_label(1) == "1 папка"
+    assert workspace_count_label(3) == "3 папки"
+    assert workspace_count_label(12) == "12 папок"
     assert event_count_label(1) == "1 событие"
     assert omitted_events_label(2) == "Ещё 2 события скрыты"

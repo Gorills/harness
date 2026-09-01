@@ -4,6 +4,7 @@
 - **Date:** 2026-08-28
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0011](0011-task-persistence-and-revision-cas.md), [ADR-0019](0019-dashboard-human-review-loop.md), [ADR-0020](0020-dashboard-drilldown-realtime-design.md), [ADR-0021](0021-project-intelligence-retrieval.md)
+- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md)
 
 ## Context
 
@@ -24,7 +25,7 @@ Add an explicit `task_reopen` operator operation. It is valid only for `complete
 
 Expose these operations only through the human dashboard in this slice; do not add MCP tools or daemon IPC methods. Task detail shows the Jira link, operator status, comments, and controls. Project/Workspace overview cards show the current operator marker and a direct Jira link. All POSTs retain the dashboard's existing capability path, same-origin/Host admission, bounded form parsing, and rendered revision token.
 
-Extend the rebuildable Task FTS index with Jira URL, operator status (including Russian display terms), operator comments, baseline branch, and checkpoint branch. Workspace dashboard search combines its existing bounded indexed-path results with Project-scoped Task hits and links those hits to Task detail. Authoritative Task/event/checkpoint/baseline rows remain the source of truth; FTS remains derived candidate data.
+Extend the rebuildable Task FTS index with Jira URL, operator status (including Russian display terms), operator comments, baseline branch, and checkpoint branch. Workspace dashboard search combines its existing bounded indexed-path results with Project-scoped Task hits and links those hits to Task detail. The home dashboard searches Task-history FTS across every registered Project on the daemon. Authoritative Task/event/checkpoint/baseline rows remain the source of truth; FTS remains derived candidate data.
 
 ## Consequences
 
@@ -45,4 +46,5 @@ Automated tests must prove:
 - reopen keeps the same Task ID, rejects non-terminal Tasks, and cannot violate the one-working-Task invariant;
 - Task search finds title/checkpoint history plus Git branch, Jira key/URL, operator comments, and Russian delivery-marker text;
 - dashboard Task pages escape persisted text, show Jira/status/history, and submit bounded same-origin CAS actions;
-- workspace search returns bounded linked Task hits without raw source or unrelated Project data.
+- workspace search returns bounded linked Task hits without raw source or unrelated Project data;
+- home dashboard Task search finds Tasks across registered Projects without raw source.

@@ -16,6 +16,7 @@ from mcp.client.stdio import stdio_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "0.1.0.dev0"
+DECLARED_MCP_REQUIREMENT = "mcp==2.0.0"
 
 
 def _run(
@@ -43,6 +44,23 @@ def _venv_scripts_dir(venv: Path) -> Path:
     return venv / ("Scripts" if os.name == "nt" else "bin")
 
 
+def _install_wheel(uv: str, python: Path, wheel: Path, workspace: Path) -> None:
+    """Install the built wheel, then its declared MCP runtime dependency.
+
+    ``--no-deps`` keeps undeclared packages out of the smoke venv. ADR-0037
+    starts daemon-owned Streamable HTTP during ``harnessd serve``, so the
+    pinned MCP SDK (and its uvicorn/starlette graph) must still be present.
+    """
+    _run(
+        (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
+        cwd=workspace,
+    )
+    _run(
+        (uv, "pip", "install", "--python", str(python), DECLARED_MCP_REQUIREMENT),
+        cwd=workspace,
+    )
+
+
 def _isolated_wheel_env() -> dict[str, str]:
     """Copy the process environment without the source-checkout overlay identity."""
     values = os.environ.copy()
@@ -52,6 +70,8 @@ def _isolated_wheel_env() -> dict[str, str]:
         "HARNESS_SKILL_REGISTRY",
         "HARNESS_DEV_SAVED_XDG_STATE_HOME",
         "HARNESS_DEV_SAVED_XDG_RUNTIME_DIR",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT",
     ):
         values.pop(key, None)
     return values
@@ -103,20 +123,32 @@ def _require_cursor_enabled(state_path: Path, *workspaces: Path) -> None:
 
 
 def _require_codex_config(
-    path: Path, python: Path, workspace: Path, *, hidden: bool = False
+    path: Path, _python: Path, workspace: Path, *, hidden: bool = False
 ) -> None:
     if not path.is_file():
         raise RuntimeError(f"installed Codex project config is missing: {path}")
     config = tomllib.loads(path.read_text(encoding="utf-8"))
     value = config["mcp_servers"]["harness"]
     expected_root = str(workspace.resolve())
-    if value.get("command") != str(python.absolute()):
-        raise RuntimeError(f"installed Codex config has stale Python: {path}")
-    if value.get("cwd") != expected_root or value.get("env") != {
-        "HARNESS_HOST_PROFILE": "codex",
-        "HARNESS_WORKSPACE_ROOT": expected_root,
-    }:
+    url = value.get("url")
+    if (
+        not isinstance(url, str)
+        or not url.startswith("http://127.0.0.1:")
+        or not url.endswith("/mcp")
+    ):
+        raise RuntimeError(f"installed Codex config has unexpected URL: {path}")
+    if "command" in value or "cwd" in value or "env" in value:
+        raise RuntimeError(f"installed Codex config still uses stdio: {path}")
+    headers = value.get("http_headers")
+    if not isinstance(headers, dict):
+        raise RuntimeError(f"installed Codex config is missing HTTP headers: {path}")
+    if headers.get("X-Harness-Workspace-Root") != expected_root:
         raise RuntimeError(f"installed Codex config has wrong Workspace identity: {path}")
+    authorization = headers.get("Authorization")
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        raise RuntimeError(f"installed Codex config is missing bearer token: {path}")
+    if value.get("required") is not True:
+        raise RuntimeError(f"installed Codex config is not required: {path}")
     instructions = config.get("developer_instructions")
     if not isinstance(instructions, str) or "project_status" not in instructions:
         raise RuntimeError(f"installed Codex config has no bootstrap instructions: {path}")
@@ -155,7 +187,7 @@ async def _cross_host_mcp_async(
     parameters = StdioServerParameters(
         command=str(harness),
         args=["mcp"],
-        env=host_env("claude-code", repo_a),
+        env=host_env("cursor", repo_a),
         cwd=str(repo_a),
     )
     async with Client(stdio_client(parameters)) as client:
@@ -172,11 +204,11 @@ async def _cross_host_mcp_async(
             raise RuntimeError(f"installed MCP five-tool surface changed: {names!r}")
         status = await client.call_tool("project_status")
         if status.is_error or status.structured_content is None:
-            raise RuntimeError("installed Claude-profile project_status failed")
+            raise RuntimeError("installed Cursor-profile project_status failed")
         workspace_a = status.structured_content["workspace_id"]
         started = await client.call_tool("task_start", {"title": "Wheel cross-host continuity"})
         if started.is_error or started.structured_content is None:
-            raise RuntimeError("installed Claude-profile task_start failed")
+            raise RuntimeError("installed Cursor-profile task_start failed")
         task_id = started.structured_content["task_id"]
         checkpoint = await client.call_tool(
             "task_checkpoint",
@@ -196,7 +228,7 @@ async def _cross_host_mcp_async(
             },
         )
         if checkpoint.is_error:
-            raise RuntimeError("installed Claude-profile task_checkpoint failed")
+            raise RuntimeError("installed Cursor-profile task_checkpoint failed")
 
     parameters = StdioServerParameters(
         command=str(harness),
@@ -212,7 +244,7 @@ async def _cross_host_mcp_async(
             raise RuntimeError("Codex did not resolve repo A by exact configured root")
         current = status.structured_content["current_task"]
         if current is None or current["task_id"] != task_id:
-            raise RuntimeError("Codex did not continue the Claude-started Task")
+            raise RuntimeError("Codex did not continue the Cursor-started Task")
 
     parameters = StdioServerParameters(
         command=str(harness),
@@ -228,7 +260,7 @@ async def _cross_host_mcp_async(
             raise RuntimeError("Cursor did not resolve repo A by exact configured root")
         current = status.structured_content["current_task"]
         if current is None or current["task_id"] != task_id:
-            raise RuntimeError("Cursor did not continue the Claude-started Task")
+            raise RuntimeError("Cursor did not continue the Cursor-started Task")
         knowledge = await client.call_tool(
             "project_search",
             {"query": "wheel host continuity", "scope": "knowledge", "limit": 5},
@@ -275,16 +307,16 @@ async def _cross_host_mcp_async(
     parameters = StdioServerParameters(
         command=str(harness),
         args=["mcp"],
-        env=host_env("claude-code", repo_a),
+        env=host_env("cursor", repo_a),
         cwd=str(repo_b),
     )
     async with Client(stdio_client(parameters)) as client:
         status = await client.call_tool("project_status")
         if status.is_error or status.structured_content is None:
-            raise RuntimeError("installed Claude return project_status failed")
+            raise RuntimeError("installed Cursor return project_status failed")
         current = status.structured_content["current_task"]
         if current is None or current["task_id"] != task_id:
-            raise RuntimeError("Task continuity failed after Cursor -> Claude switch")
+            raise RuntimeError("Task continuity failed after Codex -> Cursor return")
 
 
 def _cross_host_mcp(
@@ -338,7 +370,7 @@ def main() -> int:
             if len(metadata_names) != 1:
                 raise RuntimeError("wheel must contain exactly one dist-info/METADATA file")
             metadata = archive.read(metadata_names[0]).decode("utf-8")
-        if "Requires-Dist: mcp==2.0.0" not in metadata:
+        if f"Requires-Dist: {DECLARED_MCP_REQUIREMENT}" not in metadata:
             raise RuntimeError(
                 "wheel metadata does not pin the official MCP SDK runtime dependency"
             )
@@ -346,12 +378,18 @@ def main() -> int:
         _run((uv, "venv", "--python", "3.13", "--no-project", str(venv)), cwd=workspace)
         scripts_dir = _venv_scripts_dir(venv)
         python = scripts_dir / ("python.exe" if os.name == "nt" else "python")
-        _run(
-            (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
-            cwd=workspace,
-        )
+        _install_wheel(uv, python, wheel, workspace)
 
         isolated_env = _isolated_wheel_env()
+        _run(
+            (
+                str(python),
+                "-c",
+                "import mcp, uvicorn; from harness.mcp_http_server import MCPHTTPServerManager",
+            ),
+            cwd=workspace,
+            env=isolated_env,
+        )
         suffix = ".exe" if os.name == "nt" else ""
         for name in ("harness", "harnessd"):
             executable = scripts_dir / f"{name}{suffix}"
@@ -455,31 +493,34 @@ def main() -> int:
         if doctor_state.exists() or doctor_runtime.exists() or (doctor_home / ".harness").exists():
             raise RuntimeError("installed clean-machine doctor mutated canonical Harness state")
 
-        claude_project = workspace / "claude-project"
-        claude_project.mkdir()
-        host_probe = _run(
+        leftover_claude_project = workspace / "leftover-claude-project"
+        leftover_claude_project.mkdir()
+        leftover_probe = _run(
             (
                 str(python),
                 "-c",
                 (
-                    "from harness.host_adapters import workspace_hints_from_environment; "
-                    "h=workspace_hints_from_environment(environment={"
+                    "from harness.host_adapters import "
+                    "HostIntegrationError, workspace_hints_from_environment\n"
+                    "try:\n"
+                    "    workspace_hints_from_environment(environment={"
                     "'HARNESS_HOST_PROFILE':'claude-code',"
-                    f"'CLAUDE_PROJECT_DIR':{str(claude_project)!r}"
-                    "}); "
-                    "print(h[0].source); print(h[0].match_mode.value); print(h[0].path)"
+                    f"'CLAUDE_PROJECT_DIR':{str(leftover_claude_project)!r}"
+                    "})\n"
+                    "except HostIntegrationError as exc:\n"
+                    "    print(str(exc))\n"
+                    "else:\n"
+                    "    raise SystemExit('leftover claude-code profile was accepted')"
                 ),
             ),
             cwd=workspace,
             env=isolated_env,
         )
-        if host_probe.stdout.splitlines() != [
-            "claude-project-dir",
-            "root",
-            str(claude_project.resolve()),
+        if leftover_probe.stdout.splitlines() != [
+            "unsupported Harness host profile: claude-code",
         ]:
             raise RuntimeError(
-                f"installed Claude host adapter produced unexpected root hint: {host_probe.stdout!r}"
+                f"installed leftover Claude overlay did not fail closed: {leftover_probe.stdout!r}"
             )
 
         skill_project = workspace / "skill-project"
@@ -488,6 +529,7 @@ def main() -> int:
         skill_registry = workspace / "skill-registry"
         skill = skill_registry / "fastapi"
         skill.mkdir(parents=True)
+        skill_registry.chmod(0o700)
         (skill / "SKILL.md").write_text(
             "---\n"
             "name: fastapi\n"
@@ -505,24 +547,22 @@ def main() -> int:
                 "-c",
                 (
                     "from pathlib import Path; "
-                    "from harness.host_adapters import ClaudeCodeAdapter,codex_skill_projection_surface; "
+                    "from harness.host_adapters import "
+                    "codex_skill_projection_surface,cursor_skill_projection_surface; "
                     "from harness.skills import "
                     "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
                     "plan_skill_projection,resolve_skills; "
                     f"root=Path({str(skill_project)!r}); registry=Path({str(skill_registry)!r}); "
                     "definitions=load_skill_registry(registry); "
                     "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
-                    "claude=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
+                    "cursor=cursor_skill_projection_surface(); "
                     "codex=codex_skill_projection_surface(); "
-                    "result=apply_skill_projection(plan_skill_projection(root,resolved,(claude,codex))); "
-                    "claude_target=root/'.claude'/'skills'/'fastapi'; "
-                    "codex_target=root/'.agents'/'skills'/'fastapi'; "
+                    "result=apply_skill_projection(plan_skill_projection(root,resolved,(cursor,codex))); "
+                    "target=root/'.agents'/'skills'/'fastapi'; "
                     "print(len(resolved)); print(result.materialized); "
-                    "print((claude_target/'SKILL.md').is_file()); "
-                    "print((codex_target/'SKILL.md').is_file()); "
-                    "print((claude_target/'.harness-skill.json').is_file()); "
-                    "print((codex_target/'.harness-skill.json').is_file()); "
-                    "print((codex_target/'harness.yaml').exists())"
+                    "print((target/'SKILL.md').is_file()); "
+                    "print((target/'.harness-skill.json').is_file()); "
+                    "print((target/'harness.yaml').exists())"
                 ),
             ),
             cwd=workspace,
@@ -530,9 +570,7 @@ def main() -> int:
         )
         if skill_probe.stdout.splitlines() != [
             "1",
-            "2",
-            "True",
-            "True",
+            "1",
             "True",
             "True",
             "False",
@@ -540,19 +578,15 @@ def main() -> int:
             raise RuntimeError(
                 f"installed skill resolver/projection probe was unexpected: {skill_probe.stdout!r}"
             )
-        for projected_skill in (
-            ".claude/skills/fastapi/SKILL.md",
-            ".agents/skills/fastapi/SKILL.md",
-        ):
-            ignored = _run(
-                ("git", "check-ignore", "-q", projected_skill),
-                cwd=skill_project,
-                env=isolated_env,
+        ignored = _run(
+            ("git", "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md"),
+            cwd=skill_project,
+            env=isolated_env,
+        )
+        if ignored.returncode != 0:
+            raise RuntimeError(
+                "installed skill projection was not ignored by Git: .agents/skills/fastapi/SKILL.md"
             )
-            if ignored.returncode != 0:
-                raise RuntimeError(
-                    f"installed skill projection was not ignored by Git: {projected_skill}"
-                )
 
         cursor_project = workspace / "cursor-skill-project"
         cursor_project.mkdir()
@@ -563,22 +597,21 @@ def main() -> int:
                 "-c",
                 (
                     "from pathlib import Path; "
-                    "from harness.host_adapters import "
-                    "ClaudeCodeAdapter,cursor_skill_projection_surface; "
+                    "from harness.host_adapters import cursor_skill_projection_surface; "
                     "from harness.skills import "
                     "DetectedProjectStack,apply_skill_projection,load_skill_registry,"
                     "plan_skill_projection,resolve_skills; "
                     f"root=Path({str(cursor_project)!r}); registry=Path({str(skill_registry)!r}); "
                     "definitions=load_skill_registry(registry); "
                     "resolved=resolve_skills(definitions,DetectedProjectStack(frozenset(),frozenset(),frozenset()),task_hints=('fastapi',)); "
-                    "claude=ClaudeCodeAdapter(Path('/claude'),Path('/python')).skill_projection_surface(); "
                     "cursor=cursor_skill_projection_surface(); "
-                    "plan=plan_skill_projection(root,resolved,(claude,cursor)); "
+                    "plan=plan_skill_projection(root,resolved,(cursor,)); "
                     "result=apply_skill_projection(plan); "
-                    "print(','.join(str(target.relative_root) for target in plan.targets)); "
+                    "print(str(plan.targets[0].relative_root)); "
+                    "print(','.join(str(root) for root in cursor.visible_roots)); "
                     "print(result.materialized); "
-                    "print((root/'.claude'/'skills'/'fastapi'/'SKILL.md').is_file()); "
-                    "print((root/'.agents'/'skills'/'fastapi').exists()); "
+                    "print((root/'.agents'/'skills'/'fastapi'/'SKILL.md').is_file()); "
+                    "print((root/'.claude'/'skills'/'fastapi').exists()); "
                     "print((root/'.cursor'/'skills'/'fastapi').exists())"
                 ),
             ),
@@ -586,7 +619,8 @@ def main() -> int:
             env=isolated_env,
         )
         if cursor_probe.stdout.splitlines() != [
-            ".claude/skills",
+            ".agents/skills",
+            ".agents/skills,.cursor/skills,.claude/skills,.codex/skills",
             "1",
             "True",
             "False",
@@ -596,14 +630,12 @@ def main() -> int:
                 f"installed Cursor skill projection probe was unexpected: {cursor_probe.stdout!r}"
             )
         ignored = _run(
-            ("git", "check-ignore", "-q", ".claude/skills/fastapi/SKILL.md"),
+            ("git", "check-ignore", "-q", ".agents/skills/fastapi/SKILL.md"),
             cwd=cursor_project,
             env=isolated_env,
         )
         if ignored.returncode != 0:
-            raise RuntimeError(
-                "installed Cursor-compatible skill projection was not ignored by Git"
-            )
+            raise RuntimeError("installed Cursor skill projection was not ignored by Git")
 
         antigravity_project = workspace / "antigravity-skill-project"
         antigravity_project.mkdir()
@@ -708,54 +740,8 @@ def main() -> int:
             raise RuntimeError("installed Antigravity CLI skill projection was not ignored by Git")
 
         if os.name != "nt":
-            fake_bin = workspace / "fake-claude-bin"
+            fake_bin = workspace / "fake-host-bin"
             fake_bin.mkdir()
-            fake_claude = fake_bin / "claude"
-            fake_state = workspace / "fake-claude-state.json"
-            fake_claude.write_text(
-                f"""#!{python}
-import json
-import os
-import sys
-from pathlib import Path
-
-state = Path(os.environ["HARNESS_FAKE_CLAUDE_STATE"])
-args = sys.argv[1:]
-if args == ["mcp", "get", "harness"]:
-    if not state.exists():
-        print("No MCP server found with name: harness")
-        raise SystemExit(1)
-    value = json.loads(state.read_text(encoding="utf-8"))
-    print("harness:")
-    print("  Scope: User config (available in all your projects)")
-    print("  Status: ✓ Connected")
-    print(f"  Type: {{value['type']}}")
-    print(f"  Command: {{value['command']}}")
-    print("  Args: " + " ".join(value.get("args", [])))
-    print("  Environment:")
-    for key, item in value.get("env", {{}}).items():
-        print(f"    {{key}}={{item}}")
-    raise SystemExit(0)
-if args[:3] == ["mcp", "add-json", "harness"] and args[4:] == ["--scope", "user"]:
-    if state.exists():
-        print("MCP server harness already exists in user config")
-        raise SystemExit(1)
-    state.write_text(args[3], encoding="utf-8")
-    print("Added stdio MCP server harness")
-    raise SystemExit(0)
-if args == ["mcp", "remove", "harness", "--scope", "user"]:
-    if not state.exists():
-        print("No MCP server found with name: harness")
-        raise SystemExit(1)
-    state.unlink()
-    print("Removed MCP server harness")
-    raise SystemExit(0)
-print("unexpected fake claude invocation: " + repr(args))
-raise SystemExit(2)
-""",
-                encoding="utf-8",
-            )
-            fake_claude.chmod(0o755)
             fake_agent = fake_bin / "agent"
             fake_agent_state = workspace / "fake-agent-state.json"
             fake_agent.write_text(
@@ -804,12 +790,12 @@ raise SystemExit(2)
             fake_codex.chmod(0o755)
             fake_env = isolated_env.copy()
             fake_env["PATH"] = str(fake_bin) + os.pathsep + isolated_env.get("PATH", "")
-            fake_env["HARNESS_FAKE_CLAUDE_STATE"] = str(fake_state)
             fake_env["HARNESS_FAKE_AGENT_STATE"] = str(fake_agent_state)
             fake_home = workspace / "fake-home"
             fake_home.mkdir()
             canonical_skill = fake_home / ".harness" / "skills" / "python-helper"
             canonical_skill.mkdir(parents=True)
+            (fake_home / ".harness").chmod(0o700)
             (fake_home / ".harness" / "skills").chmod(0o700)
             (canonical_skill / "SKILL.md").write_text(
                 "---\nname: python-helper\ndescription: Python conventions\n---\n\n"
@@ -844,11 +830,11 @@ raise SystemExit(2)
                 raise RuntimeError(
                     f"installed harness install was not idempotent: {install_again.stdout!r}"
                 )
-            installed_registration = json.loads(fake_state.read_text(encoding="utf-8"))
-            if installed_registration.get("command") != str(python.absolute()):
+            host_state = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "host-integrations.json"
+            if json.loads(host_state.read_text(encoding="utf-8")).get("profiles") != ["cursor"]:
                 raise RuntimeError(
-                    "harness install registered an unexpected Python executable: "
-                    f"{installed_registration!r}"
+                    "default harness install did not record Cursor host intent: "
+                    f"{host_state.read_text(encoding='utf-8')!r}"
                 )
 
             lifecycle_project = workspace / "installed-lifecycle-project"
@@ -901,11 +887,6 @@ raise SystemExit(2)
             )
             _run(
                 (str(harness), "visibility", "hidden", str(lifecycle_project)),
-                cwd=workspace,
-                env=fake_env,
-            )
-            _run(
-                (str(harness), "uninstall", "--host", "claude-code"),
                 cwd=workspace,
                 env=fake_env,
             )
@@ -964,51 +945,49 @@ raise SystemExit(2)
             )
             upgrade_scripts = _venv_scripts_dir(upgrade_venv)
             upgrade_python = upgrade_scripts / "python"
-            _run(
-                (
-                    uv,
-                    "pip",
-                    "install",
-                    "--python",
-                    str(upgrade_python),
-                    "--no-deps",
-                    str(wheel),
-                ),
-                cwd=workspace,
-            )
+            _install_wheel(uv, upgrade_python, wheel, workspace)
             upgraded_harness = upgrade_scripts / "harness"
-            _run(
-                (str(upgraded_harness), "install", "--host", "claude-code"),
+            cursor_upgrade = _run(
+                (str(upgraded_harness), "install", "--host", "cursor"),
                 cwd=workspace,
                 env=fake_env,
             )
+            if (
+                "MCP registration: changed" not in cursor_upgrade.stdout
+                or f"Daemon Python: {upgrade_python.absolute()}" not in cursor_upgrade.stdout
+            ):
+                raise RuntimeError(
+                    "Cursor reinstall from a second interpreter did not replace stale runtime: "
+                    f"{cursor_upgrade.stdout!r}"
+                )
             upgrade_install = _run(
                 (str(upgraded_harness), "install", "--host", "codex"),
                 cwd=workspace,
                 env=fake_env,
             )
-            if (
-                "MCP registration: changed" not in upgrade_install.stdout
-                or f"Daemon Python: {upgrade_python.absolute()}" not in upgrade_install.stdout
-            ):
+            if f"Daemon Python: {upgrade_python.absolute()}" not in upgrade_install.stdout:
                 raise RuntimeError(
                     "Codex reinstall from a second interpreter did not replace stale runtime: "
                     f"{upgrade_install.stdout!r}"
                 )
-            upgraded_registration = json.loads(fake_state.read_text(encoding="utf-8"))
-            if upgraded_registration.get("command") != str(upgrade_python.absolute()):
-                raise RuntimeError("upgrade-safe reinstall did not update Claude Python")
+            cursor_upgrade_config = json.loads(
+                (lifecycle_project / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+            )
+            if cursor_upgrade_config["mcpServers"]["harness"]["command"] != str(
+                upgrade_python.absolute()
+            ):
+                raise RuntimeError("upgrade-safe reinstall did not update Cursor Python")
             _require_codex_config(codex_project_a, upgrade_python, lifecycle_project)
             _require_codex_config(codex_project_b, upgrade_python, lifecycle_worktree)
             _require_codex_config(codex_project_c, upgrade_python, independent_project)
-            lifecycle_projected_skill = lifecycle_project / ".claude" / "skills" / "python-helper"
+            lifecycle_projected_skill = lifecycle_project / ".agents" / "skills" / "python-helper"
             if not (lifecycle_projected_skill / "SKILL.md").is_file():
-                raise RuntimeError("Claude skill projection is missing")
-            claude_language_skill = (
-                lifecycle_project / ".claude" / "skills" / "language-engineering"
+                raise RuntimeError("Cursor skill projection is missing")
+            cursor_language_skill = (
+                lifecycle_project / ".agents" / "skills" / "language-engineering"
             )
-            if not (claude_language_skill / "references" / "python.md").is_file():
-                raise RuntimeError("Claude language reference projection is missing")
+            if not (cursor_language_skill / "references" / "python.md").is_file():
+                raise RuntimeError("Cursor language reference projection is missing")
             lifecycle_harness = upgraded_harness
 
             _cross_host_mcp(
@@ -1022,7 +1001,7 @@ raise SystemExit(2)
             full_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
             for expected in (
                 "Daemon: OK",
-                "Claude Code MCP registration: OK",
+                "Cursor MCP registration: OK",
                 "Codex adapter: OK",
                 "Codex host integration: OK",
                 "Codex project MCP configs: OK",
@@ -1045,18 +1024,18 @@ raise SystemExit(2)
             )
             if "Project Intelligence: preserved" not in uninstall_codex.stdout:
                 raise RuntimeError(f"Codex uninstall was unexpected: {uninstall_codex.stdout!r}")
-            if not fake_state.is_file() or not lifecycle_projected_skill.is_dir():
-                raise RuntimeError("Codex uninstall damaged the remaining Claude integration")
+            if not lifecycle_projected_skill.is_dir():
+                raise RuntimeError("Codex uninstall damaged the remaining Cursor skill projection")
             if codex_project_a.exists() or codex_project_b.exists() or codex_project_c.exists():
                 raise RuntimeError("Codex uninstall left Harness-owned project configs")
-            if codex_projected_skill.exists():
-                raise RuntimeError("Codex uninstall left the .agents skill projection")
 
-            claude_doctor = _run((str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env)
-            if "Claude Code MCP registration: OK" not in claude_doctor.stdout:
-                raise RuntimeError("Claude was not healthy after Codex uninstall")
-            if "Generated skills: OK" not in claude_doctor.stdout:
-                raise RuntimeError("Claude skills were not healthy after Codex uninstall")
+            cursor_after_codex = _run(
+                (str(lifecycle_harness), "doctor"), cwd=workspace, env=fake_env
+            )
+            if "Cursor MCP registration: OK" not in cursor_after_codex.stdout:
+                raise RuntimeError("Cursor was not healthy after Codex uninstall")
+            if "Generated skills: OK" not in cursor_after_codex.stdout:
+                raise RuntimeError("Cursor skills were not healthy after Codex uninstall")
 
             cursor_global.parent.mkdir(parents=True, exist_ok=True)
             cursor_global.write_text(
@@ -1122,21 +1101,11 @@ raise SystemExit(2)
             database = Path(fake_env["XDG_STATE_HOME"]) / "harness" / "harness.db"
             if not database.is_file():
                 raise RuntimeError("multi-host uninstall did not preserve Project Intelligence")
-            if (
-                fake_state.exists()
-                or cursor_project_a.exists()
-                or cursor_project_b.exists()
-                or cursor_project_c.exists()
-            ):
+            if cursor_project_a.exists() or cursor_project_b.exists() or cursor_project_c.exists():
                 raise RuntimeError("multi-host uninstall left Harness-owned host registrations")
 
             _run(
-                (str(lifecycle_harness), "install", "--host", "claude-code"),
-                cwd=workspace,
-                env=fake_env,
-            )
-            _run(
-                (str(lifecycle_harness), "install", "--host", "cursor"),
+                (str(lifecycle_harness), "install", "--host", "all"),
                 cwd=workspace,
                 env=fake_env,
             )

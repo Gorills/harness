@@ -118,11 +118,11 @@ def _wait_for_canonical_daemon(paths: RuntimePaths, launch: _DaemonLaunch) -> No
     deadline = monotonic() + _DAEMON_START_TIMEOUT_SECONDS
     last_transport_error: IpcTransportError | None = None
     while True:
+        failure = _daemon_start_failure(launch)
+        if failure is not None:
+            raise DaemonAutostartError(failure) from last_transport_error
         remaining = deadline - monotonic()
         if remaining <= 0:
-            failure = _daemon_start_failure(launch)
-            if failure is not None:
-                raise DaemonAutostartError(failure) from last_transport_error
             raise DaemonAutostartError(
                 "Harness daemon did not become ready"
             ) from last_transport_error

@@ -48,8 +48,12 @@ def _repo(root: Path) -> None:
 def _skill_registry(home: Path) -> None:
     skill = home / ".harness" / "skills" / "python-helper"
     skill.mkdir(parents=True)
+    (home / ".harness").chmod(0o700)
+    (home / ".harness" / "skills").chmod(0o700)
     (skill / "SKILL.md").write_text(
-        "# Python helper\n\nUse Python conventions.\n", encoding="utf-8"
+        "---\nname: python-helper\ndescription: Use Python conventions.\n---\n\n"
+        "# Python helper\n\nUse Python conventions.\n",
+        encoding="utf-8",
     )
     (skill / "harness.yaml").write_text(
         "id: python-helper\napplies:\n  languages:\n    - python\n",
@@ -94,11 +98,11 @@ def test_daemon_reconciles_and_cleans_project_skills_then_shuts_down(
                 match_mode=WorkspaceHintMatchMode.ROOT,
             ),
         )
-        skills = request_workspace_skills_reconcile(socket_path, hints, ("claude-code",))
+        skills = request_workspace_skills_reconcile(socket_path, hints, ("cursor",))
         assert skills.workspace_id == scan.workspace_id
         assert skills.selected_skill_ids == ("python-helper",)
         assert skills.materialized == 1
-        assert (root / ".claude" / "skills" / "python-helper" / "SKILL.md").exists()
+        assert (root / ".agents" / "skills" / "python-helper" / "SKILL.md").exists()
         exclude = subprocess.run(
             ["git", "rev-parse", "--git-path", "info/exclude"],
             cwd=root,
@@ -109,15 +113,15 @@ def test_daemon_reconciles_and_cleans_project_skills_then_shuts_down(
         exclude_path = Path(exclude)
         if not exclude_path.is_absolute():
             exclude_path = root / exclude_path
-        assert ".claude/skills/python-helper/" in exclude_path.read_text(encoding="utf-8")
+        assert ".agents/skills/python-helper/" in exclude_path.read_text(encoding="utf-8")
 
-        cleanup = request_skill_cleanup(socket_path, ("claude-code",))
+        cleanup = request_skill_cleanup(socket_path, ("cursor",))
         assert cleanup.workspace_count == 1
         assert cleanup.cleaned_workspace_count == 1
         assert cleanup.skipped_workspace_count == 0
         assert cleanup.removed == 1
-        assert not (root / ".claude" / "skills" / "python-helper").exists()
-        assert ".claude/skills/python-helper/" not in exclude_path.read_text(encoding="utf-8")
+        assert not (root / ".agents" / "skills" / "python-helper").exists()
+        assert ".agents/skills/python-helper/" not in exclude_path.read_text(encoding="utf-8")
 
         assert request_shutdown(socket_path).accepted is True
         future.result(timeout=3)
@@ -151,22 +155,22 @@ def test_global_skill_cleanup_skips_replaced_workspace_identity(
                     match_mode=WorkspaceHintMatchMode.ROOT,
                 ),
             ),
-            ("claude-code",),
+            ("cursor",),
         )
         original = tmp_path / "original-repo"
         root.rename(original)
         _repo(root)
-        sentinel = root / ".claude" / "skills" / "python-helper" / "SKILL.md"
+        sentinel = root / ".agents" / "skills" / "python-helper" / "SKILL.md"
         sentinel.parent.mkdir(parents=True)
         sentinel.write_text("user-owned replacement\n", encoding="utf-8")
 
-        cleanup = request_skill_cleanup(socket_path, ("claude-code",))
+        cleanup = request_skill_cleanup(socket_path, ("cursor",))
         assert cleanup.workspace_count == 1
         assert cleanup.cleaned_workspace_count == 1
         assert cleanup.skipped_workspace_count == 0
         assert cleanup.removed == 0
         assert sentinel.read_text(encoding="utf-8") == "user-owned replacement\n"
-        assert (original / ".claude" / "skills" / "python-helper" / "SKILL.md").exists()
+        assert (original / ".agents" / "skills" / "python-helper" / "SKILL.md").exists()
     finally:
         stop.set()
         executor.shutdown(wait=True)
@@ -190,16 +194,16 @@ def test_global_skill_cleanup_skips_unsafe_projection_parent_without_following_i
         outside.mkdir()
         sentinel = outside / "sentinel.txt"
         sentinel.write_text("keep\n", encoding="utf-8")
-        (root / ".claude").mkdir()
-        (root / ".claude" / "skills").symlink_to(outside, target_is_directory=True)
+        (root / ".agents").mkdir()
+        (root / ".agents" / "skills").symlink_to(outside, target_is_directory=True)
 
-        cleanup = request_skill_cleanup(socket_path, ("claude-code",))
+        cleanup = request_skill_cleanup(socket_path, ("cursor",))
         assert cleanup.workspace_count == 1
         assert cleanup.cleaned_workspace_count == 0
         assert cleanup.skipped_workspace_count == 1
         assert cleanup.removed == 0
         assert sentinel.read_text(encoding="utf-8") == "keep\n"
-        assert (root / ".claude" / "skills").is_symlink()
+        assert (root / ".agents" / "skills").is_symlink()
     finally:
         stop.set()
         executor.shutdown(wait=True)
@@ -235,7 +239,7 @@ def test_skill_cleanup_waits_for_authoritative_scan_lock(
             server_peer,
             database,
             "cleanup-request",
-            ("claude-code",),
+            ("cursor",),
             scan_lock,
         )
         assert cleanup_called.wait(0.05) is False

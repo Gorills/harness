@@ -1,5 +1,11 @@
 # ADR-0030: Codex Workspace identity is explicit project-scoped MCP state
 
+> **Amended by ADR-0037:** Codex now uses authenticated daemon-owned Streamable HTTP. The stdio
+> launch details below remain historical context and migration input, not current runtime behavior.
+>
+> **Amended by ADR-0039:** Claude Code is no longer a supported Harness host. `--host all` is the
+> Codex+Cursor pair. Decision point 8's Claude pairing is historical.
+
 - **Status:** Accepted
 - **Date:** 2026-08-28
 - **Deciders:** Repository architecture baseline
@@ -35,10 +41,16 @@ slice.
    Workspace uses `.codex/config.toml` with `[mcp_servers.harness]`, the installed Python
    executable, `-m harness.mcp_process`, the canonical Workspace root as `cwd`, and exact
    `HARNESS_HOST_PROFILE=codex` plus `HARNESS_WORKSPACE_ROOT=<canonical-root>` environment values.
-   It also forwards `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, and
+   The server is `required = true`, so an enabled Harness MCP initialization failure blocks Codex
+   startup/resume instead of silently leaving a repository session without Harness. It also sets
+   `experimental_environment = "local"`: Harness IPC is a user-local Unix socket, so executor- or
+   remote-placed stdio cannot be allowed to fall back to starting a second daemon against the same
+   database. Harness
+   forwards the non-empty values among `HOME`, `PATH`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, and
    `HARNESS_SKILL_REGISTRY` through Codex `env_vars`. These values select the same canonical daemon,
    database, Git executable, and optional skill registry that the local Codex host can access;
-   without them a reduced stdio environment can silently select fallback Harness paths.
+   omitting unset optional names avoids false missing-variable diagnostics while preserving the
+   normal Harness fallback paths.
 2. A Codex-profile MCP bridge requires that explicit `HARNESS_WORKSPACE_ROOT` and treats it as an
    exact `ROOT` hint. It must list no tools and refuse calls when the root is absent or invalid.
    Process cwd and self-reported client metadata are not Codex Workspace identity.
@@ -62,7 +74,12 @@ slice.
    has a valid Codex ownership marker.
 6. Codex project trust is not written by Harness. Install/scan/doctor must give bounded actionable
    guidance when a project config exists but is not loaded because the operator has not trusted or
-   restarted the Codex client.
+   restarted the Codex client. After changing project config, guidance requires a full client
+   restart and a new Task because an existing Task retains its startup instruction snapshot; the
+   first project action in that fresh Task must be `project_status`. Before that call, only host
+   tool discovery needed to locate and invoke Harness is permitted: no shell command, repository
+   file read/search, browser inspection, or change. Native targeted search is permitted after the
+   initial status call, not as an alternative bootstrap path.
 7. This ADR defines the local CLI/IDE/ChatGPT-desktop configuration profile only. Codex cloud and
    hosted ChatGPT plugin delivery are separate profiles and cannot inherit its Workspace or Hidden
    guarantees.
@@ -79,13 +96,18 @@ slice.
    SCM-write denial, so operator diagnostics must report the policy as hygiene-effective rather
    than enforced.
 10. The Harness source checkout has a separate tracked development overlay at
-    `.codex/config.toml`, named `harness-dev`. It launches `./scripts/dev harness mcp` without a
+    `.codex/config.toml`, named `harness-dev`. It launches `./scripts/dogfood mcp` without a
     production `HARNESS_HOST_PROFILE`, uses the project process working directory as its relative
-    Workspace root, allows 30 seconds for the checkout uv/Python cold start, and is required so a
-    broken local daemon fails Codex startup visibly. `scripts/dev-env.sh` keeps `UV_CACHE_DIR`
-    under the ignored writable `.harness/` tree because Codex may expose the user uv cache
-    read-only. This overlay is not a production Codex registration and never uses canonical
-    per-user Harness state.
+    Workspace root, allows 30 seconds for cold start, forces Codex's local stdio environment, and
+    is required so a broken selected route fails Codex startup visibly. The router defaults to
+    `scripts/dev` and its ignored writable
+    `.harness/` XDG/cache roots; explicit ADR-0036 mode selects only the tool-installed executable
+    and canonical state after index-only registration. This overlay is not a production Codex
+    registration and must not contain a second `harness` alias. It carries the same exact bootstrap
+    `developer_instructions` as production. The repository's human-owned `AGENTS.md` repeats the
+    bootstrap for source-development hosts; this is a repository policy, not an adapter mutation
+    of arbitrary user projects. A tracked source overlay without the exact bootstrap is not
+    reported CURRENT and fails production reconcile without modifying the tracked file.
 
 ## Consequences
 
@@ -102,17 +124,27 @@ slice.
   instructions. Project trust/restart remains operator-owned, and hard enforced Hidden remains a
   later acceptance-gated profile capability.
 - Real-host acceptance must prove project config discovery, trust/restart behavior, the five-tool
-  catalog, correct worktree identity, and cross-client continuity. Core tests cannot prove Codex's
-  internal tool-ranking behavior.
-- Agents working on the Harness source itself use `harness-dev` and the checkout daemon even when
-  the separately installed production profile is absent or stale.
+  catalog, model-visible bootstrap prompt, correct worktree identity, and cross-client continuity.
+  The CLI prompt-input probe proves only a fresh CLI process; a running IDE/desktop app may retain
+  an older configuration snapshot until its documented restart boundary. Core tests cannot prove
+  Codex's internal tool-ranking behavior.
+- Agents working on the Harness source itself use the single `harness-dev` project server. It
+  defaults to the checkout daemon; explicit ADR-0036 dogfood may select the installed daemon. Its
+  tracked Codex config and repository-owned agent instructions both deliver the bootstrap before
+  deferred MCP tool discovery.
+- MCP server instructions independently front-load deferred-tool discovery and `project_status`
+  within their first 512 characters. This strengthens the server-wide guidance once the server is
+  discovered, but does not replace project `developer_instructions` at Task bootstrap.
+- The bootstrap uses an exact first-action rule rather than “before broad exploration.” The latter
+  wording allowed an agent to classify an initial `rg`, `git status`, or file read as targeted
+  native work and bypass Harness while still following the literal instruction.
 
 ## Verification
 
 Automated tests must prove:
 
-- exact Normal/Hidden generated TOML fields, forwarded environment names, modes, ownership marker,
-  and root-anchored Git exclusions;
+- exact Normal/Hidden generated TOML fields, required-server flag, local stdio placement, present-only forwarded
+  environment names, modes, ownership marker, and root-anchored Git exclusions;
 - idempotent reconcile and marker-owned installed-Python update;
 - exact tracked/manual adoption without mutation or automatic removal;
 - refusal of user-owned TOML, foreign same-name entries, tracked mutation, malformed/symlink state,
@@ -125,7 +157,9 @@ Automated tests must prove:
 - installed-wheel upgrade refreshes every owned Workspace config to the new Python executable and
   partial uninstall preserves other active hosts and shared skill projections.
 - the tracked source-checkout Codex overlay has the bounded required launch contract, and the
-  checkout wrapper uses a private writable uv cache under `.harness/`;
+  exact bootstrap developer instructions, while the repository-owned `AGENTS.md` requires the same
+  first action; a source overlay missing that bootstrap fails closed; the checkout wrapper uses a
+  private writable uv cache under `.harness/`;
 - three-host skill admission fails before intent/config mutation; Codex Hidden installation and
   transitions preserve `AGENTS.md`, reconcile exact developer instructions, and fail before mutation
   on unsafe/manual config collisions.
@@ -143,6 +177,7 @@ Real-host acceptance must additionally prove:
 
 - trusted project config is discovered by the current Codex CLI, IDE extension, and ChatGPT desktop
   local Codex host after their documented restart/reload boundary;
+- a fresh host session's actual model-visible developer input contains the exact Harness bootstrap;
 - the exact five Harness tools and server instructions are visible;
 - simultaneous projects and linked worktrees never cross-resolve;
 - Task and Knowledge continuity survives fresh Codex processes and switching to another supported

@@ -4,7 +4,8 @@
 - **Date:** 2026-08-27
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0020](0020-dashboard-drilldown-realtime-design.md), [ADR-0023](0023-linux-operational-diagnostics-and-upgrade-safety.md)
-- **Amended by:** [ADR-0027](0027-dashboard-fixed-loopback-port.md)
+- **Amended by:** [ADR-0027](0027-dashboard-fixed-loopback-port.md),
+  [ADR-0040](0040-dashboard-root-url-and-project-index.md)
 
 ## Context
 

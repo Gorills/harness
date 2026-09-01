@@ -15,6 +15,7 @@ from harness.retrieval import (
     ProjectSearchScope,
     read_project_context,
     search_project,
+    search_tasks,
 )
 from harness.storage import connect_database, initialize_database
 
@@ -198,6 +199,11 @@ def test_project_search_retrieves_scoped_knowledge_tasks_code_and_docs(tmp_path:
             f"task:rotation-task#event:{feedback_event_id}",
         }
         assert "other-task" not in str(tasks)
+
+        across_projects = search_tasks(connection, "refresh", limit=5)
+        titles = {hit.title for hit in across_projects}
+        assert "Rotate session credentials" in titles
+        assert "Other Project refresh work" in titles
 
         code = search_project(
             connection, workspace_id, "refresh token", scope=ProjectSearchScope.CODE, limit=5

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import harness.skills as skills_module
+from harness.host_adapters import cursor_skill_projection_surface
 from harness.skills import (
     SKILL_OWNERSHIP_MARKER_NAME,
     DetectedProjectStack,
@@ -37,18 +38,17 @@ def _git_init(root: Path) -> None:
 
 
 def _surface() -> SkillProjectionSurface:
-    root = PurePosixPath(".claude/skills")
-    return SkillProjectionSurface(
-        profile="claude-code",
-        target_root=root,
-        visible_roots=(root,),
-    )
+    return cursor_skill_projection_surface()
 
 
 def _resolved_fastapi(registry: Path) -> tuple[ResolvedSkill, ...]:
     skill = registry / "fastapi"
     skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("# FastAPI\n", encoding="utf-8")
+    registry.chmod(0o700)
+    (skill / "SKILL.md").write_text(
+        "---\nname: fastapi\ndescription: Apply FastAPI conventions.\n---\n\n# FastAPI\n",
+        encoding="utf-8",
+    )
     (skill / "harness.yaml").write_text(
         "id: fastapi\ntask_hints:\n  - fastapi\n",
         encoding="utf-8",
@@ -69,7 +69,7 @@ def test_stale_cleanup_rechecks_ownership_after_preflight(
     surface = _surface()
     resolved = _resolved_fastapi(tmp_path / "registry")
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     empty_plan = plan_skill_projection(root, (), (surface,))
     original_preflight = skills_module._preflight_projection_paths
 
@@ -96,7 +96,7 @@ def test_stale_cleanup_rejects_marker_for_different_skill(tmp_path: Path) -> Non
     root = tmp_path / "repo"
     _git_init(root)
     surface = _surface()
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     target.mkdir(parents=True)
     (target / "SKILL.md").write_text("# user content\n", encoding="utf-8")
     marker = {
@@ -125,7 +125,7 @@ def test_stale_cleanup_rechecks_target_at_atomic_move(
     surface = _surface()
     resolved = _resolved_fastapi(tmp_path / "registry")
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     empty_plan = plan_skill_projection(root, (), (surface,))
     original_replace = os.replace
     raced = False
@@ -165,9 +165,12 @@ def test_skill_update_rechecks_ownership_after_preflight(
     registry = tmp_path / "registry"
     resolved = _resolved_fastapi(registry)
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
 
-    (registry / "fastapi" / "SKILL.md").write_text("# FastAPI v2\n", encoding="utf-8")
+    (registry / "fastapi" / "SKILL.md").write_text(
+        "---\nname: fastapi\ndescription: Apply FastAPI conventions.\n---\n\n# FastAPI v2\n",
+        encoding="utf-8",
+    )
     updated = resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
@@ -205,9 +208,12 @@ def test_rollback_validates_committed_projection_after_atomic_move(
     registry = tmp_path / "registry"
     resolved = _resolved_fastapi(registry)
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
 
-    (registry / "fastapi" / "SKILL.md").write_text("# FastAPI v2\n", encoding="utf-8")
+    (registry / "fastapi" / "SKILL.md").write_text(
+        "---\nname: fastapi\ndescription: Apply FastAPI conventions.\n---\n\n# FastAPI v2\n",
+        encoding="utf-8",
+    )
     updated = resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
@@ -272,7 +278,7 @@ def test_stale_cleanup_rejects_dangling_symlink_created_after_state_check(
     surface = _surface()
     resolved = _resolved_fastapi(tmp_path / "registry")
     apply_skill_projection(plan_skill_projection(root, resolved, (surface,)))
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     empty_plan = plan_skill_projection(root, (), (surface,))
     original_state = skills_module._projection_state_sha256
     target_state_reads = 0
@@ -326,7 +332,7 @@ def test_skill_creation_does_not_overwrite_target_created_after_existence_check(
     _git_init(root)
     surface = _surface()
     resolved = _resolved_fastapi(tmp_path / "registry")
-    target = root / ".claude" / "skills" / "fastapi"
+    target = root / ".agents" / "skills" / "fastapi"
     original_exists = skills_module._projection_entry_exists
     raced = False
 

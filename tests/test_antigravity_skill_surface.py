@@ -6,7 +6,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 from harness.host_adapters import (
-    ClaudeCodeAdapter,
     antigravity_cli_skill_projection_surface,
     antigravity_ide_skill_projection_surface,
     codex_skill_projection_surface,
@@ -166,26 +165,6 @@ def test_antigravity_ide_refuses_same_id_legacy_agent_skill(tmp_path: Path) -> N
 
     assert (duplicate / "SKILL.md").read_text(encoding="utf-8") == "# user-owned\n"
     assert not (workspace / ".agents" / "skills" / "fastapi").exists()
-
-
-def test_claude_antigravity_cursor_combination_fails_duplicate_free_planning(
-    tmp_path: Path,
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    resolved = _resolved_skill(tmp_path / "registry", _valid_skill_text())
-    claude = ClaudeCodeAdapter(Path("/claude"), Path("/python")).skill_projection_surface()
-
-    with pytest.raises(SkillProjectionCollisionError, match="duplicate-free"):
-        plan_skill_projection(
-            workspace,
-            resolved,
-            (
-                claude,
-                antigravity_ide_skill_projection_surface(),
-                cursor_skill_projection_surface(),
-            ),
-        )
 
 
 def test_antigravity_cli_skill_surface_uses_current_workspace_contract() -> None:

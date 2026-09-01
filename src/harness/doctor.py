@@ -26,11 +26,7 @@ from harness.git_workspace import (
     inspect_git_workspace_runtime_identity,
 )
 from harness.hidden_projection import HiddenProjectionError, inspect_hidden_workspace
-from harness.host_adapters import (
-    HostIntegrationError,
-    HostRegistrationState,
-    discover_claude_code_adapter,
-)
+from harness.host_adapters import HostIntegrationError, HostRegistrationState
 from harness.host_integration_state import load_host_integration_state
 from harness.index import (
     IndexingError,
@@ -69,7 +65,12 @@ from harness.skill_runtime import (
     active_skill_profiles_for_runtime,
     inspect_workspace_skills,
 )
-from harness.skills import SkillError, default_skill_registry, load_skill_registry
+from harness.skills import (
+    SkillError,
+    default_skill_registry,
+    load_skill_registry,
+    validate_skill_registry_trust,
+)
 from harness.storage import (
     SCHEMA_VERSION,
     DatabaseError,
@@ -216,28 +217,12 @@ def run_system_doctor(
     )
 
     isolated_development = bool(values.get("HARNESS_DEV_ROOT"))
-    claude_registration_state: HostRegistrationState | None = None
     codex_host_active = False
     cursor_registration_state: HostRegistrationState | None = None
     cursor_host_active = False
     inspect_cursor_runtime = False
     cursor_agent = None
     if isolated_development:
-        checks.append(
-            _check(
-                "Claude Code adapter",
-                DoctorSeverity.WARN,
-                "isolated development; user-global Claude MCP is not inspected",
-            )
-        )
-        checks.append(
-            _check(
-                "Claude Code MCP registration",
-                DoctorSeverity.WARN,
-                "isolated development; user-global Claude MCP is not inspected",
-            )
-        )
-        claude_registration_state = None
         checks.append(
             _check(
                 "Codex adapter",
@@ -249,7 +234,7 @@ def run_system_doctor(
             _check(
                 "Codex host integration",
                 DoctorSeverity.OK,
-                "isolated development uses checkout overlay harness-dev, not production Codex intent",
+                "isolated development does not inspect the generated production Codex HTTP config",
             )
         )
         checks.append(
@@ -278,73 +263,6 @@ def run_system_doctor(
         cursor_agent = None
         inspect_cursor_runtime = False
     else:
-        adapter = discover_claude_code_adapter(
-            environment=environment,
-            python_executable=python_executable,
-        )
-        if adapter is None:
-            checks.append(
-                _check("Claude Code adapter", DoctorSeverity.WARN, "Claude CLI not found on PATH")
-            )
-            checks.append(
-                _check(
-                    "Claude Code MCP registration",
-                    DoctorSeverity.WARN,
-                    "not inspectable without Claude CLI",
-                )
-            )
-        else:
-            checks.append(
-                _check(
-                    "Claude Code adapter", DoctorSeverity.OK, f"discovered at {adapter.executable}"
-                )
-            )
-            try:
-                claude_registration_state = adapter.registration_state()
-            except HostIntegrationError as exc:
-                checks.append(
-                    _check(
-                        "Claude Code MCP registration",
-                        DoctorSeverity.FAIL,
-                        _bounded_detail(exc),
-                    )
-                )
-            else:
-                if claude_registration_state is HostRegistrationState.CURRENT:
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.OK,
-                            "current Harness user registration",
-                        )
-                    )
-                elif claude_registration_state is HostRegistrationState.ABSENT:
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.WARN,
-                            "Harness registration absent",
-                        )
-                    )
-                elif claude_registration_state is HostRegistrationState.STALE_OWNED:
-                    stale_notes.append("stale Claude Harness MCP registration")
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.FAIL,
-                            "Harness-owned registration points at a different installed runtime",
-                        )
-                    )
-                else:
-                    stale_notes.append("Claude MCP name collision")
-                    checks.append(
-                        _check(
-                            "Claude Code MCP registration",
-                            DoctorSeverity.FAIL,
-                            "non-Harness user registration already owns the name 'harness'",
-                        )
-                    )
-
         codex_discovered = discover_codex_adapter(
             environment=environment,
             python_executable=python_executable,
@@ -480,6 +398,7 @@ def run_system_doctor(
         python_executable=(
             Path(sys.executable) if python_executable is None else python_executable
         ).resolve(),
+        mcp_http_database=paths.database,
     )
     cursor_adapter = discover_cursor_adapter(
         environment=environment,
@@ -583,10 +502,6 @@ def run_system_doctor(
         active_skill_profiles = tuple(
             profile
             for profile, selected in (
-                (
-                    "claude-code",
-                    claude_registration_state is HostRegistrationState.CURRENT,
-                ),
                 ("codex", codex_host_active),
                 ("cursor", cursor_host_active),
             )
@@ -935,6 +850,7 @@ def _inspect_projects_and_workspaces(
     index_failed: list[WorkspaceRecord] = []
     current_skills = 0
     stale_skills = 0
+    skill_projects_isolated = 0
     skill_timed_out: list[WorkspaceRecord] = []
     skill_failed: list[WorkspaceRecord] = []
     cursor_projects_current = 0
@@ -946,6 +862,7 @@ def _inspect_projects_and_workspaces(
     cursor_project_checks: list[DoctorCheck] = []
     cursor_runtime_checks: list[DoctorCheck] = []
     codex_projects_current = 0
+    codex_projects_isolated = 0
     codex_projects_bad = 0
     codex_project_checks: list[DoctorCheck] = []
     hidden_ok = 0
@@ -959,6 +876,8 @@ def _inspect_projects_and_workspaces(
             skipped.extend(inspectable[position:])
             break
         workspace_deadline = min(overall_deadline, monotonic() + _DOCTOR_WORKSPACE_DEADLINE_SECONDS)
+        codex_project_isolated = False
+        cursor_project_isolated = False
         try:
             identity = inspect_git_workspace_runtime_identity(
                 workspace.workspace_root,
@@ -1047,9 +966,20 @@ def _inspect_projects_and_workspaces(
             )
             stale_notes.append(f"Codex project config unreadable {workspace.workspace_id}")
         else:
-            configured_python = codex_project.configured_python or "<missing>"
+            configured_endpoint = codex_project.configured_endpoint or "<missing>"
             configured_root = codex_project.configured_workspace_root or "<missing>"
-            if codex_host_active:
+            if codex_project.isolated_development:
+                codex_projects_isolated += 1
+                codex_project_isolated = True
+                codex_project_checks.append(
+                    _check(
+                        f"Codex project MCP config {workspace.workspace_id}",
+                        DoctorSeverity.OK,
+                        f"isolated-development overlay at {codex_project.path}; "
+                        "server harness-dev (or legacy harness) is left unchanged",
+                    )
+                )
+            elif codex_host_active:
                 if (
                     codex_project.state is HostRegistrationState.CURRENT
                     and codex_project.preflight_error is None
@@ -1059,9 +989,8 @@ def _inspect_projects_and_workspaces(
                         _check(
                             f"Codex project MCP config {workspace.workspace_id}",
                             DoctorSeverity.OK,
-                            f"current at {codex_project.path}; configured Python: "
-                            f"{configured_python}; expected Python: {codex_project.expected_python}; "
-                            f"HARNESS_WORKSPACE_ROOT={configured_root}",
+                            f"current at {codex_project.path}; endpoint: "
+                            f"{configured_endpoint}; X-Harness-Workspace-Root={configured_root}",
                         )
                     )
                 else:
@@ -1071,10 +1000,10 @@ def _inspect_projects_and_workspaces(
                         _check(
                             f"Codex project MCP config {workspace.workspace_id}",
                             DoctorSeverity.FAIL,
-                            f"{codex_project.path}: {issue}; expected Python: "
-                            f"{codex_project.expected_python}; configured Python: "
-                            f"{configured_python}; expected HARNESS_WORKSPACE_ROOT="
-                            f"{workspace.workspace_root}; configured HARNESS_WORKSPACE_ROOT="
+                            f"{codex_project.path}: {issue}; expected endpoint: "
+                            f"{codex_project.expected_endpoint}; configured endpoint: "
+                            f"{configured_endpoint}; expected X-Harness-Workspace-Root="
+                            f"{workspace.workspace_root}; configured X-Harness-Workspace-Root="
                             f"{configured_root}; remediation: harness install --host codex",
                         )
                     )
@@ -1111,6 +1040,7 @@ def _inspect_projects_and_workspaces(
             configured_root = cursor_project.configured_workspace_root or "<missing>"
             if cursor_project.isolated_development:
                 cursor_projects_isolated += 1
+                cursor_project_isolated = True
                 cursor_project_checks.append(
                     _check(
                         f"Cursor project MCP override {workspace.workspace_id}",
@@ -1242,6 +1172,9 @@ def _inspect_projects_and_workspaces(
                                 f"Cursor project MCP tools unavailable {workspace.workspace_id}"
                             )
 
+        if codex_project_isolated and cursor_project_isolated:
+            skill_projects_isolated += 1
+            continue
         if not active_profiles or not registry_ok:
             continue
         if registry_root is None:
@@ -1323,7 +1256,8 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Codex project MCP configs",
                 DoctorSeverity.FAIL,
-                f"{codex_projects_current} current, {codex_projects_bad} "
+                f"{codex_projects_current} current, {codex_projects_isolated} "
+                f"isolated-development, {codex_projects_bad} "
                 "missing/stale/foreign/orphaned/unsafe; see per-Workspace checks below",
             )
         )
@@ -1337,8 +1271,18 @@ def _inspect_projects_and_workspaces(
             _check(
                 "Codex project MCP configs",
                 codex_severity,
-                f"{codex_projects_current} current, 0 missing/stale/foreign; each config "
-                "binds an explicit absolute HARNESS_WORKSPACE_ROOT",
+                f"{codex_projects_current} current, {codex_projects_isolated} "
+                "isolated-development, 0 missing/stale/foreign; production configs bind an "
+                "authenticated loopback HTTP endpoint and explicit X-Harness-Workspace-Root",
+            )
+        )
+    elif codex_projects_isolated:
+        checks.append(
+            _check(
+                "Codex project MCP configs",
+                DoctorSeverity.OK,
+                f"{codex_projects_isolated} isolated-development overlay(s) preserved; "
+                "Codex host integration is inactive",
             )
         )
     else:
@@ -1456,7 +1400,8 @@ def _inspect_projects_and_workspaces(
         skill_detail = (
             f"{current_skills} current, {stale_skills} stale, "
             f"{_counted_named(len(skill_timed_out), 'timed out', skill_timed_out)}, "
-            f"{_counted_named(len(skill_failed), 'failed', skill_failed)}"
+            f"{_counted_named(len(skill_failed), 'failed', skill_failed)}, "
+            f"{skill_projects_isolated} source-checkout overlay(s) skipped"
         )
         if skipped:
             skill_detail += (
@@ -1513,26 +1458,12 @@ def _inspect_projects_and_workspaces(
 
 def _inspect_skill_registry_permissions(path: Path, checks: list[DoctorCheck]) -> bool:
     try:
-        metadata = path.lstat()
+        validate_skill_registry_trust(path)
     except FileNotFoundError:
         return True
-    except OSError as exc:
+    except SkillError as exc:
         checks.append(
             _check("Skill registry permissions", DoctorSeverity.FAIL, _bounded_detail(exc))
-        )
-        return False
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o022
-    ):
-        checks.append(
-            _check(
-                "Skill registry permissions",
-                DoctorSeverity.FAIL,
-                "registry must be a real current-user directory without group/other write access",
-            )
         )
         return False
     checks.append(
