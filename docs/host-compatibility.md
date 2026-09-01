@@ -95,7 +95,13 @@ API-key scope, and local isolation guarantees without invoking a model. With exp
 real Codex JSONL evidence for successful calls to all five Harness tools, a native skill-read
 `skill_marker` field proof, and a negative-control exec, checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
-bootstrap in model-visible input, and emits a sanitized report. The key is passed only to `codex exec`;
+bootstrap in model-visible input, and emits a sanitized report. When `--run-model` is used, the
+report may include sanitized `search_behavior` metrics from `scripts/eval_search_behavior.py`
+(strong vs zero/insufficient Harness hits, targeted vs broad native follow-up). That field is
+metrics-only; the standalone CLI JSON includes redacted evidence. The classifier is acceptance
+evidence only: it does not add daemon telemetry or MCP fields. The same script classifies
+existing `codex exec --json` JSONL without a model when given `--workspace-root`. The key is
+passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or
 writes user trust/config. A local-only stdio preflight passed on 2026-08-28 with `codex-cli 0.147.0`.
 ADR-0037 replaced that transport; current automated proof uses the official MCP SDK against the

@@ -150,6 +150,18 @@ scripts/dev python scripts/accept_codex.py --run-model \
   --evidence /tmp/harness-codex-cli-acceptance.json
 ```
 
+To classify existing Codex `exec --json` JSONL for search-vs-native-grep behavior without a model
+or daemon, pass `--workspace-root` so absolute `rg`/`cat` paths under that root classify as
+repo-relative (`accept_codex --run-model` uses the primary Workspace the same way). The CLI writes
+the full classifier payload including redacted evidence; `accept_codex --run-model` attaches
+metrics-only `search_behavior` (no evidence/argv) to its report:
+
+```bash
+scripts/dev python scripts/eval_search_behavior.py events.jsonl \
+  --workspace-root /path/to/workspace \
+  --output /tmp/harness-search-behavior.json
+```
+
 The runner builds and installs the exact current wheel under one temporary directory, uses two
 temporary Git Workspaces containing only fixture README/pyproject text, isolates Harness state and
 skills, and uses the official MCP SDK to connect to the exact configured Streamable HTTP endpoint and call all five

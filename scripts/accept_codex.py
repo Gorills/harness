@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import codex_exec_jsonl
+import eval_search_behavior
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
@@ -581,8 +583,7 @@ def completed_harness_tool_calls(events: Sequence[Mapping[str, Any]]) -> tuple[s
         item = event.get("item")
         if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
             continue
-        server = item.get("server") or item.get("server_name")
-        tool = item.get("tool") or item.get("name")
+        server, tool = codex_exec_jsonl.mcp_server_and_tool(item)
         if server != "harness" or not isinstance(tool, str):
             continue
         status = item.get("status")
@@ -596,54 +597,14 @@ def project_actions_before_harness_status(
     events: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
     """Return repository/tool actions completed before the first Harness project_status call."""
-    actions: list[str] = []
-    for event in events:
-        if event.get("type") != "item.completed":
-            continue
-        item = event.get("item")
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "mcp_tool_call":
-            server = item.get("server") or item.get("server_name")
-            tool = item.get("tool") or item.get("name")
-            if server == "harness" and tool == "project_status":
-                return tuple(actions)
-            actions.append(f"mcp:{server}:{tool}")
-        elif item_type in {"command_execution", "file_change"}:
-            actions.append(str(item_type))
-    return tuple(actions)
+    return codex_exec_jsonl.project_actions_before_harness_status(events)
 
 
 def discovery_actions_before_task_start(
     events: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
     """Return diagnosis/discovery actions after project_status and before task_start."""
-    seen_status = False
-    actions: list[str] = []
-    for event in events:
-        if event.get("type") != "item.completed":
-            continue
-        item = event.get("item")
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        if item_type == "mcp_tool_call":
-            server = item.get("server") or item.get("server_name")
-            tool = item.get("tool") or item.get("name")
-            if server == "harness" and tool == "project_status":
-                seen_status = True
-                continue
-            if server == "harness" and tool == "task_start":
-                return tuple(actions)
-            if not seen_status:
-                continue
-            actions.append(f"mcp:{server}:{tool}")
-        elif item_type in {"command_execution", "file_change"}:
-            if not seen_status:
-                continue
-            actions.append(str(item_type))
-    return tuple(actions)
+    return codex_exec_jsonl.discovery_actions_before_task_start(events)
 
 
 def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
@@ -1209,6 +1170,7 @@ def run_acceptance(
                 raise CodexAcceptanceError("Codex generated no project skills")
 
             model_calls: tuple[str, ...] = ()
+            search_behavior: dict[str, Any] | None = None
             if run_model:
                 model_environment = environment.copy()
                 model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
@@ -1250,6 +1212,9 @@ def run_acceptance(
                         f"Codex did not complete every Harness MCP tool; missing {missing!r}; "
                         f"observed item types: {observed_types!r}"
                     )
+                search_behavior = eval_search_behavior.sanitized_search_behavior_metrics(
+                    events, workspace_root=primary_workspace
+                )
             doctor = _run(
                 (str(harness), "doctor"),
                 cwd=primary_workspace,
@@ -1285,6 +1250,7 @@ def run_acceptance(
                 "wire_verified_harness_tool_calls": list(wire_calls),
                 "model_completed_harness_tool_calls": list(model_calls),
                 "model_run": run_model,
+                "search_behavior": search_behavior,
                 "all_five_wire_tools_verified": True,
                 "all_five_model_tools_verified": run_model,
                 "doctor_zero_fail": True,
