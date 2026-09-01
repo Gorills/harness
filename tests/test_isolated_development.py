@@ -25,6 +25,7 @@ from harness.cursor_adapter import (
 )
 from harness.entrypoints import harness_main
 from harness.ipc import WorkspaceScanResult, WorkspaceSkillsResult
+from harness.mcp_bridge import _SERVER_INSTRUCTIONS
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import SCHEMA_VERSION
 
@@ -438,11 +439,30 @@ def test_checkout_agent_instructions_require_harness_before_native_tools() -> No
     assert "`project_status` must be the first repository action" in bootstrap
     assert "deferred or omitted from the initial visible tool list" in bootstrap
     assert "only allowed\n  pre-status action" in bootstrap
-    assert "After status, use `project_search`" in bootstrap
+    assert "After status, start or resume a Harness Task" in bootstrap
+    assert "Then use `project_search`" in bootstrap
     assert "before diagnosis or edits" in bootstrap
     assert "read the tool schema and retry" in bootstrap
     assert "Checkpoint each logical stage" in bootstrap
+    assert "targeted native read/search is allowed" in bootstrap
+    assert "already has an exact path" in bootstrap
     assert "before changes and checkpoint meaningful" not in bootstrap
+    assert "After status, use `project_search`" not in bootstrap
+
+
+def test_cursor_bootstrap_matches_canonical_workflow() -> None:
+    text = _SERVER_INSTRUCTIONS
+    after_status = text.split("After status", maxsplit=1)[1]
+    task_at = after_status.find("start/resume a Task")
+    search_at = after_status.find("project_search")
+    assert 0 <= task_at < search_at
+    assert "After status use project_search" not in text
+    assert "After status, use project_search" not in text
+    assert "project_search, project_context, then native tools" not in text
+    assert "code/doc path may be read natively" in text
+    assert "project_context is not required for those kinds" in text
+    assert "project_context only for selected semantic refs." not in text
+    assert len(text.encode("utf-8")) < 1024
 
 
 def _dogfood_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:

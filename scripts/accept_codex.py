@@ -615,6 +615,37 @@ def project_actions_before_harness_status(
     return tuple(actions)
 
 
+def discovery_actions_before_task_start(
+    events: Sequence[Mapping[str, Any]],
+) -> tuple[str, ...]:
+    """Return diagnosis/discovery actions after project_status and before task_start."""
+    seen_status = False
+    actions: list[str] = []
+    for event in events:
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        if item_type == "mcp_tool_call":
+            server = item.get("server") or item.get("server_name")
+            tool = item.get("tool") or item.get("name")
+            if server == "harness" and tool == "project_status":
+                seen_status = True
+                continue
+            if server == "harness" and tool == "task_start":
+                return tuple(actions)
+            if not seen_status:
+                continue
+            actions.append(f"mcp:{server}:{tool}")
+        elif item_type in {"command_execution", "file_change"}:
+            if not seen_status:
+                continue
+            actions.append(str(item_type))
+    return tuple(actions)
+
+
 def _validate_wire_tools(tools: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
     names = tuple(str(tool.get("name")) for tool in tools)
     if names != EXPECTED_TOOLS:
@@ -664,6 +695,18 @@ def _validate_wire_instructions(instructions: str | None) -> None:
             )
     if "Before broad repository exploration" in instructions:
         raise CodexAcceptanceError("installed MCP instructions retain ambiguous broad-work wording")
+    if "After status use project_search" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions retain search-before-task wording")
+    after_status = instructions.split("After status", maxsplit=1)
+    if len(after_status) != 2:
+        raise CodexAcceptanceError("installed MCP instructions omit after-status workflow")
+    remainder = after_status[1]
+    task_at = remainder.find("start/resume a Task")
+    search_at = remainder.find("project_search")
+    if not (0 <= task_at < search_at):
+        raise CodexAcceptanceError(
+            "installed MCP instructions do not require Task before project_search"
+        )
 
 
 def _structured_result(name: str, result: Any) -> dict[str, Any]:
@@ -829,8 +872,9 @@ def _acceptance_prompt() -> str:
         "Audit this temporary Python package as a normal repository task. Determine whether "
         "pyproject.toml matches the business requirement in README.md. Do not edit files. Use the "
         "project's configured context and continuity mechanisms exactly as you would in normal "
-        "work: inspect current state, find and expand the relevant project context, create a "
-        "Russian-titled work record with only the affected stack hint, and complete it with a "
+        "work: inspect current state, create a Russian-titled work record with only the affected "
+        "stack hint, then find relevant project material (a found code or doc path may be read "
+        "natively; expand context only for semantic refs), and complete it with a "
         "passed verification. Return one short JSON object with the observed workspace identity, "
         "work-record identity, final revision, and audit result. Never invent a result if a tool "
         "call fails."
@@ -1186,6 +1230,12 @@ def run_acceptance(
                 if not model_calls or model_calls[0] != "project_status":
                     raise CodexAcceptanceError(
                         f"Codex did not use Harness project_status first: {model_calls!r}"
+                    )
+                premature_discovery = discovery_actions_before_task_start(events)
+                if premature_discovery:
+                    raise CodexAcceptanceError(
+                        "Codex performed diagnosis/discovery before Harness task_start: "
+                        f"{premature_discovery!r}"
                     )
                 missing = [name for name in EXPECTED_TOOLS if name not in model_calls]
                 if missing:

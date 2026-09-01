@@ -30,6 +30,7 @@ from accept_codex import (
     _validate_wire_instructions,
     _validate_wire_tools,
     completed_harness_tool_calls,
+    discovery_actions_before_task_start,
     evidence_contains_skill_marker,
     generate_acceptance_skill_nonces,
     main,
@@ -150,6 +151,84 @@ def test_codex_acceptance_detects_project_actions_before_harness_status() -> Non
     assert project_actions_before_harness_status(events) == ("command_execution",)
 
 
+def test_codex_acceptance_rejects_discovery_before_task_start() -> None:
+    search_before_task = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_status",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_search",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "task_start",
+                "status": "completed",
+            },
+        },
+    ]
+    native_before_task = [
+        search_before_task[0],
+        {"type": "item.completed", "item": {"type": "command_execution"}},
+        search_before_task[2],
+    ]
+
+    assert discovery_actions_before_task_start(search_before_task) == (
+        "mcp:harness:project_search",
+    )
+    assert discovery_actions_before_task_start(native_before_task) == ("command_execution",)
+
+
+def test_codex_acceptance_allows_search_after_task_start() -> None:
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_status",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "task_start",
+                "status": "completed",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "server": "harness",
+                "tool": "project_search",
+                "status": "completed",
+            },
+        },
+        {"type": "item.completed", "item": {"type": "command_execution"}},
+    ]
+
+    assert discovery_actions_before_task_start(events) == ()
+    assert project_actions_before_harness_status(events) == ()
+
+
 def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     properties = {
         "project_status": (),
@@ -190,7 +269,9 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
 def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
     instructions = (
         "project_status must be the first repository action. Before any shell command, locate "
-        "Harness. Tool discovery is the only allowed pre-status action."
+        "Harness. Tool discovery is the only allowed pre-status action. After status, "
+        "start/resume a Task before diagnosis or edits. Then project_search before broad native "
+        "exploration."
     )
 
     _validate_wire_instructions(instructions)
@@ -199,6 +280,14 @@ def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
     with pytest.raises(CodexAcceptanceError, match="ambiguous broad-work wording"):
         _validate_wire_instructions(
             instructions + " Before broad repository exploration, use project_status."
+        )
+    with pytest.raises(CodexAcceptanceError, match="search-before-task wording"):
+        _validate_wire_instructions(instructions + " After status use project_search extra.")
+    with pytest.raises(CodexAcceptanceError, match="Task before project_search"):
+        _validate_wire_instructions(
+            "project_status must be the first repository action. Before any shell command, "
+            "locate Harness. Tool discovery is the only allowed pre-status action. After status, "
+            "then project_search, then start/resume a Task."
         )
 
 
@@ -209,6 +298,12 @@ def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints(
     assert "pyproject.toml" in prompt
     assert "README.md" in prompt
     assert "Harness" not in prompt
+    create_at = prompt.find("create a Russian-titled work record")
+    find_at = prompt.find("find relevant project material")
+    assert 0 <= create_at < find_at
+    assert "may be read natively" in prompt
+    assert "semantic refs" in prompt
+    assert "find and expand the relevant project context" not in prompt
     for tool_name in (
         "project_status",
         "project_search",

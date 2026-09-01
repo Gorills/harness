@@ -22,6 +22,8 @@ from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import request_dashboard_url
 from harness.mcp_bridge import (
+    _PROJECT_CONTEXT_DESCRIPTION,
+    _PROJECT_SEARCH_DESCRIPTION,
     _SERVER_INSTRUCTIONS,
     _TOOL_ARGUMENTS,
     _unknown_tool_argument_error,
@@ -55,7 +57,53 @@ def test_server_instructions_require_task_before_diagnosis_within_budget() -> No
     assert "never skip" in _SERVER_INSTRUCTIONS
     assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
     assert "implement-after-diagnosis" in _SERVER_INSTRUCTIONS
+    assert "code/doc path may be read natively" in _SERVER_INSTRUCTIONS
+    assert "project_context is not required for those kinds" in _SERVER_INSTRUCTIONS
     assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
+
+
+def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
+    text = _SERVER_INSTRUCTIONS
+    after_status = text.split("After status", maxsplit=1)[1]
+    task_at = after_status.find("start/resume a Task")
+    search_at = after_status.find("project_search")
+    assert 0 <= task_at < search_at
+    assert "After status use project_search" not in text
+    assert "After status, use project_search" not in text
+    assert "project_search, project_context, then native tools" not in text
+    assert "code/doc path may be read natively" in text
+    assert "project_context is not required for those kinds" in text
+    assert "project_context only for selected semantic refs." not in text
+
+
+def test_project_search_description_allows_targeted_native_read_after_localization() -> None:
+    description = _PROJECT_SEARCH_DESCRIPTION
+    assert "exact path" in description
+    assert "targeted native read is allowed" in description
+    assert "project_context is not required for those kinds" in description
+    assert "after task_start or resume" in description
+    assert "use project_context only for selected refs" not in description
+
+
+def test_project_context_description_is_not_mandatory_for_code_docs() -> None:
+    description = _PROJECT_CONTEXT_DESCRIPTION
+    assert "Not mandatory for code or doc" in description
+    assert "already include a path" in description
+    assert "metadata only" in description
+    assert "Knowledge and Task refs" in description
+
+
+def test_server_instruction_budget_remains_bounded() -> None:
+    encoded = _SERVER_INSTRUCTIONS.encode("utf-8")
+    first_512 = _SERVER_INSTRUCTIONS[:512]
+    assert len(encoded) < 1024
+    assert "Russian" in first_512
+    assert "title" in first_512
+    assert "next_step" in first_512
+    assert "stack_hints" in first_512
+    assert "task-focused" in first_512
+    assert "must be the first repository action" in first_512
+    assert "only allowed pre-status action" in first_512
 
 
 def test_unknown_tool_argument_error_names_allowed_fields_not_unknown_names() -> None:
@@ -641,11 +689,13 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "stack_hints" in instructions[:512]
                 assert "task-focused" in instructions[:512]
                 assert "durable SCM mutations" in instructions
-                assert "briefly" in instructions
-                assert "unchanged source" in instructions
-                assert "recap diffs" in instructions
+                assert "code/doc path may be read natively" in instructions
+                assert "project_context is not required for those kinds" in instructions
+                assert "project_context only for selected semantic refs." not in instructions
                 assert "before diagnosis" in instructions
                 assert "never skip" in instructions
+                assert "After status, start/resume a Task" in instructions
+                assert "After status use project_search" not in instructions
                 assert "Start/resume a Task before changes." not in instructions
                 assert "scm_write" not in instructions
                 assert "info/exclude" not in instructions
@@ -664,9 +714,12 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "Russian" in by_name["task_start"]["description"]
                 assert "affected technologies" in by_name["task_start"]["description"]
                 assert "before diagnosis" in by_name["task_start"]["description"]
+                assert "project_search" in by_name["task_start"]["description"]
                 assert "omit task_id" in by_name["task_start"]["description"]
                 assert "never pass summary" in by_name["task_start"]["description"]
                 assert "read this schema and retry" in by_name["task_start"]["description"]
+                assert "targeted native read is allowed" in by_name["project_search"]["description"]
+                assert "Not mandatory for code or doc" in by_name["project_context"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
                 assert "each logical stage" in by_name["task_checkpoint"]["description"]
                 task_start_schema = by_name["task_start"]["inputSchema"]

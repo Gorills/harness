@@ -64,14 +64,25 @@ _SERVER_INSTRUCTIONS = (
     "Harness tools if deferred or omitted from the initial visible tool list and call "
     "project_status. Tool discovery is the only allowed pre-status action; omission is not "
     f"failure. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
-    "title/body. New-Task stack_hints must be affected and task-focused. After status use "
-    "project_search, project_context, then native tools. Start/resume a Task before diagnosis "
-    "or edits; on schema error retry, never skip. Checkpoint each stage. New request or "
-    "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision "
-    "across turns; never infer write targets. Store only reusable Knowledge. Inspect "
-    "contracts before risky work; review and run repo gates before publication. Reply briefly, "
-    "result first; omit unchanged source and recap diffs. Hidden mode forbids durable SCM "
-    "mutations."
+    "title/body. New-Task stack_hints must be task-focused. After status, "
+    "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Then "
+    "project_search before broad native work. A code/doc path may be read natively; "
+    "project_context is not required for those kinds. Checkpoint each stage. New request or "
+    "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision; "
+    "never infer write targets. Store only reusable Knowledge. Inspect contracts before risky "
+    "work; run repo gates before publication. Hidden mode forbids durable SCM mutations."
+)
+_PROJECT_SEARCH_DESCRIPTION = (
+    "Search bounded Project Intelligence across local code/doc text and identifiers, "
+    "durable Knowledge, and Task history. Natural queries may include conversational "
+    "filler. Results are compact refs. Use after task_start or resume, before broad native "
+    "exploration. If a code or doc hit includes an exact path, targeted native read is "
+    "allowed; project_context is not required for those kinds."
+)
+_PROJECT_CONTEXT_DESCRIPTION = (
+    "Expand only explicitly selected Project Intelligence refs when they add semantic "
+    "information. Not mandatory for code or doc refs that already include a path; those "
+    "expose metadata only. Knowledge and Task refs expose bounded durable semantic context."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -445,13 +456,7 @@ def build_mcp_server(
             "project_status response exceeds model exposure budget",
         )
 
-    @server.tool(
-        description=(
-            "Search bounded Project Intelligence across local code/doc text and identifiers, "
-            "durable Knowledge, and Task history. Natural queries may include conversational "
-            "filler. Results are compact refs; use project_context only for selected refs."
-        )
-    )
+    @server.tool(description=_PROJECT_SEARCH_DESCRIPTION)
     def project_search(
         ctx: Context[Any, Any],
         query: str,
@@ -486,12 +491,7 @@ def build_mcp_server(
             "project_search response exceeds model exposure budget",
         )
 
-    @server.tool(
-        description=(
-            "Expand only explicitly selected Project Intelligence refs. Code/doc refs expose "
-            "metadata only; Knowledge and Task refs expose bounded durable semantic context."
-        )
-    )
+    @server.tool(description=_PROJECT_CONTEXT_DESCRIPTION)
     def project_context(ctx: Context[Any, Any], refs: list[str]) -> dict[str, Any]:
         if not refs or len(refs) > _CONTEXT_HARD_LIMIT:
             raise ValueError(f"refs must contain between 1 and {_CONTEXT_HARD_LIMIT} items")
@@ -539,7 +539,7 @@ def build_mcp_server(
     @server.tool(
         description=(
             "Create a new durable Harness task, or explicitly resume an existing task. Required "
-            f"before diagnosis and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
+            f"before diagnosis, project_search, and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
             "Create with title and optional stack_hints only; omit task_id; never pass summary or "
             "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
             "A schema error is a blocker: read this schema and retry. For a new Task, stack_hints "
