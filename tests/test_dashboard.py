@@ -506,3 +506,58 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
     )
     assert "Удаление проекта" in workspace_html
     assert f'action="/projects/{project_id}/"' in workspace_html
+
+
+def test_dashboard_home_pins_live_tasks_ahead_of_newer_completed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    connection = connect_database(database)
+    try:
+        waiting = create_task_record(connection, workspace_id, "Older review task")
+        checkpoint_task(
+            connection,
+            waiting.task_id,
+            expected_revision=waiting.revision,
+            expected_workspace_id=workspace_id,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Needs review",
+            next_step="Accept or reject",
+        )
+        completed = create_task_record(connection, workspace_id, "Newer completed task")
+        checkpoint_task(
+            connection,
+            completed.task_id,
+            expected_revision=completed.revision,
+            expected_workspace_id=workspace_id,
+            state=TaskState.COMPLETED,
+            summary="Finished later",
+        )
+        create_task_record(connection, workspace_id, "Newest working task")
+    finally:
+        connection.close()
+
+    home = read_dashboard_home(database)
+    assert [row.task.title for row in home.recent_tasks] == [
+        "Newest working task",
+        "Older review task",
+        "Newer completed task",
+    ]
+    html = render_projects_page(home, base_path="/")
+    assert html.index("Newest working task") < html.index("Older review task")
+    assert html.index("Older review task") < html.index("Newer completed task")
+
+    workspace = read_dashboard_workspace_detail(database, workspace_id)
+    assert [row.task.title for row in workspace.recent_tasks] == [
+        "Newest working task",
+        "Older review task",
+        "Newer completed task",
+    ]
+
+    monkeypatch.setattr("harness.dashboard._DASHBOARD_RECENT_TASK_LIMIT", 2)
+    bounded = read_dashboard_home(database)
+    assert [row.task.title for row in bounded.recent_tasks] == [
+        "Newest working task",
+        "Older review task",
+    ]

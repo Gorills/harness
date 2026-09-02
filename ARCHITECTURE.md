@@ -550,7 +550,7 @@ Dashboard rules:
 - serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
-- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and recent Tasks; do not present Workspaces as copies or a second dashboard;
+- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and a bounded Task list that pins live (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies or a second dashboard;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
