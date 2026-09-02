@@ -364,7 +364,7 @@ def test_synthetic_gate_task_start_does_not_deliver_skill_x_through_mcp(
             connection,
             TaskStartRequestData(
                 workspace_hints=(WorkspaceHint(root, "explicit-root"),),
-                title="Select skill X",
+                title="Локальная проверка MCP",
                 stack_hints=(_SKILL_X_HINT,),
                 task_id=None,
                 expected_revision=None,

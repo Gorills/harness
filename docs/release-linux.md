@@ -166,19 +166,23 @@ The runner builds and installs the exact current wheel under one temporary direc
 temporary Git Workspaces containing only fixture README/pyproject text, isolates Harness state and
 skills, and uses the official MCP SDK to connect to the exact configured Streamable HTTP endpoint and call all five
 tools during local-only preflight. Preflight also writes a temporary user-owned
-`acceptance-skill` (and a projected negative sibling) into the isolated registry, projects them into
+`acceptance-skill` (and a projected negative sibling) into the isolated registry using project
+`applies` only (no `task_hints`), projects them into
 each fixture `.agents/skills`, and proves the runtime nonce lives in the `SKILL.md` body rather than
-description/frontmatter or the positive prompt. It does not contact the model;
+description/frontmatter or the positive prompt. Task `stack_hints` on the five-tool MCP proof remain
+optional Task metadata and do not choose Skills. It does not contact the model;
 `skill_read_verified` and `skill_negative_verified` remain false. Model mode additionally requires
 the real Codex CLI to select and complete all five MCP calls from JSONL evidence, and additionally
-proves native skill discovery → description relevance → `SKILL.md` body read by requiring the
-hidden nonce in `skill_marker` / JSONL for the matching synthetic-acceptance prompt, plus a second
-exec whose unmatched prompt must not return the negative nonce. Both modes verify schemas, distinct simultaneous
+proves native skill selection by description: the matching synthetic-acceptance prompt must return
+the hidden nonce in `skill_marker` / JSONL (so Codex selected and read that `SKILL.md`), plus a
+second exec whose unmatched prompt must not return the negative sibling nonce. The nonce must not
+appear in prompt metadata ahead of time. Both modes verify schemas, distinct simultaneous
 Workspace identities, the exact relevant/no irrelevant generated skill set, doctor, and owned
 cleanup, and fail if `~/.codex/config.toml` changes. The runner gives Codex project
 trust only through a temporary `CODEX_HOME`, does not use saved Codex authentication, and removes
 that temporary state after the run. It does not prove Codex IDE, ChatGPT desktop, Cursor, or other
-proprietary UI behavior; those remain open host-compatibility matrix items.
+proprietary UI behavior; those remain open host-compatibility matrix items. Paid-model `--run-model`
+is optional and is not a required CI gate.
 
 1. Run `make install-global HOST=codex`, then `harness scan` in each Workspace.
 2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,

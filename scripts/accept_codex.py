@@ -49,12 +49,13 @@ EXPECTED_GENERATED_SKILLS = (
     "testing-strategy",
 )
 # Negative sibling is projected with the same python/software-project applies so a later
-# catalog or Task change cannot drop one sibling while keeping the other. Preflight proves
-# its nonce is absent from the positive prompt; --run-model additionally requires a second
-# exec whose prompt does not match this description.
+# catalog change cannot drop one sibling while keeping the other. Task metadata never
+# participates. Preflight proves its nonce is absent from the positive prompt; --run-model
+# additionally requires a second exec whose prompt does not match this description.
 NEGATIVE_SKILL_PREFLIGHT_POLICY = "projected; nonce absent from the positive skill-read prompt"
-# Harness does not rotate project Skills by Task. Native skill-read proves the
-# scan-projected pack present at session start. MCP does not deliver skill bodies.
+# Harness does not rotate project Skills by Task. Native skill-read proves the host
+# selected the matching description from the scan-projected pack. MCP does not
+# deliver skill bodies.
 MCP_SKILL_BODY_DELIVERY_CONTRACT = "mcp-does-not-deliver-skill-bodies"
 FORBIDDEN_SKILL_DELIVERY_FIELD_NAMES = (
     "recommended_skills",
@@ -267,14 +268,7 @@ def _write_synthetic_skill(
         f"{nonce}\n"
     )
     metadata_text = (
-        f"id: {skill_id}\n"
-        "applies:\n"
-        "  languages:\n"
-        "    - python\n"
-        "  facets:\n"
-        "    - software-project\n"
-        "task_hints:\n"
-        "  - python\n"
+        f"id: {skill_id}\napplies:\n  languages:\n    - python\n  facets:\n    - software-project\n"
     )
     skill_path = directory / "SKILL.md"
     metadata_path = directory / "harness.yaml"
@@ -1149,9 +1143,9 @@ def run_acceptance(
                 _verify_codex_prompt_input(codex, workspace, environment)
 
                 if run_model and workspace == primary_workspace:
-                    # Prove native skill discovery against the scan-projected set first.
-                    # ADR-0042: Task start does not rotate that pack. MCP does not deliver
-                    # skill bodies. Optional host hot reload is not a Harness guarantee.
+                    # Prove native description selection against the scan-projected set.
+                    # ADR-0042: Task start does not rotate that pack and is not a Skill
+                    # selector. MCP does not deliver skill bodies.
                     model_environment = environment.copy()
                     model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
                     try:

@@ -53,3 +53,8 @@ Automated tests must prove:
 - adding real stack evidence (for example a Dockerfile) may change the resolved pack after scan;
 - MCP tools and structured responses still omit `skill_body` and `recommended_skills`;
 - `project_context` still rejects skill refs.
+
+Codex `scripts/accept_codex.py` proves native description selection against the scan-projected
+pack: synthetic Skills use project `applies` only, the matching prompt must return a body-only
+nonce, and an unmatched prompt must not return the negative sibling nonce. Task `stack_hints` in
+the five-tool MCP proof remain Task metadata. `--run-model` stays optional.

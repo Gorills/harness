@@ -13,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import eval_search_behavior
 from accept_codex import (
     _MODEL_USAGE_DISCLOSURE,
+    ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION,
     ACCEPTANCE_NEGATIVE_SKILL_ID,
+    ACCEPTANCE_SKILL_DESCRIPTION,
     ACCEPTANCE_SKILL_ID,
     EXPECTED_GENERATED_SKILLS,
     MCP_SKILL_BODY_DELIVERY_CONTRACT,
@@ -497,8 +499,7 @@ def test_synthetic_skill_projection_keeps_nonce_in_body_not_frontmatter(
         assert nonce not in metadata
         assert "software-project" in metadata
         assert "python" in metadata
-        assert "task_hints:" in metadata
-        assert "  - python" in metadata
+        assert "task_hints:" not in metadata
         projected = workspace / ".agents" / "skills" / skill_id
         projected.mkdir(parents=True)
         (projected / "SKILL.md").write_text(source, encoding="utf-8")
@@ -514,7 +515,9 @@ def test_synthetic_skill_projection_keeps_nonce_in_body_not_frontmatter(
     )
 
 
-def test_synthetic_acceptance_skills_survive_python_task_focus(tmp_path: Path) -> None:
+def test_synthetic_acceptance_skills_project_from_applies_not_task_hints(
+    tmp_path: Path,
+) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     write_synthetic_acceptance_skills(registry, generate_acceptance_skill_nonces())
@@ -530,15 +533,32 @@ def test_synthetic_acceptance_skills_survive_python_task_focus(tmp_path: Path) -
     assert ACCEPTANCE_NEGATIVE_SKILL_ID not in builtin_ids
 
     by_id = {definition.skill_id: definition for definition in definitions}
-    assert by_id[ACCEPTANCE_SKILL_ID].task_hints == by_id[ACCEPTANCE_NEGATIVE_SKILL_ID].task_hints
-    assert by_id[ACCEPTANCE_SKILL_ID].task_hints == ("python",)
+    assert by_id[ACCEPTANCE_SKILL_ID].task_hints == ()
+    assert by_id[ACCEPTANCE_NEGATIVE_SKILL_ID].task_hints == ()
     assert by_id[ACCEPTANCE_SKILL_ID].applies.languages == ("python",)
     assert by_id[ACCEPTANCE_SKILL_ID].applies.facets == ("software-project",)
+    assert by_id[ACCEPTANCE_NEGATIVE_SKILL_ID].applies == by_id[ACCEPTANCE_SKILL_ID].applies
 
     selected = tuple(item.definition.skill_id for item in resolve_skills(definitions, stack))
     assert selected == EXPECTED_GENERATED_SKILLS
     assert ACCEPTANCE_SKILL_ID in selected
     assert ACCEPTANCE_NEGATIVE_SKILL_ID in selected
+
+
+def test_skill_read_prompt_selects_by_description_not_task_metadata() -> None:
+    positive = _skill_read_prompt()
+    negative = _skill_negative_prompt()
+    assert "synthetic acceptance workflow" in ACCEPTANCE_SKILL_DESCRIPTION
+    assert ACCEPTANCE_SKILL_DESCRIPTION.split()[0] == "Use"
+    assert "unrelated negative-control" in ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION
+    assert "task_hints" not in positive
+    assert "stack_hints" not in positive
+    assert "task_start" not in positive
+    assert ACCEPTANCE_SKILL_ID not in positive
+    assert ACCEPTANCE_NEGATIVE_SKILL_ID not in positive
+    assert ACCEPTANCE_SKILL_ID not in negative
+    assert "synthetic acceptance workflow" in positive
+    assert "synthetic acceptance" not in negative
 
 
 def test_native_skill_read_requires_skill_marker_field_not_jsonl_substring() -> None:
