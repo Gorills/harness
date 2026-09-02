@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1564,6 +1564,32 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                     )
                 ),
                 PRIMARY KEY (project_id, facet)
+            )
+            """
+        )
+        return
+    if target_version == 17:
+        connection.execute(
+            """
+            CREATE TABLE workspace_search_index_state (
+                workspace_id TEXT PRIMARY KEY
+                    REFERENCES workspaces(id) ON DELETE CASCADE,
+                git_head TEXT NOT NULL CHECK (git_head <> ''),
+                change_token TEXT NOT NULL CHECK (length(change_token) = 64),
+                index_revision INTEGER NOT NULL CHECK (index_revision > 0)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE workspace_search_index_dirty_paths (
+                workspace_id TEXT NOT NULL
+                    REFERENCES workspace_search_index_state(workspace_id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL CHECK (
+                    relative_path <> ''
+                    AND length(CAST(relative_path AS BLOB)) <= 4096
+                ),
+                PRIMARY KEY (workspace_id, relative_path)
             )
             """
         )

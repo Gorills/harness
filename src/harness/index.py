@@ -40,6 +40,7 @@ _DEFAULT_EXCLUDES = (
 )
 _HASH_CHUNK_BYTES = 128 * 1024
 MAX_INDEXED_SEARCH_BODY_BYTES = 1024 * 1024
+MAX_EXACT_SEARCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_INDEXED_IDENTIFIER_TOKENS_BYTES = 256 * 1024
 MAX_INCREMENTAL_SCAN_PATHS = 256
 
@@ -346,6 +347,24 @@ def _normalize_incremental_paths(relative_paths: Sequence[str]) -> tuple[str, ..
     return tuple(sorted(selected))
 
 
+def list_workspace_candidate_paths(
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float | None = None,
+) -> tuple[str, ...]:
+    """Return the exact Git/.harnessignore path set eligible for the Structural Index."""
+    _require_scan_deadline(deadline)
+    _require_registered_layout(workspace, deadline=deadline)
+    harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
+    paths = _candidate_paths(
+        workspace.workspace_root,
+        harnessignore_rules,
+        deadline=deadline,
+    )
+    _require_registered_layout(workspace, deadline=deadline)
+    return paths
+
+
 def list_indexed_files(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -468,6 +487,24 @@ class SearchEvidenceRead:
     text: str | None = None
 
 
+class ExactSearchReadStatus(StrEnum):
+    """Outcome of a bounded exact-search source read."""
+
+    OK = "ok"
+    CHANGED_SINCE_INDEX = "changed_since_index"
+    NON_TEXT = "non_text"
+    TOO_LARGE = "too_large"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class ExactSearchRead:
+    """Current bounded UTF-8 source for exhaustive local literal matching."""
+
+    status: ExactSearchReadStatus
+    text: str | None = None
+
+
 def read_current_search_text(
     workspace: WorkspaceRecord,
     relative_path: str,
@@ -492,6 +529,36 @@ def read_current_search_text(
         return _decode_indexed_search_payload(payload, expected_content_sha256)
     except IndexingError:
         return SearchEvidenceRead(SearchEvidenceReadStatus.UNAVAILABLE)
+
+
+def read_current_exact_search_text(
+    workspace: WorkspaceRecord,
+    relative_path: str,
+    *,
+    expected_content_sha256: str,
+    deadline: float | None = None,
+) -> ExactSearchRead:
+    """Read one current regular file for bounded exact matching without exposing its body."""
+    try:
+        payload = _read_stable_regular_file_bytes(
+            workspace,
+            relative_path,
+            deadline=deadline,
+            maximum_bytes=MAX_EXACT_SEARCH_FILE_BYTES,
+        )
+    except IndexingError:
+        return ExactSearchRead(ExactSearchReadStatus.UNAVAILABLE)
+    if len(payload) > MAX_EXACT_SEARCH_FILE_BYTES:
+        return ExactSearchRead(ExactSearchReadStatus.TOO_LARGE)
+    if hashlib.sha256(payload).hexdigest() != expected_content_sha256:
+        return ExactSearchRead(ExactSearchReadStatus.CHANGED_SINCE_INDEX)
+    if b"\x00" in payload:
+        return ExactSearchRead(ExactSearchReadStatus.NON_TEXT)
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return ExactSearchRead(ExactSearchReadStatus.NON_TEXT)
+    return ExactSearchRead(ExactSearchReadStatus.OK, text)
 
 
 def _read_stable_search_text(
@@ -535,6 +602,7 @@ def _read_stable_regular_file_bytes(
     relative_path: str,
     *,
     deadline: float | None,
+    maximum_bytes: int = MAX_INDEXED_SEARCH_BODY_BYTES,
 ) -> bytes:
     path = workspace.workspace_root / relative_path
     try:
@@ -554,7 +622,7 @@ def _read_stable_regular_file_bytes(
         with path.open("rb") as stream:
             opened_before = os.fstat(stream.fileno())
             _require_stable_entry(relative_path, before, opened_before)
-            payload = stream.read(MAX_INDEXED_SEARCH_BODY_BYTES + 1)
+            payload = stream.read(maximum_bytes + 1)
             opened_after = os.fstat(stream.fileno())
         _require_stable_entry(relative_path, opened_before, opened_after)
         current = path.lstat()

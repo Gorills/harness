@@ -102,6 +102,11 @@ def test_project_retrieval_round_trips_through_strict_daemon_ipc(tmp_path: Path)
             scope=ProjectSearchScope.DOCS,
             limit=1,
         )
+        assert docs.workspace_state == "current"
+        assert docs.exact_coverage is not None
+        assert docs.exact_coverage.complete is True
+        assert docs.exact_coverage.matched_occurrences == 1
+        assert docs.exact_coverage.locations[0].path == "docs/rotation.md"
         assert docs.results[0].ref == "doc:docs/rotation.md"
         assert docs.results[0].evidence is not None
         assert docs.results[0].evidence.snippet.strip() == "rotation"

@@ -55,8 +55,14 @@ def _search(
     *,
     via: str = "structured_content",
     scope: str = "code",
+    exact_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload = {"query": query, "scope": scope, "results": list(results or ())}
+    payload = {
+        "query": query,
+        "scope": scope,
+        "exact_coverage": exact_coverage,
+        "results": list(results or ()),
+    }
     if via == "structured_content":
         result: dict[str, Any] = {"structured_content": payload, "content": []}
     else:
@@ -366,6 +372,131 @@ def test_sanitized_metrics_are_the_accept_codex_report_contract() -> None:
     assert summary["native_followup"] == "targeted_read"
     assert summary["duplicate_broad_search"] is False
     assert "candidate_paths" not in summary
+
+
+def test_complete_exact_coverage_flags_repeated_native_search() -> None:
+    events = [
+        _status(),
+        _task_start(),
+        _search(
+            "authenticate",
+            [{"kind": "code", "path": CANDIDATE, "title": "auth"}],
+            exact_coverage={
+                "needle": "authenticate",
+                "needle_kind": "single_term",
+                "case_sensitive": True,
+                "matched_files": 1,
+                "matched_occurrences": 2,
+                "matched_lines": 2,
+                "scanned_files": 5,
+                "scanned_bytes": 1024,
+                "non_text_files": 1,
+                "unavailable_files": 0,
+                "complete": True,
+                "locations_truncated": False,
+                "locations": [],
+            },
+        ),
+        _command(f"rg authenticate {CANDIDATE}"),
+    ]
+
+    report = evaluate_search_behavior(events)
+
+    assert report.complete_exact_to_native_search is True
+    assert sanitized_search_behavior_metrics(events)["complete_exact_to_native_search"] is True
+
+
+def test_exact_coverage_without_fts_hits_is_strong_and_supplies_candidate_path() -> None:
+    events = [
+        _status(),
+        _task_start(),
+        _search(
+            "where `authenticate` is used",
+            [],
+            exact_coverage={
+                "needle": "authenticate",
+                "matched_occurrences": 1,
+                "complete": True,
+                "locations_truncated": False,
+                "locations": [
+                    {"path": CANDIDATE, "line": 7, "column": 5, "preview": "authenticate()"}
+                ],
+            },
+        ),
+        _command(f"cat {CANDIDATE}"),
+    ]
+
+    report = evaluate_search_behavior(events)
+
+    assert report.search_hit_quality is SearchHitQuality.STRONG
+    assert report.candidate_paths == (CANDIDATE,)
+    assert report.native_followup is CommandClass.TARGETED_READ
+
+
+def test_incomplete_exact_coverage_without_fts_hits_is_insufficient() -> None:
+    events = [
+        _status(),
+        _task_start(),
+        _search(
+            "authenticate",
+            [],
+            exact_coverage={
+                "needle": "authenticate",
+                "matched_occurrences": 1,
+                "complete": False,
+                "locations_truncated": False,
+                "locations": [
+                    {"path": CANDIDATE, "line": 7, "column": 5, "preview": "authenticate()"}
+                ],
+            },
+        ),
+    ]
+
+    report = evaluate_search_behavior(events)
+
+    assert report.search_hit_quality is SearchHitQuality.INSUFFICIENT
+    assert report.candidate_paths == (CANDIDATE,)
+
+
+def test_complete_zero_exact_coverage_without_fts_hits_is_zero() -> None:
+    events = [
+        _status(),
+        _task_start(),
+        _search(
+            "authenticate",
+            [],
+            exact_coverage={
+                "needle": "authenticate",
+                "matched_occurrences": 0,
+                "complete": True,
+                "locations_truncated": False,
+                "locations": [],
+            },
+        ),
+    ]
+
+    assert evaluate_search_behavior(events).search_hit_quality is SearchHitQuality.ZERO
+
+
+def test_incomplete_or_truncated_exact_coverage_allows_native_search() -> None:
+    for complete, truncated in ((False, False), (True, True)):
+        events = [
+            _status(),
+            _task_start(),
+            _search(
+                "authenticate",
+                [{"kind": "code", "path": CANDIDATE, "title": "auth"}],
+                exact_coverage={
+                    "needle": "authenticate",
+                    "complete": complete,
+                    "locations_truncated": truncated,
+                },
+            ),
+            _command("rg authenticate ."),
+        ]
+        report = evaluate_search_behavior(events)
+        assert report.complete_exact_to_native_search is False
+        assert report.good_hit_to_duplicate_broad_search is False
 
 
 def test_preflight_parser_reads_jsonl_without_a_model(

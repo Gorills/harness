@@ -248,6 +248,22 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert code_hit["evidence"] is not None
             assert "replace_and_invalidate" in code_hit["evidence"]["snippet"]
             assert "bm25" not in json.dumps(code.structured_content).casefold()
+
+            exact = await client.call_tool(
+                "project_search",
+                {"query": "rotateRefreshToken", "scope": "code", "limit": 3},
+            )
+            assert exact.is_error is False
+            assert exact.structured_content is not None
+            assert exact.structured_content["workspace_state"] == "current"
+            exact_coverage = exact.structured_content["exact_coverage"]
+            assert exact_coverage is not None
+            assert exact_coverage["needle"] == "rotateRefreshToken"
+            assert exact_coverage["complete"] is True
+            assert exact_coverage["locations_truncated"] is False
+            assert exact_coverage["matched_occurrences"] == 1
+            assert exact_coverage["locations"][0]["path"] == "src/token_service.py"
+
             assert knowledge_results[0].get("evidence") is None
             assert tasks.structured_content["results"][0].get("evidence") is None
 

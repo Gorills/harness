@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, replace
 from enum import StrEnum
+from itertools import pairwise
 from pathlib import Path
 
 from harness.index import (
+    MAX_EXACT_SEARCH_FILE_BYTES,
+    ExactSearchReadStatus,
     IndexedFileKind,
     SearchEvidenceReadStatus,
     get_indexed_file,
+    read_current_exact_search_text,
     read_current_search_text,
 )
 from harness.knowledge import (
@@ -56,6 +61,11 @@ _FILE_CANDIDATE_LIMIT = 96
 MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 48
 MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 3072
 MAX_SEARCH_EVIDENCE_HITS = 3
+MAX_EXACT_SEARCH_NEEDLE_BYTES = 256
+MAX_EXACT_SEARCH_LOCATIONS = 24
+MAX_EXACT_SEARCH_PREVIEW_BYTES = 160
+MAX_EXACT_SEARCH_SCAN_BYTES = 64 * 1024 * 1024
+MAX_EXACT_SEARCH_COVERAGE_BYTES = 4 * 1024
 PROJECT_SEARCH_MAX_BYTES = 12 * 1024
 _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
 EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
@@ -112,6 +122,56 @@ class ProjectSearchEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectExactSearchLocation:
+    path: str
+    line: int
+    column: int
+    preview: str
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "path": self.path,
+            "line": self.line,
+            "column": self.column,
+            "preview": self.preview,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectExactSearchCoverage:
+    needle: str
+    needle_kind: str
+    case_sensitive: bool
+    matched_files: int
+    matched_occurrences: int
+    matched_lines: int
+    scanned_files: int
+    scanned_bytes: int
+    non_text_files: int
+    unavailable_files: int
+    complete: bool
+    locations_truncated: bool
+    locations: tuple[ProjectExactSearchLocation, ...]
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "needle": self.needle,
+            "needle_kind": self.needle_kind,
+            "case_sensitive": self.case_sensitive,
+            "matched_files": self.matched_files,
+            "matched_occurrences": self.matched_occurrences,
+            "matched_lines": self.matched_lines,
+            "scanned_files": self.scanned_files,
+            "scanned_bytes": self.scanned_bytes,
+            "non_text_files": self.non_text_files,
+            "unavailable_files": self.unavailable_files,
+            "complete": self.complete,
+            "locations_truncated": self.locations_truncated,
+            "locations": [location.to_wire() for location in self.locations],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectSearchHit:
     ref: str
     kind: ProjectSearchKind
@@ -148,6 +208,7 @@ def search_project(
     *,
     scope: ProjectSearchScope = ProjectSearchScope.ALL,
     limit: int,
+    response_reserve_bytes: int = 0,
 ) -> tuple[ProjectSearchHit, ...]:
     """Search bounded Project Intelligence while keeping filesystem search Workspace-local."""
     workspace = get_workspace(connection, workspace_id)
@@ -233,7 +294,143 @@ def search_project(
             ),
         )
         hits = _fuse_ranked_channels(channels, limit)
-    return _attach_current_source_evidence(connection, workspace, analyzed, hits)
+    return _attach_current_source_evidence(
+        connection,
+        workspace,
+        analyzed,
+        hits,
+        response_reserve_bytes=response_reserve_bytes,
+    )
+
+
+def search_exact_source_coverage(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: str,
+    *,
+    scope: ProjectSearchScope,
+) -> ProjectExactSearchCoverage | None:
+    """Return exhaustive current-source literal locations when the query exposes one exact needle."""
+    if scope not in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS}:
+        return None
+    needle = _exact_search_needle(query)
+    if needle is None:
+        return None
+    needle_text, needle_kind = needle
+    workspace = get_workspace(connection, workspace_id)
+    rows = connection.execute(
+        """
+        SELECT
+            files.relative_path,
+            files.kind,
+            files.size_bytes,
+            files.content_sha256
+        FROM indexed_files AS files
+        WHERE files.workspace_id = ?
+        ORDER BY files.relative_path
+        """,
+        (workspace_id,),
+    ).fetchall()
+
+    matched_files = 0
+    matched_occurrences = 0
+    matched_lines = 0
+    scanned_files = 0
+    scanned_bytes = 0
+    non_text_files = 0
+    unavailable_files = 0
+    locations: list[ProjectExactSearchLocation] = []
+    locations_truncated = False
+    budget_exhausted = False
+    for raw_path, raw_kind, raw_size, file_sha in rows:
+        if (
+            not isinstance(raw_path, str)
+            or not isinstance(raw_kind, str)
+            or isinstance(raw_size, bool)
+            or not isinstance(raw_size, int)
+            or raw_size < 0
+            or not isinstance(file_sha, str)
+        ):
+            raise ProjectRetrievalError(
+                "exact source coverage crossed invalid Structural Index state"
+            )
+        if raw_kind != IndexedFileKind.FILE.value or is_generated_text_output_path(raw_path):
+            continue
+        is_doc = is_document_path(raw_path)
+        if scope is ProjectSearchScope.CODE and is_doc:
+            continue
+        if scope is ProjectSearchScope.DOCS and not is_doc:
+            continue
+        if budget_exhausted or scanned_bytes + raw_size > MAX_EXACT_SEARCH_SCAN_BYTES:
+            budget_exhausted = True
+            unavailable_files += 1
+            continue
+        read = read_current_exact_search_text(
+            workspace,
+            raw_path,
+            expected_content_sha256=file_sha,
+        )
+        scanned_files += 1
+        scanned_bytes += min(raw_size, MAX_EXACT_SEARCH_FILE_BYTES + 1)
+        if read.status is ExactSearchReadStatus.NON_TEXT:
+            non_text_files += 1
+            continue
+        if read.status is not ExactSearchReadStatus.OK or read.text is None:
+            unavailable_files += 1
+            continue
+        file_occurrences = 0
+        file_matched_lines = 0
+        for line_number, line in enumerate(read.text.splitlines(), start=1):
+            line_occurrences = _literal_columns(line, needle_text)
+            if not line_occurrences:
+                continue
+            file_matched_lines += 1
+            file_occurrences += len(line_occurrences)
+            preview = _truncate_utf8(line.strip(), MAX_EXACT_SEARCH_PREVIEW_BYTES)
+            for column in line_occurrences:
+                if len(locations) < MAX_EXACT_SEARCH_LOCATIONS:
+                    locations.append(
+                        ProjectExactSearchLocation(
+                            path=raw_path,
+                            line=line_number,
+                            column=column,
+                            preview=preview,
+                        )
+                    )
+                else:
+                    locations_truncated = True
+        if file_occurrences:
+            matched_files += 1
+            matched_occurrences += file_occurrences
+            matched_lines += file_matched_lines
+
+    coverage = ProjectExactSearchCoverage(
+        needle=needle_text,
+        needle_kind=needle_kind,
+        case_sensitive=True,
+        matched_files=matched_files,
+        matched_occurrences=matched_occurrences,
+        matched_lines=matched_lines,
+        scanned_files=scanned_files,
+        scanned_bytes=scanned_bytes,
+        non_text_files=non_text_files,
+        unavailable_files=unavailable_files,
+        complete=not budget_exhausted and unavailable_files == 0,
+        locations_truncated=locations_truncated,
+        locations=tuple(locations),
+    )
+    return _fit_exact_coverage_to_budget(coverage)
+
+
+def exact_coverage_response_reserve(coverage: ProjectExactSearchCoverage | None) -> int:
+    if coverage is None:
+        return 0
+    encoded = json.dumps(
+        project_exact_search_coverage_payload(coverage),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return len(encoded) + 128
 
 
 def search_tasks(
@@ -1081,6 +1278,8 @@ def _attach_current_source_evidence(
     workspace: WorkspaceRecord,
     query: AnalyzedSearchQuery,
     hits: tuple[ProjectSearchHit, ...],
+    *,
+    response_reserve_bytes: int = 0,
 ) -> tuple[ProjectSearchHit, ...]:
     annotated: list[ProjectSearchHit] = []
     reread_budget = MAX_SEARCH_EVIDENCE_HITS
@@ -1120,7 +1319,11 @@ def _attach_current_source_evidence(
             )
             continue
         annotated.append(replace(hit, evidence=evidence, evidence_reason=None))
-    return _fit_search_hits_to_response_budget(annotated, query.normalized)
+    return _fit_search_hits_to_response_budget(
+        annotated,
+        query.normalized,
+        response_reserve_bytes=response_reserve_bytes,
+    )
 
 
 def _indexed_content_sha256(
@@ -1233,6 +1436,8 @@ def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearc
 def _fit_search_hits_to_response_budget(
     hits: list[ProjectSearchHit],
     query: str,
+    *,
+    response_reserve_bytes: int = 0,
 ) -> tuple[ProjectSearchHit, ...]:
     fitted = list(hits)
     while True:
@@ -1245,7 +1450,10 @@ def _fit_search_hits_to_response_budget(
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        if len(encoded) + _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES <= PROJECT_SEARCH_MAX_BYTES:
+        if (
+            len(encoded) + _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES + response_reserve_bytes
+            <= PROJECT_SEARCH_MAX_BYTES
+        ):
             return tuple(fitted)
         trimmed = False
         for index in range(len(fitted) - 1, -1, -1):
@@ -1259,6 +1467,73 @@ def _fit_search_hits_to_response_budget(
             break
         if not trimmed:
             return tuple(fitted)
+
+
+def project_exact_search_coverage_payload(
+    coverage: ProjectExactSearchCoverage,
+) -> dict[str, object]:
+    return coverage.to_wire()
+
+
+def _exact_search_needle(query: str) -> tuple[str, str] | None:
+    normalized = query.strip()
+    for match in re.finditer(r"`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'", normalized):
+        candidate = next(value for value in match.groups() if value is not None).strip()
+        if _valid_exact_needle(candidate):
+            return candidate, "quoted_literal"
+
+    raw_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", normalized)
+    for candidate in raw_tokens:
+        if (
+            "_" in candidate
+            or "." in candidate
+            or any(left.islower() and right.isupper() for left, right in pairwise(candidate))
+        ) and _valid_exact_needle(candidate):
+            return candidate, "identifier"
+
+    if not any(character.isspace() for character in normalized) and _valid_exact_needle(normalized):
+        return normalized, "single_term"
+    return None
+
+
+def _valid_exact_needle(value: str) -> bool:
+    if not value or "\x00" in value or "\n" in value or "\r" in value:
+        return False
+    try:
+        return len(value.encode("utf-8")) <= MAX_EXACT_SEARCH_NEEDLE_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _literal_columns(line: str, needle: str) -> tuple[int, ...]:
+    columns: list[int] = []
+    start = 0
+    while True:
+        index = line.find(needle, start)
+        if index < 0:
+            return tuple(columns)
+        columns.append(index + 1)
+        start = index + max(1, len(needle))
+
+
+def _fit_exact_coverage_to_budget(
+    coverage: ProjectExactSearchCoverage,
+) -> ProjectExactSearchCoverage:
+    fitted = coverage
+    while fitted.locations:
+        encoded = json.dumps(
+            project_exact_search_coverage_payload(fitted),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= MAX_EXACT_SEARCH_COVERAGE_BYTES:
+            return fitted
+        fitted = replace(
+            fitted,
+            locations=fitted.locations[:-1],
+            locations_truncated=True,
+        )
+    return fitted
 
 
 def project_search_hit_payload(hit: ProjectSearchHit) -> dict[str, object]:
