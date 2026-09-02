@@ -95,7 +95,11 @@ prints the external destination, exact temporary fixture/MCP payload class, acco
 API-key scope, and local isolation guarantees without invoking a model. With explicit
 `--run-model` approval and an invocation-scoped `CODEX_API_KEY`, it builds the exact wheel, requires
 real Codex JSONL evidence for successful calls to all five Harness tools, a native skill-read
-`skill_marker` field proof against the scan-projected set present at session start, and a negative-control exec, checks
+`skill_marker` field proof that Codex selected the matching description from the scan-projected
+pack present at session start (not a Task-selected skill), and a negative-control exec whose
+prompt must not return the unmatched sibling nonce. That sibling is a Codex acceptance
+fairness device (projected so description selection can fail closed); an unmatched prompt
+must not select it. The runner then checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
 bootstrap in model-visible input, and emits a sanitized report. When `--run-model` is used, the
 report may include sanitized `search_behavior` metrics from `scripts/eval_search_behavior.py`
@@ -132,8 +136,40 @@ characters as a second supported delivery path after server discovery.
 - Cursor supports interpolation including `${workspaceFolder}`. Official docs describe it as the folder that contains `.cursor/mcp.json`. Real-host Cursor IDE source from 2026-08-27 interpolates user-level MCP with `configurationResolverService.resolveAsync` against the window that spawned the shared profile-scoped process, not `~/.cursor`.
 - Real-host Cursor IDE user-level stdio evidence from 2026-08-27: process cwd is the user home, not the Workspace. Cursor injects `WORKSPACE_FOLDER_PATHS` on that shared process; it can name the spawn window rather than the calling window. Using it as Workspace identity attached an Alia chat to mangazeya-backend and wrote a Task into the wrong Project. Harness therefore ignores it. Cursor-profile identity is only interpolated `HARNESS_WORKSPACE_ROOT` from an enabled project override.
 - After changing `mcp.json`, current Cursor help explicitly says to save the file and restart Cursor. MCP Logs in the Output panel are the documented troubleshooting surface.
-- Skills load from `.agents/skills` and `.cursor/skills`, with user equivalents.
+- Skills load from `.agents/skills` and `.cursor/skills`, with user equivalents. Official Cursor
+  skill docs describe discovery by name/description and loading `SKILL.md` on activation. Reviewed
+  Cursor CLI (`agent mcp list`, `agent mcp list-tools`, `agent mcp enable`) does not expose a
+  documented, deterministic "currently selected Skill" query. Do not treat undocumented IDE
+  internals, agent transcripts, or a new Harness telemetry channel as that proof.
 - Cursor also loads compatibility skill directories including `.claude/skills` and `.codex/skills`. A projection that writes duplicates to several roots is therefore unsafe by default.
+
+### Cursor native skill selection (manual real-host)
+
+Harness does not own Cursor's per-prompt Skill choice. After `harness scan`, the stable project pack
+must already exist under `.agents/skills` before a new Cursor session starts. Task lifecycle must
+not be used as a Skill selector. Host-version uncertainty remains: Cursor may change how Skills
+appear in the UI.
+
+Until Cursor documents a machine-readable selected-Skill API, use this operator procedure on a
+mixed FastAPI+Expo (or equivalent backend+mobile) Workspace:
+
+1. Confirm the projected pack is present and Git-ignored (`ls .agents/skills` includes both
+   backend/server and mobile surfaces; no Task mutation is required first).
+2. Fully quit and reopen Cursor so the session can rediscover project Skills (current Cursor MCP
+   help still requires restart after config changes; Skill rediscovery is not proven to hot-reload).
+3. Confirm Cursor lists the project Skills from `.agents/skills` (Skills UI / skill picker if the
+   current build shows one). Record the Cursor version. Absence of a picker is not a Harness defect;
+   the pack on disk is still the Harness contract.
+4. In a **new** chat, give a backend-only prompt (for example, Alembic/API validation). The agent
+   should follow server/data guidance if it activates a Skill. It must not systematically apply
+   mobile-application guidance to that prompt.
+5. In another **new** chat, give a mobile-only prompt (for example, Expo navigation). Mobile
+   guidance should activate. Backend-only Skills should not systematically dominate.
+6. In a third chat, a mixed prompt should not produce systematic confusion (always-mobile on
+   backend work, or the reverse) across repeated trials.
+
+Score files-at-session-start and qualitative native choice. Do not score mid-session Task start as
+Skill injection. Do not add Cursor-specific path logic to the core resolver from this procedure.
 
 ### Implemented Cursor local adapter boundary
 
@@ -189,7 +225,10 @@ support; Codex claims only ADR-0028 hygiene-effective support until real-host en
   may occur; do not score it as Harness current-session delivery. Task lifecycle does not
   rotate the project pack
   ([ADR-0042](../decisions/0042-project-stack-skill-selection.md)).
-- [ ] Irrelevant generated skills are absent.
+- [ ] The host chooses among that stable pack by Skill description. Cursor has no documented
+  selected-Skill CLI; use the manual procedure in the Cursor section. Codex `--run-model`
+  may prove description selection via the isolated nonce; it is optional and not CI-mandatory.
+- [ ] Irrelevant generated skills are absent from the projected pack.
 - [ ] No duplicate Harness skill appears because of compatibility directory scanning.
 - [ ] Removing Harness deletes only Harness-owned integration artifacts.
 - [ ] Codex trusted-project config is discovered independently by the current CLI, IDE extension, and ChatGPT desktop local client; untrusted projects remain fail-closed without Harness changing trust.

@@ -126,8 +126,9 @@ that was absent at session start.
 
 - Greenfield and later Task hint changes still converge on disk without a manual scan.
 - Operators and agents must not treat mid-session `task_start` as live skill injection.
-  That caveat is on the `task_start` tool description (`stack_hints` drive the next host
-  discovery boundary, not current-session MCP skill delivery). `_SERVER_INSTRUCTIONS`
+  That caveat is on the `task_start` tool description (`stack_hints` are Task metadata, not a
+  Skill selector). Historical Option A treated hints as the next host discovery boundary;
+  ADR-0042 withdrew Task-selected projection. `_SERVER_INSTRUCTIONS`
   does not repeat it: the 1024-byte budget already holds R-02 status→task→search,
   Russian in the first 512 characters, and the code/doc native-read exemption.
 - Closing current-session delivery would be a later ADR (Option C/D) with a new expected
@@ -140,7 +141,15 @@ Automated tests must prove:
 - the five MCP tools and `task_start` / `project_status` payloads do not include skill
   bodies or `recommended_skills` as delivery;
 - `project_context` kinds remain code/doc/knowledge/task and reject `skill:` refs;
-- the `task_start` tool description states next host discovery boundary and forbids
-  treating mid-session `task_start` as live skill injection;
-- docs and Codex acceptance wording state next-session-only for the synthetic gate;
-- projection-after-`task_start` tests still assert watcher enqueue / filesystem repair.
+- the `task_start` tool description forbids treating mid-session `task_start` as live skill
+  injection (`stack_hints` are Task metadata, not a Skill selector);
+- projection-after-`task_start` tests assert the project pack is unchanged (ADR-0042).
+
+## 2026-09-02 amendment: Codex synthetic gate is description selection
+
+[ADR-0042](0042-project-stack-skill-selection.md) withdrew Task-selected projection. The historical
+synthetic scenario `task_start selects X` / expected result **next-session-only** is no longer the
+Codex acceptance product contract. `scripts/accept_codex.py` projects a stable pack (including a
+positive/negative sibling pair selected by `applies`, not `task_hints`) and, when `--run-model` is
+used, proves the host chose the matching description. MCP still does not deliver skill bodies.
+Keep the historical Decision text above for the superseded Task-selected filesystem model.
