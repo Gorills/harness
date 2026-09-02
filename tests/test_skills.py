@@ -29,7 +29,6 @@ from harness.skills import (
     SkillProjectionError,
     SkillRegistryError,
     SkillResolutionError,
-    SkillResolutionPolicy,
     apply_skill_projection,
     default_skill_registry,
     detect_workspace_stack,
@@ -939,7 +938,7 @@ def test_workspace_stack_resolution_honors_expired_deadline(tmp_path: Path) -> N
         connection.close()
 
 
-def test_resolver_budget_is_bounded_deterministic_and_explicit_wins(tmp_path: Path) -> None:
+def test_resolver_returns_every_match_deterministically_and_explicit_wins(tmp_path: Path) -> None:
     registry = tmp_path / "registry"
     for skill_id in ("alpha", "beta", "gamma"):
         _write_skill(registry, skill_id, languages=("python",))
@@ -954,10 +953,9 @@ def test_resolver_budget_is_bounded_deterministic_and_explicit_wins(tmp_path: Pa
         definitions,
         stack,
         explicit_include=("gamma",),
-        policy=SkillResolutionPolicy(max_visible_skills=2),
     )
 
-    assert _ids(resolved) == ("gamma", "alpha")
+    assert _ids(resolved) == ("gamma", "alpha", "beta")
     with pytest.raises(SkillResolutionError, match="both explicitly included and excluded"):
         resolve_skills(
             definitions,
