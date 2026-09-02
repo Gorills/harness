@@ -24,7 +24,7 @@ jobs:
         run: |
           set -euo pipefail
           base64 --decode .github/project-skill-scope.patch.gz.b64 > /tmp/project-skill-scope.patch.gz
-          echo '286bee40e1d1ee287781deb98aa22ec329f757b1ccf24b4b0a4fdd1633ff7e79  /tmp/project-skill-scope.patch.gz' | sha256sum --check --strict
+          echo '566da083029e6369db6ccb76dcc1cdfef7d01c19eb7be5de1bf24821d471d9bc  /tmp/project-skill-scope.patch.gz' | sha256sum --check --strict
           gzip --decompress --stdout /tmp/project-skill-scope.patch.gz > /tmp/project-skill-scope.patch
           git apply --check /tmp/project-skill-scope.patch
           git apply /tmp/project-skill-scope.patch
