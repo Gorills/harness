@@ -401,6 +401,8 @@ def test_expected_generated_skills_include_synthetic_acceptance_skill() -> None:
     assert "testing-strategy" in EXPECTED_GENERATED_SKILLS
     assert "project-architecture" in EXPECTED_GENERATED_SKILLS
     assert "complex-change-planning" in EXPECTED_GENERATED_SKILLS
+    assert "language-engineering" in EXPECTED_GENERATED_SKILLS
+    assert "legacy-preservation" in EXPECTED_GENERATED_SKILLS
     assert NEGATIVE_SKILL_PREFLIGHT_POLICY.startswith("projected;")
 
 

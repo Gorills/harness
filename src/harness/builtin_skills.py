@@ -1247,6 +1247,7 @@ compatibility and run the repository's focused checks plus required gates.
             "typescript",
             "vue",
         ),
+        applies_facets=("software-project",),
         references=(
             (
                 "python.md",
@@ -1555,7 +1556,7 @@ compatibility and run the repository's focused checks plus required gates.
     ),
     BuiltinSkill(
         "complex-change-planning",
-        "Use when planning a cross-boundary or migration-ordered change, independently reviewing a risky diff, or preserving legacy compatibility; exclude ordinary single-module bugfixes and routine test-only work.",
+        "Use when planning a cross-boundary or migration-ordered change or independently reviewing a risky diff; exclude ordinary single-module bugfixes and routine test-only work.",
         (),
         """
 # Complex change planning
@@ -1569,8 +1570,7 @@ repository already requires one.
   ad-hoc files.
 - Before implementing a risky or underspecified change, read
   [specification audit](references/specification-audit.md).
-- When modifying established behavior, read
-  [legacy preservation](references/legacy-preservation.md).
+- Established-behavior and compatibility work uses the project-wide `legacy-preservation` Skill.
 - Before publication, read [independent review](references/independent-review.md).
 """,
         applies_facets=("software-project",),
@@ -1604,9 +1604,13 @@ Review the finished change as if you did not implement it.
 - Report verified evidence separately from assumptions, not-run checks, and real blockers.
 """,
             ),
-            (
-                "legacy-preservation.md",
-                """
+        ),
+    ),
+    BuiltinSkill(
+        "legacy-preservation",
+        "Use when changing established behavior, compatibility, or an existing runtime path; exclude greenfield-only design and an explicitly authorized rewrite.",
+        (),
+        """
 # Legacy preservation
 Treat the existing system as an evidence-bearing contract, including awkward behavior that users or
 integrations may rely on.
@@ -1632,8 +1636,7 @@ integrations may rely on.
 - Run the repository's focused compatibility tests and required gates, then review the full diff
   specifically for architectural drift and unintended surface changes.
 """,
-            ),
-        ),
+        applies_facets=("software-project",),
     ),
 )
 

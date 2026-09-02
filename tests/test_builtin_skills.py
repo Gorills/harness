@@ -83,6 +83,8 @@ def test_builtin_pack_resolves_from_project_stack_without_task_hints(tmp_path: P
     software_ids = set(_ids(resolve_skills(definitions, software)))
     assert {
         "complex-change-planning",
+        "language-engineering",
+        "legacy-preservation",
         "project-architecture",
         "secure-by-design",
         "testing-strategy",
@@ -91,7 +93,6 @@ def test_builtin_pack_resolves_from_project_stack_without_task_hints(tmp_path: P
         {
             "backend-security",
             "architecture-decisions",
-            "legacy-preservation",
             "project-conventions",
             "spec-audit",
             "independent-review",
@@ -145,13 +146,13 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         "server-application",
         "godot-development",
         "deployment-operations",
+        "legacy-preservation",
     } <= set(by_id)
     assert by_id.keys().isdisjoint(
         {
             "architecture-decisions",
             "backend-security",
             "independent-review",
-            "legacy-preservation",
             "project-conventions",
             "scalability-architecture",
             "spec-audit",
@@ -282,6 +283,7 @@ def test_builtin_pack_keeps_polyglot_workspace_surfaces(tmp_path: Path) -> None:
     assert {
         "data-integrity",
         "language-engineering",
+        "legacy-preservation",
         "mobile-application",
         "secure-by-design",
         "server-application",
@@ -355,9 +357,16 @@ def test_builtin_pack_omits_task_hints_and_requires_stack_applies(tmp_path: Path
 def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path) -> None:
     architecture = _builtin_by_id("project-architecture")
     change = _builtin_by_id("complex-change-planning")
+    language = _builtin_by_id("language-engineering")
+    legacy = _builtin_by_id("legacy-preservation")
     security_web = dict(_builtin_by_id("secure-by-design").references)["web-backend.md"]
     assert architecture.applies_facets == ("software-project",)
     assert change.applies_facets == ("software-project",)
+    assert language.applies_facets == ("software-project",)
+    assert language.applies_languages
+    assert legacy.applies_facets == ("software-project",)
+    assert legacy.task_hints == ()
+    assert "characterization, contract, or golden tests" in legacy.body
     assert dict(architecture.references)["architecture-decisions.md"]
     assert (
         "Record an ADR only for durable decisions"
@@ -369,16 +378,18 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
         in dict(change.references)["specification-audit.md"]
     )
     assert "as if you did not implement it" in dict(change.references)["independent-review.md"]
-    assert (
-        "characterization, contract, or golden tests"
-        in dict(change.references)["legacy-preservation.md"]
-    )
+    assert "legacy-preservation.md" not in dict(change.references)
+    assert "legacy-preservation" in change.body
     assert change.description.startswith(
         "Use when planning a cross-boundary or migration-ordered change"
     )
+    assert "preserving legacy compatibility" not in change.description
     assert (
         "exclude ordinary single-module bugfixes and routine test-only work" in change.description
     )
+    assert legacy.description.startswith("Use when")
+    assert "established behavior" in legacy.description
+    assert "greenfield-only" in legacy.description
     testing = _builtin_by_id("testing-strategy")
     conventions = " ".join(testing.body.split())
     assert "Do not duplicate facts Harness can derive from manifests" in conventions
@@ -397,9 +408,9 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
     assert by_id["complex-change-planning"].portable_files == (
         PurePosixPath("SKILL.md"),
         PurePosixPath("references/independent-review.md"),
-        PurePosixPath("references/legacy-preservation.md"),
         PurePosixPath("references/specification-audit.md"),
     )
+    assert by_id["legacy-preservation"].portable_files == (PurePosixPath("SKILL.md"),)
 
 
 def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None:
@@ -415,7 +426,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         ids = set(_ids(resolve_skills(definitions, stack)))
         assert required <= ids
         assert ids.isdisjoint(forbidden)
-        assert len(ids) <= 12
+        assert len(ids) <= 14
         return ids
 
     python_cli = DetectedProjectStack(
@@ -429,6 +440,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         {
             "complex-change-planning",
             "language-engineering",
+            "legacy-preservation",
             "project-architecture",
             "secure-by-design",
             "testing-strategy",
@@ -456,6 +468,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         {
             "data-integrity",
             "language-engineering",
+            "legacy-preservation",
             "secure-by-design",
             "server-application",
             "testing-strategy",
@@ -474,6 +487,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         {
             "frontend-design",
             "language-engineering",
+            "legacy-preservation",
             "public-frontend",
             "secure-by-design",
             "testing-strategy",
@@ -492,6 +506,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         {
             "frontend-design",
             "language-engineering",
+            "legacy-preservation",
             "mobile-application",
             "secure-by-design",
             "testing-strategy",
@@ -520,6 +535,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
             "container-infrastructure",
             "data-integrity",
             "language-engineering",
+            "legacy-preservation",
             "secure-by-design",
             "server-application",
             "testing-strategy",
@@ -554,6 +570,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
             "data-integrity",
             "frontend-design",
             "language-engineering",
+            "legacy-preservation",
             "mobile-application",
             "secure-by-design",
             "server-application",
@@ -566,7 +583,11 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
 
 
 def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> None:
-    """Facet matches outrank language-only; budget 12 may drop language-engineering."""
+    """Default budget 14 fits six software-project cores plus this fixture's eight surfaces.
+
+    Ranking still drops ``godot-development`` (no matching facet). ``observability`` may
+    remain out of the truncated pack even when OpenTelemetry/Prometheus tokens are present.
+    """
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -599,23 +620,25 @@ def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> Non
     )
     resolved = resolve_skills(definitions, busy)
     ids = _ids(resolved)
-    assert len(ids) == 12
-    assert {
+    assert len(ids) == 14
+    assert len(BUILTIN_SKILLS) == 16
+    assert set(ids) == {
         "ci-release",
         "complex-change-planning",
         "container-infrastructure",
         "data-integrity",
         "deployment-operations",
         "frontend-design",
+        "language-engineering",
+        "legacy-preservation",
         "mobile-application",
         "project-architecture",
         "public-frontend",
         "secure-by-design",
         "server-application",
         "testing-strategy",
-    } <= set(ids)
+    }
     assert "godot-development" not in ids
-    assert "language-engineering" not in ids
     assert "observability" not in ids
     assert all(
         any(reason.startswith("facet:") for reason in item.match_reasons) for item in resolved
