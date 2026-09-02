@@ -127,13 +127,13 @@ class _Replacement:
 BUILTIN_SKILLS: Final[tuple[BuiltinSkill, ...]] = (
     BuiltinSkill(
         "testing-strategy",
-        "Use when choosing focused verification for a software change or confirming repository-required gates before publication.",
+        "Use when implementing or modifying software behavior; defines reproduction, regression coverage, focused verification, and repository-required completion checks.",
         (),
         """
 # Testing strategy
 - Reproduce failures or define a falsifiable acceptance check before changing behavior when practical.
 - During iteration, run the smallest relevant unit/integration checks that can catch the change.
-- Add regression coverage for the actual failure mode and important negative paths.
+- Add the smallest regression coverage that protects the actual failure mode and important negative path; do not expand the test surface for unrelated behavior.
 - Mock network/external systems at explicit boundaries; prefer real local domain/storage behavior where cheap.
 - Before publication or merge, run every repository-mandated quality gate for the exact candidate. A targeted green test never substitutes for required CI.
 - After repeated failed attempts, stop changing code, restate the evidence and current hypothesis, and inspect the boundary before trying another fix.
@@ -610,7 +610,7 @@ Official platform guidance:
     ),
     BuiltinSkill(
         "public-frontend",
-        "Use when changing a public web frontend that needs search discoverability, document semantics, accessibility, or loading performance; exclude native-only apps.",
+        "Use when changing any public or indexable web frontend, including search discoverability, document semantics, accessibility, and loading performance; exclude native-only apps.",
         (),
         """
 # Public frontend
@@ -1072,28 +1072,158 @@ dependency.
     ),
     BuiltinSkill(
         "godot-development",
-        "Use when changing a Godot project, GDScript/C# gameplay code, scenes, resources, simulation, or export behavior.",
+        "Use when changing any Godot project behavior, including gameplay, input, UI, localization, scenes, resources, rendering, performance, persistence, or export.",
         (),
         """
 # Godot development
-- Derive the Godot version, renderer, target platforms, C#/GDScript mix, autoloads, input map, plugins,
-  import settings, and test/export commands from the project. Do not assume another engine version's API.
-- Preserve scene/node/resource ownership and lifecycle. Keep signals typed and scoped, disconnect or use
-  lifecycle-safe connections, avoid fragile absolute node paths, and do not retain freed nodes/resources.
-- Separate deterministic simulation/domain rules from scene-tree, rendering, input, audio, persistence,
-  and platform adapters where the current architecture supports it. Keep autoload global state small.
-- Use `_physics_process` for fixed-step rules and `_process` for presentation where appropriate. Make
-  pause/time-scale, input focus, collision layers/masks, ordering, randomness, and save/load compatibility
-  explicit rather than frame-rate dependent.
-- Profile before optimizing. Bound per-frame allocation, tree traversal, signals, physics queries,
-  resource loading, draw calls, particles, and C#↔Godot crossings on representative target hardware.
-- Keep imported/generated artifacts out of hand edits and avoid unrelated scene/resource serialization
-  churn. Preserve stable resource paths/UIDs and validate migrations of saved data and exported fields.
-- Run headless parse/import and deterministic simulation tests first, then focused runtime scenes and
-  target export/startup smoke tests. Cover input, scene transitions, pause, resolution/aspect ratios,
-  persistence, failure recovery, and both debug and release behavior touched by the change.
+- First derive the Godot version, renderer, target platforms, GDScript/C# mix, autoloads, InputMap,
+  Theme/localization setup, plugins, import/export settings, and project check commands. Existing
+  project conventions and architecture win. Consult current official docs only for version-specific
+  API, export, renderer, import, or plugin behavior the repository does not establish.
+- For gameplay, player/controller behavior, controls, input, or rebinding, read
+  [gameplay and input](references/gameplay-input.md).
+- For menus, HUD, settings, Control layout, themes, accessibility, or localization, read
+  [UI and localization](references/ui-localization.md).
+- For resolution/stretch, assets, shaders, lighting, particles, rendering, or performance, read
+  [rendering and performance](references/rendering-performance.md).
+- Preserve scene/node/resource ownership and lifecycle. Keep signals typed and scoped, use
+  lifecycle-safe connections, avoid fragile absolute node paths, and do not retain freed nodes or
+  resources.
+- Keep deterministic game rules separate from presentation, raw input, audio, persistence, and
+  platform adapters where that seam helps the current architecture. Keep global autoload state small.
+  Use `_physics_process` for fixed-step physics/simulation and `_process` for presentation/non-physics
+  work where appropriate. Make pause/time scale, collisions, ordering, randomness, and save
+  compatibility explicit rather than frame-rate dependent.
+- Establish the applicable input, UI/localization, and rendering foundations before feature code can
+  grow around accidental defaults. Implement the smallest coherent change, then review representative
+  playable behavior and profile/render only the affected path. Do not add state machines, event buses,
+  pools, or genre patterns without an actual project need.
+- Do not hand-edit generated/imported artifacts or create unrelated scene/resource serialization churn.
+  Preserve stable resource paths/UIDs and migrate serialized/exported fields or save data deliberately.
+- Completion means the affected real project path works: input/device flow, UI/focus/localized layout,
+  scene/pause/persistence transitions, resolution/rendering/performance, and target export/startup only
+  as touched by the change. Run repository-required checks; do not create unrelated test surface.
 """,
         applies_facets=("godot-project",),
+        references=(
+            (
+                "gameplay-input.md",
+                """
+# Gameplay and input
+
+## Build the control boundary
+- Gameplay consumes semantic InputMap actions, not physical key/button codes. Physical events belong
+  only at device capture/rebinding and presentation boundaries.
+- Map keyboard/mouse and controller to the same gameplay actions. Keep device-specific prompts/glyphs
+  outside gameplay logic so changing a binding or active device does not rewrite game rules.
+- Treat analog input deliberately: deadzone, response curve/sensitivity, normalization, and clamping
+  must match the action. Keep movement, camera, and control tuning in named configuration/resources
+  rather than scattered literals.
+- Define which context owns input when gameplay, pause menus, dialogs, rebinding, overlays, or cutscenes
+  overlap. Paused/menu input must not leak into gameplay, and closing UI must not replay stale input.
+- Where UI exists, make its keyboard/controller focus path complete enough that core menus/settings do
+  not require a pointer.
+- Rebinding changes action bindings without changing gameplay code. Persist bindings and control
+  settings with safe defaults/reset behavior; device disconnect or switching must not corrupt them.
+- If prompts switch to the active device, debounce noisy analog input and keep the switch presentational.
+
+## Keep gameplay deterministic where it matters
+- Separate deterministic rules from raw input and presentation when the current architecture supports
+  that seam. Fixed-step physics/simulation uses the correct delta; presentation updates must not make
+  outcomes depend on frame rate.
+- Make pause/time scale, scene transitions, collision layers/masks, ordering, randomness/seed policy,
+  and save compatibility explicit when affected.
+- Prefer small components/resources and explicit ownership. Do not introduce a state machine, event
+  bus, coyote time, pooling, or another genre pattern unless the actual mechanic or measured workload
+  requires it.
+
+## Verify the affected control path
+- Exercise the devices and contexts the change touches: keyboard/mouse, controller, analog extremes and
+  deadzone, rebind/reset, pause/menu/focus, and device disconnect/switch where supported.
+- Check frame-rate variation only for mechanics that could become frame-dependent. Use the project's
+  existing focused runtime/simulation checks; do not invent a parallel test harness.
+""",
+            ),
+            (
+                "ui-localization.md",
+                """
+# Godot UI and localization
+
+## Build a reusable UI system
+- Treat UI as a system, not independently styled Controls. Extend the existing Theme/design language;
+  for greenfield UI establish a project-wide or deliberate subtree Theme and semantic type variations
+  before screens multiply.
+- Keep a compact set of semantic roles for typography, color, spacing, shape/depth, focus/selection,
+  disabled/error/success states, and motion where used. Prefer Theme values, type variations, and
+  reusable components over repeated local overrides.
+- Build layout with Control/Container behavior, anchors, size flags, and intentional minimums. Design
+  against the project's base design size, supported aspect ratios, and UI scale instead of one fixed
+  viewport coordinate set.
+- Every interactive state that can occur must be legible: default, focus, pressed/selected, disabled,
+  error, and hover where a pointer exists. Keyboard/controller focus order is logical and visible;
+  hover alone never carries required information.
+- Keep fonts, icons, and control density coherent at target scale. Preserve an established design
+  system instead of re-skinning one feature in isolation.
+
+## Localize from the start
+- Put user-visible copy into the project's translation pipeline as it is introduced. Use stable keys
+  or the established source format and one authoritative translation workflow; do not scatter manual
+  per-locale branches through scenes/scripts.
+- Do not construct translatable sentences from concatenated fragments. Keep variables, plural/context
+  needs, and word-order differences representable by the translation system.
+- Layout must tolerate longer text, wrapping, changed word order, and missing/fallback translations;
+  do not size controls only for the source language.
+- Ensure the selected fonts/fallbacks cover glyphs for target locales. Persist locale when the product
+  exposes it as a setting and use Godot's translation/locale facilities rather than per-label logic.
+- Use pseudolocalization or equivalent expansion checks for meaningful UI work. Add RTL/CJK-specific
+  handling only when target locales require it, but do not close the architecture against it.
+
+## Verify the affected UI path
+- Review representative menu/HUD/settings screens at supported aspect ratios and UI scales with
+  expanded localized copy, focus navigation, and relevant disabled/error/selected states.
+- Exercise locale switching/fallback only where supported by the product. Keep verification bounded to
+  the changed UI path and repository-required checks.
+""",
+            ),
+            (
+                "rendering-performance.md",
+                """
+# Rendering and performance
+
+## Establish the rendering contract early
+- Derive target hardware/platforms, renderer, 2D/3D path, base design resolution/stretch policy,
+  target frame rate/frame-time budget, quality range, and material memory constraints from product and
+  repository evidence. Do not wait for late optimization to discover these constraints.
+- Make resolution, aspect-ratio, stretch, render scale, and UI scaling behavior intentional and check
+  representative targets early. Preserve pixel-art or high-DPI rules the project already establishes.
+- Treat import settings as part of the asset pipeline: texture size/compression/filtering/mipmaps,
+  mesh/animation/audio choices, and platform overrides should fit the targets. Never hand-edit generated
+  import artifacts.
+- Keep rendering features and quality tiers coherent. Expensive lighting, shadows, post-processing,
+  viewports, shaders, and particles need a deliberate lower-end or disabled path when target hardware
+  requires one.
+
+## Keep hot paths bounded
+- Avoid unbounded work in `_process`/`_physics_process`: repeated tree searches, transient allocation,
+  excessive signals/physics queries, synchronous resource I/O, or repeated C#↔Godot crossings need a
+  concrete reason on a hot path. Cache stable references and size work to the scene.
+- Bound draw calls/overdraw, lights/shadows, particles, shader/viewport effects, animation, and physics
+  according to the real scene and target. Load/preload/stream resources according to lifetime and hitch
+  risk; do not add pooling until measured churn makes it the simplest fix.
+- Design performance-sensitive ownership and work bounds proactively, but micro-optimize only from
+  measurements. Profile representative gameplay with Godot's Profiler/Visual Profiler or the relevant
+  platform/.NET profiler when engine tooling does not expose the bottleneck.
+- Measure on target-like hardware/configuration, fix the highest material bottleneck, then measure again.
+  An empty test scene or editor-only result is not representative evidence.
+
+## Verify the affected render path
+- Inspect the representative affected scene for frame/physics/render time, memory/loading hitches, and
+  visual output at target resolution/quality as relevant.
+- Exercise startup/transition/loading and target export/release behavior only when renderer, imports,
+  shaders, particles, platform settings, or quality configuration changed.
+""",
+            ),
+        ),
     ),
     BuiltinSkill(
         "deployment-operations",
@@ -1201,7 +1331,7 @@ operational contract and the decision may need an ADR.
     ),
     BuiltinSkill(
         "language-engineering",
-        "Use when changing source code and language-native correctness, tooling, runtime, or package conventions matter; read only references for affected languages.",
+        "Use when changing source code in a supported language; apply the affected language's correctness, runtime, package, tooling, and compatibility conventions.",
         (),
         """
 # Language engineering
@@ -1429,20 +1559,24 @@ compatibility and run the repository's focused checks plus required gates.
                 "gdscript.md",
                 """
 # GDScript engineering
-- Honor the repository's Godot version, typed-GDScript policy, scene/resource ownership, autoloads,
-  input map, physics ticks, and generated/imported asset boundaries.
-- Use static types for public/stateful boundaries where the project supports them. Treat exported
-  properties, signals, node paths, resources, and serialized scene fields as compatibility surfaces.
-- Keep node lifetime explicit: disconnect or use lifecycle-safe signals, validate weak/external
-  references, cancel owned awaits/timers, and do not retain freed nodes or mutate the scene tree from
-  unsafe callbacks.
-- Separate deterministic domain/simulation logic from rendering, input, and scene-tree side effects
-  when the project architecture does so. Avoid broad autoload singletons and stringly typed cross-scene
-  coordination.
-- Keep frame and physics work bounded; do not allocate, traverse the tree, load resources, or perform
-  blocking I/O in hot callbacks without measured justification. Use engine-native profiling evidence.
-- Run headless parser/import tests, focused scene/runtime tests, and the project's real target/export
-  checks. Cover scene transitions, pause/time scale, save compatibility, input focus, and failure paths.
+- Honor the project's Godot/GDScript version and typed-GDScript policy. Use only supported syntax,
+  annotations, built-ins, and APIs; verify a version-specific API when repository evidence is not
+  enough.
+- Prefer static types on changed public or stateful boundaries when compatible with project style.
+  Keep function signatures, typed arrays/dictionaries, enums, `StringName`/`NodePath`, and nullable
+  states precise enough to make contracts visible without forcing noisy types where inference is clear.
+- Treat exported properties, signal signatures, resource fields, and serialized scene-facing names as
+  compatibility surfaces. Rename or change them deliberately and migrate affected scenes/resources or
+  saved data when required.
+- Keep signal/callable argument and return contracts explicit. Prefer typed signals, callables, enums,
+  and resources over stringly dispatch when they fit the existing design.
+- Make `await`, timer, and callback lifetime explicit: a continuation may resume after scene/state
+  changes, so revalidate external/node state and keep ownership clear before mutating it.
+- Prefer ordinary readable GDScript over clever dynamic property access or reflection. Keep collection
+  and allocation choices proportional in frequent language-level code; engine hot-path, scene, input,
+  rendering, and export policy belongs to `godot-development`.
+- Run the project's parser/static-warning and focused script/unit checks plus required repository gates.
+  Scene/input/render/export verification is governed by `godot-development`.
 """,
             ),
             (

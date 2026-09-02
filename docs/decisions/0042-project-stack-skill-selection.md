@@ -39,12 +39,12 @@ loading. It is ignored at resolve time.
 
 - A FastAPI+Expo Workspace keeps both surfaces in the projected pack while Tasks change.
 - Greenfield Task hints no longer activate Skills before stack evidence exists.
-- The built-in catalog no longer depends on Task hints for usefulness. The pack has 16 built-ins;
-  the default visible budget is 14 (`DEFAULT_MAX_VISIBLE_SKILLS`). Six cores apply to every
-  detected software project: `testing-strategy`, `secure-by-design`, `project-architecture`,
-  `complex-change-planning`, `language-engineering`, and dedicated `legacy-preservation`.
-  Specialized Task-only skills were merged into those cores or retired. Built-in `harness.yaml`
-  does not emit `task_hints`.
+- The built-in catalog no longer depends on Task hints for usefulness. The pack has 16 built-ins.
+  Six cores apply to every detected software project: `testing-strategy`, `secure-by-design`,
+  `project-architecture`, `complex-change-planning`, `language-engineering`, and dedicated
+  `legacy-preservation`. Specialized Task-only skills were merged into those cores or retired.
+  Built-in `harness.yaml` does not emit `task_hints`. The count-based visibility budget originally
+  recorded here is superseded by [ADR-0044](0044-project-skill-projection-has-no-count-cap.md).
 - Projection safety, registry trust, and Git `info/exclude` are unchanged.
 
 ## Verification

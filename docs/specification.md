@@ -1787,9 +1787,10 @@ godot/
 
 Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует detected project stack и explicit include/exclude, без отдельного workflow DSL. Built-in `harness.yaml` не генерирует `task_hints`.
 
-Количество canonical built-ins не равно model-visible budget: resolver по-прежнему выбирает только
-релевантный bounded subset. Подробные stack/domain инструкции могут жить в portable
-`references/` и должны читаться skill'ом только для затронутого языка или режима. Quality pack
+Resolver materialize'ит каждый Skill, релевантный detected project stack или явно включённый
+project policy; количественного model-visible cap нет. Нерелевантные Skills в Project не попадают.
+Подробные stack/domain инструкции могут жить в portable `references/` и должны читаться skill'ом
+только для затронутого языка или режима. Quality pack
 покрывает как минимум Docker lifecycle/configuration, public frontend discoverability для Google и
 Яндекса, language-native engineering, project architecture, legacy preservation, data integrity,
 backend services, Expo/React Native mobile apps, Godot, deployment operations и secure-by-design
@@ -1934,20 +1935,14 @@ Harness не должен менять `.gitignore` без необходимо�
 
 ---
 
-# 81. Skill budget
+# 81. Skill visibility
 
-Количество model-visible Harness skills ограничено.
+Project видит все Skills, релевантные detected Workspace stack или явно включённые project policy,
+кроме явно исключённых. Количественного model-visible budget нет: порядок может быть
+детерминирован relevance, но не должен отбрасывать matching Skill.
 
-Design target:
-
-```text
-около 12 или меньше
-
-```
-
-на project по умолчанию.
-
-Это configurable policy, а не protocol constant.
+Это не отменяет response budgets MCP: Skill files materialize'ятся через native host surface и
+читаются host'ом по progressive disclosure, а не выдаются одним model-context payload.
 
 ---
 

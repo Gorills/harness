@@ -84,10 +84,10 @@ that was absent at session start.
    available in that session. The next discovery boundary sees the projected files. Restart
    remains the documented fallback.
 
-4. **What happens on skill budget overflow?**
-   Unchanged: the resolver projects at most the configured bounded subset. Skills that do
-   not win the budget are not projected and are not delivered through MCP. Overflow is a
-   next-boundary projection outcome, not a current-session MCP fallback.
+4. **What happens when many Skills match the project?**
+   [ADR-0044](0044-project-skill-projection-has-no-count-cap.md) supersedes the former overflow
+   rule: every matching Skill is projected. MCP still does not deliver Skill bodies; the host
+   chooses which projected Skill to load through native discovery/progressive disclosure.
 
 5. **How are nested `references/` disclosed?**
    Host-native progressive disclosure after the host loads the projected `SKILL.md`.

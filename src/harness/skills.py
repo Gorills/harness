@@ -27,7 +27,6 @@ from harness.registry import WorkspaceRecord, get_workspace
 SKILL_FILE_NAME = "SKILL.md"
 SKILL_METADATA_FILE_NAME = "harness.yaml"
 SKILL_OWNERSHIP_MARKER_NAME = ".harness-skill.json"
-DEFAULT_MAX_VISIBLE_SKILLS = 14
 _SKILL_MARKER_VERSION = 1
 _GIT_TIMEOUT_SECONDS = 1.5
 _MAX_METADATA_BYTES = 64 * 1024
@@ -255,19 +254,6 @@ class DetectedProjectStack:
     dependencies: frozenset[str]
     manifests: frozenset[str]
     facets: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
-class SkillResolutionPolicy:
-    max_visible_skills: int = DEFAULT_MAX_VISIBLE_SKILLS
-
-    def __post_init__(self) -> None:
-        if isinstance(self.max_visible_skills, bool) or not isinstance(
-            self.max_visible_skills, int
-        ):
-            raise SkillResolutionError("skill budget must be an integer")
-        if self.max_visible_skills <= 0:
-            raise SkillResolutionError("skill budget must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,10 +537,9 @@ def resolve_workspace_skills(
     *,
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
-    policy: SkillResolutionPolicy | None = None,
     deadline: float | None = None,
 ) -> tuple[ResolvedSkill, ...]:
-    """Resolve relevant skills from the indexed project stack and explicit project policy."""
+    """Resolve every relevant Skill from the indexed project stack and explicit project policy."""
     _require_resolution_deadline(deadline)
     stack = detect_workspace_stack(connection, workspace_id, deadline=deadline)
     _require_resolution_deadline(deadline)
@@ -563,7 +548,6 @@ def resolve_workspace_skills(
         stack,
         explicit_include=explicit_include,
         explicit_exclude=explicit_exclude,
-        policy=policy,
     )
 
 
@@ -573,15 +557,14 @@ def resolve_skills(
     *,
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
-    policy: SkillResolutionPolicy | None = None,
 ) -> tuple[ResolvedSkill, ...]:
-    """Select a deterministic bounded relevant subset from the canonical registry.
+    """Select every deterministic relevant Skill from the canonical registry.
 
     Detected project stack is the only Harness relevance source besides explicit include/exclude.
     Skill metadata ``task_hints`` is ignored legacy input and does not rank or narrow the pack.
-    Per-task choice among the projected files remains host-native.
+    Per-task choice among the projected files remains host-native. Match strength only stabilizes
+    ordering; it never removes a relevant Skill.
     """
-    effective_policy = SkillResolutionPolicy() if policy is None else policy
     by_id = {definition.skill_id: definition for definition in definitions}
     if len(by_id) != len(definitions):
         raise SkillResolutionError("skill definitions contain duplicate ids")
@@ -595,8 +578,6 @@ def resolve_skills(
     unknown = (include | exclude) - set(by_id)
     if unknown:
         raise SkillResolutionError(f"explicit skill ids are unknown: {', '.join(sorted(unknown))}")
-    if len(include) > effective_policy.max_visible_skills:
-        raise SkillResolutionError("explicit skills exceed the configured model-visible budget")
 
     matched: list[tuple[tuple[int, int, int, int, int], ResolvedSkill]] = []
     for definition in definitions:
@@ -637,8 +618,7 @@ def resolve_skills(
             item[1].definition.skill_id,
         )
     )
-    selected = matched[: effective_policy.max_visible_skills]
-    return tuple(item[1] for item in selected)
+    return tuple(item[1] for item in matched)
 
 
 def validate_skill_projection_compatibility(
