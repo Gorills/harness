@@ -688,6 +688,10 @@ def _validate_wire_instructions(instructions: str | None) -> None:
         raise CodexAcceptanceError(
             "installed MCP instructions do not require Task before project_search"
         )
+    if "Do not skip Task because work looks small or the path is known" not in instructions:
+        raise CodexAcceptanceError("installed MCP instructions omit Task-skip prohibition")
+    if "discussion only" in instructions or "waiver" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions contain discussion-waiver license")
 
 
 def _structured_result(name: str, result: Any) -> dict[str, Any]:

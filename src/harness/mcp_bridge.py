@@ -70,19 +70,21 @@ _SERVER_INSTRUCTIONS = (
     "project_status. Tool discovery is the only allowed pre-status action; omission is not "
     f"failure. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
     "title/body. stack_hints are optional Task metadata. After status, "
-    "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Then "
-    "project_search before broad native work. A code/doc path may be read natively; "
+    "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Do not "
+    "skip Task because work looks small or the path is known. Then "
+    "project_search before broad native work; an already-known exact path may skip search, "
+    "not Task. A code/doc path may be read natively; "
     "project_context is not required for those kinds. Checkpoint each stage. New request or "
     "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision; "
-    "never infer write targets. Store only reusable Knowledge. Inspect contracts before risky "
-    "work; run repo gates before publication. Hidden mode forbids durable SCM mutations."
+    "never infer write targets. Hidden mode forbids durable SCM mutations."
 )
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search bounded Project Intelligence across local code/doc text and identifiers, "
     "durable Knowledge, and Task history. Natural queries may include conversational "
     "filler. Results are compact refs. Code/doc hits may include a bounded current-source "
     "evidence snippet after a live-file SHA match; FTS is not a source store. Use after "
-    "task_start or resume, before broad native exploration. If a code or doc hit includes "
+    "task_start or resume, before broad native exploration. Skip this search only when an "
+    "exact path is already in hand; Task remains required. If a code or doc hit includes "
     "an exact path, targeted native read is allowed; project_context is not required for "
     "those kinds."
 )
@@ -93,7 +95,8 @@ _PROJECT_CONTEXT_DESCRIPTION = (
 )
 _TASK_START_DESCRIPTION = (
     "Create a new durable Harness task, or explicitly resume an existing task. Required "
-    f"before diagnosis, project_search, and edits. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
+    f"before diagnosis, project_search, and edits. Do not skip because work looks small or "
+    f"the path is known. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
     "Create with title and optional stack_hints only; omit task_id; never pass summary or "
     "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
     "A schema error is a blocker: read this schema and retry. stack_hints are optional "
