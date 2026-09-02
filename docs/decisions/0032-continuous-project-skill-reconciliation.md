@@ -11,6 +11,10 @@
   the three-host incompatibility in Decision 5 are historical.
 - **Relevance-key amendment (2026-09-01):** any committed Task mutation that changes the skill
   relevance key queues watcher reconciliation, not only `task_start`.
+- **Superseded in part by:** [ADR-0042](0042-project-stack-skill-selection.md). Task mutations no
+  longer change skill relevance or enqueue skill reconciliation. Continuous reconciliation after
+  project/index changes remains.
+- **Task-enqueue amendment (2026-09-02):** Decision 3 withdrawn. Decision 2 and Decision 4 remain.
 
 ## Context
 
@@ -108,3 +112,13 @@ makes Task-selected skills after `task_start` in an already-started session **ne
 when the host does not hot-reload. Reconciliation still guarantees projected files for the
 next host discovery boundary. Identifier lists such as `recommended_skills` are not instruction
 delivery. MCP does not carry skill bodies.
+
+## 2026-09-02 amendment: Decision 3 withdrawn
+
+[ADR-0042](0042-project-stack-skill-selection.md) withdraws Decision 3. Task mutations no longer
+compare a skill-relevance key and no longer enqueue watcher skill reconciliation. The 2026-09-01
+relevance-key amendment is historical.
+
+Decision 2 and Decision 4 remain: watcher-owned authoritative scans and foreground `harness scan`
+still resolve and reconcile skills after project or index changes. Task `stack_hints` stay optional
+durable metadata and are not a Skill selector.

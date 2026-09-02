@@ -404,13 +404,13 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 
 ## 14. Skills architecture
 
-Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects a relevant subset using deterministic project stack, Task hints, and explicit configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through the existing `task_hints` mechanism, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
+Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects a relevant subset using deterministic project stack and explicit include/exclude configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through stack applicability, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
 
 The quality baseline includes explicit local/test/production container operations, Google/Yandex
 public-route discoverability and web performance, project architecture, legacy compatibility,
 language-native correctness/tooling, and durable data integrity. Stack-derived applicability keeps
-language and domain guidance automatic after manifests/source appear; Task hints cover greenfield
-and intent-only work before deterministic stack evidence exists. Dependency matching retains the
+language and domain guidance automatic after manifests/source appear. Task `stack_hints` remain
+optional Task metadata and are not a Skill selector. Dependency matching retains the
 existing portable exact-token contract, while deterministic derived facets capture cross-signal
 project roles such as `web-frontend`, `mobile-app`, `backend-service`, `godot-project`, and
 `deployment-ops`. Facets are calculated with manifest locality where needed: an Expo/React Native
@@ -425,21 +425,15 @@ not a full evaluator.
 `secure-by-design` applies to detected software projects and progressively routes to web/backend,
 browser, mobile,
 infrastructure/supply-chain, and verification controls; it reduces risk but never claims that a
-system cannot be compromised. It shares the `backend-security` and `server-auth-review` Task
-hints so Task-focused projection cannot keep the specialized backend checklist while dropping that
-guidance. `frontend-design` accompanies recognized web and mobile frontend
-surfaces through matching facets and Task hints. Its compact entrypoint requires a subject-specific
+system cannot be compromised. `frontend-design` accompanies recognized web and mobile frontend
+surfaces through matching facets. Its compact entrypoint requires a subject-specific
 design contract, progressively routes marketing/editorial versus product/mobile guidance, rejects
 unjustified model-default aesthetics, and requires bounded rendered visual review before a design
 claim is treated as verified.
 
-Stack evidence describes the whole Workspace, not necessarily the current change. When at least one
-non-excluded skill recognizes the current Task `stack_hints`, the resolver treats those matches as a
-focus boundary: it projects the task-matched skills plus explicit inclusions and omits unrelated
-stack-only matches. If no skill recognizes the hints, it retains the stack-derived baseline rather
-than accidentally projecting nothing for a novel hint. Built-in descriptions state when the host
-should load each projected skill, so host-native progressive disclosure remains discriminating even
-inside the focused subset.
+Stack evidence describes the whole Workspace. The resolver does not narrow the pack from the
+current Task `stack_hints`. Built-in descriptions state when the host should load each projected
+skill, so host-native progressive disclosure remains discriminating inside the project pack.
 
 Projection is host-native and owned by adapters.
 
@@ -456,21 +450,18 @@ Projection design must include:
 - `.git/info/exclude` for generated project artifacts where appropriate, never silent `.gitignore` mutation.
 
 Skill hot reload is an optimization, not a correctness requirement.
-Task-selected skills after `task_start` in an already-started session follow that same
-next-discovery-boundary contract
-([ADR-0041](docs/decisions/0041-task-skill-session-delivery.md)): Harness MCP does not deliver
-skill bodies or treat `recommended_skills` as instruction delivery. Harness MCP does not
-deliver skill bodies into the current session. Optional host hot reload is not scored as
-Harness current-session delivery. Projection and watcher enqueue after a relevance-key
-change remain filesystem repair for the next host discovery boundary.
+Harness does not rotate project Skills by Task
+([ADR-0042](docs/decisions/0042-project-stack-skill-selection.md)). The host receives the stable
+project-visible pack; host-native selection chooses which Skill to use. Harness MCP does not deliver
+skill bodies or treat `recommended_skills` as instruction delivery. Optional host hot reload of
+changed projected files is not scored as Harness current-session delivery. Restart remains the
+fallback when a host does not refresh changed files.
 
-ADR-0032 closes the lifecycle gap between resolution and projection. Installed host intent for
-every supported profile is durable daemon-adjacent state. Foreground `scan` reconciles skills
-synchronously, while the Workspace watcher repeats resolution after authoritative index changes
-and after any committed Task mutation that changes the skill-relevance key
-`(relevant_task_id, relevant_task_stack_hints)`. This makes manifest/dependency changes and
-greenfield Task hints, as well as later relevant-Task identity or hint changes, converge without
-requiring another manual scan. Projection failure remains a
+ADR-0032 closes the lifecycle gap between resolution and projection for project/index changes.
+Installed host intent for every supported profile is durable daemon-adjacent state. Foreground
+`scan` reconciles skills synchronously, while the Workspace watcher repeats resolution after
+authoritative index changes. Task mutations do not enqueue skill reconciliation. Projection
+failure remains a
 repairable integration condition reported by doctor; it never rolls back or duplicates committed
 Task state.
 

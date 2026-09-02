@@ -46,14 +46,14 @@ EXPECTED_GENERATED_SKILLS = (
     "secure-by-design",
     "testing-strategy",
 )
-# Negative sibling is projected with the same python/software-project applies and the same
-# python task_hints so Codex bootstrap task_start cannot drop one sibling while keeping the
-# other. Preflight proves its nonce is absent from the positive prompt; --run-model
-# additionally requires a second exec whose prompt does not match this description.
+# Negative sibling is projected with the same python/software-project applies so a later
+# catalog or Task change cannot drop one sibling while keeping the other. Preflight proves
+# its nonce is absent from the positive prompt; --run-model additionally requires a second
+# exec whose prompt does not match this description.
 NEGATIVE_SKILL_PREFLIGHT_POLICY = "projected; nonce absent from the positive skill-read prompt"
-# ADR-0041 Option A. Synthetic gate: session starts; skill X was not task-selected;
-# task_start selects X; host never hot reloads. Expected result is next-session-only.
-TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT = "next-session-only"
+# Harness does not rotate project Skills by Task. Native skill-read proves the
+# scan-projected pack present at session start. MCP does not deliver skill bodies.
+MCP_SKILL_BODY_DELIVERY_CONTRACT = "mcp-does-not-deliver-skill-bodies"
 FORBIDDEN_SKILL_DELIVERY_FIELD_NAMES = (
     "recommended_skills",
     "skill_body",
@@ -1148,11 +1148,8 @@ def run_acceptance(
 
                 if run_model and workspace == primary_workspace:
                     # Prove native skill discovery against the scan-projected set first.
-                    # ADR-0041: this is session-start native discovery, not mid-session
-                    # task_start delivery. The synthetic no-reload gate is next-session-only.
-                    # Codex bootstrap task_start plus the daemon watcher can task-focus
-                    # projection even without the later runner _verify_mcp_wire call.
-                    # No separate timeout or cost cap in this runner skips the negative exec.
+                    # ADR-0042: Task start does not rotate that pack. MCP does not deliver
+                    # skill bodies. Optional host hot reload is not a Harness guarantee.
                     model_environment = environment.copy()
                     model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
                     try:
@@ -1274,9 +1271,7 @@ def run_acceptance(
                 "generated_skill_names": list(projected_skill_names),
                 "generated_skill_count_per_workspace": len(projected_skill_names),
                 "negative_skill_preflight_policy": NEGATIVE_SKILL_PREFLIGHT_POLICY,
-                "task_skill_session_delivery_expected_result": (
-                    TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT
-                ),
+                "mcp_skill_body_delivery_contract": MCP_SKILL_BODY_DELIVERY_CONTRACT,
                 "skill_read_verified": skill_read_verified,
                 "skill_negative_verified": skill_negative_verified,
                 "wire_verified_harness_tool_calls": list(wire_calls),

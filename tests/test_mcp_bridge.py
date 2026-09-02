@@ -54,7 +54,7 @@ def test_server_instructions_require_task_before_diagnosis_within_budget() -> No
     assert "title" in first_512
     assert "next_step" in first_512
     assert "stack_hints" in first_512
-    assert "task-focused" in first_512
+    assert "optional Task metadata" in first_512
     assert "before diagnosis" in _SERVER_INSTRUCTIONS
     assert "never skip" in _SERVER_INSTRUCTIONS
     assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
@@ -95,11 +95,10 @@ def test_project_context_description_is_not_mandatory_for_code_docs() -> None:
     assert "Knowledge and Task refs" in description
 
 
-def test_task_start_description_states_next_discovery_boundary() -> None:
-    assert "next host discovery boundary" in _TASK_START_DESCRIPTION
-    assert "not current-session MCP skill delivery" in _TASK_START_DESCRIPTION
+def test_task_start_description_states_stack_hints_are_not_skill_selectors() -> None:
+    assert "not a Skill selector" in _TASK_START_DESCRIPTION
+    assert "optional durable Task metadata" in _TASK_START_DESCRIPTION
     assert "live skill injection" in _TASK_START_DESCRIPTION
-    assert "stack_hints drive" in _TASK_START_DESCRIPTION
 
 
 def test_server_instruction_budget_remains_bounded() -> None:
@@ -110,7 +109,7 @@ def test_server_instruction_budget_remains_bounded() -> None:
     assert "title" in first_512
     assert "next_step" in first_512
     assert "stack_hints" in first_512
-    assert "task-focused" in first_512
+    assert "optional Task metadata" in first_512
     assert "must be the first repository action" in first_512
     assert "only allowed pre-status action" in first_512
 
@@ -739,7 +738,7 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "title" in instructions[:512]
                 assert "next_step" in instructions[:512]
                 assert "stack_hints" in instructions[:512]
-                assert "task-focused" in instructions[:512]
+                assert "optional Task metadata" in instructions[:512]
                 assert "durable SCM mutations" in instructions
                 assert "code/doc path may be read natively" in instructions
                 assert "project_context is not required for those kinds" in instructions
@@ -764,16 +763,13 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                     assert tool["inputSchema"]["additionalProperties"] is False
                 by_name = {tool["name"]: tool for tool in tools}
                 assert "Russian" in by_name["task_start"]["description"]
-                assert "affected technologies" in by_name["task_start"]["description"]
+                assert "not a Skill selector" in by_name["task_start"]["description"]
                 assert "before diagnosis" in by_name["task_start"]["description"]
                 assert "project_search" in by_name["task_start"]["description"]
                 assert "omit task_id" in by_name["task_start"]["description"]
                 assert "never pass summary" in by_name["task_start"]["description"]
                 assert "read this schema and retry" in by_name["task_start"]["description"]
-                assert "next host discovery boundary" in by_name["task_start"]["description"]
-                assert (
-                    "not current-session MCP skill delivery" in by_name["task_start"]["description"]
-                )
+                assert "optional durable Task metadata" in by_name["task_start"]["description"]
                 assert "live skill injection" in by_name["task_start"]["description"]
                 assert "targeted native read is allowed" in by_name["project_search"]["description"]
                 assert "Not mandatory for code or doc" in by_name["project_context"]["description"]

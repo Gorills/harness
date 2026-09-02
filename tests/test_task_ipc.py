@@ -7,6 +7,7 @@ import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from queue import SimpleQueue
 from threading import Event
 from typing import cast
 
@@ -100,6 +101,7 @@ def test_global_skill_reconcile_refuses_source_checkout_but_isolated_runtime_all
     registry = tmp_path / "skills"
     skill = registry / "python-helper"
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: python-helper\ndescription: Python helper.\n---\n\n# Python helper\n",
         encoding="utf-8",
@@ -140,12 +142,31 @@ def test_global_skill_reconcile_refuses_source_checkout_but_isolated_runtime_all
     assert (root / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
 
 
+class _RecordedInvalidations(SimpleQueue[str]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.items: list[str] = []
+
+    def put(self, item: str, block: bool = True, timeout: float | None = None) -> None:
+        self.items.append(item)
+        super().put(item, block, timeout)
+
+
 def _start_server(
-    database: Path, socket_path: Path
+    database: Path,
+    socket_path: Path,
+    *,
+    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> tuple[Event, ThreadPoolExecutor, Future[None]]:
     stop_event = Event()
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(serve_daemon, database, socket_path, stop_event=stop_event)
+    future = executor.submit(
+        serve_daemon,
+        database,
+        socket_path,
+        stop_event=stop_event,
+        watcher_invalidations=watcher_invalidations,
+    )
     deadline = time.monotonic() + 3
     while not socket_path.exists():
         if future.done():
@@ -346,13 +367,14 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
         connection.close()
 
 
-def test_task_stack_hints_trigger_project_skill_projection(
+def test_task_start_does_not_project_task_hint_only_skill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, database, _ = _registered_database(tmp_path)
     registry = tmp_path / "skills"
     skill = registry / "fastapi"
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(
         "---\nname: fastapi\ndescription: Build FastAPI services.\n---\n\n# FastAPI\n",
         encoding="utf-8",
@@ -370,28 +392,36 @@ def test_task_stack_hints_trigger_project_skill_projection(
     monkeypatch.setenv("HARNESS_SKILL_REGISTRY", str(registry))
 
     socket_path = tmp_path / "s"
-    stop_event, executor, future = _start_server(database, socket_path)
+    invalidations = _RecordedInvalidations()
+    stop_event, executor, future = _start_server(
+        database, socket_path, watcher_invalidations=invalidations
+    )
     try:
-        request_task_start(
+        started = request_task_start(
             socket_path,
             [WorkspaceHint(root, "explicit-root")],
             title="Create a greenfield API",
             stack_hints=("fastapi",),
         )
+        request_task_checkpoint(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            started.task_id,
+            expected_revision=started.revision,
+            state=TaskState.COMPLETED,
+            summary="No hint-only skill projection",
+            next_step=None,
+        )
+        if future.done():
+            future.result()
+        assert invalidations.items == []
         projected = root / ".agents" / "skills" / "fastapi" / "SKILL.md"
-        deadline = time.monotonic() + 5.0
-        while not projected.is_file():
-            if future.done():
-                future.result()
-            if time.monotonic() >= deadline:
-                raise AssertionError("Task stack hints did not trigger skill projection")
-            time.sleep(0.02)
-        assert "Build FastAPI services" in projected.read_text(encoding="utf-8")
+        assert not projected.is_file()
     finally:
         _stop_server(stop_event, executor, future)
 
 
-def test_task_stack_hints_remove_unrelated_stack_only_projection(
+def test_task_start_does_not_replace_stack_only_projection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, database, workspace_id = _registered_database(tmp_path)
@@ -410,6 +440,7 @@ def test_task_stack_hints_remove_unrelated_stack_only_projection(
     registry = tmp_path / "skills"
     language = registry / "language"
     language.mkdir(parents=True)
+    registry.chmod(0o700)
     (language / "SKILL.md").write_text(
         "---\nname: language\ndescription: Python engineering.\n---\n\n# Language\n",
         encoding="utf-8",
@@ -453,21 +484,31 @@ def test_task_stack_hints_remove_unrelated_stack_only_projection(
     assert language_projection.is_dir()
 
     socket_path = tmp_path / "s"
-    stop_event, executor, future = _start_server(database, socket_path)
+    invalidations = _RecordedInvalidations()
+    stop_event, executor, future = _start_server(
+        database, socket_path, watcher_invalidations=invalidations
+    )
     try:
-        request_task_start(
+        started = request_task_start(
             socket_path,
             [WorkspaceHint(root, "explicit-root")],
             title="Fix Expo APK",
             stack_hints=("expo",),
         )
-        deadline = time.monotonic() + 5.0
-        while not mobile_projection.is_dir() or language_projection.exists():
-            if future.done():
-                future.result()
-            if time.monotonic() >= deadline:
-                raise AssertionError("Task focus did not replace the stack-only skill projection")
-            time.sleep(0.02)
+        request_task_checkpoint(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            started.task_id,
+            expected_revision=started.revision,
+            state=TaskState.COMPLETED,
+            summary="Stack-only projection stays",
+            next_step=None,
+        )
+        if future.done():
+            future.result()
+        assert invalidations.items == []
+        assert language_projection.is_dir()
+        assert not mobile_projection.exists()
     finally:
         _stop_server(stop_event, executor, future)
 

@@ -23,7 +23,6 @@ from time import monotonic
 from harness.git_workspace import _git_environment
 from harness.index import IndexedFileKind, IndexedFileRecord, list_indexed_files
 from harness.registry import WorkspaceRecord, get_workspace
-from harness.tasks import get_relevant_task, get_task, get_task_stack_hints
 
 SKILL_FILE_NAME = "SKILL.md"
 SKILL_METADATA_FILE_NAME = "harness.yaml"
@@ -550,28 +549,18 @@ def resolve_workspace_skills(
     workspace_id: str,
     definitions: Sequence[SkillDefinition],
     *,
-    task_id: str | None = None,
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
     policy: SkillResolutionPolicy | None = None,
     deadline: float | None = None,
 ) -> tuple[ResolvedSkill, ...]:
-    """Resolve relevant skills from indexed stack, Task hints, and explicit project policy."""
+    """Resolve relevant skills from the indexed project stack and explicit project policy."""
     _require_resolution_deadline(deadline)
     stack = detect_workspace_stack(connection, workspace_id, deadline=deadline)
-    _require_resolution_deadline(deadline)
-    if task_id is None:
-        task = get_relevant_task(connection, workspace_id)
-    else:
-        task = get_task(connection, task_id)
-        if task.workspace_id != workspace_id:
-            raise SkillResolutionError("skill Task does not belong to the selected Workspace")
-    task_hints = () if task is None else get_task_stack_hints(connection, task.task_id)
     _require_resolution_deadline(deadline)
     return resolve_skills(
         definitions,
         stack,
-        task_hints=task_hints,
         explicit_include=explicit_include,
         explicit_exclude=explicit_exclude,
         policy=policy,
@@ -582,24 +571,20 @@ def resolve_skills(
     definitions: Sequence[SkillDefinition],
     stack: DetectedProjectStack,
     *,
-    task_hints: Iterable[str] = (),
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
     policy: SkillResolutionPolicy | None = None,
 ) -> tuple[ResolvedSkill, ...]:
     """Select a deterministic bounded relevant subset from the canonical registry.
 
-    A Task hint is direct evidence about the current work, while detected stack is only evidence
-    that a skill could be useful somewhere in the Workspace. Once at least one non-excluded skill
-    recognizes the current Task hints, keep that task-focused set plus explicit inclusions instead
-    of projecting every unrelated surface in a polyglot Workspace. If no skill recognizes the
-    hints, retain stack-based resolution so an incomplete or novel hint cannot empty the baseline.
+    Detected project stack is the only Harness relevance source besides explicit include/exclude.
+    Skill metadata ``task_hints`` is ignored legacy input and does not rank or narrow the pack.
+    Per-task choice among the projected files remains host-native.
     """
     effective_policy = SkillResolutionPolicy() if policy is None else policy
     by_id = {definition.skill_id: definition for definition in definitions}
     if len(by_id) != len(definitions):
         raise SkillResolutionError("skill definitions contain duplicate ids")
-    hints = {_normalize_match_token(value, "task hint") for value in task_hints}
     include = {_normalize_skill_id(value) for value in explicit_include}
     exclude = {_normalize_skill_id(value) for value in explicit_exclude}
     overlap = include & exclude
@@ -613,45 +598,34 @@ def resolve_skills(
     if len(include) > effective_policy.max_visible_skills:
         raise SkillResolutionError("explicit skills exceed the configured model-visible budget")
 
-    matched: list[tuple[tuple[int, int, int, int, int, int], ResolvedSkill]] = []
+    matched: list[tuple[tuple[int, int, int, int, int], ResolvedSkill]] = []
     for definition in definitions:
         if definition.skill_id in exclude:
             continue
-        task_matches = sorted(set(definition.task_hints) & hints)
         dependency_matches = sorted(set(definition.applies.dependencies) & stack.dependencies)
         manifest_matches = sorted(set(definition.applies.manifests) & stack.manifests)
         language_matches = sorted(set(definition.applies.languages) & stack.languages)
         facet_matches = sorted(set(definition.applies.facets) & stack.facets)
         explicit = definition.skill_id in include
         if not (
-            explicit
-            or task_matches
-            or facet_matches
-            or dependency_matches
-            or manifest_matches
-            or language_matches
+            explicit or facet_matches or dependency_matches or manifest_matches or language_matches
         ):
             continue
         reasons: list[str] = []
         if explicit:
             reasons.append("explicit")
-        reasons.extend(f"task_hint:{value}" for value in task_matches)
         reasons.extend(f"facet:{value}" for value in facet_matches)
         reasons.extend(f"dependency:{value}" for value in dependency_matches)
         reasons.extend(f"manifest:{value}" for value in manifest_matches)
         reasons.extend(f"language:{value}" for value in language_matches)
         priority = (
             1 if explicit else 0,
-            len(task_matches),
             len(facet_matches),
             len(dependency_matches),
             len(manifest_matches),
             len(language_matches),
         )
         matched.append((priority, ResolvedSkill(definition, tuple(reasons))))
-
-    if hints and any(priority[1] > 0 for priority, _ in matched):
-        matched = [item for item in matched if item[0][0] > 0 or item[0][1] > 0]
 
     matched.sort(
         key=lambda item: (
@@ -660,7 +634,6 @@ def resolve_skills(
             -item[0][2],
             -item[0][3],
             -item[0][4],
-            -item[0][5],
             item[1].definition.skill_id,
         )
     )

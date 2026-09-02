@@ -38,21 +38,19 @@ Official Claude Code evidence below is leftover-host documentation, not a curren
 
 ### Implemented skill resolver/projection boundary
 
-The current core skills slice loads Harness-owned canonical skills from `~/.harness/skills/`, with portable `SKILL.md` content separated from strict Harness applicability metadata in `harness.yaml`. Deterministic relevance combines indexed languages/manifests/dependencies, durable Task `stack_hints`, and explicit resolver include/exclude inputs under a bounded visible-skill budget. No proprietary host is trusted to perform that selection.
+The current core skills slice loads Harness-owned canonical skills from `~/.harness/skills/`, with portable `SKILL.md` content separated from strict Harness applicability metadata in `harness.yaml`. Deterministic relevance combines indexed languages/manifests/dependencies and explicit resolver include/exclude inputs under a bounded visible-skill budget. Task `stack_hints` are optional Task metadata, not a Skill selector. No proprietary host is trusted to perform that project-pack selection.
 
 Projection planning takes explicit host visibility surfaces and chooses a minimal set of native project roots where every active profile sees exactly one generated Harness copy; if the compatibility graph cannot satisfy that invariant, projection fails closed. Reconciliation removes only exact Harness-owned stale projections, refuses user-owned or Git-tracked collisions, rechecks filesystem identity before mutation, and maintains generated-path exclusions through `git rev-parse --git-path info/exclude` without changing `.gitignore`. Codex and Cursor share `.agents/skills`. Cursor also observes leftover `.claude/skills` and `.codex/skills` compatibility roots so retired Harness-owned files can be cleaned; Claude Code is not an active projection profile ([ADR-0039](../decisions/0039-retire-claude-code-host.md)). `--host all` is the Codex+Cursor pair. Antigravity can reuse `.agents/skills` where its active graph permits it. Codex and Cursor local MCP/root integration are implemented; Antigravity MCP/root integration and proprietary-host visibility remain later/acceptance work.
 
 Installed profile intent is persisted for all supported local hosts. Foreground `scan` projects
-synchronously; the daemon watcher repeats resolution after authoritative index changes and after any
-committed Task mutation that changes the skill-relevance key `(relevant_task_id,
-relevant_task_stack_hints)` ([ADR-0032](../decisions/0032-continuous-project-skill-reconciliation.md)).
-That enqueue/projection is for the next host discovery boundary, not current-session instruction
-delivery ([ADR-0041](../decisions/0041-task-skill-session-delivery.md)). The synthetic gate
-(session starts; skill X was not task-selected; `task_start` selects X; host never hot reloads)
-is **next-session-only**. Host-side live discovery remains host-owned and optional; restart/reopen
-is the documented fallback. Identifier lists such as `recommended_skills` are not delivery.
+synchronously; the daemon watcher repeats resolution after authoritative index changes
+([ADR-0032](../decisions/0032-continuous-project-skill-reconciliation.md)). Task mutations do not
+rotate the project pack ([ADR-0042](../decisions/0042-project-stack-skill-selection.md)). Host-side
+discovery and progressive disclosure are native. Restart/reopen remains the documented fallback when
+a host does not refresh changed files. Identifier lists such as `recommended_skills` are not
+delivery. Harness MCP does not carry skill bodies.
 
-Automated tests prove registry parsing, legacy and greenfield relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
+Automated tests prove registry parsing, stack relevance, bounded selection, compatibility-root collision planning, idempotent/rollback-safe projection, late-race refusal, linked-worktree Git exclusion, and installed-wheel projection mechanics. They do **not** prove that Codex, Cursor, or Antigravity displays or de-duplicates these generated skills in a proprietary build; the matrix below remains the acceptance authority for that behavior.
 
 ### Codex
 
@@ -97,8 +95,7 @@ prints the external destination, exact temporary fixture/MCP payload class, acco
 API-key scope, and local isolation guarantees without invoking a model. With explicit
 `--run-model` approval and an invocation-scoped `CODEX_API_KEY`, it builds the exact wheel, requires
 real Codex JSONL evidence for successful calls to all five Harness tools, a native skill-read
-`skill_marker` field proof against the scan-projected set present at session start (not
-mid-session `task_start` selection; ADR-0041 next-session-only), and a negative-control exec, checks
+`skill_marker` field proof against the scan-projected set present at session start, and a negative-control exec, checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
 bootstrap in model-visible input, and emits a sanitized report. When `--run-model` is used, the
 report may include sanitized `search_behavior` metrics from `scripts/eval_search_behavior.py`
@@ -187,12 +184,11 @@ support; Codex claims only ADR-0028 hygiene-effective support until real-host en
 - [ ] Two simultaneously registered Workspaces cannot be confused.
 - [ ] A Task started in one host is visible/resumable in a fresh process of the same host.
 - [ ] A Task can be resumed after switching to another supported host.
-- [ ] Relevant generated skill files are present for the next host discovery boundary
+- [ ] Relevant generated skill files are present for host-native discovery
   (session start after projection, restart/reopen). Optional host-owned live detection
-  may occur; do not score it as Harness current-session delivery. Mid-session `task_start`
-  that newly selects skill X is **next-session-only** and must be scored as files at the
-  next discovery boundary, not Harness current-session instruction delivery
-  ([ADR-0041](../decisions/0041-task-skill-session-delivery.md)).
+  may occur; do not score it as Harness current-session delivery. Task lifecycle does not
+  rotate the project pack
+  ([ADR-0042](../decisions/0042-project-stack-skill-selection.md)).
 - [ ] Irrelevant generated skills are absent.
 - [ ] No duplicate Harness skill appears because of compatibility directory scanning.
 - [ ] Removing Harness deletes only Harness-owned integration artifacts.

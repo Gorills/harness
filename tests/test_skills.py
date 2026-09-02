@@ -24,6 +24,7 @@ from harness.skills import (
     SKILL_OWNERSHIP_MARKER_NAME,
     DetectedProjectStack,
     ResolvedSkill,
+    SkillDefinition,
     SkillProjectionCollisionError,
     SkillProjectionError,
     SkillRegistryError,
@@ -137,6 +138,17 @@ def _write_skill(
 
 def _ids(resolved: Sequence[ResolvedSkill]) -> tuple[str, ...]:
     return tuple(item.definition.skill_id for item in resolved)
+
+
+def _explicit(
+    definitions: Sequence[SkillDefinition],
+    *skill_ids: str,
+) -> tuple[ResolvedSkill, ...]:
+    return resolve_skills(
+        definitions,
+        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
+        explicit_include=skill_ids,
+    )
 
 
 def test_default_registry_and_strict_metadata_loading(tmp_path: Path) -> None:
@@ -810,7 +822,7 @@ def test_stack_detection_recognizes_godot_shell_ci_and_deployment_facets(
     } <= stack.facets
 
 
-def test_greenfield_task_hints_activate_skills_before_manifest_exists(tmp_path: Path) -> None:
+def test_task_stack_hints_do_not_activate_skills_before_manifest_exists(tmp_path: Path) -> None:
     _, connection, workspace_id = _registered_workspace(tmp_path, {"README.md": "greenfield\n"})
     registry = tmp_path / "registry"
     _write_skill(registry, "fastapi", task_hints=("fastapi",))
@@ -829,10 +841,38 @@ def test_greenfield_task_hints_activate_skills_before_manifest_exists(tmp_path: 
         connection.close()
 
     assert hints == ("fastapi", "postgres")
-    assert _ids(resolved) == ("fastapi", "postgres")
+    assert _ids(resolved) == ()
 
 
-def test_recognized_task_hints_suppress_unrelated_stack_only_skills(tmp_path: Path) -> None:
+def test_same_detected_stack_resolves_the_same_skills_regardless_of_current_task(
+    tmp_path: Path,
+) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "apps/api/pyproject.toml": ('[project]\nname = "api"\ndependencies = ["fastapi"]\n'),
+            "apps/mobile/package.json": json.dumps(
+                {"dependencies": {"expo": "55", "react-native": "0.83"}}
+            ),
+        },
+    )
+    registry = tmp_path / "registry"
+    _write_skill(registry, "mobile", facets=("mobile-app",), task_hints=("expo",))
+    _write_skill(registry, "server", facets=("backend-service",), task_hints=("fastapi",))
+    _write_skill(registry, "testing", facets=("software-project",))
+    definitions = load_skill_registry(registry)
+    try:
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        task_start(connection, workspace_id, "Mobile work", stack_hints=("expo",))
+        after = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+    finally:
+        connection.close()
+
+    assert before == after
+    assert {"mobile", "server"} <= set(before)
+
+
+def test_legacy_task_hints_do_not_narrow_or_activate_resolved_skills(tmp_path: Path) -> None:
     registry = tmp_path / "registry"
     _write_skill(
         registry,
@@ -847,6 +887,7 @@ def test_recognized_task_hints_suppress_unrelated_stack_only_skills(tmp_path: Pa
         task_hints=("fastapi",),
     )
     _write_skill(registry, "testing", facets=("software-project",))
+    _write_skill(registry, "godot", task_hints=("godot",))
     definitions = load_skill_registry(registry)
     stack = DetectedProjectStack(
         languages=frozenset({"python", "typescript"}),
@@ -856,21 +897,17 @@ def test_recognized_task_hints_suppress_unrelated_stack_only_skills(tmp_path: Pa
     )
 
     assert _ids(resolve_skills(definitions, stack)) == ("mobile", "server", "testing")
-    assert _ids(resolve_skills(definitions, stack, task_hints=("expo",))) == ("mobile",)
     assert _ids(
         resolve_skills(
             definitions,
             stack,
-            task_hints=("expo",),
             explicit_include=("server",),
         )
-    ) == ("server", "mobile")
-
-    # Novel hints must not accidentally remove the applicable project baseline.
-    assert _ids(resolve_skills(definitions, stack, task_hints=("apk-signing",))) == (
-        "mobile",
-        "server",
-        "testing",
+    ) == ("server", "mobile", "testing")
+    assert "godot" not in _ids(resolve_skills(definitions, stack))
+    assert next(item.task_hints for item in definitions if item.skill_id == "mobile") == (
+        "android",
+        "expo",
     )
 
 
@@ -936,11 +973,7 @@ def test_projection_planner_shares_agents_root_for_codex_and_cursor(tmp_path: Pa
     registry = tmp_path / "registry"
     _write_skill(registry, "shared", task_hints=("shared",))
     definition = load_skill_registry(registry)[0]
-    resolved = resolve_skills(
-        (definition,),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("shared",),
-    )
+    resolved = _explicit((definition,), "shared")
     cursor = cursor_skill_projection_surface()
     codex = codex_skill_projection_surface()
 
@@ -959,11 +992,7 @@ def test_projection_reconciles_leftover_claude_skills_visible_to_cursor(
     _make_repo(root, {"README.md": "repo\n"})
     registry = tmp_path / "registry"
     _write_skill(registry, "shared", task_hints=("shared",))
-    resolved = resolve_skills(
-        load_skill_registry(registry),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("shared",),
-    )
+    resolved = _explicit(load_skill_registry(registry), "shared")
     cursor = cursor_skill_projection_surface()
 
     leftover = root / ".claude" / "skills" / "shared"
@@ -1029,11 +1058,7 @@ def test_projection_is_idempotent_owned_only_and_git_local(tmp_path: Path) -> No
         extra_files={"references/example.md": "example\n"},
     )
     definitions = load_skill_registry(registry)
-    resolved = resolve_skills(
-        definitions,
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
-    )
+    resolved = _explicit(definitions, "fastapi")
     surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
 
@@ -1075,11 +1100,7 @@ def test_projection_rechecks_target_state_immediately_before_mutation(
     _make_repo(root, {"README.md": "repo\n"})
     registry = tmp_path / "registry"
     _write_skill(registry, "fastapi", task_hints=("fastapi",))
-    resolved = resolve_skills(
-        load_skill_registry(registry),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
-    )
+    resolved = _explicit(load_skill_registry(registry), "fastapi")
     surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
     original_build = skills_module._build_projected_skill
@@ -1108,11 +1129,7 @@ def test_projection_rollback_does_not_overwrite_concurrent_target_change(
     _make_repo(root, {"README.md": "repo\n"})
     registry = tmp_path / "registry"
     _write_skill(registry, "fastapi", task_hints=("fastapi",))
-    resolved = resolve_skills(
-        load_skill_registry(registry),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
-    )
+    resolved = _explicit(load_skill_registry(registry), "fastapi")
     surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
     target = root / ".agents" / "skills" / "fastapi"
@@ -1142,11 +1159,7 @@ def test_projection_uses_git_path_info_exclude_for_linked_worktree(tmp_path: Pat
 
     registry = tmp_path / "registry"
     _write_skill(registry, "fastapi", task_hints=("fastapi",))
-    resolved = resolve_skills(
-        load_skill_registry(registry),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
-    )
+    resolved = _explicit(load_skill_registry(registry), "fastapi")
     surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(worktree, resolved, (surface,))
     raw_exclude = _git(worktree, "rev-parse", "--git-path", "info/exclude").stdout.decode().strip()
@@ -1169,11 +1182,7 @@ def test_projection_refuses_user_owned_or_tracked_target_before_mutation(tmp_pat
     registry = tmp_path / "registry"
     _write_skill(registry, "fastapi", task_hints=("fastapi",))
     definition = load_skill_registry(registry)[0]
-    resolved = resolve_skills(
-        (definition,),
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
-    )
+    resolved = _explicit((definition,), "fastapi")
     surface = cursor_skill_projection_surface()
     plan = plan_skill_projection(root, resolved, (surface,))
     user_target = root / ".agents" / "skills" / "fastapi"

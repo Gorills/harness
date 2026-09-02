@@ -4,7 +4,6 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from queue import SimpleQueue
 from uuid import uuid4
 
 from harness.registry import get_workspace
@@ -93,19 +92,6 @@ class TaskCreationRecord:
 
     task: TaskRecord
     baseline: TaskBaselineRecord
-
-
-@dataclass(frozen=True, slots=True)
-class SkillRelevanceKey:
-    """Skill-resolver input derived from the Workspace's current relevant Task.
-
-    The resolver selects the working Task, else the newest waiting Task, and reads that
-    Task's stack hints. Terminal Tasks do not participate. Task lifecycle state is not
-    part of the key unless it changes which Task is relevant or that Task's hints.
-    """
-
-    task_id: str | None
-    stack_hints: tuple[str, ...]
 
 
 def create_task_record(
@@ -230,37 +216,6 @@ def get_relevant_task(
         (workspace_id,),
     ).fetchone()
     return None if row is None else _task_from_row(row)
-
-
-def skill_relevance_key(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-) -> SkillRelevanceKey:
-    """Return the relevant Task identity and stack hints consumed by skill resolution."""
-    task = get_relevant_task(connection, workspace_id)
-    if task is None:
-        return SkillRelevanceKey(task_id=None, stack_hints=())
-    return SkillRelevanceKey(
-        task_id=task.task_id,
-        stack_hints=get_task_stack_hints(connection, task.task_id),
-    )
-
-
-def enqueue_skill_reconcile_if_relevance_changed(
-    watcher_invalidations: SimpleQueue[str] | None,
-    workspace_id: str,
-    before: SkillRelevanceKey,
-    after: SkillRelevanceKey,
-) -> bool:
-    """Enqueue watcher skill reconciliation when resolver input changed after commit.
-
-    Returns whether ``before`` and ``after`` differ. A ``None`` queue still reports the
-    change; it does not enqueue.
-    """
-    changed = before != after
-    if changed and watcher_invalidations is not None:
-        watcher_invalidations.put(workspace_id)
-    return changed
 
 
 def get_latest_task(

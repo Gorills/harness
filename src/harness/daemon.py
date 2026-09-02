@@ -125,9 +125,7 @@ from harness.tasks import (
     TaskTransitionError,
     TaskValidationError,
     TaskWorkspaceConflictError,
-    enqueue_skill_reconcile_if_relevance_changed,
     get_relevant_task,
-    skill_relevance_key,
 )
 from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
@@ -609,12 +607,9 @@ def _workspace_index_entry_result(
 def mutate_task_start(
     connection: sqlite3.Connection,
     request: TaskStartRequestData,
-    *,
-    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> TaskStartResult:
     """Resolve one Workspace and delegate Task create/resume to the domain workflow."""
     workspace = _resolve_task_workspace(connection, request.workspace_hints)
-    before = skill_relevance_key(connection, workspace.workspace_id)
     if request.task_id is None:
         if request.title is None:
             raise TaskValidationError("new task_start requires title")
@@ -631,12 +626,6 @@ def mutate_task_start(
             request.task_id,
             expected_revision=request.expected_revision,
         )
-    enqueue_skill_reconcile_if_relevance_changed(
-        watcher_invalidations,
-        workspace.workspace_id,
-        before,
-        skill_relevance_key(connection, workspace.workspace_id),
-    )
     return TaskStartResult(
         schema_version=SCHEMA_VERSION,
         workspace_id=workspace.workspace_id,
@@ -650,12 +639,9 @@ def mutate_task_start(
 def mutate_task_checkpoint(
     connection: sqlite3.Connection,
     request: TaskCheckpointRequestData,
-    *,
-    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> TaskCheckpointResult:
     """Resolve one Workspace and delegate one explicit revision-CAS checkpoint."""
     workspace = _resolve_task_workspace(connection, request.workspace_hints)
-    before = skill_relevance_key(connection, workspace.workspace_id)
     mutation = domain_task_checkpoint(
         connection,
         workspace.workspace_id,
@@ -667,12 +653,6 @@ def mutate_task_checkpoint(
         wait_reason=request.wait_reason,
         verification=request.verification,
         knowledge=request.knowledge,
-    )
-    enqueue_skill_reconcile_if_relevance_changed(
-        watcher_invalidations,
-        workspace.workspace_id,
-        before,
-        skill_relevance_key(connection, workspace.workspace_id),
     )
     return TaskCheckpointResult(
         schema_version=SCHEMA_VERSION,
@@ -750,6 +730,7 @@ def serve_daemon(
     watcher_retry_seconds: float = DEFAULT_WATCH_RETRY_SECONDS,
     watcher_token_deadline_seconds: float = DEFAULT_WATCH_TOKEN_DEADLINE_SECONDS,
     watcher_scan_deadline_seconds: float = DEFAULT_WATCH_SCAN_DEADLINE_SECONDS,
+    watcher_invalidations: SimpleQueue[str] | None = None,
 ) -> None:
     """Serve local IPC while keeping registered Workspace indexes reconciled."""
     from harness.dashboard import DashboardError, DashboardServerManager, dashboard_url_path
@@ -772,7 +753,8 @@ def serve_daemon(
     watcher_stop = Event()
     watcher_thread: Thread | None = None
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
-    watcher_invalidations: SimpleQueue[str] = SimpleQueue()
+    if watcher_invalidations is None:
+        watcher_invalidations = SimpleQueue()
     dashboard = DashboardServerManager(
         database_path,
         url_file=dashboard_url_path(socket_path),
@@ -1529,7 +1511,6 @@ def _serve_task_start(
         result = mutate_task_start(
             database,
             request,
-            watcher_invalidations=watcher_invalidations,
         )
     except WorkspaceResolutionError as exc:
         _try_send_error(
@@ -1614,7 +1595,6 @@ def _serve_task_checkpoint(
         result = mutate_task_checkpoint(
             database,
             request,
-            watcher_invalidations=watcher_invalidations,
         )
     except WorkspaceResolutionError as exc:
         _try_send_error(

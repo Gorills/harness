@@ -1,8 +1,7 @@
-"""Filesystem/watcher skill reconciliation after relevance-key changes.
+"""Project skill pack is independent of Task lifecycle.
 
-These tests prove enqueue and projection repair for the next host discovery
-boundary (R-01). They do not prove current-session model instruction delivery
-(ADR-0041).
+Task mutations do not change resolved skills or enqueue skill reconciliation.
+Authoritative scan after a real stack change may change the pack.
 """
 
 from __future__ import annotations
@@ -32,15 +31,11 @@ from harness.skills import (
 )
 from harness.storage import connect_database, initialize_database
 from harness.tasks import (
-    SkillRelevanceKey,
-    TaskOperatorStatus,
     TaskRecord,
     TaskRevisionConflictError,
     TaskState,
     TaskWaitReason,
-    get_relevant_task,
     get_task,
-    skill_relevance_key,
 )
 from harness.workspace_resolution import WorkspaceHint
 
@@ -89,7 +84,13 @@ def _registered_workspace(
     return root, database, connection, workspace.workspace_id
 
 
-def _write_skill(registry: Path, skill_id: str, *, task_hints: tuple[str, ...]) -> None:
+def _write_skill(
+    registry: Path,
+    skill_id: str,
+    *,
+    facets: tuple[str, ...],
+    task_hints: tuple[str, ...] = (),
+) -> None:
     directory = registry / skill_id
     directory.mkdir(parents=True)
     registry.chmod(0o700)
@@ -98,8 +99,11 @@ def _write_skill(registry: Path, skill_id: str, *, task_hints: tuple[str, ...]) 
         f"---\n\n# {skill_id}\n",
         encoding="utf-8",
     )
-    lines = [f"id: {skill_id}", "task_hints:"]
-    lines.extend(f"  - {hint}" for hint in task_hints)
+    lines = [f"id: {skill_id}", "applies:", "  facets:"]
+    lines.extend(f"    - {facet}" for facet in facets)
+    if task_hints:
+        lines.append("task_hints:")
+        lines.extend(f"  - {value}" for value in task_hints)
     (directory / SKILL_METADATA_FILE_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -120,13 +124,19 @@ def _hints(root: Path) -> tuple[WorkspaceHint, ...]:
     return (WorkspaceHint(root, "explicit-root"),)
 
 
+def _polyglot_registry(tmp_path: Path) -> Path:
+    registry = tmp_path / "skills"
+    _write_skill(registry, "mobile", facets=("mobile-app",), task_hints=("expo",))
+    _write_skill(registry, "server", facets=("backend-service",), task_hints=("fastapi",))
+    _write_skill(registry, "container", facets=("containerized",))
+    return registry
+
+
 def _start(
     connection: sqlite3.Connection,
     root: Path,
     title: str,
     stack_hints: tuple[str, ...],
-    *,
-    invalidations: SimpleQueue[str],
 ) -> TaskRecord:
     result = mutate_task_start(
         connection,
@@ -137,7 +147,6 @@ def _start(
             task_id=None,
             expected_revision=None,
         ),
-        watcher_invalidations=invalidations,
     )
     return get_task(connection, result.task_id)
 
@@ -148,7 +157,6 @@ def _checkpoint(
     task: TaskRecord,
     state: TaskState,
     *,
-    invalidations: SimpleQueue[str],
     wait_reason: TaskWaitReason | None = None,
     summary: str = "checkpoint",
     next_step: str | None = "next",
@@ -166,83 +174,8 @@ def _checkpoint(
             verification=(),
             knowledge=(),
         ),
-        watcher_invalidations=invalidations,
     )
     return get_task(connection, result.task_id)
-
-
-def _wait_review(
-    connection: sqlite3.Connection,
-    root: Path,
-    task: TaskRecord,
-    *,
-    invalidations: SimpleQueue[str],
-) -> TaskRecord:
-    return _checkpoint(
-        connection,
-        root,
-        task,
-        TaskState.WAITING,
-        invalidations=invalidations,
-        wait_reason=TaskWaitReason.OPERATOR_REVIEW,
-        summary="Ready for review",
-        next_step="Operator review",
-    )
-
-
-def _working_and_waiting(
-    connection: sqlite3.Connection,
-    root: Path,
-    *,
-    invalidations: SimpleQueue[str],
-) -> tuple[TaskRecord, TaskRecord]:
-    waiting = _start(connection, root, "Waiting backend", ("fastapi",), invalidations=invalidations)
-    waiting = _wait_review(connection, root, waiting, invalidations=invalidations)
-    working = _start(connection, root, "Working mobile", ("expo",), invalidations=invalidations)
-    _drain(invalidations)
-    return waiting, working
-
-
-def _two_waiting_reviews(
-    connection: sqlite3.Connection,
-    root: Path,
-    *,
-    invalidations: SimpleQueue[str],
-) -> tuple[TaskRecord, TaskRecord]:
-    older = _start(connection, root, "Older backend", ("fastapi",), invalidations=invalidations)
-    older = _wait_review(connection, root, older, invalidations=invalidations)
-    newer = _start(connection, root, "Newer mobile", ("expo",), invalidations=invalidations)
-    newer = _wait_review(connection, root, newer, invalidations=invalidations)
-    _drain(invalidations)
-    return older, newer
-
-
-def _dashboard(
-    database: Path,
-    workspace_id: str,
-    task: TaskRecord,
-    action: str,
-    *,
-    invalidations: SimpleQueue[str],
-    feedback: str | None = None,
-    comment: str | None = None,
-    jira_url: str | None = None,
-    operator_status: TaskOperatorStatus | None = None,
-) -> bool:
-    return mutate_dashboard_task(
-        database,
-        DashboardActionRequest(
-            action=action,
-            workspace_id=workspace_id,
-            task_id=task.task_id,
-            expected_revision=task.revision,
-            feedback=feedback,
-            comment=comment,
-            jira_url=jira_url,
-            operator_status=operator_status,
-        ),
-        watcher_invalidations=invalidations,
-    )
 
 
 def _post(url: str, fields: dict[str, str | int], *, origin: str) -> int:
@@ -266,141 +199,98 @@ def _post(url: str, fields: dict[str, str | int], *, origin: str) -> int:
     return status
 
 
-def _focus_registry(tmp_path: Path) -> Path:
-    registry = tmp_path / "skills"
-    _write_skill(registry, "mobile", task_hints=("expo",))
-    _write_skill(registry, "server", task_hints=("fastapi",))
-    return registry
-
-
-def test_task_start_create_enqueues_skill_reconcile(tmp_path: Path) -> None:
-    root, _database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_task_start_does_not_change_project_skills(tmp_path: Path) -> None:
+    root, _database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(None, ())
-        created = _start(connection, root, "New work", ("expo",), invalidations=invalidations)
-        assert _drain(invalidations) == [workspace_id]
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            created.task_id, ("expo",)
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert next(item.task_hints for item in definitions if item.skill_id == "mobile") == (
+            "expo",
         )
+        assert next(item.task_hints for item in definitions if item.skill_id == "server") == (
+            "fastapi",
+        )
+        assert before == ("mobile", "server")
+        started = _start(connection, root, "Mobile slice", ("expo",))
+        after = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert after == before
+        assert get_task(connection, started.task_id).state is TaskState.WORKING
     finally:
         connection.close()
 
 
-def test_task_start_resume_of_different_waiting_task_enqueues_skill_reconcile(
-    tmp_path: Path,
-) -> None:
-    root, _database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_task_checkpoint_does_not_change_project_skills(tmp_path: Path) -> None:
+    root, _database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        older, newer = _two_waiting_reviews(connection, root, invalidations=invalidations)
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            newer.task_id, ("expo",)
-        )
-        resumed = mutate_task_start(
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        working = _start(connection, root, "Mobile slice", ("expo",))
+        waiting = _checkpoint(
             connection,
-            TaskStartRequestData(
-                workspace_hints=_hints(root),
-                title=None,
-                stack_hints=(),
-                task_id=older.task_id,
-                expected_revision=older.revision,
-            ),
-            watcher_invalidations=invalidations,
+            root,
+            working,
+            TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Ready for review",
+            next_step="Operator review",
         )
-        assert resumed.task_id == older.task_id
-        assert resumed.state is TaskState.WORKING
-        assert _drain(invalidations) == [workspace_id]
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            older.task_id, ("fastapi",)
-        )
+        after = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert after == before == ("mobile", "server")
+        assert waiting.state is TaskState.WAITING
     finally:
         connection.close()
 
 
-def test_task_completion_invalidates_skill_relevance(tmp_path: Path) -> None:
-    root, _database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_task_terminal_transition_does_not_change_project_skills(tmp_path: Path) -> None:
+    root, database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
-        before = skill_relevance_key(connection, workspace_id)
-        assert before == SkillRelevanceKey(working.task_id, ("expo",))
-
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        working = _start(connection, root, "Mobile slice", ("expo",))
         completed = _checkpoint(
             connection,
             root,
             working,
             TaskState.COMPLETED,
-            invalidations=invalidations,
             summary="Shipped mobile work",
+            next_step=None,
         )
-
         assert completed.state is TaskState.COMPLETED
-        assert _drain(invalidations) == [workspace_id]
-        after = skill_relevance_key(connection, workspace_id)
-        assert after == SkillRelevanceKey(waiting.task_id, ("fastapi",))
-        relevant = get_relevant_task(connection, workspace_id)
-        assert relevant is not None
-        assert relevant.task_id == waiting.task_id
-    finally:
-        connection.close()
-
-
-def test_task_cancel_invalidates_skill_relevance(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
-    try:
-        waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
-        changed = _dashboard(database, workspace_id, working, "cancel", invalidations=invalidations)
-        assert changed is True
-        assert _drain(invalidations) == [workspace_id]
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            waiting.task_id, ("fastapi",)
+        mutate_dashboard_task(
+            database,
+            DashboardActionRequest(
+                action="reopen",
+                workspace_id=workspace_id,
+                task_id=completed.task_id,
+                expected_revision=completed.revision,
+            ),
         )
-        assert get_task(connection, working.task_id).state is TaskState.CANCELLED
+        reopened = get_task(connection, completed.task_id)
+        after = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert after == before == ("mobile", "server")
+        assert reopened.state is TaskState.WORKING
     finally:
         connection.close()
 
 
-def test_task_reopen_invalidates_skill_relevance(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_dashboard_task_action_does_not_request_skill_reconcile(tmp_path: Path) -> None:
+    root, database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
-        completed = _checkpoint(
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        working = _start(connection, root, "Mobile slice", ("expo",))
+        waiting = _checkpoint(
             connection,
             root,
             working,
-            TaskState.COMPLETED,
-            invalidations=invalidations,
-            summary="Finished",
-        )
-        _drain(invalidations)
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            waiting.task_id, ("fastapi",)
-        )
-
-        changed = _dashboard(
-            database, workspace_id, completed, "reopen", invalidations=invalidations
-        )
-        assert changed is True
-        assert _drain(invalidations) == [workspace_id]
-        reopened = get_task(connection, completed.task_id)
-        assert reopened.state is TaskState.WORKING
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            reopened.task_id, ("expo",)
-        )
-    finally:
-        connection.close()
-
-
-def test_operator_accept_invalidates_skill_relevance(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    setup_queue: SimpleQueue[str] = SimpleQueue()
-    try:
-        older, newer = _two_waiting_reviews(connection, root, invalidations=setup_queue)
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            newer.task_id, ("expo",)
+            TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Ready for review",
+            next_step="Operator review",
         )
     finally:
         connection.close()
@@ -411,159 +301,62 @@ def test_operator_accept_invalidates_skill_relevance(tmp_path: Path) -> None:
         url = manager.get_url()
         parsed = urlsplit(url)
         origin = f"http://127.0.0.1:{parsed.port}"
-        # Accept the currently relevant (newest) waiting Task so the older Task
-        # with different stack_hints becomes relevant. Accept completes; it does
-        # not resume the older Task to working.
         status = _post(
             url,
             {
                 "action": "accept",
                 "workspace_id": workspace_id,
-                "task_id": newer.task_id,
-                "expected_revision": newer.revision,
+                "task_id": waiting.task_id,
+                "expected_revision": waiting.revision,
             },
             origin=origin,
         )
         assert status == 303
-        assert _drain(invalidations) == [workspace_id]
+        assert _drain(invalidations) == []
     finally:
         manager.close()
 
     connection = connect_database(database)
     try:
-        assert get_task(connection, newer.task_id).state is TaskState.COMPLETED
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            older.task_id, ("fastapi",)
+        assert get_task(connection, waiting.task_id).state is TaskState.COMPLETED
+        after = _ids(
+            resolve_workspace_skills(connection, workspace_id, load_skill_registry(registry))
         )
+        assert after == before == ("mobile", "server")
     finally:
         connection.close()
 
 
-def test_feedback_relevance_change_invalidates_skills(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_project_stack_change_still_reconciles_skills(tmp_path: Path) -> None:
+    root, _database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        older, newer = _two_waiting_reviews(connection, root, invalidations=invalidations)
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            newer.task_id, ("expo",)
-        )
-        changed = _dashboard(
-            database,
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert before == ("mobile", "server")
+        (root / "Dockerfile").write_text("FROM alpine:3.20\n", encoding="utf-8")
+        scan_workspace(connection, workspace_id)
+        after = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        assert after == ("container", "mobile", "server")
+        projection = reconcile_workspace_skills(
+            connection,
             workspace_id,
-            older,
-            "feedback",
-            invalidations=invalidations,
-            feedback="Please continue the FastAPI work",
+            ("codex",),
+            registry_root=registry,
         )
-        assert changed is True
-        assert _drain(invalidations) == [workspace_id]
-        resumed = get_task(connection, older.task_id)
-        assert resumed.state is TaskState.WORKING
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            resumed.task_id, ("fastapi",)
-        )
+        assert projection.selected_skill_ids == after
+        assert (root / ".agents" / "skills" / "container" / "SKILL.md").is_file()
     finally:
         connection.close()
 
 
-def test_non_relevance_metadata_mutation_does_not_invalidate_skills(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+def test_failed_task_mutation_does_not_change_project_skills(tmp_path: Path) -> None:
+    root, database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
+    definitions = load_skill_registry(registry)
     try:
-        _waiting_backend, working = _working_and_waiting(
-            connection, root, invalidations=invalidations
-        )
-        expected = SkillRelevanceKey(working.task_id, ("expo",))
-        assert skill_relevance_key(connection, workspace_id) == expected
-
-        assert (
-            _dashboard(
-                database,
-                workspace_id,
-                working,
-                "comment",
-                invalidations=invalidations,
-                comment="Operator note only",
-            )
-            is False
-        )
-        working = get_task(connection, working.task_id)
-        assert (
-            _dashboard(
-                database,
-                workspace_id,
-                working,
-                "set_jira",
-                invalidations=invalidations,
-                jira_url="https://jira.example/browse/HAR-42",
-            )
-            is False
-        )
-        working = get_task(connection, working.task_id)
-        assert (
-            _dashboard(
-                database,
-                workspace_id,
-                working,
-                "set_operator_status",
-                invalidations=invalidations,
-                operator_status=TaskOperatorStatus.DEPLOY_TEST,
-            )
-            is False
-        )
-        working = get_task(connection, working.task_id)
-        working = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.WORKING,
-            invalidations=invalidations,
-            summary="Same relevant Task, new summary",
-        )
-        mutate_task_start(
-            connection,
-            TaskStartRequestData(
-                workspace_hints=_hints(root),
-                title=None,
-                stack_hints=(),
-                task_id=working.task_id,
-                expected_revision=working.revision,
-            ),
-            watcher_invalidations=invalidations,
-        )
-        waiting_relevant = _wait_review(
-            connection,
-            root,
-            get_task(connection, working.task_id),
-            invalidations=invalidations,
-        )
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            waiting_relevant.task_id, ("expo",)
-        )
-        assert (
-            _dashboard(
-                database,
-                workspace_id,
-                waiting_relevant,
-                "feedback",
-                invalidations=invalidations,
-                feedback="Continue the same Expo task",
-            )
-            is False
-        )
-        assert _drain(invalidations) == []
-        assert skill_relevance_key(connection, workspace_id) == expected
-        assert get_task(connection, _waiting_backend.task_id).state is TaskState.WAITING
-    finally:
-        connection.close()
-
-
-def test_failed_task_mutation_does_not_queue_skill_reconcile(tmp_path: Path) -> None:
-    root, database, connection, workspace_id = _registered_workspace(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
-    try:
-        waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
-        before = skill_relevance_key(connection, workspace_id)
+        before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
+        working = _start(connection, root, "Mobile slice", ("expo",))
         stale = TaskCheckpointRequestData(
             workspace_hints=_hints(root),
             task_id=working.task_id,
@@ -576,7 +369,7 @@ def test_failed_task_mutation_does_not_queue_skill_reconcile(tmp_path: Path) -> 
             knowledge=(),
         )
         with pytest.raises(TaskRevisionConflictError):
-            mutate_task_checkpoint(connection, stale, watcher_invalidations=invalidations)
+            mutate_task_checkpoint(connection, stale)
         with pytest.raises(TaskRevisionConflictError):
             mutate_dashboard_task(
                 database,
@@ -586,12 +379,9 @@ def test_failed_task_mutation_does_not_queue_skill_reconcile(tmp_path: Path) -> 
                     task_id=working.task_id,
                     expected_revision=working.revision + 3,
                 ),
-                watcher_invalidations=invalidations,
             )
-        assert _drain(invalidations) == []
         assert get_task(connection, working.task_id).state is TaskState.WORKING
-        assert get_task(connection, waiting.task_id).state is TaskState.WAITING
-        assert skill_relevance_key(connection, workspace_id) == before
+        assert _ids(resolve_workspace_skills(connection, workspace_id, definitions)) == before
     finally:
         connection.close()
 
@@ -599,22 +389,19 @@ def test_failed_task_mutation_does_not_queue_skill_reconcile(tmp_path: Path) -> 
 def test_reconcile_failure_does_not_rollback_committed_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root, _database, connection, workspace_id = _registered_workspace(tmp_path)
-    registry = _focus_registry(tmp_path)
-    invalidations: SimpleQueue[str] = SimpleQueue()
+    root, _database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
+    registry = _polyglot_registry(tmp_path)
     try:
-        _waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
+        working = _start(connection, root, "Mobile slice", ("expo",))
         completed = _checkpoint(
             connection,
             root,
             working,
             TaskState.COMPLETED,
-            invalidations=invalidations,
             summary="Committed before projection",
+            next_step=None,
         )
-        assert completed.state is TaskState.COMPLETED
         committed_revision = completed.revision
-        assert _drain(invalidations) == [workspace_id]
 
         def fail_projection(*_args: object, **_kwargs: object) -> None:
             raise SkillRuntimeError("projection failed")
@@ -630,35 +417,5 @@ def test_reconcile_failure_does_not_rollback_committed_task(
         row = get_task(connection, completed.task_id)
         assert row.state is TaskState.COMPLETED
         assert row.revision == committed_revision
-    finally:
-        connection.close()
-
-
-def test_terminal_task_reveals_previous_waiting_task_skills(tmp_path: Path) -> None:
-    root, _database, connection, workspace_id = _registered_workspace(tmp_path, _POLYGLOT_FILES)
-    registry = _focus_registry(tmp_path)
-    definitions = load_skill_registry(registry)
-    invalidations: SimpleQueue[str] = SimpleQueue()
-    try:
-        waiting, working = _working_and_waiting(connection, root, invalidations=invalidations)
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            working.task_id, ("expo",)
-        )
-        assert _ids(resolve_workspace_skills(connection, workspace_id, definitions)) == ("mobile",)
-
-        completed = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.COMPLETED,
-            invalidations=invalidations,
-            summary="Mobile slice done",
-        )
-        assert completed.state is TaskState.COMPLETED
-        assert _drain(invalidations) == [workspace_id]
-        assert skill_relevance_key(connection, workspace_id) == SkillRelevanceKey(
-            waiting.task_id, ("fastapi",)
-        )
-        assert _ids(resolve_workspace_skills(connection, workspace_id, definitions)) == ("server",)
     finally:
         connection.close()
