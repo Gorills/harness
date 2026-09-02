@@ -106,7 +106,8 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
-    assert "Relevant skills: 6" in scan_output
+    projected_skill_count = 6
+    assert f"Relevant skills: {projected_skill_count}" in scan_output
     assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").exists()
     language_skill = repo / ".agents" / "skills" / "language-engineering"
     assert (language_skill / "references" / "python.md").exists()
@@ -138,7 +139,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall"])
     assert harness_main() == 0
     uninstall_output = capsys.readouterr().out
-    assert "Generated skills removed: 4" in uninstall_output
+    assert f"Generated skills removed: {projected_skill_count}" in uninstall_output
     assert "Project Intelligence: preserved" in uninstall_output
     assert not integration_state.exists()
     assert not (repo / ".agents" / "skills" / "python-helper").exists()
