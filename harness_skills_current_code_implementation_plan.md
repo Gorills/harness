@@ -1754,8 +1754,7 @@ def resolve_skills(
     explicit_include=(),
     explicit_exclude=(),
     policy=None,
-):
-    ...
+): ...
 ```
 
 Без:
