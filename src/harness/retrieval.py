@@ -16,6 +16,7 @@ from harness.knowledge import (
     KnowledgeCardRecord,
     KnowledgeError,
     KnowledgeFreshness,
+    KnowledgeSourceType,
     get_knowledge_card,
 )
 from harness.registry import WorkspaceRecord, get_project, get_workspace
@@ -180,7 +181,16 @@ def search_project(
             )
         )
     elif scope is ProjectSearchScope.KNOWLEDGE:
-        hits = _project_hits(_knowledge_hits(connection, project.project_id, analyzed, limit))
+        hits = _project_hits(
+            _knowledge_hits(
+                connection,
+                project.project_id,
+                analyzed,
+                limit,
+                active_workspace_id=workspace_id,
+                include_unanchored_agent_asserted=True,
+            )
+        )
     elif scope is ProjectSearchScope.TASKS:
         hits = _project_hits(
             _task_hits(
@@ -193,7 +203,13 @@ def search_project(
         )
     else:
         channels = (
-            _knowledge_hits(connection, project.project_id, analyzed, limit),
+            _knowledge_hits(
+                connection,
+                project.project_id,
+                analyzed,
+                limit,
+                active_workspace_id=workspace_id,
+            ),
             _file_hits(
                 connection,
                 workspace_id,
@@ -492,6 +508,9 @@ def _knowledge_hits(
     project_id: str,
     query: AnalyzedSearchQuery,
     limit: int,
+    *,
+    active_workspace_id: str,
+    include_unanchored_agent_asserted: bool = False,
 ) -> tuple[_RankedProjectHit, ...]:
     candidate_limit = _candidate_limit(limit)
     rows = connection.execute(
@@ -515,6 +534,13 @@ def _knowledge_hits(
         card = get_knowledge_card(connection, knowledge_id)
         if card.project_id != project_id:
             raise ProjectRetrievalError("Knowledge search index crossed Project ownership")
+        if not _knowledge_applies_to_workspace(
+            connection,
+            card,
+            active_workspace_id,
+            include_unanchored_agent_asserted=include_unanchored_agent_asserted,
+        ):
+            continue
         stale = card.freshness is KnowledgeFreshness.NEEDS_REVALIDATION
         location = card.anchors[0].relative_path if card.anchors else f"project:{project_id[:12]}"
         anchor_text = " ".join(
@@ -550,6 +576,34 @@ def _knowledge_hits(
         )
     ranked.sort(key=_ranked_hit_key)
     return tuple(ranked[:limit])
+
+
+def _knowledge_applies_to_workspace(
+    connection: sqlite3.Connection,
+    card: KnowledgeCardRecord,
+    active_workspace_id: str,
+    *,
+    include_unanchored_agent_asserted: bool,
+) -> bool:
+    if card.source_type is not KnowledgeSourceType.AGENT_ASSERTED:
+        return True
+    if not card.anchors:
+        return include_unanchored_agent_asserted
+    anchors_match = True
+    for anchor in card.anchors:
+        indexed = get_indexed_file(connection, active_workspace_id, anchor.relative_path)
+        if (
+            indexed is None
+            or indexed.kind.value != anchor.fingerprint_kind.value
+            or indexed.content_sha256 != anchor.content_sha256
+        ):
+            anchors_match = False
+            break
+    if anchors_match:
+        return True
+    return include_unanchored_agent_asserted and all(
+        anchor.workspace_id == active_workspace_id for anchor in card.anchors
+    )
 
 
 def _task_hits(
