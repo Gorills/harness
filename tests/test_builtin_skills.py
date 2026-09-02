@@ -81,8 +81,23 @@ def test_builtin_pack_resolves_from_project_stack_without_task_hints(tmp_path: P
         frozenset({"software-project"}),
     )
     software_ids = set(_ids(resolve_skills(definitions, software)))
-    assert {"secure-by-design", "testing-strategy"} <= software_ids
-    assert "backend-security" not in software_ids
+    assert {
+        "complex-change-planning",
+        "project-architecture",
+        "secure-by-design",
+        "testing-strategy",
+    } <= software_ids
+    assert software_ids.isdisjoint(
+        {
+            "backend-security",
+            "architecture-decisions",
+            "legacy-preservation",
+            "project-conventions",
+            "spec-audit",
+            "independent-review",
+            "scalability-architecture",
+        }
+    )
     mobile = DetectedProjectStack(
         frozenset(),
         frozenset(),
@@ -107,7 +122,6 @@ def test_secure_by_design_accompanies_software_project_stack(tmp_path: Path) -> 
     unrelated = frozenset({"public-frontend", "mobile-application", "frontend-design"})
     ids = set(_ids(resolve_skills(definitions, software_project_stack)))
     assert "secure-by-design" in ids
-    assert "backend-security" not in ids
     assert ids.isdisjoint(unrelated)
     assert "testing-strategy" in ids
 
@@ -119,10 +133,10 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
     by_id = {definition.skill_id: definition for definition in definitions}
 
     assert {
+        "complex-change-planning",
         "container-infrastructure",
         "data-integrity",
         "language-engineering",
-        "legacy-preservation",
         "project-architecture",
         "public-frontend",
         "frontend-design",
@@ -132,6 +146,17 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         "godot-development",
         "deployment-operations",
     } <= set(by_id)
+    assert by_id.keys().isdisjoint(
+        {
+            "architecture-decisions",
+            "backend-security",
+            "independent-review",
+            "legacy-preservation",
+            "project-conventions",
+            "scalability-architecture",
+            "spec-audit",
+        }
+    )
     assert by_id["language-engineering"].portable_files == (
         PurePosixPath("SKILL.md"),
         PurePosixPath("references/c-cpp.md"),
@@ -307,6 +332,296 @@ def test_builtin_descriptions_state_their_activation_boundary() -> None:
         assert "when" in skill.description.casefold(), skill.skill_id
 
 
+def test_builtin_descriptions_start_with_use_when() -> None:
+    for skill in BUILTIN_SKILLS:
+        assert skill.description.startswith("Use when"), skill.skill_id
+
+
+def test_builtin_pack_omits_task_hints_and_requires_stack_applies(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    for skill in BUILTIN_SKILLS:
+        assert skill.task_hints == (), skill.skill_id
+        assert (
+            skill.applies_languages
+            or skill.applies_dependencies
+            or skill.applies_manifests
+            or skill.applies_facets
+        ), skill.skill_id
+        metadata = (registry / skill.skill_id / "harness.yaml").read_text(encoding="utf-8")
+        assert "task_hints:" not in metadata, skill.skill_id
+
+
+def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path) -> None:
+    architecture = _builtin_by_id("project-architecture")
+    change = _builtin_by_id("complex-change-planning")
+    security_web = dict(_builtin_by_id("secure-by-design").references)["web-backend.md"]
+    assert architecture.applies_facets == ("software-project",)
+    assert change.applies_facets == ("software-project",)
+    assert dict(architecture.references)["architecture-decisions.md"]
+    assert (
+        "Record an ADR only for durable decisions"
+        in dict(architecture.references)["architecture-decisions.md"]
+    )
+    assert "measured workload" in dict(architecture.references)["scalability.md"]
+    assert (
+        "independently test the requested behavior"
+        in dict(change.references)["specification-audit.md"]
+    )
+    assert "as if you did not implement it" in dict(change.references)["independent-review.md"]
+    assert (
+        "characterization, contract, or golden tests"
+        in dict(change.references)["legacy-preservation.md"]
+    )
+    assert change.description.startswith(
+        "Use when planning a cross-boundary or migration-ordered change"
+    )
+    assert (
+        "exclude ordinary single-module bugfixes and routine test-only work" in change.description
+    )
+    testing = _builtin_by_id("testing-strategy")
+    conventions = " ".join(testing.body.split())
+    assert "Do not duplicate facts Harness can derive from manifests" in conventions
+    assert "canonical task runner" in conventions
+    assert "unsafe operations" in conventions
+    assert "Argon2id" in security_web
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+    by_id = {definition.skill_id: definition for definition in definitions}
+    assert by_id["project-architecture"].portable_files == (
+        PurePosixPath("SKILL.md"),
+        PurePosixPath("references/architecture-decisions.md"),
+        PurePosixPath("references/scalability.md"),
+    )
+    assert by_id["complex-change-planning"].portable_files == (
+        PurePosixPath("SKILL.md"),
+        PurePosixPath("references/independent-review.md"),
+        PurePosixPath("references/legacy-preservation.md"),
+        PurePosixPath("references/specification-audit.md"),
+    )
+
+
+def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+
+    def assert_pack(
+        stack: DetectedProjectStack,
+        required: set[str],
+        forbidden: set[str],
+    ) -> set[str]:
+        ids = set(_ids(resolve_skills(definitions, stack)))
+        assert required <= ids
+        assert ids.isdisjoint(forbidden)
+        assert len(ids) <= 12
+        return ids
+
+    python_cli = DetectedProjectStack(
+        frozenset({"python"}),
+        frozenset(),
+        frozenset({"pyproject.toml"}),
+        frozenset({"software-project"}),
+    )
+    python_ids = assert_pack(
+        python_cli,
+        {
+            "complex-change-planning",
+            "language-engineering",
+            "project-architecture",
+            "secure-by-design",
+            "testing-strategy",
+        },
+        {
+            "ci-release",
+            "container-infrastructure",
+            "data-integrity",
+            "frontend-design",
+            "mobile-application",
+            "public-frontend",
+            "server-application",
+        },
+    )
+    assert len(python_ids) <= 6
+
+    fastapi = DetectedProjectStack(
+        frozenset({"python"}),
+        frozenset({"alembic", "fastapi", "sqlalchemy"}),
+        frozenset({"pyproject.toml"}),
+        frozenset({"backend-service", "database-backed", "software-project"}),
+    )
+    assert_pack(
+        fastapi,
+        {
+            "data-integrity",
+            "language-engineering",
+            "secure-by-design",
+            "server-application",
+            "testing-strategy",
+        },
+        {"frontend-design", "mobile-application", "public-frontend"},
+    )
+
+    nextjs = DetectedProjectStack(
+        frozenset({"typescript"}),
+        frozenset({"next"}),
+        frozenset({"package.json"}),
+        frozenset({"software-project", "web-frontend"}),
+    )
+    assert_pack(
+        nextjs,
+        {
+            "frontend-design",
+            "language-engineering",
+            "public-frontend",
+            "secure-by-design",
+            "testing-strategy",
+        },
+        {"data-integrity", "mobile-application", "server-application"},
+    )
+
+    expo = DetectedProjectStack(
+        frozenset({"typescript"}),
+        frozenset({"expo", "react", "react-dom", "react-native", "react-native-web"}),
+        frozenset({"package.json"}),
+        frozenset({"mobile-app", "software-project"}),
+    )
+    assert_pack(
+        expo,
+        {
+            "frontend-design",
+            "language-engineering",
+            "mobile-application",
+            "secure-by-design",
+            "testing-strategy",
+        },
+        {"public-frontend", "server-application"},
+    )
+
+    docker_ci = DetectedProjectStack(
+        frozenset({"python"}),
+        frozenset({"alembic", "fastapi", "sqlalchemy"}),
+        frozenset({"dockerfile", "pyproject.toml"}),
+        frozenset(
+            {
+                "backend-service",
+                "ci-pipeline",
+                "containerized",
+                "database-backed",
+                "software-project",
+            }
+        ),
+    )
+    assert_pack(
+        docker_ci,
+        {
+            "ci-release",
+            "container-infrastructure",
+            "data-integrity",
+            "language-engineering",
+            "secure-by-design",
+            "server-application",
+            "testing-strategy",
+        },
+        {"frontend-design", "mobile-application", "public-frontend"},
+    )
+
+    mixed = DetectedProjectStack(
+        frozenset({"python", "sql", "typescript"}),
+        frozenset(
+            {
+                "alembic",
+                "expo",
+                "fastapi",
+                "react-native",
+                "sqlalchemy",
+            }
+        ),
+        frozenset({"package.json", "pyproject.toml"}),
+        frozenset(
+            {
+                "backend-service",
+                "database-backed",
+                "mobile-app",
+                "software-project",
+            }
+        ),
+    )
+    mixed_ids = assert_pack(
+        mixed,
+        {
+            "data-integrity",
+            "frontend-design",
+            "language-engineering",
+            "mobile-application",
+            "secure-by-design",
+            "server-application",
+            "testing-strategy",
+        },
+        {"public-frontend"},
+    )
+    assert "complex-change-planning" in mixed_ids
+    assert "project-architecture" in mixed_ids
+
+
+def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> None:
+    """Facet matches outrank language-only; budget 12 may drop language-engineering."""
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+    busy = DetectedProjectStack(
+        frozenset({"python", "sql", "typescript"}),
+        frozenset(
+            {
+                "alembic",
+                "expo",
+                "fastapi",
+                "opentelemetry-api",
+                "prometheus-client",
+                "react-native",
+                "sqlalchemy",
+            }
+        ),
+        frozenset({"dockerfile", "package.json", "pyproject.toml"}),
+        frozenset(
+            {
+                "backend-service",
+                "ci-pipeline",
+                "containerized",
+                "database-backed",
+                "deployment-ops",
+                "mobile-app",
+                "software-project",
+                "web-frontend",
+            }
+        ),
+    )
+    resolved = resolve_skills(definitions, busy)
+    ids = _ids(resolved)
+    assert len(ids) == 12
+    assert {
+        "ci-release",
+        "complex-change-planning",
+        "container-infrastructure",
+        "data-integrity",
+        "deployment-operations",
+        "frontend-design",
+        "mobile-application",
+        "project-architecture",
+        "public-frontend",
+        "secure-by-design",
+        "server-application",
+        "testing-strategy",
+    } <= set(ids)
+    assert "godot-development" not in ids
+    assert "language-engineering" not in ids
+    assert "observability" not in ids
+    assert all(
+        any(reason.startswith("facet:") for reason in item.match_reasons) for item in resolved
+    )
+
+
 def test_ci_release_is_self_contained_for_github_actions_supply_chain(tmp_path: Path) -> None:
     body = _builtin_by_id("ci-release").body
     for needle in (
@@ -454,11 +769,11 @@ def test_isolated_runtime_uses_one_explicit_compatible_skill_profile_set(
 
 def test_builtin_pack_refuses_foreign_collision_without_mutation(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
-    foreign = registry / "backend-security"
+    foreign = registry / "observability"
     foreign.mkdir(parents=True)
     registry.chmod(0o700)
     (foreign / "SKILL.md").write_text("user skill\n")
-    (foreign / "harness.yaml").write_text("id: backend-security\n")
+    (foreign / "harness.yaml").write_text("id: observability\n")
     before = {p.name: p.read_bytes() for p in foreign.iterdir()}
     with pytest.raises(BuiltinSkillCollisionError):
         sync_builtin_skills(registry)
@@ -470,7 +785,7 @@ def test_builtin_pack_refuses_dangling_symlink_collision(tmp_path: Path) -> None
     registry = tmp_path / "skills"
     registry.mkdir()
     registry.chmod(0o700)
-    (registry / "backend-security").symlink_to(tmp_path / "missing", target_is_directory=True)
+    (registry / "observability").symlink_to(tmp_path / "missing", target_is_directory=True)
     with pytest.raises(BuiltinSkillCollisionError, match="unsafe"):
         sync_builtin_skills(registry)
 

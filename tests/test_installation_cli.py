@@ -94,7 +94,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "MCP registration: changed" in install_output
     expected = len(BUILTIN_SKILLS)
     assert f"Built-in skills: {expected} (installed {expected}, updated 0)" in install_output
-    assert (home / ".harness" / "skills" / "backend-security" / "SKILL.md").is_file()
+    assert (home / ".harness" / "skills" / "testing-strategy" / "SKILL.md").is_file()
     assert "Harness install: OK" in install_output
     integration_state = state_home / "harness" / "host-integrations.json"
     assert json.loads(integration_state.read_text(encoding="utf-8"))["profiles"] == ["cursor"]
@@ -106,7 +106,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
-    assert "Relevant skills: 4" in scan_output
+    assert "Relevant skills: 6" in scan_output
     assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").exists()
     language_skill = repo / ".agents" / "skills" / "language-engineering"
     assert (language_skill / "references" / "python.md").exists()

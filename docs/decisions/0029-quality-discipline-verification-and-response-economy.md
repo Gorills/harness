@@ -18,7 +18,9 @@ The product specification already defines checkpoint verification as `name`, `st
 1. Harness ships a compact built-in quality pack as product-owned seed content for the canonical
    external skill registry. The first implementation contained 12 skills; that count is not a
    product invariant. The separate model-visible resolver budget remains authoritative.
-2. Built-in skills use hyphenated portable ids/frontmatter and existing `task_hints`; Harness does not add a composition DSL.
+2. Built-in skills use hyphenated portable ids/frontmatter and stack applicability. YAML
+   `task_hints` remain accepted parser input for user-owned skills and are ignored at resolve
+   time. Harness does not add a composition DSL.
 3. `harness install` reconciles the pack before host/runtime mutation. `harness skills sync` provides explicit reconciliation and `harness skills validate` checks every currently supported host surface.
 4. Reconciliation never overwrites unknown same-id content. A registry-root ownership manifest records exact installed hashes; owned skills update only while current bytes still match the recorded hash. Exact current built-ins may be adopted. Failures roll back in-process replacements when restore succeeds. A failed restore continues remaining entries, preserves surviving backups, and raises an explicit recovery failure instead of re-raising only the original error.
 5. Harness does not import `PROJECT_STATUS.md`, `STACK.md`, epic state, trigger wrappers, or host rule mirrors. Task/checkpoint state remains in Harness; mechanically detectable stack facts remain in the Structural Index; only non-mechanical project conventions belong in durable Knowledge.
@@ -37,8 +39,8 @@ visible-skill budget in polyglot repositories.
 Built-in skills may therefore carry portable nested `references/`. The entrypoint must route to the
 smallest relevant reference set, and canonical reconciliation owns and verifies the complete nested
 tree. The canonical built-in count may grow independently of the configured visible subset (about
-12 or fewer by default). Existing stack detection and `task_hints` remain the only composition
-mechanism; this amendment does not introduce a workflow DSL or a second source of project state.
+12 or fewer by default). Existing stack detection remains the composition mechanism; this
+amendment does not introduce a workflow DSL or a second source of project state.
 
 ## 2026-08-30 amendment: contextual stack facets and secure-by-design coverage
 
@@ -211,17 +213,28 @@ Later 0029 amendments that mention Task-focused projection as the reason `fronte
 Task narrowing. Compact quality pack, checkpoint verification, and response-economy decisions
 are unchanged.
 
+## 2026-09-02 amendment: built-in catalog is project-stack only
+
+The built-in pack no longer emits `task_hints` and no longer keeps specialized skills that were
+useful only through Task matching. `project-architecture` and `complex-change-planning` apply to
+detected software projects and route ADR/scalability and spec-audit/review/legacy guidance through
+references. `backend-security` unique password-KDF guidance lives in
+`secure-by-design/references/web-backend.md`. `project-conventions` is retired; its unique
+non-mechanical Knowledge-capture bullets (task runner, focused tests, local env, unsafe ops,
+release practice) live in `testing-strategy`.
+
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
 - High-precision facets prevent ambiguous ecosystem dependencies from selecting the wrong surface
   skill while preserving multi-surface monorepo coverage.
-- Recognized Task hints focus polyglot projection while explicit inclusions and the existing
-  visible-skill budget remain authoritative; unknown hints fall back to stack evidence.
+- Detected project stack plus explicit include/exclude select the projected pack; the
+  visible-skill budget remains authoritative. Hosts choose among projected Skills from
+  name/description.
 - Verification survives host/session changes and need not be repeated verbatim in chat.
 - User-modified or same-id custom skills fail closed instead of being silently replaced.
 - Recognized user-facing frontend work receives one portable design-quality baseline across web and
   mobile without merging SEO, native delivery, and visual-design concerns into one giant skill.
-- Recognized backend security reviews keep `secure-by-design` with `backend-security` so
-  Task-focused projection cannot drop threat, authorization, and verification guidance.
+- Backend security reviews use `secure-by-design`; unique password-KDF guidance from the retired
+  specialized skill lives in `secure-by-design/references/web-backend.md`.
 - Future observed hooks may add `source=observed` without changing the v1 agent-reported shape.
 - Real-host compliance with response instructions remains acceptance evidence, not an enforcement claim.

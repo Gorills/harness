@@ -43,6 +43,8 @@ ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION = (
 EXPECTED_GENERATED_SKILLS = (
     ACCEPTANCE_NEGATIVE_SKILL_ID,
     ACCEPTANCE_SKILL_ID,
+    "complex-change-planning",
+    "project-architecture",
     "secure-by-design",
     "testing-strategy",
 )
