@@ -27,7 +27,6 @@ from harness.skill_runtime import (
 from harness.skills import (
     DetectedProjectStack,
     ResolvedSkill,
-    SkillResolutionPolicy,
     load_skill_registry,
     resolve_skills,
 )
@@ -304,13 +303,6 @@ def test_frontend_design_accompanies_every_builtin_frontend_signal(tmp_path: Pat
             frozenset({facet}),
         )
         assert "frontend-design" in _ids(resolve_skills(definitions, stack)), facet
-        assert _ids(
-            resolve_skills(
-                definitions,
-                stack,
-                policy=SkillResolutionPolicy(max_visible_skills=1),
-            )
-        ) == ("frontend-design",), facet
 
 
 def test_frontend_design_routes_surface_guidance_and_visual_review(tmp_path: Path) -> None:
@@ -413,7 +405,7 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
     assert by_id["legacy-preservation"].portable_files == (PurePosixPath("SKILL.md"),)
 
 
-def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None:
+def test_builtin_pack_fixture_matrix_routes_relevant_surfaces(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -426,7 +418,6 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         ids = set(_ids(resolve_skills(definitions, stack)))
         assert required <= ids
         assert ids.isdisjoint(forbidden)
-        assert len(ids) <= 14
         return ids
 
     python_cli = DetectedProjectStack(
@@ -435,7 +426,7 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
         frozenset({"pyproject.toml"}),
         frozenset({"software-project"}),
     )
-    python_ids = assert_pack(
+    assert_pack(
         python_cli,
         {
             "complex-change-planning",
@@ -455,7 +446,6 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
             "server-application",
         },
     )
-    assert len(python_ids) <= 6
 
     fastapi = DetectedProjectStack(
         frozenset({"python"}),
@@ -582,12 +572,8 @@ def test_builtin_pack_fixture_matrix_stays_within_budget(tmp_path: Path) -> None
     assert "project-architecture" in mixed_ids
 
 
-def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> None:
-    """Default budget 14 fits six software-project cores plus this fixture's eight surfaces.
-
-    Ranking still drops ``godot-development`` (no matching facet). ``observability`` may
-    remain out of the truncated pack even when OpenTelemetry/Prometheus tokens are present.
-    """
+def test_busy_polyglot_keeps_every_matching_surface(tmp_path: Path) -> None:
+    """A broad detected stack keeps every matching surface; nonmatching Godot stays absent."""
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -620,7 +606,6 @@ def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> Non
     )
     resolved = resolve_skills(definitions, busy)
     ids = _ids(resolved)
-    assert len(ids) == 14
     assert len(BUILTIN_SKILLS) == 16
     assert set(ids) == {
         "ci-release",
@@ -632,6 +617,7 @@ def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> Non
         "language-engineering",
         "legacy-preservation",
         "mobile-application",
+        "observability",
         "project-architecture",
         "public-frontend",
         "secure-by-design",
@@ -639,10 +625,9 @@ def test_busy_polyglot_truncation_keeps_required_surfaces(tmp_path: Path) -> Non
         "testing-strategy",
     }
     assert "godot-development" not in ids
-    assert "observability" not in ids
-    assert all(
-        any(reason.startswith("facet:") for reason in item.match_reasons) for item in resolved
-    )
+    observability = next(item for item in resolved if item.definition.skill_id == "observability")
+    assert any(reason.startswith("dependency:") for reason in observability.match_reasons)
+    assert all(item.match_reasons for item in resolved)
 
 
 def test_ci_release_is_self_contained_for_github_actions_supply_chain(tmp_path: Path) -> None:
