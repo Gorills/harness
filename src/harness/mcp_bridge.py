@@ -201,7 +201,7 @@ class VerificationInput(_StrictInputModel):
 
 
 class KnowledgeAnchorInput(_StrictInputModel):
-    """Strict model-facing Task verification input."""
+    """Strict model-facing Knowledge anchor input."""
 
     path: str
     symbol: str | None = None
