@@ -217,8 +217,10 @@ are unchanged.
 
 The built-in pack no longer emits `task_hints` and no longer keeps specialized skills that were
 useful only through Task matching. `project-architecture` and `complex-change-planning` apply to
-detected software projects and route ADR/scalability and spec-audit/review/legacy guidance through
-references. `backend-security` unique password-KDF guidance lives in
+detected software projects and route ADR/scalability and spec-audit/review guidance through
+references. Established-behavior and compatibility work is the dedicated project-wide
+`legacy-preservation` Skill; `complex-change-planning` keeps only a one-line pointer and does not
+carry a nested legacy playbook. `backend-security` unique password-KDF guidance lives in
 `secure-by-design/references/web-backend.md`. `project-conventions` is retired; its unique
 non-mechanical Knowledge-capture bullets (task runner, focused tests, local env, unsafe ops,
 release practice) live in `testing-strategy`.

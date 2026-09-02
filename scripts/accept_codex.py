@@ -44,6 +44,8 @@ EXPECTED_GENERATED_SKILLS = (
     ACCEPTANCE_NEGATIVE_SKILL_ID,
     ACCEPTANCE_SKILL_ID,
     "complex-change-planning",
+    "language-engineering",
+    "legacy-preservation",
     "project-architecture",
     "secure-by-design",
     "testing-strategy",
