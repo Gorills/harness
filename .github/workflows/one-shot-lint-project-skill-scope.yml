@@ -35,7 +35,7 @@ jobs:
           path = Path('tests/test_skill_relevance_reconciliation.py')
           text = path.read_text(encoding='utf-8')
           old = '        assert "<strong>Frontend</strong><span>Не использовать" in html\n'
-          new = '        assert "<strong>Frontend</strong><span>" in html\n        assert "Не использовать" in html\n'
+          new = '        assert "<strong>Frontend</strong><span" in html\n        assert \'data-mode="excluded"\' in html\n'
           if old not in text:
               raise SystemExit('expected mixed-script assertion not found')
           path.write_text(text.replace(old, new, 1), encoding='utf-8')
