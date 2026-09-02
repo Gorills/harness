@@ -1,0 +1,40 @@
+name: One-shot project skill scope formatting
+
+on:
+  push:
+    branches:
+      - feature/project-skill-scope
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feature/project-skill-scope
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
+        with:
+          version: 0.12.5
+
+      - name: Format only CI-reported files
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv python install 3.13
+          uv sync --locked --all-groups
+          uv run --frozen ruff format src/harness/dashboard.py src/harness/dashboard_i18n.py tests/test_project_skill_policy.py tests/test_skill_relevance_reconciliation.py
+          rm -f .github/workflows/one-shot-format-project-skill-scope.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Format project skill scope changes'
+          git push origin HEAD:feature/project-skill-scope
