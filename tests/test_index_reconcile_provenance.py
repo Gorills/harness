@@ -28,7 +28,7 @@ from harness.index import (
 )
 from harness.ipc import WorkspaceStatusResult, request_workspace_status
 from harness.registry import create_project, get_workspace, register_workspace
-from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.storage import connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint
 
 

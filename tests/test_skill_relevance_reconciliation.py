@@ -26,9 +26,9 @@ from harness.dashboard import (
     mutate_dashboard_skill_policy,
     mutate_dashboard_task,
 )
+from harness.host_integration_state import HostIntegrationState
 from harness.index import scan_workspace
 from harness.ipc import TaskCheckpointRequestData, TaskStartRequestData
-from harness.host_integration_state import HostIntegrationState
 from harness.registry import create_project, get_workspace, register_workspace
 from harness.skill_policy import (
     ProjectSkillFacetMode,
@@ -394,7 +394,8 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
         get_status, html = _get_text(project_url)
         assert get_status == 200
         assert "Области разработки" in html
-        assert "<strong>Frontend</strong><span>Не использовать" in html
+        assert "<strong>Frontend</strong><span" in html
+        assert 'data-mode="excluded"' in html
         assert 'name="facet" value="web-frontend"' in html
         assert 'name="mode" value="auto"' in html
         assert 'aria-label="Авто: Frontend"' in html
