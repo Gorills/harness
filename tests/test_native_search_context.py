@@ -7,6 +7,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from eval_search_behavior import SearchHitQuality, _search_outcome
+
 from harness.retrieval import _relocate_search_evidence
 
 
