@@ -16,12 +16,24 @@ from urllib.parse import urlencode, urlsplit
 
 import pytest
 
+import harness.dashboard as dashboard_module
 import harness.skill_runtime as skill_runtime_module
 from harness.daemon import mutate_task_checkpoint, mutate_task_start
-from harness.dashboard import DashboardActionRequest, DashboardServerManager, mutate_dashboard_task
+from harness.dashboard import (
+    DashboardActionRequest,
+    DashboardServerManager,
+    DashboardSkillPolicyRequest,
+    mutate_dashboard_skill_policy,
+    mutate_dashboard_task,
+)
+from harness.host_integration_state import HostIntegrationState
 from harness.index import scan_workspace
 from harness.ipc import TaskCheckpointRequestData, TaskStartRequestData
-from harness.registry import create_project, register_workspace
+from harness.registry import create_project, get_workspace, register_workspace
+from harness.skill_policy import (
+    ProjectSkillFacetMode,
+    get_project_skill_policy,
+)
 from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
 from harness.skills import (
     SKILL_METADATA_FILE_NAME,
@@ -178,6 +190,18 @@ def _checkpoint(
     return get_task(connection, result.task_id)
 
 
+def _get_text(url: str) -> tuple[int, str]:
+    parsed = urlsplit(url)
+    assert parsed.hostname is not None and parsed.port is not None
+    connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=2)
+    connection.request("GET", parsed.path)
+    response = connection.getresponse()
+    body = response.read().decode("utf-8")
+    status = response.status
+    connection.close()
+    return status, body
+
+
 def _post(url: str, fields: dict[str, str | int], *, origin: str) -> int:
     parsed = urlsplit(url)
     assert parsed.hostname is not None and parsed.port is not None
@@ -323,6 +347,121 @@ def test_dashboard_task_action_does_not_request_skill_reconcile(tmp_path: Path) 
             resolve_workspace_skills(connection, workspace_id, load_skill_registry(registry))
         )
         assert after == before == ("mobile", "server")
+    finally:
+        connection.close()
+
+
+def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
+    tmp_path: Path,
+) -> None:
+    root, database, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "apps/api/pyproject.toml": ('[project]\nname = "api"\ndependencies = ["fastapi"]\n'),
+            "apps/site/package.json": json.dumps(
+                {"dependencies": {"next": "16", "react": "19", "react-dom": "19"}}
+            ),
+        },
+    )
+    worktree = tmp_path / "repo-feature"
+    _git(root, "worktree", "add", "--detach", str(worktree))
+    try:
+        project_id = get_workspace(connection, workspace_id).project_id
+        second = register_workspace(connection, project_id=project_id, path=worktree)
+        scan_workspace(connection, second.workspace_id)
+    finally:
+        connection.close()
+
+    invalidations: SimpleQueue[str] = SimpleQueue()
+    manager = DashboardServerManager(database, workspace_invalidations=invalidations)
+    try:
+        url = manager.get_url()
+        parsed = urlsplit(url)
+        origin = f"http://127.0.0.1:{parsed.port}"
+        project_url = url + f"projects/{project_id}/"
+        status = _post(
+            project_url,
+            {
+                "action": "set_skill_scope",
+                "project_id": project_id,
+                "facet": "web-frontend",
+                "mode": "excluded",
+            },
+            origin=origin,
+        )
+        assert status == 303
+        assert _drain(invalidations) == []
+        get_status, html = _get_text(project_url)
+        assert get_status == 200
+        assert "Области разработки" in html
+        assert "<strong>Frontend</strong><span" in html
+        assert 'data-mode="excluded"' in html
+        assert 'name="facet" value="web-frontend"' in html
+        assert 'name="mode" value="auto"' in html
+        assert 'aria-label="Авто: Frontend"' in html
+    finally:
+        manager.close()
+
+    connection = connect_database(database)
+    try:
+        assert get_project_skill_policy(connection, project_id).excluded_facets == ("web-frontend",)
+    finally:
+        connection.close()
+
+
+def test_dashboard_skill_scope_reconciles_each_workspace_and_retries_only_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "apps/api/pyproject.toml": '[project]\nname = "api"\ndependencies = ["fastapi"]\n',
+            "apps/site/package.json": json.dumps({"dependencies": {"next": "16"}}),
+        },
+    )
+    worktree = tmp_path / "repo-feature"
+    _git(root, "worktree", "add", "--detach", str(worktree))
+    try:
+        project_id = get_workspace(connection, workspace_id).project_id
+        second = register_workspace(connection, project_id=project_id, path=worktree)
+        scan_workspace(connection, second.workspace_id)
+    finally:
+        connection.close()
+
+    monkeypatch.setattr(
+        dashboard_module,
+        "load_host_integration_state_for_database",
+        lambda _database: HostIntegrationState(profiles=frozenset({"codex"})),
+    )
+    reconciled: list[tuple[str, tuple[str, ...]]] = []
+
+    def reconcile(
+        _connection: sqlite3.Connection,
+        target_workspace_id: str,
+        profiles: tuple[str, ...],
+    ) -> object:
+        reconciled.append((target_workspace_id, profiles))
+        if target_workspace_id == second.workspace_id:
+            raise SkillRuntimeError("forced retry")
+        return object()
+
+    monkeypatch.setattr(dashboard_module, "reconcile_workspace_skills", reconcile)
+
+    retry = mutate_dashboard_skill_policy(
+        database,
+        DashboardSkillPolicyRequest(
+            project_id=project_id,
+            facet="web-frontend",
+            mode=ProjectSkillFacetMode.EXCLUDED,
+        ),
+    )
+
+    assert {item[0] for item in reconciled} == {workspace_id, second.workspace_id}
+    assert all(item[1] == ("codex",) for item in reconciled)
+    assert retry == (second.workspace_id,)
+    connection = connect_database(database)
+    try:
+        assert get_project_skill_policy(connection, project_id).excluded_facets == ("web-frontend",)
     finally:
         connection.close()
 

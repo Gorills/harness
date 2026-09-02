@@ -23,6 +23,7 @@ from time import monotonic
 from harness.git_workspace import _git_environment
 from harness.index import IndexedFileKind, IndexedFileRecord, list_indexed_files
 from harness.registry import WorkspaceRecord, get_workspace
+from harness.skill_policy import MANAGED_PROJECT_SKILL_FACETS, get_project_skill_policy
 
 SKILL_FILE_NAME = "SKILL.md"
 SKILL_METADATA_FILE_NAME = "harness.yaml"
@@ -162,6 +163,18 @@ _BACKEND_DEPENDENCIES = frozenset(
         "spring-boot-starter-webflux",
         "starlette",
         "symfony/framework-bundle",
+    }
+)
+_OBSERVABILITY_DEPENDENCIES = frozenset(
+    {
+        "@opentelemetry/api",
+        "opentelemetry-api",
+        "opentelemetry-sdk",
+        "pino",
+        "prometheus-client",
+        "sentry-sdk",
+        "structlog",
+        "winston",
     }
 )
 _DATABASE_DEPENDENCIES = frozenset(
@@ -541,13 +554,16 @@ def resolve_workspace_skills(
 ) -> tuple[ResolvedSkill, ...]:
     """Resolve every relevant Skill from the indexed project stack and explicit project policy."""
     _require_resolution_deadline(deadline)
+    workspace = get_workspace(connection, workspace_id)
     stack = detect_workspace_stack(connection, workspace_id, deadline=deadline)
+    policy = get_project_skill_policy(connection, workspace.project_id)
     _require_resolution_deadline(deadline)
     return resolve_skills(
         definitions,
         stack,
         explicit_include=explicit_include,
         explicit_exclude=explicit_exclude,
+        excluded_facets=policy.excluded_facets,
     )
 
 
@@ -557,6 +573,7 @@ def resolve_skills(
     *,
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
+    excluded_facets: Iterable[str] = (),
 ) -> tuple[ResolvedSkill, ...]:
     """Select every deterministic relevant Skill from the canonical registry.
 
@@ -578,16 +595,33 @@ def resolve_skills(
     unknown = (include | exclude) - set(by_id)
     if unknown:
         raise SkillResolutionError(f"explicit skill ids are unknown: {', '.join(sorted(unknown))}")
+    managed_facets = frozenset(MANAGED_PROJECT_SKILL_FACETS)
+    excluded_project_facets = {_normalize_facet(value) for value in excluded_facets}
+    unsupported_facets = excluded_project_facets - managed_facets
+    if unsupported_facets:
+        raise SkillResolutionError(
+            "project skill policy contains unsupported facets: "
+            + ", ".join(sorted(unsupported_facets))
+        )
+    effective_facets = stack.facets - excluded_project_facets
 
     matched: list[tuple[tuple[int, int, int, int, int], ResolvedSkill]] = []
     for definition in definitions:
         if definition.skill_id in exclude:
             continue
+        explicit = definition.skill_id in include
+        declared_managed_facets = set(definition.applies.facets) & managed_facets
+        detected_managed_facets = declared_managed_facets & stack.facets
+        if (
+            not explicit
+            and detected_managed_facets
+            and detected_managed_facets <= excluded_project_facets
+        ):
+            continue
         dependency_matches = sorted(set(definition.applies.dependencies) & stack.dependencies)
         manifest_matches = sorted(set(definition.applies.manifests) & stack.manifests)
         language_matches = sorted(set(definition.applies.languages) & stack.languages)
-        facet_matches = sorted(set(definition.applies.facets) & stack.facets)
-        explicit = definition.skill_id in include
+        facet_matches = sorted(set(definition.applies.facets) & effective_facets)
         if not (
             explicit or facet_matches or dependency_matches or manifest_matches or language_matches
         ):
@@ -1321,6 +1355,8 @@ def _dependency_facets(dependencies: set[str]) -> set[str]:
         facets.add("backend-service")
     if dependencies & _DATABASE_DEPENDENCIES:
         facets.add("database-backed")
+    if dependencies & _OBSERVABILITY_DEPENDENCIES:
+        facets.add("observability")
     if dependencies & _MOBILE_DEPENDENCIES:
         facets.add("mobile-app")
     return facets
@@ -2571,6 +2607,13 @@ def _read_bounded_file(path: Path, limit: int) -> bytes:
     if len(payload) > limit:
         raise SkillRegistryError(f"skill metadata exceeds {limit} bytes: {path.parent.name}")
     return payload
+
+
+def _normalize_facet(value: str) -> str:
+    normalized = value.strip().casefold()
+    if not normalized or len(normalized) > 128 or "\x00" in normalized:
+        raise SkillResolutionError("project skill facet must be non-empty normalized text")
+    return normalized
 
 
 def _normalize_skill_id(value: str) -> str:

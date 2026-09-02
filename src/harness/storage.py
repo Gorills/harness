@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1541,6 +1541,29 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                     CHECK (last_successful_reconcile_at <> ''),
                 last_reconcile_kind TEXT NOT NULL
                     CHECK (last_reconcile_kind IN ('full', 'incremental'))
+            )
+            """
+        )
+        return
+    if target_version == 16:
+        connection.execute(
+            """
+            CREATE TABLE project_skill_exclusions (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                facet TEXT NOT NULL CHECK (
+                    facet IN (
+                        'backend-service',
+                        'web-frontend',
+                        'mobile-app',
+                        'database-backed',
+                        'godot-project',
+                        'containerized',
+                        'observability',
+                        'ci-pipeline',
+                        'deployment-ops'
+                    )
+                ),
+                PRIMARY KEY (project_id, facet)
             )
             """
         )

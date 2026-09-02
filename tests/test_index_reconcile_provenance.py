@@ -28,7 +28,7 @@ from harness.index import (
 )
 from harness.ipc import WorkspaceStatusResult, request_workspace_status
 from harness.registry import create_project, get_workspace, register_workspace
-from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
+from harness.storage import connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint
 
 
@@ -372,7 +372,7 @@ def test_schema_v15_adds_reconcile_provenance_without_backfill(
 
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 15)
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 15
+    assert status.schema_version == 15
 
     connection = connect_database(database)
     try:

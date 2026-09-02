@@ -98,6 +98,21 @@ from harness.dashboard_i18n import (
     SEARCH_PLACEHOLDER,
     SEARCH_SECTION,
     SECTION_WORKSPACES,
+    SKILL_SCOPE,
+    SKILL_SCOPE_AUTO,
+    SKILL_SCOPE_AUTO_HINT,
+    SKILL_SCOPE_BACKEND,
+    SKILL_SCOPE_CI,
+    SKILL_SCOPE_CONTAINERS,
+    SKILL_SCOPE_DATABASE,
+    SKILL_SCOPE_DEPLOYMENT,
+    SKILL_SCOPE_EXCLUDED,
+    SKILL_SCOPE_EXCLUDED_HINT,
+    SKILL_SCOPE_FRONTEND,
+    SKILL_SCOPE_GODOT,
+    SKILL_SCOPE_HINT,
+    SKILL_SCOPE_MOBILE,
+    SKILL_SCOPE_OBSERVABILITY,
     SKIP_TO_CONTENT,
     STACK_HINTS,
     STATE,
@@ -165,6 +180,15 @@ from harness.registry import (
 from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
+from harness.skill_policy import (
+    MANAGED_PROJECT_SKILL_FACETS,
+    ProjectSkillFacetMode,
+    ProjectSkillPolicy,
+    ProjectSkillPolicyError,
+    get_project_skill_policy,
+    set_project_skill_facet_mode,
+)
+from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
 from harness.storage import DatabaseError, connect_database
 from harness.task_checkpoints import (
     TaskCheckpointError,
@@ -316,10 +340,11 @@ class DashboardHomePage:
 
 @dataclass(frozen=True, slots=True)
 class DashboardProjectDetail:
-    """One Project plus all of its registered Workspace summaries."""
+    """One Project plus its Workspaces and durable skill-scope policy."""
 
     project: ProjectRecord
     workspaces: tuple[DashboardWorkspaceRow, ...]
+    skill_policy: ProjectSkillPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +392,15 @@ class DashboardVisibilityRequest:
 
     project_id: str
     visibility_mode: VisibilityMode
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardSkillPolicyRequest:
+    """One validated Project skill-surface mutation from the dashboard UI."""
+
+    project_id: str
+    facet: str
+    mode: ProjectSkillFacetMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -498,6 +532,7 @@ def read_dashboard_project_detail(
         connection.execute("BEGIN")
         try:
             project = get_project(connection, project_id)
+            skill_policy = get_project_skill_policy(connection, project_id)
             workspaces = list_workspaces(connection, project_id=project_id)
             rows = tuple(_read_workspace_row_persisted(connection, item) for item in workspaces)
             connection.execute("COMMIT")
@@ -510,6 +545,7 @@ def read_dashboard_project_detail(
     return DashboardProjectDetail(
         project=project,
         workspaces=tuple(_with_live_workspace_status(row) for row in rows),
+        skill_policy=skill_policy,
     )
 
 
@@ -862,6 +898,34 @@ def mutate_dashboard_visibility(database_path: Path, request: DashboardVisibilit
         connection.close()
 
 
+def mutate_dashboard_skill_policy(
+    database_path: Path,
+    request: DashboardSkillPolicyRequest,
+) -> tuple[str, ...]:
+    """Persist one Project scope override and reconcile skills without rescanning source."""
+    connection = connect_database(database_path)
+    try:
+        set_project_skill_facet_mode(
+            connection,
+            request.project_id,
+            request.facet,
+            request.mode,
+        )
+        workspaces = list_workspaces(connection, project_id=request.project_id)
+        profiles = tuple(sorted(load_host_integration_state_for_database(database_path).profiles))
+        if not profiles:
+            return ()
+        retry: list[str] = []
+        for workspace in workspaces:
+            try:
+                reconcile_workspace_skills(connection, workspace.workspace_id, profiles)
+            except (GitWorkspaceError, SkillRuntimeError):
+                retry.append(workspace.workspace_id)
+        return tuple(retry)
+    finally:
+        connection.close()
+
+
 def mutate_dashboard_registry(
     database_path: Path,
     request: DashboardProjectDeleteRequest | DashboardWorkspaceRelocationRequest,
@@ -886,6 +950,7 @@ def _parse_dashboard_action_form(
 ) -> (
     DashboardActionRequest
     | DashboardVisibilityRequest
+    | DashboardSkillPolicyRequest
     | DashboardProjectDeleteRequest
     | DashboardWorkspaceRelocationRequest
 ):
@@ -941,6 +1006,32 @@ def _parse_dashboard_action_form(
         return DashboardWorkspaceRelocationRequest(
             workspace_id=workspace_id,
             new_path=Path(new_path),
+        )
+    if action == "set_skill_scope":
+        expected = {"action", "project_id", "facet", "mode"}
+        if set(fields) != expected:
+            raise TaskValidationError(
+                "dashboard skill-scope form does not match the expected schema"
+            )
+        project_id = fields["project_id"]
+        facet = fields["facet"]
+        mode_text = fields["mode"]
+        if (
+            not project_id
+            or len(project_id) > 128
+            or "\x00" in project_id
+            or facet not in MANAGED_PROJECT_SKILL_FACETS
+            or mode_text
+            not in {
+                ProjectSkillFacetMode.AUTO.value,
+                ProjectSkillFacetMode.EXCLUDED.value,
+            }
+        ):
+            raise TaskValidationError("dashboard skill-scope fields are invalid")
+        return DashboardSkillPolicyRequest(
+            project_id=project_id,
+            facet=facet,
+            mode=ProjectSkillFacetMode(mode_text),
         )
     if action == "set_visibility":
         expected = {"action", "project_id", "visibility_mode"}
@@ -1097,6 +1188,66 @@ def _render_visibility_form(
         + _hidden_input("project_id", project_id)
         + _hidden_input("visibility_mode", target.value)
         + f'<button class="btn" type="submit">{escape(label)}</button></form></div>'
+    )
+
+
+_SKILL_SCOPE_LABELS: dict[str, str] = {
+    "backend-service": SKILL_SCOPE_BACKEND,
+    "web-frontend": SKILL_SCOPE_FRONTEND,
+    "mobile-app": SKILL_SCOPE_MOBILE,
+    "database-backed": SKILL_SCOPE_DATABASE,
+    "godot-project": SKILL_SCOPE_GODOT,
+    "containerized": SKILL_SCOPE_CONTAINERS,
+    "observability": SKILL_SCOPE_OBSERVABILITY,
+    "ci-pipeline": SKILL_SCOPE_CI,
+    "deployment-ops": SKILL_SCOPE_DEPLOYMENT,
+}
+
+
+def _render_skill_policy(
+    project_id: str,
+    policy: ProjectSkillPolicy,
+    *,
+    action: str,
+) -> str:
+    excluded = set(policy.excluded_facets)
+    rows: list[str] = []
+    for facet in MANAGED_PROJECT_SKILL_FACETS:
+        is_excluded = facet in excluded
+        target_mode = ProjectSkillFacetMode.AUTO if is_excluded else ProjectSkillFacetMode.EXCLUDED
+        state_label = SKILL_SCOPE_EXCLUDED if is_excluded else SKILL_SCOPE_AUTO
+        state_hint = SKILL_SCOPE_EXCLUDED_HINT if is_excluded else SKILL_SCOPE_AUTO_HINT
+        button_label = SKILL_SCOPE_AUTO if is_excluded else SKILL_SCOPE_EXCLUDED
+        rows.append(
+            '<div class="skill-scope-row" data-mode="'
+            + escape(
+                ProjectSkillFacetMode.EXCLUDED.value
+                if is_excluded
+                else ProjectSkillFacetMode.AUTO.value,
+                quote=True,
+            )
+            + '"><div class="skill-scope-copy">'
+            + f"<strong>{escape(_SKILL_SCOPE_LABELS[facet])}</strong>"
+            + f"<span>{escape(state_label)} · {escape(state_hint)}</span></div>"
+            + f'<form method="post" action="{escape(action, quote=True)}">'
+            + _hidden_input("action", "set_skill_scope")
+            + _hidden_input("project_id", project_id)
+            + _hidden_input("facet", facet)
+            + _hidden_input("mode", target_mode.value)
+            + '<button class="btn" type="submit" aria-label="'
+            + escape(f"{button_label}: {_SKILL_SCOPE_LABELS[facet]}", quote=True)
+            + f'">{escape(button_label)}</button>'
+            + "</form></div>"
+        )
+    return (
+        '<section class="panel skill-scope-panel"><div class="panel-head"><div>'
+        + f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
+        + f"<h2>{escape(SKILL_SCOPE)}</h2></div></div>"
+        + '<div class="panel-body">'
+        + f'<p class="management-hint skill-scope-hint">{escape(SKILL_SCOPE_HINT)}</p>'
+        + '<div class="skill-scope-list">'
+        + "".join(rows)
+        + "</div></div></section>"
     )
 
 
@@ -1622,6 +1773,11 @@ def render_project_page(
         + _render_project_delete_form(project_id, action=visibility_action)
         + "</div></section>"
         + _render_metrics(rows)
+        + _render_skill_policy(
+            project_id,
+            detail.skill_policy,
+            action=visibility_action,
+        )
         + workspace_html
     )
     return _render_shell(
@@ -2328,6 +2484,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             OSError,
             sqlite3.DatabaseError,
             DatabaseError,
+            ProjectSkillPolicyError,
             TaskError,
             TaskCheckpointError,
         ):
@@ -2379,6 +2536,15 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             request = _parse_dashboard_action_form(payload)
             if isinstance(request, DashboardVisibilityRequest):
                 mutate_dashboard_visibility(self.database_path, request)
+            elif isinstance(request, DashboardSkillPolicyRequest):
+                if page.kind != "project" or page.identity != request.project_id:
+                    raise TaskValidationError(
+                        "dashboard skill-scope target does not match its project page"
+                    )
+                retry_workspace_ids = mutate_dashboard_skill_policy(self.database_path, request)
+                if self.workspace_invalidations is not None:
+                    for workspace_id in retry_workspace_ids:
+                        self.workspace_invalidations.put(workspace_id)
             elif isinstance(request, DashboardProjectDeleteRequest):
                 if page.kind != "project" or page.identity != request.project_id:
                     raise TaskValidationError(
@@ -2420,6 +2586,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             RegistryError,
             GitWorkspaceError,
             HostIntegrationStateError,
+            ProjectSkillPolicyError,
         ):
             self._send_html(409, "")
             return
@@ -2453,6 +2620,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 OSError,
                 sqlite3.DatabaseError,
                 DatabaseError,
+                ProjectSkillPolicyError,
                 RegistryError,
                 TaskError,
                 SearchError,

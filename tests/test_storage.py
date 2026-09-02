@@ -690,6 +690,7 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TABLE project_skill_exclusions")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")
