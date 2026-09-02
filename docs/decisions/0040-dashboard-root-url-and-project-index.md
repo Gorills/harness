@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-01
-- **Amended:** 2026-09-01
+- **Amended:** 2026-09-02
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0019](0019-dashboard-human-review-loop.md),
   [ADR-0020](0020-dashboard-drilldown-realtime-design.md),
@@ -47,9 +47,10 @@ browser isolation contract.
    (`/workspaces/{workspace_id}/`), not `/projects/{project_id}/`. Breadcrumbs use the same
    Workspace URL. The home page is daemon-wide Task search plus a bounded recent-Task list.
    Do not list Task titles in the sidebar. Do not label a Workspace as a copy, a primary copy,
-   or a second dashboard. Workspace detail remains for bounded search, current Task, recent
-   Tasks, visibility, and explicit relocation; operator copy calls it a folder and shows the
-   absolute path. `/projects/{id}/` remains for Project deletion and folder inventory.
+   or a second dashboard.    Workspace detail remains for bounded search, current Task, recent
+   Tasks, visibility, explicit relocation, and the Project deletion disclosure; operator copy
+   calls it a folder and shows the absolute path. `/projects/{id}/` remains the mutation target
+   and folder inventory. Sidebar Project links stay on `/workspaces/{workspace_id}/`.
 
 ## Consequences
 
@@ -73,4 +74,5 @@ Automated tests must prove:
 - an unknown path, a wrong `Host`, and a non-token first segment remain 404;
 - mutation POSTs still require exact loopback Host and same-origin proof;
 - overview HTML does not call a Workspace a copy or primary copy;
+- Workspace detail renders the Project deletion disclosure posting to `/projects/{id}/`;
 - isolated canonical sockets still select `17374`.

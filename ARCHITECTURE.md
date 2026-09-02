@@ -557,11 +557,12 @@ Dashboard rules:
 - Hidden/Normal operator control is on Project and Workspace detail;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
+- SSE and the explicit refresh control re-fetch the current same-origin HTML and replace the rendered layout in place; they must not force a full page navigation. Dirty operator input still blocks automatic apply ([ADR-0043](docs/decisions/0043-dashboard-in-place-html-refresh.md)).
 - dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.
-- Project detail supports explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Destructive and relocation POST identities must match the detail page that rendered them.
+- Project and Workspace detail support explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. The deletion form may render on Workspace detail, but the POST still targets `/projects/{id}/` and must match that Project identity. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Relocation POST identity must match the Workspace page that rendered it.
 
 ## 18. Security and privacy boundaries
 

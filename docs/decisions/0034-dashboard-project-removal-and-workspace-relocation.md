@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-30
+- **Amended:** 2026-09-02
 - **Deciders:** Repository architecture baseline
 - **Builds on:** [ADR-0002](0002-host-integration-and-workspace-resolution.md),
   [ADR-0018](0018-daemon-workspace-watcher-reconciliation.md), and
@@ -22,9 +23,9 @@ removing a logical Project and rebinding a moved physical Workspace.
 
 ## Decision
 
-The Project detail page exposes a destructive deletion form behind a disclosure. It requires the
-operator to type `УДАЛИТЬ`, and the server accepts it only when the posted `project_id` exactly
-matches the capability-scoped Project page. Deletion runs in one `BEGIN IMMEDIATE` transaction and
+The Workspace folder page and the Project detail page expose a destructive deletion form behind a
+disclosure. It requires the operator to type `УДАЛИТЬ`. The form POSTs to `/projects/{id}/`, and
+the server accepts it only when the posted `project_id` exactly matches that Project page. Deletion runs in one `BEGIN IMMEDIATE` transaction and
 removes the Project, its Workspaces, Tasks, checkpoints/events/baselines, Knowledge, anchors, and
 derived search/index rows through the existing foreign keys and cleanup triggers. It does not
 delete, rename, or otherwise modify repository files or project-local integration artifacts.
@@ -66,6 +67,8 @@ progressively usable without JavaScript. No MCP tool or schema migration is adde
 
 Automated tests must prove that relocation preserves Project/Workspace/Task identity, clears stale
 derived index rows, rejects registered destinations without partial mutation, and renders the new
-canonical path. Project deletion must require exact confirmation and page identity, cascade through
-Task/Knowledge/index/search state, redirect away from the deleted page, and leave repository files
-untouched. Existing dashboard Host/origin and hardened-response tests remain applicable.
+canonical path. Project deletion must render on the Workspace folder page as well as Project
+detail, POST only to `/projects/{id}/`, require exact confirmation and page identity, cascade
+through Task/Knowledge/index/search state, redirect away from the deleted page, and leave
+repository files untouched. Existing dashboard Host/origin and hardened-response tests remain
+applicable.

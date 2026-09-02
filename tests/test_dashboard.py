@@ -500,3 +500,9 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
     )
     assert str(root) in project_html
     assert str(worktree) in project_html
+    workspace_html = render_workspace_page(
+        read_dashboard_workspace_detail(database, workspace_id),
+        base_path="/",
+    )
+    assert "Удаление проекта" in workspace_html
+    assert f'action="/projects/{project_id}/"' in workspace_html

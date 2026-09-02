@@ -2,8 +2,9 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-26
-- **Amended:** 2026-08-27, 2026-09-01
-- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md)
+- **Amended:** 2026-08-27, 2026-09-01, 2026-09-02
+- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md),
+  [ADR-0043](0043-dashboard-in-place-html-refresh.md)
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -18,7 +19,7 @@ Add capability-scoped Project, Workspace, and Task detail routes under the exist
 
 Serve dashboard CSS and JavaScript as capability-scoped local assets. The Content Security Policy permits only same-origin style, script, and EventSource connections; inline script/style is not required. The UI uses progressive enhancement: navigation, search, and human-review forms work without JavaScript. JavaScript is limited to realtime freshness behavior.
 
-Realtime uses Server-Sent Events only as a dashboard refresh hint. Every rendered page embeds a SHA-256 fingerprint of its bounded authoritative view model in the capability-scoped EventSource URL. On connection, the server recomputes that view once to close the race between HTML rendering and EventSource setup, then keeps one read-only SQLite connection open and watches `PRAGMA data_version` instead of repeatedly rebuilding the view or running live Git subprocesses. A changed data version emits only a `refresh` marker; the stream never carries Task text, source content, model reasoning, or mutation payloads. The browser reloads after a refresh when no user input is at risk; when feedback/search input is non-empty it shows an explicit update affordance instead of discarding the draft. SSE sessions are bounded in duration, capped per dashboard server, and reconnect through normal EventSource behavior.
+Realtime uses Server-Sent Events only as a dashboard refresh hint. Every rendered page embeds a SHA-256 fingerprint of its bounded authoritative view model in the capability-scoped EventSource URL. On connection, the server recomputes that view once to close the race between HTML rendering and EventSource setup, then keeps one read-only SQLite connection open and watches `PRAGMA data_version` instead of repeatedly rebuilding the view or running live Git subprocesses. A changed data version emits only a `refresh` marker; the stream never carries Task text, source content, model reasoning, or mutation payloads. The browser then re-fetches the current same-origin HTML and replaces the rendered layout in place; it must not force a full navigation. When feedback/search input is dirty it shows an explicit update affordance instead of discarding the draft. SSE sessions are bounded in duration, capped per dashboard server, and reconnect through normal EventSource behavior. See ADR-0043.
 
 The visual system is a dense editorial developer-tool direction: warm neutral surfaces, one restrained coral accent, document-scale serif headings (with wrapping line-height, especially for long Task titles) paired with system sans/monospace data, a named 4/8px spacing scale, shallow elevation, textual state pills, visible keyboard focus, responsive layouts, dark-mode tokens, and motion only for hover/live-state feedback. Reduced-motion preferences disable non-essential transitions and animation. Color is never the only carrier of Task state. Operator-facing copy is Russian and limited to the work process; it must not explain the product, loopback trust model, or Harness architecture. See ADR-0025.
 
@@ -39,6 +40,7 @@ Automated coverage must prove:
 - Project/Workspace/Task navigation renders durable state, including the recorded Task Git branch, and escapes all persisted text;
 - Workspace search returns only bounded indexed-path metadata;
 - external Task/index changes produce an SSE refresh hint without streaming the changed content;
+- dashboard JavaScript re-fetches the current HTML and replaces `.app-layout` in place instead of calling `location.reload`;
 - CSP permits only same-origin assets/EventSource and no inline script/style;
 - existing same-origin CAS actions, stale-revision conflicts, response hardening, daemon lifecycle, and shutdown behavior remain unchanged;
 - repo-wide formatting, lint, typing, tests, and wheel smoke remain green.

@@ -1845,6 +1845,9 @@ def render_workspace_page(
         + '<div class="settings-divider"></div>'
         + f'<p class="panel-kicker">{escape(WORKSPACE_RELOCATION)}</p>'
         + _render_workspace_relocation_form(row.workspace_id, action=workspace_url)
+        + '<div class="settings-divider"></div>'
+        + f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
+        + _render_project_delete_form(row.project_id, action=project_url)
         + "</div></section></aside></section>"
     )
     return _render_shell(
