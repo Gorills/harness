@@ -76,10 +76,11 @@ class BuiltinSkill:
                     metadata.extend(
                         f"    - {_yaml_quoted_scalar(value, field=field)}" for value in values
                     )
-        metadata.append("task_hints:")
-        metadata.extend(
-            f"  - {_yaml_quoted_scalar(hint, field='task_hints')}" for hint in self.task_hints
-        )
+        if self.task_hints:
+            metadata.append("task_hints:")
+            metadata.extend(
+                f"  - {_yaml_quoted_scalar(hint, field='task_hints')}" for hint in self.task_hints
+            )
         files = {
             SKILL_FILE_NAME: (frontmatter + self.body.strip() + "\n").encode(),
             SKILL_METADATA_FILE_NAME: ("\n".join(metadata) + "\n").encode(),
@@ -125,23 +126,9 @@ class _Replacement:
 
 BUILTIN_SKILLS: Final[tuple[BuiltinSkill, ...]] = (
     BuiltinSkill(
-        "architecture-decisions",
-        "Use when a change alters a durable architecture, data, protocol, security, or operational contract and the decision may need an ADR.",
-        ("architecture", "adr", "auth", "database-migration", "schema-change", "complex-change"),
-        """
-# Architecture decisions
-Use this skill when a change alters a durable boundary, data model, protocol, security model, or operational contract.
-- Read existing architecture docs and ADRs before designing.
-- Prefer the smallest design that preserves existing invariants.
-- Record an ADR only for durable decisions, not routine implementation detail.
-- State context, decision, alternatives rejected, consequences, migration/rollback implications, and verification boundary.
-- Keep code, docs, and ADR terminology consistent. Do not invent behavior that authoritative evidence does not establish.
-""",
-    ),
-    BuiltinSkill(
         "testing-strategy",
         "Use when choosing focused verification for a software change or confirming repository-required gates before publication.",
-        ("test", "testing", "bugfix", "refactor", "auth", "database-migration", "complex-change"),
+        (),
         """
 # Testing strategy
 - Reproduce failures or define a falsifiable acceptance check before changing behavior when practical.
@@ -151,62 +138,18 @@ Use this skill when a change alters a durable boundary, data model, protocol, se
 - Before publication or merge, run every repository-mandated quality gate for the exact candidate. A targeted green test never substitutes for required CI.
 - After repeated failed attempts, stop changing code, restate the evidence and current hypothesis, and inspect the boundary before trying another fix.
 - Report only checks that actually ran; distinguish failed, not run, and environment-blocked verification.
+- Do not duplicate facts Harness can derive from manifests or the Structural Index. Record durable
+  Knowledge only for non-mechanical conventions future agents would otherwise rediscover: focused
+  test commands, canonical task runner, local integration environment, docs locations, unsafe
+  operations, migration workflow, and release practice. Verify them from repository evidence;
+  prefer a few anchored operational facts over a broad generated project summary.
 """,
         applies_facets=("software-project",),
     ),
     BuiltinSkill(
-        "backend-security",
-        "Use when an explicit server-side authentication or authorization review is requested; do not activate for ordinary backend work.",
-        ("backend-security", "server-auth-review"),
-        """
-# Backend security
-- Treat authentication and authorization as separate checks; enforce authorization server-side at the resource boundary.
-- Validate untrusted input structurally and use parameterized database access. Encode output for its destination context.
-- Prefer HttpOnly and Secure cookies for browser sessions when appropriate; choose SameSite for the actual flow, including OAuth/OIDC redirects.
-- Store passwords with a current memory-hard password KDF such as Argon2id, or a deliberately tuned supported alternative.
-- Keep secrets out of source, logs, errors, and generated artifacts; environment variables and managed/mounted secret stores are acceptable deployment mechanisms.
-- Fail closed on permission ambiguity and avoid exposing production stack traces or sensitive payloads.
-""",
-    ),
-    BuiltinSkill(
         "secure-by-design",
         "Use when work changes a trust boundary, sensitive data, authentication, authorization, exposed input, infrastructure, or delivery security.",
-        (
-            "security",
-            "secure-by-design",
-            "threat-model",
-            "auth",
-            "authentication",
-            "authorization",
-            "api-security",
-            "backend-security",
-            "server-auth-review",
-            "secrets",
-            "hardening",
-            "new-project",
-            "greenfield",
-            "backend",
-            "web-frontend",
-            "website",
-            "django",
-            "fastapi",
-            "flask",
-            "laravel",
-            "go-api",
-            "express",
-            "nestjs",
-            "next",
-            "nuxt",
-            "svelte",
-            "vue",
-            "expo",
-            "react-native",
-            "android",
-            "ios",
-            "godot",
-            "docker",
-            "container",
-        ),
+        (),
         """
 # Secure by design
 Security reduces likelihood and impact; it never makes a project impossible to compromise.
@@ -309,7 +252,8 @@ Primary baselines:
   subject, tenant, object, field, and state-transition permission server-side. Test horizontal and
   vertical privilege escalation, guessed identifiers, bulk APIs, alternate methods, and stale roles.
 - Use phishing-resistant MFA/passkeys for high-value and administrative accounts where feasible.
-  Passwords use a current password KDF, breached-password defenses, safe recovery, generic responses,
+  Passwords use a current memory-hard password KDF such as Argon2id, or a deliberately tuned
+  supported alternative, plus breached-password defenses, safe recovery, generic responses,
   rotation only on compromise, and rate/automation controls that do not enable account lockout abuse.
 - Sessions/tokens need bounded lifetime, rotation/revocation, secure issuance, audience/issuer checks,
   replay resistance where required, and invalidation on relevant account changes. Browser session
@@ -508,15 +452,7 @@ Official platform guidance:
     BuiltinSkill(
         "container-infrastructure",
         "Use when changing Dockerfiles, Compose, container runtime configuration, images, or local/test/production container operations.",
-        (
-            "docker",
-            "container",
-            "compose",
-            "infrastructure",
-            "dev-infra",
-            "dockerize",
-            "new-project",
-        ),
+        (),
         """
 # Container infrastructure
 - For a new Dockerized project or a material container redesign, read both
@@ -624,7 +560,7 @@ Official platform guidance:
     BuiltinSkill(
         "observability",
         "Use when changing logs, metrics, traces, alerts, incident diagnostics, or runbook-facing observability behavior.",
-        ("observability", "logging", "metrics", "tracing", "incident", "outage"),
+        (),
         """
 # Observability
 - Prefer structured events with stable names and correlation/request identifiers.
@@ -650,22 +586,9 @@ Official platform guidance:
         ),
     ),
     BuiltinSkill(
-        "scalability-architecture",
-        "Use when measured load, latency, throughput, capacity, or high-availability requirements drive an architecture change.",
-        ("scalability", "high-load", "performance", "throughput", "latency", "capacity"),
-        """
-# Scalability architecture
-- Start from measured workload, latency, throughput, durability, and failure requirements.
-- Prefer the simplest architecture that meets the current envelope; do not add unused distributed machinery.
-- Introduce caches, queues, replicas, sharding, or async pipelines only with an explicit bottleneck and invalidation/failure semantics.
-- Define concurrency, idempotency, backpressure, retry, timeout, and overload behavior at external boundaries.
-- Benchmark or load-test the relevant path and record assumptions that materially affect sizing.
-""",
-    ),
-    BuiltinSkill(
         "ci-release",
         "Use when changing CI pipelines, release automation, deployment gates, artifact publication, or rollback behavior.",
-        ("ci", "cd", "release", "deployment", "pipeline", "github-actions"),
+        (),
         """
 # CI and release
 - Treat the repository's existing CI contract as authoritative; extend it rather than replacing it with generic conventions.
@@ -688,25 +611,7 @@ Official platform guidance:
     BuiltinSkill(
         "public-frontend",
         "Use when changing a public web frontend that needs search discoverability, document semantics, accessibility, or loading performance; exclude native-only apps.",
-        (
-            "public-frontend",
-            "web-frontend",
-            "website",
-            "seo",
-            "accessibility",
-            "web-performance",
-            "react-web",
-            "next",
-            "vue",
-            "nuxt",
-            "astro",
-            "svelte",
-            "angular",
-            "gatsby",
-            "remix",
-            "solid",
-            "qwik",
-        ),
+        (),
         """
 # Public frontend
 - Classify each affected route as public/indexable or deliberately private/non-indexable. Never
@@ -797,44 +702,7 @@ Official platform guidance:
     BuiltinSkill(
         "frontend-design",
         "Use when creating, changing, or reviewing any user-facing web or mobile interface; exclude backend-only and non-visual work.",
-        (
-            "frontend-design",
-            "ui",
-            "ux",
-            "interface",
-            "design",
-            "redesign",
-            "public-frontend",
-            "web-frontend",
-            "website",
-            "landing-page",
-            "marketing-site",
-            "seo",
-            "accessibility",
-            "web-performance",
-            "react-web",
-            "next",
-            "vue",
-            "nuxt",
-            "astro",
-            "svelte",
-            "angular",
-            "gatsby",
-            "remix",
-            "solid",
-            "qwik",
-            "mobile",
-            "mobile-app",
-            "native-app",
-            "mobile-ui",
-            "expo",
-            "react-native",
-            "android",
-            "ios",
-            "eas",
-            "apk",
-            "aab",
-        ),
+        (),
         """
 # Frontend design
 Apply this skill whenever the changed output includes a user-facing interface. Functional code is
@@ -1077,18 +945,7 @@ behavior that could not be verified instead of silently claiming completion.
     BuiltinSkill(
         "server-application",
         "Use when changing a backend service, HTTP API, worker, webhook, queue consumer, or server framework lifecycle.",
-        (
-            "backend",
-            "api",
-            "server",
-            "django",
-            "fastapi",
-            "flask",
-            "laravel",
-            "go-api",
-            "express",
-            "nestjs",
-        ),
+        (),
         """
 # Server application
 - Preserve the repository's domain, delivery, persistence, and integration boundaries; framework
@@ -1147,18 +1004,7 @@ behavior that could not be verified instead of silently claiming completion.
     BuiltinSkill(
         "mobile-application",
         "Use when changing an installed Android/iOS app, Expo or React Native code, native configuration, device behavior, or mobile delivery; exclude browser-only work.",
-        (
-            "mobile",
-            "mobile-app",
-            "native-app",
-            "expo",
-            "react-native",
-            "android",
-            "ios",
-            "eas",
-            "apk",
-            "aab",
-        ),
+        (),
         """
 # Mobile application
 This skill is for installed Android/iOS applications. Do not apply browser SEO, DOM, or Core Web
@@ -1227,7 +1073,7 @@ dependency.
     BuiltinSkill(
         "godot-development",
         "Use when changing a Godot project, GDScript/C# gameplay code, scenes, resources, simulation, or export behavior.",
-        ("godot", "game", "game-development", "gdscript", "godot-csharp"),
+        (),
         """
 # Godot development
 - Derive the Godot version, renderer, target platforms, C#/GDScript mix, autoloads, input map, plugins,
@@ -1252,7 +1098,7 @@ dependency.
     BuiltinSkill(
         "deployment-operations",
         "Use when changing reverse proxies, system services, host deployment automation, rollout, or operational recovery.",
-        ("nginx", "reverse-proxy", "ansible", "systemd", "server-ops", "deployment-ops"),
+        (),
         """
 # Deployment operations
 - Read [Linux service and edge operations](references/linux-service-edge.md) for Nginx, systemd,
@@ -1294,16 +1140,8 @@ dependency.
     ),
     BuiltinSkill(
         "project-architecture",
-        "Use when creating or materially restructuring project boundaries, modules, ownership, dependency direction, or runtime composition.",
-        (
-            "architecture",
-            "bootstrap",
-            "greenfield",
-            "new-project",
-            "project-structure",
-            "modularization",
-            "complex-change",
-        ),
+        "Use when creating or restructuring project boundaries, modules, or ownership, recording an ADR, or changing architecture for measured load, latency, capacity, or availability.",
+        (),
         """
 # Project architecture
 Use this skill for a new project, a new subsystem, or a material boundary change.
@@ -1321,87 +1159,50 @@ Use this skill for a new project, a new subsystem, or a material boundary change
   for itself, but do not wrap stable libraries with empty abstractions.
 - Design for test seams and replaceable external boundaries without duplicating production logic.
   Add boundary/architecture tests only for rules important enough to prevent recurring drift.
-- Record a concise ADR when the decision durably changes public contracts, data ownership,
-  deployment topology, or dependency direction. Include migration and rollback/forward-repair.
+- When a change durably alters a public contract, data model, protocol, security model, or
+  operational boundary, read [architecture decisions](references/architecture-decisions.md).
+- When measured load, latency, throughput, capacity, or availability drives the change, read
+  [scalability](references/scalability.md).
 - Recheck the complete dependency graph and production operations after implementation; a tidy
   folder tree alone is not evidence of sound architecture.
 """,
-    ),
-    BuiltinSkill(
-        "legacy-preservation",
-        "Use when modifying established or legacy code where compatibility, historical behavior, migration, or architectural drift is a concern.",
-        (
-            "legacy",
-            "legacy-code",
-            "legacy-change",
-            "compatibility-preservation",
-        ),
-        """
-# Legacy preservation
-Treat the existing system as an evidence-bearing contract, including awkward behavior that users
-or integrations may rely on.
-- Before editing, read project instructions, architecture/ADRs, manifests, the target code, nearby
-  callers/callees, tests, configuration, migrations, and relevant history. Trace the real runtime
-  path; do not infer architecture from filenames or preferred modern patterns.
-- Identify the local dependency direction, ownership boundaries, naming/error conventions,
-  persistence and serialization formats, public APIs/CLI output, deployment topology, and supported
-  runtime versions. Preserve them unless the task explicitly authorizes a migration.
-- Capture current behavior with focused characterization, contract, or golden tests at the safest
-  seam before changing poorly understood behavior. Include important failure and compatibility
-  paths, not only the desired happy path.
-- Make the smallest coherent change inside the nearest existing abstraction. Do not introduce a
-  new framework, architectural style, duplicate service/repository layer, or parallel configuration
-  mechanism in one corner merely because it would suit a greenfield design.
-- Separate behavior changes from cleanup where practical. Do not opportunistically rename, move,
-  reformat, upgrade dependencies, or "fix" historical quirks without evidence and authorization.
-- When replacement is necessary, use an explicit adapter or migration seam, preserve backward
-  compatibility for the required rollout window, and define data/config/API rollback or forward
-  repair. Never assume old and new versions deploy atomically.
-- Delete old paths only after proving callers, stored data, jobs, integrations, and rollback needs
-  no longer require them. Keep deprecation observable and time-bounded.
-- Run the repository's focused compatibility tests and required gates, then review the full diff
-  specifically for architectural drift and unintended surface changes.
+        applies_facets=("software-project",),
+        references=(
+            (
+                "architecture-decisions.md",
+                """
+# Architecture decisions
+Use this reference when a change alters a durable boundary, data model, protocol, security model, or
+operational contract and the decision may need an ADR.
+- Read existing architecture docs and ADRs before designing.
+- Prefer the smallest design that preserves existing invariants.
+- Record an ADR only for durable decisions, not routine implementation detail.
+- State context, decision, alternatives rejected, consequences, migration/rollback implications, and
+  verification boundary.
+- Keep code, docs, and ADR terminology consistent. Do not invent behavior that authoritative
+  evidence does not establish.
 """,
+            ),
+            (
+                "scalability.md",
+                """
+# Scalability architecture
+- Start from measured workload, latency, throughput, durability, and failure requirements.
+- Prefer the simplest architecture that meets the current envelope; do not add unused distributed
+  machinery.
+- Introduce caches, queues, replicas, sharding, or async pipelines only with an explicit bottleneck
+  and invalidation/failure semantics.
+- Define concurrency, idempotency, backpressure, retry, timeout, and overload behavior at external
+  boundaries.
+- Benchmark or load-test the relevant path and record assumptions that materially affect sizing.
+""",
+            ),
+        ),
     ),
     BuiltinSkill(
         "language-engineering",
         "Use when changing source code and language-native correctness, tooling, runtime, or package conventions matter; read only references for affected languages.",
-        (
-            "python",
-            "fastapi",
-            "django",
-            "flask",
-            "javascript",
-            "typescript",
-            "node",
-            "react",
-            "react-native",
-            "expo",
-            "next",
-            "vue",
-            "nuxt",
-            "svelte",
-            "astro",
-            "go",
-            "rust",
-            "java",
-            "kotlin",
-            "gradle",
-            "maven",
-            "csharp",
-            "dotnet",
-            "php",
-            "laravel",
-            "ruby",
-            "rails",
-            "c",
-            "cpp",
-            "gdscript",
-            "godot",
-            "shell",
-            "swift",
-            "sql",
-        ),
+        (),
         """
 # Language engineering
 Use the repository's selected language/runtime versions, package manager, lockfiles, formatter,
@@ -1706,16 +1507,7 @@ compatibility and run the repository's focused checks plus required gates.
     BuiltinSkill(
         "data-integrity",
         "Use when changing a database, schema, migration, ORM, transaction, query, or other durable-state behavior where data integrity matters.",
-        (
-            "database",
-            "database-migration",
-            "schema-change",
-            "persistence",
-            "orm",
-            "alembic",
-            "sql",
-            "data-migration",
-        ),
+        (),
         """
 # Data integrity
 - Read the authoritative schema/migrations, ORM mappings, read/write paths, transaction boundaries,
@@ -1763,55 +1555,85 @@ compatibility and run the repository's focused checks plus required gates.
     ),
     BuiltinSkill(
         "complex-change-planning",
-        "Use when a change crosses multiple boundaries or needs migration-ordered slices, rollback planning, and explicit acceptance evidence.",
-        ("complex-change", "migration", "multi-module", "legacy-change", "large-refactor"),
+        "Use when planning a cross-boundary or migration-ordered change, independently reviewing a risky diff, or preserving legacy compatibility; exclude ordinary single-module bugfixes and routine test-only work.",
+        (),
         """
 # Complex change planning
-Use Harness Task state as the source of truth. Do not create a second epic/status system unless the repository already requires one.
+Use Harness Task state as the source of truth. Do not create a second epic/status system unless the
+repository already requires one.
 - Map affected contracts, callers, callees, persistence, tests, and operational edges before editing.
 - Split work into the smallest dependency-ordered slices that each leave the repository coherent.
-- Identify blast radius, migration/rollback concerns, and explicit acceptance evidence for risky boundaries.
-- Keep one current implementation slice active; checkpoint progress instead of duplicating status in ad-hoc files.
+- Identify blast radius, migration/rollback concerns, and explicit acceptance evidence for risky
+  boundaries.
+- Keep one current implementation slice active; checkpoint progress instead of duplicating status in
+  ad-hoc files.
+- Before implementing a risky or underspecified change, read
+  [specification audit](references/specification-audit.md).
+- When modifying established behavior, read
+  [legacy preservation](references/legacy-preservation.md).
+- Before publication, read [independent review](references/independent-review.md).
 """,
-    ),
-    BuiltinSkill(
-        "spec-audit",
-        "Use when risky or cross-boundary implementation depends on specifications that may be incomplete, contradictory, or assumption-sensitive.",
-        ("spec-audit", "complex-change", "architecture", "migration", "security"),
-        """
+        applies_facets=("software-project",),
+        references=(
+            (
+                "specification-audit.md",
+                """
 # Specification audit
 Before implementation, independently test the requested behavior against existing contracts.
 - Identify the authoritative spec/ADR/API/schema and invariants the change must preserve.
-- List material ambiguities, contradictions, missing failure behavior, migration concerns, and acceptance criteria.
+- List material ambiguities, contradictions, missing failure behavior, migration concerns, and
+  acceptance criteria.
 - Resolve what can be proven from repository evidence; do not invent missing product decisions.
-- If a gap can cause incompatible implementations or irreversible damage, stop implementation at that boundary and surface the blocker.
-- Keep the audit concise: only findings that can change implementation or verification belong in the result.
+- If a gap can cause incompatible implementations or irreversible damage, stop implementation at that
+  boundary and surface the blocker.
+- Keep the audit concise: only findings that can change implementation or verification belong in the
+  result.
 """,
-    ),
-    BuiltinSkill(
-        "independent-review",
-        "Use when independently reviewing a completed change against governing contracts, failure modes, and exact verification before publication.",
-        ("review", "independent-review", "complex-change", "security", "release"),
-        """
+            ),
+            (
+                "independent-review.md",
+                """
 # Independent review
 Review the finished change as if you did not implement it.
 - Re-read the governing contract and inspect the complete diff plus nearby callers/callees.
-- Look for stale-write races, unsafe defaults, ownership/collision mistakes, migration/recovery gaps, disclosure leaks, and tests that only prove the happy path.
-- Classify findings by materiality. Fix correctness/safety/contract issues; do not churn code for taste.
+- Look for stale-write races, unsafe defaults, ownership/collision mistakes, migration/recovery
+  gaps, disclosure leaks, and tests that only prove the happy path.
+- Classify findings by materiality. Fix correctness/safety/contract issues; do not churn code for
+  taste.
 - Re-run checks affected by any fix and the repository-required publication gate.
 - Report verified evidence separately from assumptions, not-run checks, and real blockers.
 """,
-    ),
-    BuiltinSkill(
-        "project-conventions",
-        "Use when discovering or recording non-mechanical repository conventions such as canonical task runners, local environments, release practice, or unsafe operations.",
-        ("bootstrap", "onboarding", "project-conventions", "setup", "dev-workflow"),
-        """
-# Project conventions
-Do not duplicate facts Harness can derive from manifests or the Structural Index.
-Capture durable Knowledge only for conventions future agents would otherwise rediscover: focused test commands, canonical task runner, local integration environment, docs locations, unsafe operations, migration workflow, and release practice.
-Verify conventions from repository evidence before recording them. Prefer a few anchored operational facts over a broad generated project summary.
+            ),
+            (
+                "legacy-preservation.md",
+                """
+# Legacy preservation
+Treat the existing system as an evidence-bearing contract, including awkward behavior that users or
+integrations may rely on.
+- Before editing, read project instructions, architecture/ADRs, manifests, the target code, nearby
+  callers/callees, tests, configuration, migrations, and relevant history. Trace the real runtime
+  path; do not infer architecture from filenames or preferred modern patterns.
+- Identify the local dependency direction, ownership boundaries, naming/error conventions,
+  persistence and serialization formats, public APIs/CLI output, deployment topology, and supported
+  runtime versions. Preserve them unless the task explicitly authorizes a migration.
+- Capture current behavior with focused characterization, contract, or golden tests at the safest
+  seam before changing poorly understood behavior. Include important failure and compatibility
+  paths, not only the desired happy path.
+- Make the smallest coherent change inside the nearest existing abstraction. Do not introduce a
+  new framework, architectural style, duplicate service/repository layer, or parallel configuration
+  mechanism in one corner merely because it would suit a greenfield design.
+- Separate behavior changes from cleanup where practical. Do not opportunistically rename, move,
+  reformat, upgrade dependencies, or "fix" historical quirks without evidence and authorization.
+- When replacement is necessary, use an explicit adapter or migration seam, preserve backward
+  compatibility for the required rollout window, and define data/config/API rollback or forward
+  repair. Never assume old and new versions deploy atomically.
+- Delete old paths only after proving callers, stored data, jobs, integrations, and rollback needs
+  no longer require them. Keep deprecation observable and time-bounded.
+- Run the repository's focused compatibility tests and required gates, then review the full diff
+  specifically for architectural drift and unintended surface changes.
 """,
+            ),
+        ),
     ),
 )
 

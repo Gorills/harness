@@ -864,7 +864,7 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 4" not in scan_a.stdout:
+            if "Relevant skills: 6" not in scan_a.stdout:
                 raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
 
             independent_project = workspace / "installed-independent-project"
@@ -874,7 +874,7 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 4" not in scan_c.stdout:
+            if "Relevant skills: 6" not in scan_c.stdout:
                 raise RuntimeError(
                     f"installed independent Workspace scan was unexpected: {scan_c.stdout!r}"
                 )
@@ -927,7 +927,7 @@ raise SystemExit(2)
                 cwd=workspace,
                 env=fake_env,
             )
-            if "Relevant skills: 4" not in scan_b.stdout:
+            if "Relevant skills: 6" not in scan_b.stdout:
                 raise RuntimeError(f"installed worktree-B scan was unexpected: {scan_b.stdout!r}")
             codex_project_b = lifecycle_worktree / ".codex" / "config.toml"
             _require_codex_config(codex_project_b, python, lifecycle_worktree)

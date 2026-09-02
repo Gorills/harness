@@ -407,9 +407,10 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects a relevant subset using deterministic project stack and explicit include/exclude configuration. Harness ships a compact built-in quality pack into that registry through ownership-aware reconciliation. The built-ins are intent-oriented, composed through stack applicability, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. The canonical pack may exceed the model-visible budget; the resolver still projects at most the configured bounded subset. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
 
 The quality baseline includes explicit local/test/production container operations, Google/Yandex
-public-route discoverability and web performance, project architecture, legacy compatibility,
-language-native correctness/tooling, and durable data integrity. Stack-derived applicability keeps
-language and domain guidance automatic after manifests/source appear. Task `stack_hints` remain
+public-route discoverability and web performance, project architecture, change quality (including
+legacy compatibility), language-native correctness/tooling, and durable data integrity. Stack-derived
+applicability keeps language and domain guidance automatic after manifests/source appear. Task
+`stack_hints` remain
 optional Task metadata and are not a Skill selector. Dependency matching retains the
 existing portable exact-token contract, while deterministic derived facets capture cross-signal
 project roles such as `web-frontend`, `mobile-app`, `backend-service`, `godot-project`, and
@@ -425,7 +426,9 @@ not a full evaluator.
 `secure-by-design` applies to detected software projects and progressively routes to web/backend,
 browser, mobile,
 infrastructure/supply-chain, and verification controls; it reduces risk but never claims that a
-system cannot be compromised. `frontend-design` accompanies recognized web and mobile frontend
+system cannot be compromised. `project-architecture` and `complex-change-planning` also apply to
+detected software projects and route ADR/scalability and specification-audit/independent-review/legacy
+playbooks through references. `frontend-design` accompanies recognized web and mobile frontend
 surfaces through matching facets. Its compact entrypoint requires a subject-specific
 design contract, progressively routes marketing/editorial versus product/mobile guidance, rejects
 unjustified model-default aesthetics, and requires bounded rendered visual review before a design

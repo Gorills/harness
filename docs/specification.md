@@ -1785,7 +1785,7 @@ godot/
 
 # 73.1 Built-in quality pack
 
-Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует detected project stack и explicit include/exclude, без отдельного workflow DSL.
+Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует detected project stack и explicit include/exclude, без отдельного workflow DSL. Built-in `harness.yaml` не генерирует `task_hints`.
 
 Количество canonical built-ins не равно model-visible budget: resolver по-прежнему выбирает только
 релевантный bounded subset. Подробные stack/domain инструкции могут жить в portable
