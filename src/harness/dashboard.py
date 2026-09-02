@@ -1021,7 +1021,8 @@ def _parse_dashboard_action_form(
             or len(project_id) > 128
             or "\x00" in project_id
             or facet not in MANAGED_PROJECT_SKILL_FACETS
-            or mode_text not in {
+            or mode_text
+            not in {
                 ProjectSkillFacetMode.AUTO.value,
                 ProjectSkillFacetMode.EXCLUDED.value,
             }
@@ -1213,9 +1214,7 @@ def _render_skill_policy(
     rows: list[str] = []
     for facet in MANAGED_PROJECT_SKILL_FACETS:
         is_excluded = facet in excluded
-        target_mode = (
-            ProjectSkillFacetMode.AUTO if is_excluded else ProjectSkillFacetMode.EXCLUDED
-        )
+        target_mode = ProjectSkillFacetMode.AUTO if is_excluded else ProjectSkillFacetMode.EXCLUDED
         state_label = SKILL_SCOPE_EXCLUDED if is_excluded else SKILL_SCOPE_AUTO
         state_hint = SKILL_SCOPE_EXCLUDED_HINT if is_excluded else SKILL_SCOPE_AUTO_HINT
         button_label = SKILL_SCOPE_AUTO if is_excluded else SKILL_SCOPE_EXCLUDED
@@ -1228,8 +1227,8 @@ def _render_skill_policy(
                 quote=True,
             )
             + '"><div class="skill-scope-copy">'
-            + f'<strong>{escape(_SKILL_SCOPE_LABELS[facet])}</strong>'
-            + f'<span>{escape(state_label)} · {escape(state_hint)}</span></div>'
+            + f"<strong>{escape(_SKILL_SCOPE_LABELS[facet])}</strong>"
+            + f"<span>{escape(state_label)} · {escape(state_hint)}</span></div>"
             + f'<form method="post" action="{escape(action, quote=True)}">'
             + _hidden_input("action", "set_skill_scope")
             + _hidden_input("project_id", project_id)
@@ -1243,7 +1242,7 @@ def _render_skill_policy(
     return (
         '<section class="panel skill-scope-panel"><div class="panel-head"><div>'
         + f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
-        + f'<h2>{escape(SKILL_SCOPE)}</h2></div></div>'
+        + f"<h2>{escape(SKILL_SCOPE)}</h2></div></div>"
         + '<div class="panel-body">'
         + f'<p class="management-hint skill-scope-hint">{escape(SKILL_SCOPE_HINT)}</p>'
         + '<div class="skill-scope-list">'

@@ -42,8 +42,12 @@ SKILL_SCOPE_HINT = (
 )
 SKILL_SCOPE_AUTO = "Авто"
 SKILL_SCOPE_EXCLUDED = "Не использовать"
-SKILL_SCOPE_AUTO_HINT = "Skills этой области добавляются только когда Harness обнаруживает её в стеке."
-SKILL_SCOPE_EXCLUDED_HINT = "Skills этой области не проецируются в проект, даже если стек обнаружен."
+SKILL_SCOPE_AUTO_HINT = (
+    "Skills этой области добавляются только когда Harness обнаруживает её в стеке."
+)
+SKILL_SCOPE_EXCLUDED_HINT = (
+    "Skills этой области не проецируются в проект, даже если стек обнаружен."
+)
 SKILL_SCOPE_BACKEND = "Backend"
 SKILL_SCOPE_FRONTEND = "Frontend"
 SKILL_SCOPE_MOBILE = "Mobile"

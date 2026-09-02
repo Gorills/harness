@@ -351,16 +351,13 @@ def test_dashboard_task_action_does_not_request_skill_reconcile(tmp_path: Path) 
         connection.close()
 
 
-
 def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
     tmp_path: Path,
 ) -> None:
     root, database, connection, workspace_id = _registered_workspace(
         tmp_path,
         {
-            "apps/api/pyproject.toml": (
-                '[project]\nname = "api"\ndependencies = ["fastapi"]\n'
-            ),
+            "apps/api/pyproject.toml": ('[project]\nname = "api"\ndependencies = ["fastapi"]\n'),
             "apps/site/package.json": json.dumps(
                 {"dependencies": {"next": "16", "react": "19", "react-dom": "19"}}
             ),
@@ -406,9 +403,7 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
 
     connection = connect_database(database)
     try:
-        assert get_project_skill_policy(connection, project_id).excluded_facets == (
-            "web-frontend",
-        )
+        assert get_project_skill_policy(connection, project_id).excluded_facets == ("web-frontend",)
     finally:
         connection.close()
 
@@ -465,9 +460,7 @@ def test_dashboard_skill_scope_reconciles_each_workspace_and_retries_only_failur
     assert retry == (second.workspace_id,)
     connection = connect_database(database)
     try:
-        assert get_project_skill_policy(connection, project_id).excluded_facets == (
-            "web-frontend",
-        )
+        assert get_project_skill_policy(connection, project_id).excluded_facets == ("web-frontend",)
     finally:
         connection.close()
 

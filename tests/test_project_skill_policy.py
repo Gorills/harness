@@ -184,11 +184,7 @@ def test_excluded_surface_cannot_reenter_through_dependency_match(tmp_path: Path
     root = tmp_path / "repo"
     _make_repo(
         root,
-        {
-            "pyproject.toml": (
-                '[project]\nname="service"\ndependencies=["sqlalchemy"]\n'
-            )
-        },
+        {"pyproject.toml": ('[project]\nname="service"\ndependencies=["sqlalchemy"]\n')},
     )
     database = tmp_path / "harness.db"
     initialize_database(database)
