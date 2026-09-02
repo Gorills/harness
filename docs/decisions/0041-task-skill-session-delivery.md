@@ -1,12 +1,15 @@
 # ADR-0041: Task-selected skills are next-discovery-boundary, not current-session delivery
 
-- **Status:** Accepted
+- **Status:** Superseded in part
 - **Date:** 2026-09-01
 - **Deciders:** Repository architecture baseline
-- **Choice:** Option A — next-discovery-boundary semantics
+- **Choice:** Option A — next-discovery-boundary semantics (historical for task-selected files)
 - **Builds on:** [ADR-0032](0032-continuous-project-skill-reconciliation.md),
   [ADR-0029](0029-quality-discipline-verification-and-response-economy.md)
 - **Amends:** ADR-0032 Decision 6 is product intent for live sessions, not a temporary gap.
+- **Superseded by:** [ADR-0042](0042-project-stack-skill-selection.md) for task-selected filesystem
+  delivery. Harness no longer rotates project Skills by Task. MCP still does not deliver skill
+  bodies or treat `recommended_skills` as instruction delivery.
 
 ## Context
 

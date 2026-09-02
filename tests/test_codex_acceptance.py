@@ -16,8 +16,8 @@ from accept_codex import (
     ACCEPTANCE_NEGATIVE_SKILL_ID,
     ACCEPTANCE_SKILL_ID,
     EXPECTED_GENERATED_SKILLS,
+    MCP_SKILL_BODY_DELIVERY_CONTRACT,
     NEGATIVE_SKILL_PREFLIGHT_POLICY,
-    TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT,
     CodexAcceptanceError,
     _acceptance_prompt,
     _codex_exec_events,
@@ -333,8 +333,8 @@ def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
         _validate_wire_tools(leaked)
 
 
-def test_codex_acceptance_locks_next_session_only_skill_delivery() -> None:
-    assert TASK_SKILL_SESSION_DELIVERY_EXPECTED_RESULT == "next-session-only"
+def test_codex_acceptance_locks_mcp_does_not_deliver_skill_bodies() -> None:
+    assert MCP_SKILL_BODY_DELIVERY_CONTRACT == "mcp-does-not-deliver-skill-bodies"
     reject_skill_delivery_fields({"task_id": "t", "revision": 1}, surface="task_start")
     with pytest.raises(CodexAcceptanceError, match="recommended_skills"):
         reject_skill_delivery_fields(
@@ -535,13 +535,8 @@ def test_synthetic_acceptance_skills_survive_python_task_focus(tmp_path: Path) -
 
     selected = tuple(item.definition.skill_id for item in resolve_skills(definitions, stack))
     assert selected == EXPECTED_GENERATED_SKILLS
-
-    focused = {
-        item.definition.skill_id
-        for item in resolve_skills(definitions, stack, task_hints=("python",))
-    }
-    assert ACCEPTANCE_SKILL_ID in focused
-    assert ACCEPTANCE_NEGATIVE_SKILL_ID in focused
+    assert ACCEPTANCE_SKILL_ID in selected
+    assert ACCEPTANCE_NEGATIVE_SKILL_ID in selected
 
 
 def test_native_skill_read_requires_skill_marker_field_not_jsonl_substring() -> None:

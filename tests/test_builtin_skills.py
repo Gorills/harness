@@ -68,30 +68,33 @@ def test_builtin_pack_sync_is_idempotent_and_host_compatible(tmp_path: Path) -> 
         assert f"description: {json.dumps(skill.description, ensure_ascii=False)}" in text
 
 
-def test_builtin_pack_uses_task_hints_for_bounded_composition(tmp_path: Path) -> None:
+def test_builtin_pack_resolves_from_project_stack_without_task_hints(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
     empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
-    assert _ids(resolve_skills(definitions, empty, task_hints=("auth",))) == (
-        "architecture-decisions",
-        "secure-by-design",
-        "testing-strategy",
+    assert _ids(resolve_skills(definitions, empty)) == ()
+    software = DetectedProjectStack(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset({"software-project"}),
     )
-    assert _ids(resolve_skills(definitions, empty, task_hints=("complex-change",))) == (
-        "architecture-decisions",
-        "complex-change-planning",
-        "independent-review",
-        "project-architecture",
-        "spec-audit",
-        "testing-strategy",
+    software_ids = set(_ids(resolve_skills(definitions, software)))
+    assert {"secure-by-design", "testing-strategy"} <= software_ids
+    assert "backend-security" not in software_ids
+    mobile = DetectedProjectStack(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset({"mobile-app", "software-project"}),
     )
     assert {"mobile-application", "secure-by-design"} <= set(
-        _ids(resolve_skills(definitions, empty, task_hints=("expo",)))
+        _ids(resolve_skills(definitions, mobile))
     )
 
 
-def test_secure_by_design_accompanies_backend_security_task_hints(tmp_path: Path) -> None:
+def test_secure_by_design_accompanies_software_project_stack(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -102,32 +105,11 @@ def test_secure_by_design_accompanies_backend_security_task_hints(tmp_path: Path
         frozenset({"software-project"}),
     )
     unrelated = frozenset({"public-frontend", "mobile-application", "frontend-design"})
-
-    for hint in ("backend-security", "server-auth-review"):
-        selected = resolve_skills(
-            definitions,
-            software_project_stack,
-            task_hints=(hint,),
-        )
-        ids = set(_ids(selected))
-        assert "backend-security" in ids
-        assert "secure-by-design" in ids
-        assert ids.isdisjoint(unrelated)
-        assert "testing-strategy" not in ids
-
-    baseline = set(_ids(resolve_skills(definitions, software_project_stack)))
-    unrecognized = set(
-        _ids(
-            resolve_skills(
-                definitions,
-                software_project_stack,
-                task_hints=("apk-signing",),
-            )
-        )
-    )
-    assert unrecognized == baseline
-    assert "secure-by-design" in unrecognized
-    assert "backend-security" not in unrecognized
+    ids = set(_ids(resolve_skills(definitions, software_project_stack)))
+    assert "secure-by-design" in ids
+    assert "backend-security" not in ids
+    assert ids.isdisjoint(unrelated)
+    assert "testing-strategy" in ids
 
 
 def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path: Path) -> None:
@@ -227,26 +209,25 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
         "server-application",
     } <= set(_ids(resolve_skills(definitions, stack_specific)))
 
-    docker_greenfield = resolve_skills(
+    docker_stack = resolve_skills(
         definitions,
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("docker", "new-project"),
+        DetectedProjectStack(
+            frozenset(),
+            frozenset(),
+            frozenset(),
+            frozenset({"containerized"}),
+        ),
     )
-    assert {"container-infrastructure", "project-architecture"} <= set(_ids(docker_greenfield))
-
-    legacy = resolve_skills(
-        definitions,
-        DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("legacy-change", "bugfix"),
+    assert "container-infrastructure" in _ids(docker_stack)
+    assert (
+        _ids(
+            resolve_skills(definitions, DetectedProjectStack(frozenset(), frozenset(), frozenset()))
+        )
+        == ()
     )
-    assert {
-        "complex-change-planning",
-        "legacy-preservation",
-        "testing-strategy",
-    } <= set(_ids(legacy))
 
 
-def test_builtin_pack_focuses_polyglot_workspace_on_current_task(tmp_path: Path) -> None:
+def test_builtin_pack_keeps_polyglot_workspace_surfaces(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -282,65 +263,11 @@ def test_builtin_pack_focuses_polyglot_workspace_on_current_task(tmp_path: Path)
         "testing-strategy",
     } <= repository_baseline
 
-    apk_task = set(
-        _ids(
-            resolve_skills(
-                definitions,
-                stack,
-                task_hints=("expo", "android", "apk", "bugfix"),
-            )
-        )
-    )
-    assert apk_task == {
-        "frontend-design",
-        "language-engineering",
-        "mobile-application",
-        "secure-by-design",
-        "testing-strategy",
-    }
-
-    api_migration_task = set(
-        _ids(
-            resolve_skills(
-                definitions,
-                stack,
-                task_hints=("fastapi", "alembic", "database-migration"),
-            )
-        )
-    )
-    assert {
-        "architecture-decisions",
-        "data-integrity",
-        "language-engineering",
-        "secure-by-design",
-        "server-application",
-        "testing-strategy",
-    } <= api_migration_task
-    assert "mobile-application" not in api_migration_task
-
 
 def test_frontend_design_accompanies_every_builtin_frontend_signal(tmp_path: Path) -> None:
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
-    by_id = {definition.skill_id: definition for definition in definitions}
-    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
-
-    for surface_skill_id in ("public-frontend", "mobile-application"):
-        surface = by_id[surface_skill_id]
-        for hint in surface.task_hints:
-            selected = set(_ids(resolve_skills(definitions, empty, task_hints=(hint,))))
-            assert surface_skill_id in selected, hint
-            assert "frontend-design" in selected, hint
-            minimal = _ids(
-                resolve_skills(
-                    definitions,
-                    empty,
-                    task_hints=(hint,),
-                    policy=SkillResolutionPolicy(max_visible_skills=1),
-                )
-            )
-            assert minimal == ("frontend-design",), hint
 
     for facet in ("web-frontend", "mobile-app"):
         stack = DetectedProjectStack(
@@ -397,8 +324,13 @@ def test_ci_release_is_self_contained_for_github_actions_supply_chain(tmp_path: 
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
-    empty = DetectedProjectStack(frozenset(), frozenset(), frozenset())
-    selected = set(_ids(resolve_skills(definitions, empty, task_hints=("github-actions",))))
+    ci = DetectedProjectStack(
+        frozenset(),
+        frozenset(),
+        frozenset(),
+        frozenset({"ci-pipeline"}),
+    )
+    selected = set(_ids(resolve_skills(definitions, ci)))
     assert "ci-release" in selected
     assert "secure-by-design" not in selected
 
@@ -719,12 +651,12 @@ def test_retired_skill_no_longer_projects_after_sync(
     monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", (*BUILTIN_SKILLS, extra))
     sync_builtin_skills(registry)
     before = load_skill_registry(registry)
-    assert extra.skill_id in _ids(resolve_skills(before, empty, task_hints=extra.task_hints))
+    assert extra.skill_id in _ids(resolve_skills(before, empty, explicit_include=(extra.skill_id,)))
     monkeypatch.setattr(builtin_module, "BUILTIN_SKILLS", BUILTIN_SKILLS)
     sync_builtin_skills(registry)
     after = load_skill_registry(registry)
     assert extra.skill_id not in {definition.skill_id for definition in after}
-    assert extra.skill_id not in _ids(resolve_skills(after, empty, task_hints=extra.task_hints))
+    assert extra.skill_id not in _ids(resolve_skills(after, empty))
 
 
 def test_retirement_rolls_back_if_manifest_commit_fails(

@@ -56,7 +56,7 @@ def _resolved_fastapi(registry: Path) -> tuple[ResolvedSkill, ...]:
     return resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
+        explicit_include=("fastapi",),
     )
 
 
@@ -174,7 +174,7 @@ def test_skill_update_rechecks_ownership_after_preflight(
     updated = resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
+        explicit_include=("fastapi",),
     )
     update_plan = plan_skill_projection(root, updated, (surface,))
     original_preflight = skills_module._preflight_projection_paths
@@ -217,7 +217,7 @@ def test_rollback_validates_committed_projection_after_atomic_move(
     updated = resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
+        explicit_include=("fastapi",),
     )
     update_plan = plan_skill_projection(root, updated, (surface,))
     original_commit = skills_module._commit_projection_changes

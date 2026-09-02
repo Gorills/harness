@@ -1785,7 +1785,7 @@ godot/
 
 # 73.1 Built-in quality pack
 
-Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует существующие `task_hints`, без отдельного workflow DSL.
+Harness поставляет компактный product-owned quality pack в canonical registry. Он не создаёт второй project/task state и не materialize'ится целиком в каждый Project. `install`/`skills sync` обновляют только Harness-owned exact content и fail closed при same-id user-modified collision. `skills validate` проверяет portable skill metadata против всех текущих supported host surfaces. Композиция built-in skills использует detected project stack и explicit include/exclude, без отдельного workflow DSL.
 
 Количество canonical built-ins не равно model-visible budget: resolver по-прежнему выбирает только
 релевантный bounded subset. Подробные stack/domain инструкции могут жить в portable
@@ -1796,8 +1796,8 @@ backend services, Expo/React Native mobile apps, Godot, deployment operations и
 архитектуру/верификацию для web, server, browser, mobile и supply chain. Любой распознанный
 пользовательский web/mobile frontend также materialize'ит `frontend-design`: короткий обязательный
 design contract, отдельные правила для marketing/editorial и product/mobile surfaces, anti-slop
-ограничения и bounded visual review. Его facet/task applicability сопровождает соответствующие
-frontend surface skills даже при Task-focused projection; явная project policy остаётся
+ограничения и bounded visual review. Его facet applicability сопровождает соответствующие
+frontend surface skills; явная project policy остаётся
 авторитетной.
 
 ---
@@ -1838,6 +1838,8 @@ task_hints:
 
 ```
 
+Поле `task_hints` — ignored legacy parser input. Resolver его не читает и не ранжирует по нему pack.
+
 ---
 
 # 76. Skill Resolver
@@ -1847,9 +1849,7 @@ task_hints:
 ```text
 detected project stack
 +
-current Task stack_hints
-+
-explicit project configuration
+existing explicit include/exclude where supplied
 
 ```
 
@@ -1857,14 +1857,11 @@ explicit project configuration
 facets. Facet объединяет несколько контекстных сигналов, когда один dependency неоднозначен.
 Например, `react-dom` внутри package с `expo`/`react-native` не классифицирует native app как
 `web-frontend`; отдельный web package в monorepo классифицирует Workspace одновременно как mobile и
-web. Facets не являются ручным workflow DSL и не заменяют `task_hints` для greenfield intent.
+web. Facets не являются ручным workflow DSL. Per-task relevance остаётся host-native.
 
-Stack evidence описывает весь Workspace, а не обязательно текущую работу. Если хотя бы один
-неисключённый skill распознаёт `current Task stack_hints`, resolver оставляет task-matched skills и
-явные project inclusions, но не дополняет их нерелевантными stack-only skills из других частей
-polyglot/monorepo Workspace. Если ни один skill не распознал hints, resolver сохраняет stack-derived
-baseline: новый или неполный hint не должен случайно обнулить projection. Portable skill
-description должен кратко указывать, когда skill следует загружать host'у.
+Stack evidence описывает весь Workspace. Resolver не сужает pack по `current Task stack_hints`.
+Task `stack_hints` остаются optional durable Task metadata и не являются Skill selector.
+Portable skill description должен кратко указывать, когда skill следует загружать host'у.
 
 ---
 
@@ -1906,12 +1903,7 @@ FastAPI
 
 Пустой repository может не иметь stack.
 
-Agent может сообщить:
-
-```text
-stack_hints=["fastapi", "postgres"]
-
-```
+Task `stack_hints` never activate Skills. Empty stack stays empty until indexed evidence exists.
 
 После появления manifests deterministic detection подтверждает stack.
 
@@ -2676,28 +2668,18 @@ react-native-web
 Workspace содержит однозначный web framework (например Next/Nuxt/SvelteKit), Workspace получает
 одновременно `mobile-app` и `web-frontend`, и оба surface skill остаются релевантными.
 
-## 121.2 Task-focused polyglot relevance acceptance
+## 121.2 Polyglot project pack acceptance
 
-Workspace одновременно содержит Expo/Android frontend и FastAPI/Alembic backend. Без распознанных
-Task hints resolver может materialize bounded stack baseline для обеих частей. Task с
-`stack_hints=[expo, android, apk, bugfix]` не должен получать server/data skills. Task с
-`stack_hints=[fastapi, alembic, database-migration]` не должен получать mobile skill. Явно
-включённый project skill остаётся выбранным, а полностью неизвестный hint возвращает безопасный
-stack baseline вместо пустого набора.
+Workspace одновременно содержит Expo/Android frontend и FastAPI/Alembic backend. Resolver
+materialize bounded stack baseline для обеих частей независимо от current Task `stack_hints`.
+Per-task выбор среди projected Skills остаётся host-native. Явно включённый project skill остаётся
+выбранным.
 
 ---
 
 # 122. Greenfield skill acceptance
 
-Task:
-
-```text
-Create API
-stack_hints = fastapi, postgres
-
-```
-
-Resolver активирует relevant skills до появления полной project structure.
+Greenfield без manifests не получает stack-matched skills.
 
 После создания manifests stack определяется автоматически.
 
@@ -2877,7 +2859,7 @@ Harness — accelerator/control plane, а не обязательный single p
 18. MCP exposure tests;
 19. skills registry;
 20. relevant skill projection;
-21. greenfield stack hints;
+21. optional Task `stack_hints` as durable metadata, not a Skill selector;
 22. basic dashboard;
 23. Accept/Feedback;
 24. doctor/uninstall;
@@ -3015,7 +2997,8 @@ Harness v1 считается соответствующим ТЗ только �
 - stale Knowledge не выдаётся как актуальный факт;
 - agent не обязан обновлять Structural Index вручную;
 - irrelevant skills не загружаются в project;
-- greenfield stack может быть задан Task hints;
+- Skills выбираются по detected project stack; per-task выбор среди projected Skills остаётся host-native;
+- greenfield без stack evidence не получает stack-matched skills;
 - project stack далее определяется автоматически;
 - normal agent workflow ограничивается status/start/search/work/checkpoint;
 - MCP responses имеют hard exposure limits;

@@ -1,7 +1,11 @@
 # ADR-0029: Quality discipline is a compact built-in skill pack plus durable verification
 
 ## Status
-Accepted.
+Superseded in part.
+
+**Superseded in part by:** [ADR-0042](0042-project-stack-skill-selection.md). The 2026-08-30
+Task-focused projection amendment is withdrawn. Compact built-in quality pack, durable
+verification, and response-economy decisions remain.
 
 ## Context
 Harness already owns durable Task state, Knowledge, stack-aware skill selection, host-native projection, and compact MCP tools. A reusable agent-rules kit supplied useful engineering discipline: specification audit, independent review, testing/security/infrastructure guidance, anti-duplication project conventions, and explicit verification. The kit also carried its own `PROJECT_STATUS.md`, epic directories, trigger-generation scripts, and host-specific rule mirrors.
@@ -65,6 +69,9 @@ evidence. It explicitly does not promise an unhackable system or authorize produ
 side effects.
 
 ## 2026-08-30 amendment: Task-focused projection and discriminating discovery
+
+Withdrawn by the 2026-09-02 amendment; superseded by
+[ADR-0042](0042-project-stack-skill-selection.md). Historical text follows.
 
 Workspace stack evidence is intentionally broad. In a mobile-plus-backend repository it proves that
 both surfaces exist, but it does not prove that every Task needs both playbooks. Merely ranking Task
@@ -191,6 +198,18 @@ telemetry, MCP fields, or a core invariant. The CLI JSON includes redacted evide
 `scripts/accept_codex.py --run-model` may attach metrics-only `search_behavior` (with
 `workspace_root` of the primary Workspace) to the evidence report. Unit tests classify
 synthetic JSONL without a live model.
+
+## 2026-09-02 amendment: Task-focused projection withdrawn
+
+[ADR-0042](0042-project-stack-skill-selection.md) withdraws the 2026-08-30 Task-focused
+projection amendment. Recognized Task `stack_hints` are not a resolver focus boundary and do
+not drop stack-only skills. Project-visible Skills come from the detected Workspace stack plus
+explicit include/exclude.
+
+Later 0029 amendments that mention Task-focused projection as the reason `frontend-design` and
+`secure-by-design` share Task hints remain historical catalog rationale. They do not restore
+Task narrowing. Compact quality pack, checkpoint verification, and response-economy decisions
+are unchanged.
 
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.

@@ -23,6 +23,7 @@ from harness.skills import (
 def _resolved_skill(registry: Path, skill_text: str) -> tuple[ResolvedSkill, ...]:
     skill = registry / "fastapi"
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(skill_text, encoding="utf-8")
     (skill / "harness.yaml").write_text(
         "id: fastapi\ntask_hints:\n  - fastapi\n",
@@ -32,7 +33,7 @@ def _resolved_skill(registry: Path, skill_text: str) -> tuple[ResolvedSkill, ...
     return resolve_skills(
         definitions,
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=("fastapi",),
+        explicit_include=("fastapi",),
     )
 
 

@@ -196,12 +196,10 @@ from harness.tasks import (
     TaskValidationError,
     TaskWaitReason,
     TaskWorkspaceConflictError,
-    enqueue_skill_reconcile_if_relevance_changed,
     get_latest_task,
     get_relevant_task,
     get_task,
     get_task_stack_hints,
-    skill_relevance_key,
 )
 from harness.visibility import set_project_visibility
 
@@ -779,16 +777,10 @@ def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> in
 def mutate_dashboard_task(
     database_path: Path,
     request: DashboardActionRequest,
-    *,
-    watcher_invalidations: SimpleQueue[str] | None = None,
-) -> bool:
-    """Delegate one dashboard action to the authoritative Task domain workflow.
-
-    Returns whether the skill-relevance key changed after a successful commit.
-    """
+) -> None:
+    """Delegate one dashboard action to the authoritative Task domain workflow."""
     connection = connect_database(database_path)
     try:
-        before = skill_relevance_key(connection, request.workspace_id)
         if request.action == "accept":
             task_accept(
                 connection,
@@ -846,13 +838,6 @@ def mutate_dashboard_task(
             )
         else:
             raise TaskValidationError("unsupported dashboard Task action")
-        after = skill_relevance_key(connection, request.workspace_id)
-        return enqueue_skill_reconcile_if_relevance_changed(
-            watcher_invalidations,
-            request.workspace_id,
-            before,
-            after,
-        )
     finally:
         connection.close()
 
@@ -2406,7 +2391,6 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 mutate_dashboard_task(
                     self.database_path,
                     request,
-                    watcher_invalidations=self.workspace_invalidations,
                 )
             if not isinstance(
                 request,

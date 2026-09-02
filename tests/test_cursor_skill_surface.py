@@ -27,6 +27,7 @@ def _resolved_skill(
 ) -> tuple[ResolvedSkill, ...]:
     skill = registry / skill_id
     skill.mkdir(parents=True)
+    registry.chmod(0o700)
     (skill / "SKILL.md").write_text(skill_text, encoding="utf-8")
     (skill / "harness.yaml").write_text(
         f"id: {skill_id}\ntask_hints:\n  - {skill_id}\n",
@@ -35,7 +36,7 @@ def _resolved_skill(
     return resolve_skills(
         load_skill_registry(registry),
         DetectedProjectStack(frozenset(), frozenset(), frozenset()),
-        task_hints=(skill_id,),
+        explicit_include=(skill_id,),
     )
 
 
