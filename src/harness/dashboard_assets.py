@@ -726,9 +726,11 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 DASHBOARD_JS = r"""
 (() => {
   const body = document.body;
-  const eventsUrl = body.dataset.eventsUrl;
-  const indicators = Array.from(document.querySelectorAll('.live-indicator'));
-  const refreshButtons = Array.from(document.querySelectorAll('[data-refresh-now]'));
+  let eventsUrl = body.dataset.eventsUrl;
+  let source = null;
+  let inFlight = false;
+  let queued = false;
+  let queuedForce = false;
 
   const fieldHasChanged = (field) => {
     if (field instanceof HTMLSelectElement) {
@@ -742,7 +744,7 @@ DASHBOARD_JS = r"""
   ).some(fieldHasChanged);
 
   const setState = (state, text) => {
-    indicators.forEach((indicator) => {
+    document.querySelectorAll('.live-indicator').forEach((indicator) => {
       indicator.dataset.state = state;
       const copy = indicator.querySelector('.live-copy');
       if (copy) {
@@ -751,9 +753,131 @@ DASHBOARD_JS = r"""
     });
   };
 
-  refreshButtons.forEach((button) => {
-    button.addEventListener('click', () => window.location.reload());
-  });
+  const bindRefreshButtons = () => {
+    document.querySelectorAll('[data-refresh-now]').forEach((button) => {
+      if (button.dataset.refreshBound === 'true') {
+        return;
+      }
+      button.dataset.refreshBound = 'true';
+      button.addEventListener('click', () => {
+        void refreshPage({ force: true });
+      });
+    });
+  };
+
+  const bindMobileNavigation = () => {
+    document.querySelectorAll('.mobile-navigation a').forEach((link) => {
+      if (link.dataset.navBound === 'true') {
+        return;
+      }
+      link.dataset.navBound = 'true';
+      link.addEventListener('click', () => {
+        const disclosure = link.closest('details');
+        if (disclosure instanceof HTMLDetailsElement) {
+          disclosure.open = false;
+        }
+      });
+    });
+  };
+
+  const applyPage = (nextDocument) => {
+    const currentLayout = document.querySelector('.app-layout');
+    const nextLayout = nextDocument.querySelector('.app-layout');
+    if (!(currentLayout instanceof HTMLElement) || !(nextLayout instanceof HTMLElement)) {
+      return false;
+    }
+    currentLayout.replaceWith(nextLayout);
+    const nextTitle = nextDocument.querySelector('title');
+    if (nextTitle && nextTitle.textContent) {
+      document.title = nextTitle.textContent;
+    }
+    if (nextDocument.body && nextDocument.body.dataset.eventsUrl) {
+      body.dataset.eventsUrl = nextDocument.body.dataset.eventsUrl;
+    }
+    bindRefreshButtons();
+    bindMobileNavigation();
+    return true;
+  };
+
+  const disconnectEvents = () => {
+    if (source === null) {
+      return;
+    }
+    source.onerror = null;
+    source.close();
+    source = null;
+  };
+
+  const connectEvents = () => {
+    const nextUrl = body.dataset.eventsUrl;
+    if (!nextUrl || !('EventSource' in window)) {
+      return;
+    }
+    if (source !== null && eventsUrl === nextUrl) {
+      return;
+    }
+    disconnectEvents();
+    eventsUrl = nextUrl;
+    source = new EventSource(nextUrl);
+    source.addEventListener('ready', () => setState('live', 'Онлайн'));
+    source.addEventListener('refresh', () => {
+      void refreshPage({ force: false });
+    });
+    source.onerror = () => setState('reconnecting', 'Переподключение');
+  };
+
+  const refreshPage = async (options) => {
+    queued = true;
+    queuedForce = queuedForce || Boolean(options.force);
+    if (inFlight) {
+      return;
+    }
+    inFlight = true;
+    try {
+      while (queued) {
+        queued = false;
+        const force = queuedForce;
+        queuedForce = false;
+        if (!force && hasUnsavedInput()) {
+          setState('update', 'Есть обновление');
+          break;
+        }
+        setState('update', 'Обновление');
+        const response = await fetch(`${window.location.pathname}${window.location.search}`, {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          headers: { Accept: 'text/html' },
+        });
+        if (!response.ok) {
+          throw new Error('dashboard refresh failed');
+        }
+        const html = await response.text();
+        if (!force && hasUnsavedInput()) {
+          setState('update', 'Есть обновление');
+          break;
+        }
+        const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+        const scrollX = window.scrollX;
+        const scrollY = window.scrollY;
+        if (!applyPage(nextDocument)) {
+          throw new Error('dashboard refresh parse failed');
+        }
+        window.scrollTo(scrollX, scrollY);
+        connectEvents();
+        setState('live', 'Онлайн');
+      }
+    } catch {
+      setState('update', 'Есть обновление');
+    } finally {
+      inFlight = false;
+      if (queued) {
+        void refreshPage({ force: queuedForce });
+      }
+    }
+  };
+
+  bindRefreshButtons();
+  bindMobileNavigation();
 
   document.addEventListener('keydown', (event) => {
     if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) {
@@ -770,30 +894,7 @@ DASHBOARD_JS = r"""
     }
   });
 
-  document.querySelectorAll('.mobile-navigation a').forEach((link) => {
-    link.addEventListener('click', () => {
-      const disclosure = link.closest('details');
-      if (disclosure instanceof HTMLDetailsElement) {
-        disclosure.open = false;
-      }
-    });
-  });
-
-  if (!eventsUrl || indicators.length === 0 || refreshButtons.length === 0 || !('EventSource' in window)) {
-    return;
-  }
-
-  const source = new EventSource(eventsUrl);
-  source.addEventListener('ready', () => setState('live', 'Онлайн'));
-  source.addEventListener('refresh', () => {
-    if (hasUnsavedInput()) {
-      setState('update', 'Есть обновление');
-      return;
-    }
-    setState('update', 'Обновление');
-    window.setTimeout(() => window.location.reload(), 160);
-  });
-  source.onerror = () => setState('reconnecting', 'Переподключение');
-  window.addEventListener('pagehide', () => source.close(), { once: true });
+  connectEvents();
+  window.addEventListener('pagehide', () => disconnectEvents(), { once: true });
 })();
 """.strip()

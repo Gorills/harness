@@ -550,18 +550,19 @@ Dashboard rules:
 - serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
-- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and recent Tasks; do not present Workspaces as copies or a second dashboard;
+- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and a bounded Task list that pins live (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies or a second dashboard;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
 - Hidden/Normal operator control is on Project and Workspace detail;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
+- SSE and the explicit refresh control re-fetch the current same-origin HTML and replace the rendered layout in place; they must not force a full page navigation. Dirty operator input still blocks automatic apply ([ADR-0043](docs/decisions/0043-dashboard-in-place-html-refresh.md)).
 - dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.
-- Project detail supports explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Destructive and relocation POST identities must match the detail page that rendered them.
+- Project and Workspace detail support explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. The deletion form may render on Workspace detail, but the POST still targets `/projects/{id}/` and must match that Project identity. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Relocation POST identity must match the Workspace page that rendered it.
 
 ## 18. Security and privacy boundaries
 

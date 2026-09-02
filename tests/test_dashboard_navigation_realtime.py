@@ -163,6 +163,9 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert js_headers["Content-Type"].startswith("application/javascript")
         assert "EventSource" in javascript
         assert "hasUnsavedInput" in javascript
+        assert "location.reload" not in javascript
+        assert "DOMParser" in javascript
+        assert "replaceWith" in javascript
 
         project_url = base_url + f"projects/{quote(project_id, safe='')}/"
         workspace_url = base_url + f"workspaces/{quote(workspace_id, safe='')}/"
@@ -185,6 +188,8 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert 'Ветка <strong class="mono">main</strong>' in workspace_page
         assert "Текущая задача" in workspace_page
         assert "Папка" in workspace_page
+        assert "Удаление проекта" in workspace_page
+        assert f'action="/projects/{quote(project_id, safe="")}/"' in workspace_page
 
         status, _headers, task_page = _read(task_url)
         assert status == 200

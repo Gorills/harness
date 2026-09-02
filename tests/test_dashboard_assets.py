@@ -23,6 +23,10 @@ def test_dashboard_navigation_is_server_rendered_and_javascript_stays_enhancemen
     assert "document.querySelectorAll('.mobile-navigation a')" in DASHBOARD_JS
     assert 'input[type="search"]' in DASHBOARD_JS
     assert ".innerHTML" not in DASHBOARD_JS
+    assert "location.reload" not in DASHBOARD_JS
+    assert "DOMParser" in DASHBOARD_JS
+    assert "parseFromString" in DASHBOARD_JS
+    assert "currentLayout.replaceWith(nextLayout)" in DASHBOARD_JS
 
 
 def test_dashboard_refresh_guard_preserves_any_modified_user_input() -> None:
@@ -35,4 +39,6 @@ def test_dashboard_refresh_guard_preserves_any_modified_user_input() -> None:
         in DASHBOARD_JS
     )
     assert ".some(fieldHasChanged);" in DASHBOARD_JS
-    assert "if (hasUnsavedInput())" in DASHBOARD_JS
+    assert "if (!force && hasUnsavedInput())" in DASHBOARD_JS
+    assert "window.location.pathname" in DASHBOARD_JS
+    assert "cache: 'no-store'" in DASHBOARD_JS

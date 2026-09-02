@@ -212,6 +212,11 @@ _DASHBOARD_FORM_MAX_BYTES = 8192
 _DASHBOARD_FORM_MAX_FIELDS = 5
 _DASHBOARD_SEARCH_LIMIT = 24
 _DASHBOARD_RECENT_TASK_LIMIT = 24
+# Pin live Tasks so review/waiting/working stay visible at the top of the bounded list.
+_DASHBOARD_RECENT_TASK_ORDER_SQL = (
+    "CASE WHEN tasks.state IN ('working', 'waiting') THEN 0 ELSE 1 END, "
+    "tasks.updated_at DESC, tasks.id DESC"
+)
 _DASHBOARD_TIMELINE_EVENT_LIMIT = 60
 _DASHBOARD_CHANGED_PATH_LIMIT = 24
 _DASHBOARD_SSE_POLL_SECONDS = 1.0
@@ -412,23 +417,23 @@ def _load_recent_dashboard_tasks(
 ) -> tuple[DashboardTaskRow, ...]:
     if workspace_id is None:
         rows = connection.execute(
-            """
+            f"""
             SELECT tasks.id, workspaces.project_id
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
-            ORDER BY tasks.updated_at DESC, tasks.id DESC
+            ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
             LIMIT ?
             """,
             (_DASHBOARD_RECENT_TASK_LIMIT,),
         ).fetchall()
     else:
         rows = connection.execute(
-            """
+            f"""
             SELECT tasks.id, workspaces.project_id
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             WHERE tasks.workspace_id = ?
-            ORDER BY tasks.updated_at DESC, tasks.id DESC
+            ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
             LIMIT ?
             """,
             (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
@@ -1845,6 +1850,9 @@ def render_workspace_page(
         + '<div class="settings-divider"></div>'
         + f'<p class="panel-kicker">{escape(WORKSPACE_RELOCATION)}</p>'
         + _render_workspace_relocation_form(row.workspace_id, action=workspace_url)
+        + '<div class="settings-divider"></div>'
+        + f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
+        + _render_project_delete_form(row.project_id, action=project_url)
         + "</div></section></aside></section>"
     )
     return _render_shell(

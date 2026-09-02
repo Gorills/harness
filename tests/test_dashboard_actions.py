@@ -302,6 +302,12 @@ def test_dashboard_project_deletion_requires_confirmation_and_preserves_files(
             body = response.read().decode("utf-8")
         assert "Удаление проекта" in body
         assert "Файлы на диске останутся" in body
+        workspace_url = base_url + f"workspaces/{quote(workspace_id, safe='')}/"
+        with urlopen(workspace_url, timeout=2) as workspace_response:
+            workspace_body = workspace_response.read().decode("utf-8")
+        assert "Удаление проекта" in workspace_body
+        assert f'action="/projects/{quote(project_id, safe="")}/"' in workspace_body
+        assert "Файлы на диске останутся" in workspace_body
 
         fields: dict[str, str | int] = {
             "action": "delete_project",

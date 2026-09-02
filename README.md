@@ -111,6 +111,7 @@ Codex and Cursor production MCP are project-only and use Harness-owned intent ra
 - [ADR-0040: Dashboard is one loopback-root Project index](docs/decisions/0040-dashboard-root-url-and-project-index.md)
 - [ADR-0041: Task-selected skills are next-discovery-boundary, not current-session delivery](docs/decisions/0041-task-skill-session-delivery.md)
 - [ADR-0042: Project skills are selected from the Workspace stack, not the Task](docs/decisions/0042-project-stack-skill-selection.md)
+- [ADR-0043: Dashboard realtime replaces HTML in place, not via full navigation](docs/decisions/0043-dashboard-in-place-html-refresh.md)
 
 ## Development state
 
