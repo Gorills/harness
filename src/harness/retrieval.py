@@ -1115,9 +1115,7 @@ def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearc
         return None
 
     line_terms = tuple(
-        frozenset(
-            term for term in present_terms if matching_term_count((term,), line) == 1
-        )
+        frozenset(term for term in present_terms if matching_term_count((term,), line) == 1)
         for line in lines
     )
     counts = {term: 0 for term in present_terms}
