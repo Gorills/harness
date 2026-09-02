@@ -127,6 +127,12 @@ def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> N
     assert "Before broad repository exploration" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "before diagnosis or" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "never skip" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "Do not skip Task because work looks small or the path is known" in (
+        CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    )
+    assert "may skip search, not Task" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "discussion only" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "waiver" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "before changes and checkpoint progress" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
 
@@ -234,6 +240,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
         codex_module._SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])

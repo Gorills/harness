@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-31
+- **Amended:** 2026-09-01, 2026-09-02
 - **Amends:** specification §71, [ADR-0029](0029-quality-discipline-verification-and-response-economy.md)
 
 ## Context
@@ -29,8 +30,10 @@ ADR-0029. The written contract must not itself supply the skip.
    and retry. Native work without a Task is not a fallback.
 3. `task_checkpoint` is required after each logical stage, including diagnosis with no code
    change, not only at completed or waiting work.
-4. A new operator request or a shift from diagnosis to implementation completes or waits the
-   current Task, then starts a new one. The one-working-Task invariant is unchanged.
+4. A new operator work request (diagnosis, edits, or implementation) or a shift from
+   diagnosis to implementation completes or waits the current Task, then starts a new one.
+   The one-working-Task invariant is unchanged. An explicit operator discussion waiver is not
+   a work request.
 5. Unknown-argument errors list the tool's public allowed fields and tell the caller to retry.
    They still do not echo unknown field names. New `task_start` calls take `title` and optional
    `stack_hints` only; `summary` belongs on `task_checkpoint`, and `task_id` is omitted when
@@ -69,6 +72,28 @@ before `project_status` remains allowed when the host needs it to call Harness. 
 soft instruction, not a model proxy. Previously generated Codex `developer_instructions` that
 used the search-then-task bootstrap remain owned and are reconciled to the current body.
 
+## 2026-09-02 amendment: complexity is not a Task skip
+
+"Before meaningful changes" already taught compact models to skip Task. A second reading now
+does the same: the agent judges the work small, the path obvious, or the operator tired of
+ceremony, and continues without a Task. `project_search` friction is a real cost, but skipping
+search is not a license to skip Task.
+
+Always-on MCP and Codex instruction bodies stay fail-closed and must not describe a discussion
+waiver (that text is a skip the contract would itself supply). They must say:
+
+- do not skip Task because work looks small or the path is known;
+- `project_search` is required before broad native exploration;
+- an already-known exact path may skip search, not Task.
+
+Checkout `AGENTS.md` may add an operator-explicit discussion waiver. The waiver applies only
+when the operator said so for that phase, forbids diagnosis/edits/broad exploration while it
+holds, and ends at the next implement, fix, or investigate request. Doubt without a waiver
+starts a Task. Doubt under a waiver does not stretch into work.
+
+Forbidden skip reasons remain: small diff, known path, unhelpful search, operator annoyance,
+previous discussion, or creating a Task after finishing.
+
 ## Verification
 
 - MCP and Codex bootstrap tests prove the new phrases, reject the changes-only ritual in current
@@ -82,6 +107,10 @@ used the search-then-task bootstrap remain owned and are reconciled to the curre
   that MCP surface, not checkout `AGENTS.md`;
 - unknown-argument tests prove allowed field names appear, unknown names do not, and retry text
   is present;
-- `task_start` description tests prove create-with-title-only and diagnosis-before-edits wording;
-- checkout `AGENTS.md` bootstrap tests prove diagnosis, retry, stage-checkpoint, and the same
-  canonical sequence.
+- `task_start` description tests prove create-with-title-only, diagnosis-before-edits wording,
+  and that small or known-path work is not a skip;
+- checkout `AGENTS.md` bootstrap tests prove diagnosis, retry, stage-checkpoint, the same
+  canonical sequence, the search-is-not-Task-skip rule, forbidden skip reasons, and that an
+  operator discussion waiver is phase-scoped and ends on implement/fix/investigate;
+- always-on MCP/Codex bodies prove the small/known-path skip prohibition, stay under 1 KiB,
+  and do not contain discussion-waiver license text.

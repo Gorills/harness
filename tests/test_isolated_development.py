@@ -446,8 +446,18 @@ def test_checkout_agent_instructions_require_harness_before_native_tools() -> No
     assert "Checkpoint each logical stage" in bootstrap
     assert "targeted native read/search is allowed" in bootstrap
     assert "already has an exact path" in bootstrap
+    assert "skipping search does not skip Task" in bootstrap
+    assert "Do not skip a Task because" in bootstrap
+    assert "Complexity is not a Task gate" in bootstrap
+    assert "explicit operator waiver" in bootstrap
+    assert "не создавай таску" in bootstrap
+    assert "это обсуждение" in bootstrap
+    assert "ends the waiver" in bootstrap
+    assert "discussion only" in bootstrap
     assert "before changes and checkpoint meaningful" not in bootstrap
     assert "After status, use `project_search`" not in bootstrap
+    assert "skip Task for trivial" not in bootstrap
+    assert "simple changes need no Task" not in bootstrap
 
 
 def test_cursor_bootstrap_matches_canonical_workflow() -> None:
@@ -461,6 +471,10 @@ def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     assert "project_search, project_context, then native tools" not in text
     assert "code/doc path may be read natively" in text
     assert "project_context is not required for those kinds" in text
+    assert "Do not skip Task because work looks small or the path is known" in text
+    assert "may skip search, not Task" in text
+    assert "discussion only" not in text
+    assert "waiver" not in text
     assert "project_context only for selected semantic refs." not in text
     assert len(text.encode("utf-8")) < 1024
 

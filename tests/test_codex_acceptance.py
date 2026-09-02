@@ -349,7 +349,8 @@ def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
     instructions = (
         "project_status must be the first repository action. Before any shell command, locate "
         "Harness. Tool discovery is the only allowed pre-status action. After status, "
-        "start/resume a Task before diagnosis or edits. Then project_search before broad native "
+        "start/resume a Task before diagnosis or edits. Do not skip Task because work looks "
+        "small or the path is known. Then project_search before broad native "
         "exploration."
     )
 
@@ -368,6 +369,15 @@ def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
             "locate Harness. Tool discovery is the only allowed pre-status action. After status, "
             "then project_search, then start/resume a Task."
         )
+    with pytest.raises(CodexAcceptanceError, match="Task-skip prohibition"):
+        _validate_wire_instructions(
+            "project_status must be the first repository action. Before any shell command, "
+            "locate Harness. Tool discovery is the only allowed pre-status action. After status, "
+            "start/resume a Task before diagnosis or edits. Then project_search before broad "
+            "native exploration."
+        )
+    with pytest.raises(CodexAcceptanceError, match="discussion-waiver license"):
+        _validate_wire_instructions(instructions + " discussion only")
 
 
 def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints() -> None:

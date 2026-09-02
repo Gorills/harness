@@ -195,14 +195,19 @@ project_status
 `project_context` is not a mandatory step after every search hit. Knowledge and Task refs use it
 for selected semantic context. Code and doc hits that already include an exact path may be read
 with targeted native tools immediately; `project_context` remains available for metadata
-verification.
+verification. An exact path already in hand (operator message, open file, git status, or a prior
+hit) may skip `project_search`; skipping search does not skip Task.
 
 `task_start` / resume is required before diagnosis and native edits, including read-only
-investigation. Broad discovery, including `project_search`, happens inside that Task. A failed
+investigation. Complexity, an already-known path, or a small diff is not an exemption. Broad
+discovery, including `project_search`, happens inside that Task. A failed
 schema or tool call is a blocker: retry from the public schema rather than skipping Harness.
-Checkpoint after each logical stage, even when no files changed. A new operator request or a
-diagnosis-to-implementation shift completes or waits the current Task, then starts a new one.
-Specification §71's "before meaningful changes" reading is superseded by
+Checkpoint after each logical stage, even when no files changed. A new operator work request
+(diagnosis, edits, or implementation) or a diagnosis-to-implementation shift completes or waits
+the current Task, then starts a new one. Always-on MCP/Codex instructions must not describe an
+operator discussion waiver; that waiver lives in checkout `AGENTS.md`, covers only a
+discussion phase without diagnosis/edits/broad exploration, and ends at the next implement, fix,
+or investigate request. Specification §71's "before meaningful changes" reading is superseded by
 [ADR-0038](docs/decisions/0038-task-required-for-diagnosis-and-schema-retry.md).
 
 But the implementation is explicitly workspace-domain based and write-safe:

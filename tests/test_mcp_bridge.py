@@ -57,11 +57,18 @@ def test_server_instructions_require_task_before_diagnosis_within_budget() -> No
     assert "optional Task metadata" in first_512
     assert "before diagnosis" in _SERVER_INSTRUCTIONS
     assert "never skip" in _SERVER_INSTRUCTIONS
+    assert "Do not skip Task because work looks small or the path is known" in _SERVER_INSTRUCTIONS
+    assert "may skip search, not Task" in _SERVER_INSTRUCTIONS
     assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
     assert "implement-after-diagnosis" in _SERVER_INSTRUCTIONS
     assert "code/doc path may be read natively" in _SERVER_INSTRUCTIONS
     assert "project_context is not required for those kinds" in _SERVER_INSTRUCTIONS
     assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
+    assert "discussion only" not in _SERVER_INSTRUCTIONS
+    assert "waiver" not in _SERVER_INSTRUCTIONS
+    assert "trivial" not in _SERVER_INSTRUCTIONS
+    assert "skip Task for" not in _SERVER_INSTRUCTIONS
+    assert "meaningful changes" not in _SERVER_INSTRUCTIONS
 
 
 def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
@@ -84,6 +91,8 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     assert "targeted native read is allowed" in description
     assert "project_context is not required for those kinds" in description
     assert "after task_start or resume" in description
+    assert "Skip this search only when an" in description
+    assert "Task remains required" in description
     assert "use project_context only for selected refs" not in description
 
 
@@ -99,6 +108,7 @@ def test_task_start_description_states_stack_hints_are_not_skill_selectors() -> 
     assert "not a Skill selector" in _TASK_START_DESCRIPTION
     assert "optional durable Task metadata" in _TASK_START_DESCRIPTION
     assert "live skill injection" in _TASK_START_DESCRIPTION
+    assert "Do not skip because work looks small or the path is known" in _TASK_START_DESCRIPTION
 
 
 def test_server_instruction_budget_remains_bounded() -> None:
