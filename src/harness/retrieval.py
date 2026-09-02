@@ -1147,15 +1147,15 @@ def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearc
     while end - start + 1 < MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
         grew = False
         if start > 0:
-            candidate = "\n".join(lines[start - 1 : end + 1])
-            if len(candidate.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
+            expanded = "\n".join(lines[start - 1 : end + 1])
+            if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
                 start -= 1
                 grew = True
         if end - start + 1 >= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
             break
         if end + 1 < len(lines):
-            candidate = "\n".join(lines[start : end + 2])
-            if len(candidate.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
+            expanded = "\n".join(lines[start : end + 2])
+            if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
                 end += 1
                 grew = True
         if not grew:
