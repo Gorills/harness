@@ -52,8 +52,8 @@ _CONTEXT_CHANGED_PATH_LIMIT = 16
 _CONTEXT_CHANGED_PATH_BYTES = 2048
 MAX_PROJECT_CONTEXT_REF_BYTES = 4096 + len("code:")
 _FILE_CANDIDATE_LIMIT = 96
-MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 5
-MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 480
+MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 48
+MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 3072
 MAX_SEARCH_EVIDENCE_HITS = 3
 PROJECT_SEARCH_MAX_BYTES = 12 * 1024
 _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
@@ -1039,7 +1039,9 @@ def _attach_current_source_evidence(
             annotated.append(replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_PATH_ONLY))
             continue
         if reread_budget <= 0:
-            annotated.append(hit)
+            annotated.append(
+                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET)
+            )
             continue
         reread_budget -= 1
         read = read_current_search_text(
@@ -1111,21 +1113,58 @@ def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearc
     lines = text.splitlines()
     if not lines:
         return None
+
+    line_terms = tuple(
+        frozenset(
+            term for term in present_terms if matching_term_count((term,), line) == 1
+        )
+        for line in lines
+    )
+    counts = {term: 0 for term in present_terms}
+    covered = 0
+    left = 0
     best: tuple[int, int, int] | None = None
-    for start in range(len(lines)):
-        last = min(len(lines) - 1, start + MAX_SEARCH_EVIDENCE_SNIPPET_LINES - 1)
-        for end in range(start, last + 1):
-            window = "\n".join(lines[start : end + 1])
-            if matching_term_count(present_terms, window) < len(present_terms):
-                continue
-            candidate = (end - start, start, end)
-            if best is None or candidate < best:
-                best = candidate
+    for right, matched in enumerate(line_terms):
+        for term in matched:
+            if counts[term] == 0:
+                covered += 1
+            counts[term] += 1
+        while covered == len(present_terms) and left <= right:
+            width = right - left + 1
+            if width <= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
+                candidate = (width, left, right)
+                if best is None or candidate < best:
+                    best = candidate
+            for term in line_terms[left]:
+                counts[term] -= 1
+                if counts[term] == 0:
+                    covered -= 1
+            left += 1
     if best is None:
         return None
-    _, start, end = best
+
+    _, match_start, match_end = best
+    start = match_start
+    end = match_end
+    while end - start + 1 < MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
+        grew = False
+        if start > 0:
+            candidate = "\n".join(lines[start - 1 : end + 1])
+            if len(candidate.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
+                start -= 1
+                grew = True
+        if end - start + 1 >= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
+            break
+        if end + 1 < len(lines):
+            candidate = "\n".join(lines[start : end + 2])
+            if len(candidate.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
+                end += 1
+                grew = True
+        if not grew:
+            break
+
     snippet = "\n".join(lines[start : end + 1])
-    truncated = False
+    truncated = start > 0 or end < len(lines) - 1
     if len(snippet.encode("utf-8")) > MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
         snippet = _truncate_utf8(snippet, MAX_SEARCH_EVIDENCE_SNIPPET_BYTES)
         truncated = True
