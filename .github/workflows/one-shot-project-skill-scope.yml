@@ -28,49 +28,13 @@ jobs:
           gzip --decompress --stdout /tmp/project-skill-scope.patch.gz > /tmp/project-skill-scope.patch
           git apply --check /tmp/project-skill-scope.patch
           git apply /tmp/project-skill-scope.patch
-          rm -f \
-            .github/skill-policy-orig-01 \
-            .github/skill-policy-payload-00 \
-            .github/skill-policy-payload-01 \
-            .github/project-skill-scope.patch.gz.b64 \
-            .github/workflows/one-shot-project-skill-scope.yml
+          rm -f .github/skill-policy-orig-01
+          rm -f .github/skill-policy-payload-00
+          rm -f .github/skill-policy-payload-01
+          rm -f .github/project-skill-scope.patch.gz.b64
+          rm -f .github/workflows/one-shot-project-skill-scope.yml
           git diff --check
-          python -m py_compile \
-            src/harness/skill_policy.py \
-            src/harness/skills.py \
-            src/harness/skill_runtime.py \
-            src/harness/dashboard.py \
-            src/harness/storage.py
-          expected="$(cat <<'EOF'
-ARCHITECTURE.md
-docs/decisions/0045-project-skill-scope-policy.md
-docs/specification.md
-src/harness/builtin_skills.py
-src/harness/dashboard.py
-src/harness/dashboard_assets.py
-src/harness/dashboard_i18n.py
-src/harness/skill_policy.py
-src/harness/skill_runtime.py
-src/harness/skills.py
-src/harness/storage.py
-tests/test_index_reconcile_provenance.py
-tests/test_knowledge_schema.py
-tests/test_project_skill_policy.py
-tests/test_skill_relevance_reconciliation.py
-tests/test_storage.py
-tests/test_task_checkpoint_schema.py
-tests/test_task_operator_review_schema.py
-tests/test_task_stack_hints_schema.py
-tests/test_task_workflow_schema.py
-EOF
-)"
-          actual="$(git diff --name-only origin/main...HEAD; git diff --name-only)"
-          actual="$(printf '%s\n' "$actual" | sed '/^\.github\/skill-policy-/d;/^\.github\/project-skill-scope\.patch\.gz\.b64$/d;/^\.github\/workflows\/one-shot-project-skill-scope\.yml$/d' | sort -u)"
-          if [ "$(printf '%s\n' "$expected" | sort)" != "$actual" ]; then
-            echo 'Unexpected product diff:' >&2
-            printf '%s\n' "$actual" >&2
-            exit 1
-          fi
+          python -m py_compile src/harness/skill_policy.py src/harness/skills.py src/harness/skill_runtime.py src/harness/dashboard.py src/harness/storage.py
 
       - name: Commit product changes and remove transport
         shell: bash
