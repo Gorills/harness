@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 15
+        assert SCHEMA_VERSION == 16
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -124,6 +124,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TABLE project_skill_exclusions")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")
@@ -135,7 +136,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 15
+    assert status.schema_version == SCHEMA_VERSION == 16
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id, revision FROM tasks").fetchall() == [("task", 2)]

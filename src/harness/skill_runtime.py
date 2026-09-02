@@ -15,6 +15,7 @@ from harness.host_adapters import (
 )
 from harness.host_integration_state import load_host_integration_state_for_database
 from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
+from harness.skill_policy import ProjectSkillPolicyError
 from harness.skills import (
     SkillDefinition,
     SkillError,
@@ -143,7 +144,7 @@ def reconcile_workspace_skills(
         projection = apply_skill_projection(
             plan_skill_projection(workspace.workspace_root, resolved, surfaces)
         )
-    except SkillError as exc:
+    except (SkillError, ProjectSkillPolicyError) as exc:
         raise SkillRuntimeError("Workspace skill integration could not be reconciled") from exc
     _validate_workspace_identity(workspace)
     return WorkspaceSkillReconcileResult(
@@ -178,7 +179,7 @@ def inspect_workspace_skills(
             plan_skill_projection(workspace.workspace_root, resolved, surfaces),
             deadline=deadline,
         )
-    except SkillError as exc:
+    except (SkillError, ProjectSkillPolicyError) as exc:
         raise SkillRuntimeError("Workspace skill integration could not be inspected") from exc
     _validate_workspace_identity(workspace, deadline=deadline)
     return WorkspaceSkillInspectionResult(

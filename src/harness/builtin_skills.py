@@ -584,6 +584,7 @@ Official platform guidance:
             "pino",
             "winston",
         ),
+        applies_facets=("observability",),
     ),
     BuiltinSkill(
         "ci-release",

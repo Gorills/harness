@@ -372,7 +372,7 @@ def test_schema_v15_adds_reconcile_provenance_without_backfill(
 
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 15)
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 15
+    assert status.schema_version == 15
 
     connection = connect_database(database)
     try:

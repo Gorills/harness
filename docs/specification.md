@@ -1789,6 +1789,10 @@ Harness поставляет компактный product-owned quality pack в 
 
 Resolver materialize'ит каждый Skill, релевантный detected project stack или явно включённый
 project policy; количественного model-visible cap нет. Нерелевантные Skills в Project не попадают.
+Dashboard позволяет на уровне Project исключить стабильную область разработки, которой оператор не
+занимается (`web-frontend`, `backend-service`, `mobile-app`, `database-backed`, `godot-project`,
+`containerized`, `observability`, `ci-pipeline`, `deployment-ops`). Такое исключение применяется ко
+всем Workspaces Project и к будущим Skills этой области; `software-project` отключать нельзя.
 Подробные stack/domain инструкции могут жить в portable `references/` и должны читаться skill'ом
 только для затронутого языка или режима. Quality pack
 покрывает как минимум Docker lifecycle/configuration, public frontend discoverability для Google и
@@ -1938,7 +1942,9 @@ Harness не должен менять `.gitignore` без необходимо�
 # 81. Skill visibility
 
 Project видит все Skills, релевантные detected Workspace stack или явно включённые project policy,
-кроме явно исключённых. Количественного model-visible budget нет: порядок может быть
+кроме явно исключённых. Операторский Project skill scope может исключить detected development facet
+целиком, если эта часть repository не входит в его работу; новый Skill с той же facet автоматически
+наследует сохранённое исключение. Количественного model-visible budget нет: порядок может быть
 детерминирован relevance, но не должен отбрасывать matching Skill.
 
 Это не отменяет response budgets MCP: Skill files materialize'ятся через native host surface и
