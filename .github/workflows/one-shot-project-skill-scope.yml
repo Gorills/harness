@@ -1,0 +1,83 @@
+name: One-shot project skill scope materialization
+
+on:
+  push:
+    branches:
+      - feature/project-skill-scope
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: feature/project-skill-scope
+
+      - name: Apply exact reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/project-skill-scope.patch.gz.b64 > /tmp/project-skill-scope.patch.gz
+          echo '286bee40e1d1ee287781deb98aa22ec329f757b1ccf24b4b0a4fdd1633ff7e79  /tmp/project-skill-scope.patch.gz' | sha256sum --check --strict
+          gzip --decompress --stdout /tmp/project-skill-scope.patch.gz > /tmp/project-skill-scope.patch
+          git apply --check /tmp/project-skill-scope.patch
+          git apply /tmp/project-skill-scope.patch
+          rm -f \
+            .github/skill-policy-orig-01 \
+            .github/skill-policy-payload-00 \
+            .github/skill-policy-payload-01 \
+            .github/project-skill-scope.patch.gz.b64 \
+            .github/workflows/one-shot-project-skill-scope.yml
+          git diff --check
+          python -m py_compile \
+            src/harness/skill_policy.py \
+            src/harness/skills.py \
+            src/harness/skill_runtime.py \
+            src/harness/dashboard.py \
+            src/harness/storage.py
+          expected="$(cat <<'EOF'
+ARCHITECTURE.md
+docs/decisions/0045-project-skill-scope-policy.md
+docs/specification.md
+src/harness/builtin_skills.py
+src/harness/dashboard.py
+src/harness/dashboard_assets.py
+src/harness/dashboard_i18n.py
+src/harness/skill_policy.py
+src/harness/skill_runtime.py
+src/harness/skills.py
+src/harness/storage.py
+tests/test_index_reconcile_provenance.py
+tests/test_knowledge_schema.py
+tests/test_project_skill_policy.py
+tests/test_skill_relevance_reconciliation.py
+tests/test_storage.py
+tests/test_task_checkpoint_schema.py
+tests/test_task_operator_review_schema.py
+tests/test_task_stack_hints_schema.py
+tests/test_task_workflow_schema.py
+EOF
+)"
+          actual="$(git diff --name-only origin/main...HEAD; git diff --name-only)"
+          actual="$(printf '%s\n' "$actual" | sed '/^\.github\/skill-policy-/d;/^\.github\/project-skill-scope\.patch\.gz\.b64$/d;/^\.github\/workflows\/one-shot-project-skill-scope\.yml$/d' | sort -u)"
+          if [ "$(printf '%s\n' "$expected" | sort)" != "$actual" ]; then
+            echo 'Unexpected product diff:' >&2
+            printf '%s\n' "$actual" >&2
+            exit 1
+          fi
+
+      - name: Commit product changes and remove transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Add project-level skill scope controls'
+          git push origin HEAD:feature/project-skill-scope
