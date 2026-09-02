@@ -73,20 +73,23 @@ _SERVER_INSTRUCTIONS = (
     "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Do not "
     "skip Task because work looks small or the path is known. Then "
     "project_search before broad native work; an already-known exact path may skip search, "
-    "not Task. A code/doc path may be read natively; "
-    "project_context is not required for those kinds. Checkpoint each stage. New request or "
+    "not Task. Code/doc evidence is already a current-source read; when evidence is present, "
+    "use it directly and do not reread or re-search the same match natively. Native fallback "
+    "is for hits without evidence or source outside the returned range. project_context is not "
+    "required for code/doc kinds. Checkpoint each stage. New request or "
     "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision; "
     "never infer write targets. Hidden mode forbids durable SCM mutations."
 )
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search bounded Project Intelligence across local code/doc text and identifiers, "
     "durable Knowledge, and Task history. Natural queries may include conversational "
-    "filler. Results are compact refs. Code/doc hits may include a bounded current-source "
-    "evidence snippet after a live-file SHA match; FTS is not a source store. Use after "
-    "task_start or resume, before broad native exploration. Skip this search only when an "
-    "exact path is already in hand; Task remains required. If a code or doc hit includes "
-    "an exact path, targeted native read is allowed; project_context is not required for "
-    "those kinds."
+    "filler. Results are compact refs. Code/doc hits may include bounded current-source "
+    "evidence after a live-file SHA match; that evidence is the repository read for the "
+    "returned range, not an FTS snippet. Use it directly instead of repeating native search "
+    "or read for the same match. Native fallback is appropriate when evidence is absent or "
+    "the next step needs source outside the returned range. Use after task_start or resume, "
+    "before broad native exploration. Skip this search only when an exact path is already in "
+    "hand; Task remains required. project_context is not required for code/doc kinds."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
@@ -198,7 +201,7 @@ class VerificationInput(_StrictInputModel):
 
 
 class KnowledgeAnchorInput(_StrictInputModel):
-    """Strict model-facing Knowledge anchor input."""
+    """Strict model-facing Task verification input."""
 
     path: str
     symbol: str | None = None
