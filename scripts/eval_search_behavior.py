@@ -361,9 +361,34 @@ def _search_outcome(
     if not results:
         return query, SearchHitQuality.ZERO, ()
     paths = tuple(_candidate_paths(results))
-    if paths:
-        return query, SearchHitQuality.STRONG, paths
-    return query, SearchHitQuality.INSUFFICIENT, ()
+    if not paths:
+        return query, SearchHitQuality.INSUFFICIENT, ()
+
+    production_hits = tuple(
+        hit
+        for hit in results
+        if isinstance(hit, Mapping)
+        and hit.get("kind") in _CODE_DOC_KINDS
+        and isinstance(hit.get("path"), str)
+        and "evidence" in hit
+    )
+    if production_hits:
+        if any(_has_current_source_evidence(hit) for hit in production_hits):
+            return query, SearchHitQuality.STRONG, paths
+        return query, SearchHitQuality.INSUFFICIENT, paths
+
+    # Older/synthetic JSONL fixtures predate the production evidence fields. Keep them
+    # classifiable without weakening the current MCP contract, whose code/doc hits always
+    # include explicit evidence/evidence_reason fields.
+    return query, SearchHitQuality.STRONG, paths
+
+
+def _has_current_source_evidence(hit: Mapping[str, Any]) -> bool:
+    evidence = hit.get("evidence")
+    if not isinstance(evidence, Mapping):
+        return False
+    snippet = evidence.get("snippet")
+    return isinstance(snippet, str) and bool(snippet.strip())
 
 
 def _search_query(item: Mapping[str, Any]) -> str | None:

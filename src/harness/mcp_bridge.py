@@ -73,7 +73,7 @@ _SERVER_INSTRUCTIONS = (
     "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Do not "
     "skip Task because work looks small or the path is known. Then "
     "project_search before broad native work; an already-known exact path may skip search, "
-    "not Task. A code/doc path may be read natively; "
+    "not Task. Use evidence; else a code/doc path may be read natively; "
     "project_context is not required for those kinds. Checkpoint each stage. New request or "
     "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision; "
     "never infer write targets. Hidden mode forbids durable SCM mutations."
@@ -81,12 +81,12 @@ _SERVER_INSTRUCTIONS = (
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search bounded Project Intelligence across local code/doc text and identifiers, "
     "durable Knowledge, and Task history. Natural queries may include conversational "
-    "filler. Results are compact refs. Code/doc hits may include a bounded current-source "
-    "evidence snippet after a live-file SHA match; FTS is not a source store. Use after "
-    "task_start or resume, before broad native exploration. Skip this search only when an "
-    "exact path is already in hand; Task remains required. If a code or doc hit includes "
-    "an exact path, targeted native read is allowed; project_context is not required for "
-    "those kinds."
+    "filler. Results are compact refs. Code/doc hits may include bounded current-source "
+    "evidence after a live-file SHA match; that evidence is the repository read for the "
+    "returned range, not an FTS snippet. Use evidence directly. If evidence is absent or "
+    "more source is needed, targeted native read is allowed; project_context is not required "
+    "for those kinds. Use after task_start or resume, before broad native exploration. Skip "
+    "this search only when an exact path is already in hand; Task remains required."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
