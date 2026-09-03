@@ -84,7 +84,7 @@ _PROJECT_SEARCH_DESCRIPTION = (
     "Knowledge, and Task history. Harness reconciles watcher lag before retrieval. Explicit "
     "identifiers and quoted/backticked literals may return exact_coverage with current-source "
     "locations and aggregate counts. Identifier coverage may also include symbol_navigation: "
-    "current-source precise Python AST definitions/calls/imports/inheritance with relation evidence; "
+    "current-source precise Python/JS/TS/TSX/Go/Rust/Java syntax definitions/calls/imports/inheritance with relation evidence; "
     "unsupported matching code remains exact text coverage, not guessed syntax. When "
     "exact_coverage.complete=true and locations_truncated=false, do not repeat that needle with "
     "native rg/grep. Code/doc hits may "

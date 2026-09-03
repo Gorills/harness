@@ -89,6 +89,7 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     description = _PROJECT_SEARCH_DESCRIPTION
     assert "exact path" in description
     assert "targeted native read is allowed" in description
+    assert "Python/JS/TS/TSX/Go/Rust/Java" in description
     assert "project_context is not required for those kinds" in description
     assert "after task_start or resume" in description
     assert "Skip this search only when an" in description
