@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import pairwise
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from harness.index import (
     MAX_EXACT_SEARCH_FILE_BYTES,
@@ -42,7 +42,9 @@ from harness.search_text import (
     matching_term_count,
 )
 from harness.symbol_navigation import (
+    MAX_SYMBOL_PARSE_BYTES,
     SyntaxRelation,
+    analyze_precise_code_units,
     analyze_precise_symbol_relations,
     is_precise_symbol_path,
     precise_symbol_language,
@@ -76,6 +78,7 @@ MAX_EXACT_SEARCH_COVERAGE_BYTES = 4 * 1024
 MAX_SYMBOL_NAVIGATION_RELATIONS = 16
 MAX_SYMBOL_NAVIGATION_BYTES = 5 * 1024
 MAX_SYMBOL_RELATION_TEXT_BYTES = 512
+MAX_SYMBOL_IMPORT_VALIDATION_BYTES = 4 * 1024 * 1024
 PROJECT_SEARCH_MAX_BYTES = 12 * 1024
 _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
 EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
@@ -215,6 +218,12 @@ class ProjectSymbolRelation:
     evidence: ProjectSearchEvidence | None
     resolved_target: str | None = None
     resolution_kind: str | None = None
+    resolution_module: str | None = None
+    resolved_definition_path: str | None = None
+    resolved_definition_line: int | None = None
+    resolved_definition_column: int | None = None
+    resolved_definition_kind: str | None = None
+    resolution_validation_kind: str | None = None
 
     def to_wire(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -232,6 +241,16 @@ class ProjectSymbolRelation:
             payload["resolved_target"] = self.resolved_target
         if self.resolution_kind is not None:
             payload["resolution_kind"] = self.resolution_kind
+        if self.resolved_definition_path is not None:
+            payload["resolved_definition_path"] = self.resolved_definition_path
+        if self.resolved_definition_line is not None:
+            payload["resolved_definition_line"] = self.resolved_definition_line
+        if self.resolved_definition_column is not None:
+            payload["resolved_definition_column"] = self.resolved_definition_column
+        if self.resolved_definition_kind is not None:
+            payload["resolved_definition_kind"] = self.resolved_definition_kind
+        if self.resolution_validation_kind is not None:
+            payload["resolution_validation_kind"] = self.resolution_validation_kind
         return payload
 
 
@@ -309,6 +328,13 @@ class _RankedProjectHit:
     matched_terms: int
     lexical_score: float
     relevance_boost: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonIndexedModuleFile:
+    path: str
+    size_bytes: int
+    content_sha256: str
 
 
 def search_project(
@@ -587,6 +613,11 @@ def search_exact_source_inspection(
             parse_skipped_files=parse_skipped_files,
             matching_unsupported_files=matching_unsupported_files,
             source_scan_complete=(not budget_exhausted and unavailable_files == 0),
+        )
+        navigation = _validate_python_workspace_exports(
+            workspace,
+            rows,
+            navigation,
         )
     return ProjectExactSearchInspection(coverage, navigation)
 
@@ -2032,6 +2063,7 @@ def _project_symbol_relation(relation: SyntaxRelation) -> ProjectSymbolRelation:
             else _truncate_utf8(relation.resolved_target, MAX_SYMBOL_RELATION_TEXT_BYTES)
         ),
         resolution_kind=relation.resolution_kind,
+        resolution_module=relation.resolution_module,
         evidence=ProjectSearchEvidence(
             start_line=evidence.start_line,
             end_line=evidence.end_line,
@@ -2039,6 +2071,185 @@ def _project_symbol_relation(relation: SyntaxRelation) -> ProjectSymbolRelation:
             truncated=evidence.truncated,
         ),
     )
+
+
+def _validate_python_workspace_exports(
+    workspace: WorkspaceRecord,
+    indexed_rows: list[tuple[object, ...]],
+    navigation: ProjectSymbolNavigation,
+) -> ProjectSymbolNavigation:
+    """Attach positive-only direct-export locations for proven Python import bindings."""
+    module_files: list[_PythonIndexedModuleFile] = []
+    for raw_path, raw_kind, raw_size, raw_sha in indexed_rows:
+        if (
+            isinstance(raw_path, str)
+            and raw_kind == IndexedFileKind.FILE.value
+            and isinstance(raw_size, int)
+            and not isinstance(raw_size, bool)
+            and raw_size >= 0
+            and isinstance(raw_sha, str)
+            and precise_symbol_language(raw_path) == "python"
+            and not is_generated_text_output_path(raw_path)
+        ):
+            module_files.append(
+                _PythonIndexedModuleFile(
+                    path=raw_path,
+                    size_bytes=raw_size,
+                    content_sha256=raw_sha,
+                )
+            )
+
+    parse_cache: dict[str, tuple[SyntaxRelation, ...] | None] = {}
+    validation_bytes = 0
+
+    def direct_definitions(
+        module_file: _PythonIndexedModuleFile,
+    ) -> tuple[SyntaxRelation, ...] | None:
+        nonlocal validation_bytes
+        if module_file.path in parse_cache:
+            return parse_cache[module_file.path]
+        if (
+            module_file.size_bytes > MAX_SYMBOL_PARSE_BYTES
+            or validation_bytes + module_file.size_bytes > MAX_SYMBOL_IMPORT_VALIDATION_BYTES
+        ):
+            parse_cache[module_file.path] = None
+            return None
+        validation_bytes += module_file.size_bytes
+        read = read_current_exact_search_text(
+            workspace,
+            module_file.path,
+            expected_content_sha256=module_file.content_sha256,
+        )
+        if read.status is not ExactSearchReadStatus.OK or read.text is None:
+            parse_cache[module_file.path] = None
+            return None
+        analysis = analyze_precise_code_units(module_file.path, read.text)
+        if analysis.status != "ok":
+            parse_cache[module_file.path] = None
+            return None
+        definitions = tuple(
+            relation
+            for relation in analysis.relations
+            if relation.kind == "definition" and relation.scope is None
+        )
+        parse_cache[module_file.path] = definitions
+        return definitions
+
+    validated: list[ProjectSymbolRelation] = []
+    for relation in navigation.relations:
+        export_name = _python_direct_resolved_export_name(relation)
+        if export_name is None or relation.resolution_module is None:
+            validated.append(relation)
+            continue
+        candidates = _python_workspace_module_candidates(
+            relation.path,
+            relation.resolution_module,
+            module_files,
+        )
+        if len(candidates) != 1:
+            validated.append(relation)
+            continue
+        definitions = direct_definitions(candidates[0])
+        if definitions is None:
+            validated.append(relation)
+            continue
+        matches = [definition for definition in definitions if definition.target == export_name]
+        if len(matches) != 1:
+            validated.append(relation)
+            continue
+        definition = matches[0]
+        validated.append(
+            replace(
+                relation,
+                resolved_definition_path=definition.path,
+                resolved_definition_line=definition.line,
+                resolved_definition_column=definition.column,
+                resolved_definition_kind=definition.symbol_kind,
+                resolution_validation_kind="python_workspace_direct_export",
+            )
+        )
+    return _fit_symbol_navigation_to_budget(replace(navigation, relations=tuple(validated)))
+
+
+def _python_direct_resolved_export_name(relation: ProjectSymbolRelation) -> str | None:
+    if (
+        relation.kind != "call"
+        or relation.resolved_target is None
+        or relation.resolution_module is None
+        or relation.resolution_kind not in {"python_import_binding", "python_from_import_binding"}
+    ):
+        return None
+    module = relation.resolution_module
+    if not module:
+        return None
+    prefix = module if module.endswith(".") else f"{module}."
+    if not relation.resolved_target.startswith(prefix):
+        return None
+    export_name = relation.resolved_target[len(prefix) :]
+    if not export_name or "." in export_name or not export_name.isidentifier():
+        return None
+    return export_name
+
+
+def _python_workspace_module_candidates(
+    source_path: str,
+    module: str,
+    module_files: list[_PythonIndexedModuleFile],
+) -> tuple[_PythonIndexedModuleFile, ...]:
+    leading_dots = len(module) - len(module.lstrip("."))
+    module_tail = module[leading_dots:]
+    tail_parts = tuple(part for part in module_tail.split(".") if part)
+    if any(not part.isidentifier() for part in tail_parts):
+        return ()
+
+    if leading_dots:
+        source_parent = PurePosixPath(source_path).parent
+        parent_parts = source_parent.parts
+        ascend = leading_dots - 1
+        if ascend > len(parent_parts):
+            return ()
+        base_parts = parent_parts[: len(parent_parts) - ascend]
+        module_parts = (*base_parts, *tail_parts)
+        module_path = PurePosixPath(*module_parts) if module_parts else PurePosixPath(".")
+        exact_paths = (
+            _python_module_file_paths(module_path)
+            if tail_parts
+            else _python_package_init_paths(module_path)
+        )
+        return tuple(module_file for module_file in module_files if module_file.path in exact_paths)
+
+    if not tail_parts:
+        return ()
+    module_path = PurePosixPath(*tail_parts)
+    suffixes = _python_module_file_paths(module_path)
+    return tuple(
+        module_file
+        for module_file in module_files
+        if any(
+            module_file.path == suffix or module_file.path.endswith(f"/{suffix}")
+            for suffix in suffixes
+        )
+    )
+
+
+def _python_module_file_paths(module_path: PurePosixPath) -> frozenset[str]:
+    value = "" if str(module_path) == "." else str(module_path)
+    if not value:
+        return frozenset({"__init__.py", "__init__.pyi"})
+    return frozenset(
+        {
+            f"{value}.py",
+            f"{value}.pyi",
+            f"{value}/__init__.py",
+            f"{value}/__init__.pyi",
+        }
+    )
+
+
+def _python_package_init_paths(module_path: PurePosixPath) -> frozenset[str]:
+    value = "" if str(module_path) == "." else str(module_path)
+    prefix = "" if not value else f"{value}/"
+    return frozenset({f"{prefix}__init__.py", f"{prefix}__init__.pyi"})
 
 
 def _fit_symbol_navigation_to_budget(

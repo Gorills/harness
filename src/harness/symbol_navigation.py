@@ -49,6 +49,7 @@ class SyntaxRelation:
     evidence: SyntaxRelationEvidence
     resolved_target: str | None = None
     resolution_kind: str | None = None
+    resolution_module: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +168,7 @@ def _relation_key(relation: SyntaxRelation) -> tuple[int, int, str, int, int, st
 class _PythonImportBinding:
     target: str
     kind: str
+    module: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,9 +220,9 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
         if name:
             self.bound_names_by_scope.setdefault(self._scope, set()).add(name)
 
-    def _add_import(self, local_name: str, target: str, kind: str) -> None:
+    def _add_import(self, local_name: str, target: str, kind: str, *, module: str) -> None:
         self.imports_by_scope.setdefault(self._scope, {}).setdefault(local_name, []).append(
-            _PythonImportBinding(target=target, kind=kind)
+            _PythonImportBinding(target=target, kind=kind, module=module)
         )
 
     def _push_scope(self, name: str, kind: str) -> None:
@@ -245,7 +247,7 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
             else:
                 local = alias.name.split(".", 1)[0]
                 target = local
-            self._add_import(local, target, "python_import_binding")
+            self._add_import(local, target, "python_import_binding", module=target)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
@@ -255,7 +257,12 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
                 continue
             local = alias.asname or alias.name
             target = f"{prefix}{module}.{alias.name}" if module else f"{prefix}{alias.name}"
-            self._add_import(local, target, "python_from_import_binding")
+            self._add_import(
+                local,
+                target,
+                "python_from_import_binding",
+                module=f"{prefix}{module}",
+            )
 
     def visit_Global(self, node: ast.Global) -> None:
         for name in node.names:
@@ -389,7 +396,9 @@ class _PythonRelationVisitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         target = _dotted_expression(node.func)
         if target is not None:
-            resolved_target, resolution_kind = self._resolved_import_call_target(target)
+            resolved_target, resolution_kind, resolution_module = self._resolved_import_call_target(
+                target
+            )
             if self._target_matches(target) or (
                 resolved_target is not None and self._target_matches(resolved_target)
             ):
@@ -399,6 +408,7 @@ class _PythonRelationVisitor(ast.NodeVisitor):
                     target,
                     resolved_target=resolved_target,
                     resolution_kind=resolution_kind,
+                    resolution_module=resolution_module,
                 )
         self.generic_visit(node)
 
@@ -514,6 +524,7 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         *,
         resolved_target: str | None = None,
         resolution_kind: str | None = None,
+        resolution_module: str | None = None,
     ) -> None:
         line = _line_number(node)
         evidence = _reference_evidence(self.lines, line)
@@ -530,20 +541,23 @@ class _PythonRelationVisitor(ast.NodeVisitor):
                 evidence=evidence,
                 resolved_target=resolved_target,
                 resolution_kind=resolution_kind,
+                resolution_module=resolution_module,
             )
         )
 
-    def _resolved_import_call_target(self, target: str) -> tuple[str | None, str | None]:
+    def _resolved_import_call_target(
+        self, target: str
+    ) -> tuple[str | None, str | None, str | None]:
         analysis = self.binding_analysis
         if analysis is None or self.binding_resolution_suspended:
-            return None, None
+            return None, None, None
         function_scopes = [
             ".".join(scope_name for scope_name, _scope_kind in self.scopes[: index + 1])
             for index, (_scope_name, scope_kind) in enumerate(self.scopes)
             if scope_kind in {"function", "method"}
         ]
         if not function_scopes and any(scope_kind == "class" for _name, scope_kind in self.scopes):
-            return None, None
+            return None, None, None
 
         root, separator, remainder = target.partition(".")
         if function_scopes:
@@ -552,27 +566,27 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             if binding is not None:
                 return self._apply_import_binding(binding, remainder if separator else "")
             if analysis.scope_claims_name(current_scope, root):
-                return None, None
+                return None, None, None
             for outer_scope in reversed(function_scopes[:-1]):
                 if analysis.scope_claims_name(outer_scope, root):
-                    return None, None
+                    return None, None, None
 
         binding = analysis.safe_binding("", root)
         if binding is None:
-            return None, None
+            return None, None, None
         return self._apply_import_binding(binding, remainder if separator else "")
 
     @staticmethod
     def _apply_import_binding(
         binding: _PythonImportBinding,
         remainder: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, str | None]:
         if binding.kind == "python_from_import_binding":
             if remainder:
-                return None, None
-            return binding.target, binding.kind
+                return None, None, None
+            return binding.target, binding.kind, binding.module
         resolved = binding.target if not remainder else f"{binding.target}.{remainder}"
-        return resolved, binding.kind
+        return resolved, binding.kind, binding.module
 
     def _definition_matches(self, name: str, qualified: str) -> bool:
         if self.needle is None:
