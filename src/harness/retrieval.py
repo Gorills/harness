@@ -91,6 +91,27 @@ _QUALITY_ALL_TERMS = 4
 _QUALITY_PARTIAL = 5
 _QUALITY_STALE_OFFSET = 3
 
+_CODE_RELATION_INTENT_TERMS = {
+    "call": frozenset({"call", "calls", "caller", "callers", "called", "invoke", "invokes"}),
+    "import": frozenset(
+        {"import", "imports", "imported", "importer", "dependency", "dependencies"}
+    ),
+    "inheritance": frozenset(
+        {
+            "inherit",
+            "inherits",
+            "inherited",
+            "inheritance",
+            "extends",
+            "extend",
+            "implements",
+            "implement",
+            "implementation",
+        }
+    ),
+}
+_CODE_RELATION_QUESTION_TERMS = frozenset({"who", "where"})
+
 
 class ProjectRetrievalError(RuntimeError):
     """Base class for bounded Project Intelligence retrieval failures."""
@@ -742,6 +763,10 @@ def _file_hits(
             previous = ranked_by_ref.get(candidate.hit.ref)
             if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
                 ranked_by_ref[candidate.hit.ref] = candidate
+        for candidate in _indexed_code_relation_hits(connection, workspace_id, query, limit):
+            previous = ranked_by_ref.get(candidate.hit.ref)
+            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+                ranked_by_ref[candidate.hit.ref] = candidate
 
     ranked = sorted(ranked_by_ref.values(), key=_ranked_hit_key)
     return tuple(ranked[:limit])
@@ -851,6 +876,149 @@ def _indexed_code_unit_hits(
         if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
             ranked_by_ref[ref] = candidate
     return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _indexed_code_relation_hits(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: AnalyzedSearchQuery,
+    limit: int,
+) -> tuple[_RankedProjectHit, ...]:
+    plan = _code_relation_query_plan(query)
+    if plan is None:
+        return ()
+    fts_expression, relation_kinds, target_terms, explicit_intent = plan
+    candidate_limit = min(
+        _FILE_CANDIDATE_LIMIT,
+        max(24, limit * 8, len(target_terms) * 16),
+    )
+    placeholders = ", ".join("?" for _kind in relation_kinds)
+    rows = connection.execute(
+        f"""
+        SELECT
+            relations.relative_path,
+            relations.relation_kind,
+            relations.scope,
+            relations.target,
+            relations.line,
+            relations.in_test,
+            bm25(indexed_code_relation_search, 7.0, 5.0, 1.0, 0.5),
+            manifests.content_sha256,
+            files.kind,
+            files.content_sha256
+        FROM indexed_code_relation_search
+        JOIN indexed_code_relations AS relations
+            ON relations.id = indexed_code_relation_search.rowid
+        JOIN indexed_code_unit_files AS manifests
+            ON manifests.workspace_id = relations.workspace_id
+           AND manifests.relative_path = relations.relative_path
+        JOIN indexed_files AS files
+            ON files.workspace_id = relations.workspace_id
+           AND files.relative_path = relations.relative_path
+        WHERE indexed_code_relation_search MATCH ?
+          AND relations.workspace_id = ?
+          AND manifests.status = 'ok'
+          AND manifests.relation_status = 'ok'
+          AND relations.relation_kind IN ({placeholders})
+        ORDER BY bm25(indexed_code_relation_search, 7.0, 5.0, 1.0, 0.5),
+                 relations.relative_path, relations.line, relations.column
+        LIMIT ?
+        """,
+        (fts_expression, workspace_id, *relation_kinds, candidate_limit),
+    ).fetchall()
+    ranked_by_ref: dict[str, _RankedProjectHit] = {}
+    for row in rows:
+        (
+            relative_path,
+            relation_kind,
+            scope,
+            target,
+            line,
+            in_test,
+            raw_score,
+            manifest_sha256,
+            raw_kind,
+            indexed_sha256,
+        ) = row
+        if (
+            not isinstance(relative_path, str)
+            or relation_kind not in _CODE_RELATION_INTENT_TERMS
+            or not isinstance(scope, str)
+            or not isinstance(target, str)
+            or not target
+            or isinstance(line, bool)
+            or not isinstance(line, int)
+            or line <= 0
+            or isinstance(in_test, bool)
+            or not isinstance(in_test, int)
+            or in_test not in {0, 1}
+            or not isinstance(raw_score, (int, float))
+            or not isinstance(manifest_sha256, str)
+            or not isinstance(indexed_sha256, str)
+            or raw_kind != IndexedFileKind.FILE.value
+            or is_document_path(relative_path)
+            or is_generated_text_output_path(relative_path)
+        ):
+            raise ProjectRetrievalError(
+                "indexed code relation search crossed authoritative index state"
+            )
+        if manifest_sha256 != indexed_sha256:
+            continue
+        ref = f"code:{relative_path}"
+        summary = f"{relation_kind} {target}"
+        if scope:
+            summary = f"{summary} in {scope}"
+        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if explicit_intent else _QUALITY_ALL_TERMS
+        candidate = _RankedProjectHit(
+            hit=ProjectSearchHit(
+                ref=ref,
+                kind=ProjectSearchKind.CODE,
+                title=Path(relative_path).name,
+                location=relative_path,
+                short_summary=_truncate_utf8(summary, _SUMMARY_MAX_BYTES),
+                match_reason=f"code {relation_kind} relation",
+                freshness="indexed_snapshot",
+                path=relative_path,
+            ),
+            quality=quality,
+            matched_terms=len(query.terms),
+            lexical_score=float(raw_score),
+            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 1,
+        )
+        previous = ranked_by_ref.get(ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[ref] = candidate
+    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _code_relation_query_plan(
+    query: AnalyzedSearchQuery,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], bool] | None:
+    requested_kinds = tuple(
+        kind
+        for kind, intent_terms in _CODE_RELATION_INTENT_TERMS.items()
+        if any(term in intent_terms for term in query.terms)
+    )
+    if not requested_kinds:
+        return (
+            query.all_fts_expression,
+            tuple(_CODE_RELATION_INTENT_TERMS),
+            query.terms,
+            False,
+        )
+
+    all_intent_terms = frozenset().union(
+        *(_CODE_RELATION_INTENT_TERMS[kind] for kind in requested_kinds)
+    )
+    target_terms = tuple(
+        term
+        for term in query.terms
+        if term not in all_intent_terms and term not in _CODE_RELATION_QUESTION_TERMS
+    )
+    if not target_terms:
+        return None
+    target_query = analyze_search_query(" ".join(target_terms))
+    return target_query.all_fts_expression, requested_kinds, target_query.terms, True
 
 
 def _indexed_content_hits(

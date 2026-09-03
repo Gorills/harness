@@ -28,7 +28,7 @@ from harness.search_text import (
 from harness.symbol_navigation import (
     MAX_SYMBOL_PARSE_BYTES,
     SyntaxRelation,
-    analyze_precise_code_units,
+    analyze_precise_code_structure,
     precise_symbol_language,
 )
 
@@ -49,9 +49,21 @@ MAX_INDEXED_SEARCH_BODY_BYTES = 1024 * 1024
 MAX_EXACT_SEARCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_INDEXED_IDENTIFIER_TOKENS_BYTES = 256 * 1024
 MAX_INDEXED_CODE_UNITS_PER_FILE = 4096
+MAX_INDEXED_CODE_RELATIONS_PER_FILE = 8192
 MAX_INDEXED_CODE_UNIT_NAME_BYTES = 512
 MAX_INDEXED_CODE_UNIT_QUALIFIED_NAME_BYTES = 1024
+MAX_INDEXED_CODE_RELATION_SCOPE_BYTES = 1024
+MAX_INDEXED_CODE_RELATION_TARGET_BYTES = 1024
 MAX_INCREMENTAL_SCAN_PATHS = 256
+
+_CODE_RELATION_SEARCH_TERMS = {
+    "call": "call calls caller callers called invoke invokes invoked invocation who",
+    "import": "import imports imported importer dependency dependencies who",
+    "inheritance": (
+        "inherit inherits inherited inheritance extends extend implements implement "
+        "implementation who"
+    ),
+}
 
 
 class IndexingError(RuntimeError):
@@ -801,16 +813,17 @@ def _reconcile_code_units(
 ) -> None:
     rows = connection.execute(
         """
-        SELECT relative_path, content_sha256, language, status
+        SELECT relative_path, content_sha256, language, status, relation_status
         FROM indexed_code_unit_files
         WHERE workspace_id = ?
         ORDER BY relative_path
         """,
         (workspace.workspace_id,),
     ).fetchall()
-    existing: dict[str, tuple[str, str, str]] = {}
+    existing: dict[str, tuple[str, str, str, str]] = {}
     valid_statuses = {"ok", "parse_error", "too_large", "non_text", "unit_limit"}
-    for relative_path, content_sha256, language, status in rows:
+    valid_relation_statuses = {"unindexed", "ok", "relation_limit"}
+    for relative_path, content_sha256, language, status, relation_status in rows:
         if (
             not isinstance(relative_path, str)
             or relative_path in existing
@@ -819,9 +832,11 @@ def _reconcile_code_units(
             or not isinstance(language, str)
             or not isinstance(status, str)
             or status not in valid_statuses
+            or not isinstance(relation_status, str)
+            or relation_status not in valid_relation_statuses
         ):
             raise IndexingError("indexed code-unit manifest row has invalid persisted types")
-        existing[relative_path] = (content_sha256, language, status)
+        existing[relative_path] = (content_sha256, language, status, relation_status)
 
     unit_ids_by_path: dict[str, set[int]] = {}
     for raw_id, relative_path in connection.execute(
@@ -862,6 +877,46 @@ def _reconcile_code_units(
             raise IndexingError("indexed code-unit search returned an invalid row identity")
         fts_ids_by_path.setdefault(relative_path, set()).add(raw_id)
 
+    relation_ids_by_path: dict[str, set[int]] = {}
+    for raw_id, relative_path in connection.execute(
+        """
+        SELECT id, relative_path
+        FROM indexed_code_relations
+        WHERE workspace_id = ?
+        ORDER BY relative_path, position
+        """,
+        (workspace.workspace_id,),
+    ).fetchall():
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, int)
+            or raw_id <= 0
+            or not isinstance(relative_path, str)
+        ):
+            raise IndexingError("indexed code relation row has invalid persisted types")
+        relation_ids_by_path.setdefault(relative_path, set()).add(raw_id)
+
+    relation_fts_ids_by_path: dict[str, set[int]] = {}
+    for raw_id, relative_path in connection.execute(
+        """
+        SELECT relations.id, relations.relative_path
+        FROM indexed_code_relation_search
+        JOIN indexed_code_relations AS relations
+            ON relations.id = indexed_code_relation_search.rowid
+        WHERE relations.workspace_id = ?
+        ORDER BY relations.relative_path, relations.position
+        """,
+        (workspace.workspace_id,),
+    ).fetchall():
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, int)
+            or raw_id <= 0
+            or not isinstance(relative_path, str)
+        ):
+            raise IndexingError("indexed code relation search returned an invalid row identity")
+        relation_fts_ids_by_path.setdefault(relative_path, set()).add(raw_id)
+
     eligible_paths: set[str] = set()
     for record in snapshot.values():
         _require_scan_deadline(deadline)
@@ -872,12 +927,16 @@ def _reconcile_code_units(
         prior = existing.get(record.relative_path)
         unit_ids = unit_ids_by_path.get(record.relative_path, set())
         fts_ids = fts_ids_by_path.get(record.relative_path, set())
+        relation_ids = relation_ids_by_path.get(record.relative_path, set())
+        relation_fts_ids = relation_fts_ids_by_path.get(record.relative_path, set())
         if _code_unit_manifest_is_current(
             prior,
             content_sha256=record.content_sha256,
             language=language,
             unit_ids=unit_ids,
             fts_ids=fts_ids,
+            relation_ids=relation_ids,
+            relation_fts_ids=relation_fts_ids,
         ):
             continue
 
@@ -888,7 +947,9 @@ def _reconcile_code_units(
                 record,
                 language=language,
                 status="too_large",
+                relation_status="unindexed",
                 definitions=(),
+                relations=(),
             )
             continue
 
@@ -899,25 +960,43 @@ def _reconcile_code_units(
             deadline=deadline,
         )
         definitions: tuple[SyntaxRelation, ...]
+        relations: tuple[SyntaxRelation, ...]
         if text is None:
             status = "non_text"
+            relation_status = "unindexed"
             definitions = ()
+            relations = ()
         else:
-            analysis = analyze_precise_code_units(record.relative_path, text)
+            analysis = analyze_precise_code_structure(record.relative_path, text)
             if analysis.language != language:
                 raise IndexingError("precise code-unit parser language changed during indexing")
             if analysis.status == "ok":
-                definitions = analysis.relations
+                definitions = tuple(
+                    relation for relation in analysis.relations if relation.kind == "definition"
+                )
+                relations = tuple(
+                    relation for relation in analysis.relations if relation.kind != "definition"
+                )
                 status = "ok"
+                relation_status = "ok"
                 if not _code_unit_definitions_fit_bounds(definitions):
                     definitions = ()
+                    relations = ()
                     status = "unit_limit"
+                    relation_status = "unindexed"
+                elif not _code_relations_fit_bounds(relations):
+                    relations = ()
+                    relation_status = "relation_limit"
             elif analysis.status == "too_large":
                 definitions = ()
+                relations = ()
                 status = "too_large"
+                relation_status = "unindexed"
             else:
                 definitions = ()
+                relations = ()
                 status = "parse_error"
+                relation_status = "unindexed"
 
         _replace_code_unit_file(
             connection,
@@ -925,7 +1004,9 @@ def _reconcile_code_units(
             record,
             language=language,
             status=status,
+            relation_status=relation_status,
             definitions=definitions,
+            relations=relations,
         )
 
     for relative_path in sorted(set(existing) - eligible_paths):
@@ -940,19 +1021,34 @@ def _reconcile_code_units(
 
 
 def _code_unit_manifest_is_current(
-    prior: tuple[str, str, str] | None,
+    prior: tuple[str, str, str, str] | None,
     *,
     content_sha256: str,
     language: str,
     unit_ids: set[int],
     fts_ids: set[int],
+    relation_ids: set[int],
+    relation_fts_ids: set[int],
 ) -> bool:
     if prior is None or prior[:2] != (content_sha256, language):
         return False
     status = prior[2]
+    relation_status = prior[3]
     if status == "ok":
-        return unit_ids == fts_ids
-    return not unit_ids and not fts_ids
+        if unit_ids != fts_ids:
+            return False
+        if relation_status == "ok":
+            return relation_ids == relation_fts_ids
+        if relation_status == "relation_limit":
+            return not relation_ids and not relation_fts_ids
+        return False
+    return (
+        relation_status == "unindexed"
+        and not unit_ids
+        and not fts_ids
+        and not relation_ids
+        and not relation_fts_ids
+    )
 
 
 def _code_unit_definitions_fit_bounds(definitions: Sequence[SyntaxRelation]) -> bool:
@@ -972,6 +1068,23 @@ def _code_unit_definitions_fit_bounds(definitions: Sequence[SyntaxRelation]) -> 
     return True
 
 
+def _code_relations_fit_bounds(relations: Sequence[SyntaxRelation]) -> bool:
+    if len(relations) > MAX_INDEXED_CODE_RELATIONS_PER_FILE:
+        return False
+    for relation in relations:
+        if relation.kind not in _CODE_RELATION_SEARCH_TERMS or not relation.target:
+            raise IndexingError("precise code structure parser returned an unsupported relation")
+        scope = relation.scope or ""
+        if (
+            len(scope.encode("utf-8")) > MAX_INDEXED_CODE_RELATION_SCOPE_BYTES
+            or len(relation.target.encode("utf-8")) > MAX_INDEXED_CODE_RELATION_TARGET_BYTES
+        ):
+            return False
+        if relation.line <= 0 or relation.column <= 0 or not isinstance(relation.in_test, bool):
+            raise IndexingError("precise code relation has invalid persisted fields")
+    return True
+
+
 def _replace_code_unit_file(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -979,7 +1092,9 @@ def _replace_code_unit_file(
     *,
     language: str,
     status: str,
+    relation_status: str,
     definitions: Sequence[SyntaxRelation],
+    relations: Sequence[SyntaxRelation],
 ) -> None:
     connection.execute(
         "DELETE FROM indexed_code_unit_files WHERE workspace_id = ? AND relative_path = ?",
@@ -988,15 +1103,26 @@ def _replace_code_unit_file(
     connection.execute(
         """
         INSERT INTO indexed_code_unit_files(
-            workspace_id, relative_path, content_sha256, language, status
-        ) VALUES (?, ?, ?, ?, ?)
+            workspace_id, relative_path, content_sha256, language, status, relation_status
+        ) VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (workspace_id, record.relative_path, record.content_sha256, language, status),
+        (
+            workspace_id,
+            record.relative_path,
+            record.content_sha256,
+            language,
+            status,
+            relation_status,
+        ),
     )
     if status != "ok":
-        if definitions:
-            raise IndexingError("non-ok code-unit manifest cannot persist definitions")
+        if relation_status != "unindexed" or definitions or relations:
+            raise IndexingError("non-ok code-unit manifest cannot persist structural rows")
         return
+    if relation_status == "relation_limit" and relations:
+        raise IndexingError("relation-limit manifest cannot persist code relations")
+    if relation_status not in {"ok", "relation_limit"}:
+        raise IndexingError("ok code-unit manifest has invalid relation status")
     for position, definition in enumerate(definitions):
         target = definition.target
         symbol_kind = definition.symbol_kind
@@ -1034,6 +1160,46 @@ def _replace_code_unit_file(
             ) VALUES (?, ?, ?, ?, ?)
             """,
             (row[0], name, target, normalized_tokens, symbol_kind),
+        )
+
+    for position, relation in enumerate(relations):
+        scope = relation.scope or ""
+        row = connection.execute(
+            """
+            INSERT INTO indexed_code_relations(
+                workspace_id, relative_path, position, relation_kind, scope, target,
+                line, column, in_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                workspace_id,
+                record.relative_path,
+                position,
+                relation.kind,
+                scope,
+                relation.target,
+                relation.line,
+                relation.column,
+                int(relation.in_test),
+            ),
+        ).fetchone()
+        if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
+            raise IndexingError("indexed code relation identity was not persisted")
+        normalized_tokens = " ".join(dict.fromkeys(identifier_tokens(relation.target)))
+        connection.execute(
+            """
+            INSERT INTO indexed_code_relation_search(
+                rowid, target, identifier_tokens, scope, relation_terms
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                row[0],
+                relation.target,
+                normalized_tokens,
+                scope,
+                _CODE_RELATION_SEARCH_TERMS[relation.kind],
+            ),
         )
 
 

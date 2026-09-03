@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1669,6 +1669,71 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             AFTER DELETE ON indexed_code_units
             BEGIN
                 DELETE FROM indexed_code_unit_search WHERE rowid = OLD.id;
+            END;
+            """,
+        )
+        return
+    if target_version == 19:
+        connection.execute(
+            """
+            ALTER TABLE indexed_code_unit_files
+            ADD COLUMN relation_status TEXT NOT NULL DEFAULT 'unindexed' CHECK (
+                relation_status IN ('unindexed', 'ok', 'relation_limit')
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE indexed_code_relations (
+                id INTEGER PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                position INTEGER NOT NULL CHECK (position >= 0 AND position < 8192),
+                relation_kind TEXT NOT NULL CHECK (
+                    relation_kind IN ('call', 'import', 'inheritance')
+                ),
+                scope TEXT NOT NULL CHECK (
+                    length(CAST(scope AS BLOB)) <= 1024
+                ),
+                target TEXT NOT NULL CHECK (
+                    target <> '' AND length(CAST(target AS BLOB)) <= 1024
+                ),
+                line INTEGER NOT NULL CHECK (line > 0),
+                column INTEGER NOT NULL CHECK (column > 0),
+                in_test INTEGER NOT NULL CHECK (in_test IN (0, 1)),
+                UNIQUE (workspace_id, relative_path, position),
+                FOREIGN KEY (workspace_id, relative_path)
+                    REFERENCES indexed_code_unit_files(workspace_id, relative_path)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX indexed_code_relations_workspace_path_idx
+            ON indexed_code_relations(workspace_id, relative_path, line, column)
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE indexed_code_relation_search USING fts5(
+                target,
+                identifier_tokens,
+                scope,
+                relation_terms,
+                content = '',
+                contentless_delete = 1,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TRIGGER indexed_code_relation_search_delete
+            AFTER DELETE ON indexed_code_relations
+            BEGIN
+                DELETE FROM indexed_code_relation_search WHERE rowid = OLD.id;
             END;
             """,
         )

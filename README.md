@@ -95,6 +95,7 @@ Codex and Cursor production MCP are project-only and use Harness-owned intent ra
 - [ADR-0047: Current-source symbol navigation](docs/decisions/0047-current-source-symbol-navigation.md)
 - [ADR-0048: Offline polyglot symbol providers](docs/decisions/0048-offline-polyglot-symbol-providers.md)
 - [ADR-0049: Persistent code-unit candidates](docs/decisions/0049-persistent-code-unit-candidates.md)
+- [ADR-0050: Persistent syntactic code relations](docs/decisions/0050-persistent-syntactic-code-relations.md)
 - [ADR-0022: Linux Claude Code installation lifecycle](docs/decisions/0022-linux-claude-installation-lifecycle.md)
 - [ADR-0023: Linux operational diagnostics and upgrade-safe runtime identity](docs/decisions/0023-linux-operational-diagnostics-and-upgrade-safety.md)
 - [ADR-0024: Linux Cursor MCP integration and multi-host lifecycle](docs/decisions/0024-linux-cursor-multi-host-lifecycle.md)
