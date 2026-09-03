@@ -271,7 +271,8 @@ def test_project_search_uses_content_for_natural_queries_and_compound_identifier
         assert natural[0].ref == "code:src/refresh_token.py"
         assert natural[0].match_reason == "lexical content (all terms)"
         assert compound[0].ref == "code:src/refresh_token.py"
-        assert compound[0].match_reason == "normalized identifier/title phrase"
+        assert compound[0].match_reason == "code unit definition phrase"
+        assert compound[0].short_summary == "function rotateRefreshToken"
         assert test_query[0].ref == "code:tests/test_refresh_token.py"
         assert natural[0].evidence is not None
         assert "credential" in natural[0].evidence.snippet

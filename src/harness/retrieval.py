@@ -737,8 +737,120 @@ def _file_hits(
         if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
             ranked_by_ref[candidate.hit.ref] = candidate
 
+    if scope is IndexedPathSearchScope.CODE:
+        for candidate in _indexed_code_unit_hits(connection, workspace_id, query, limit):
+            previous = ranked_by_ref.get(candidate.hit.ref)
+            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+                ranked_by_ref[candidate.hit.ref] = candidate
+
     ranked = sorted(ranked_by_ref.values(), key=_ranked_hit_key)
     return tuple(ranked[:limit])
+
+
+def _indexed_code_unit_hits(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: AnalyzedSearchQuery,
+    limit: int,
+) -> tuple[_RankedProjectHit, ...]:
+    candidate_limit = min(
+        _FILE_CANDIDATE_LIMIT,
+        max(24, limit * 8, len(query.terms) * 16),
+    )
+    rows = connection.execute(
+        """
+        SELECT
+            units.relative_path,
+            units.name,
+            units.qualified_name,
+            units.symbol_kind,
+            units.line,
+            bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
+            manifests.content_sha256,
+            files.kind,
+            files.content_sha256
+        FROM indexed_code_unit_search
+        JOIN indexed_code_units AS units
+            ON units.id = indexed_code_unit_search.rowid
+        JOIN indexed_code_unit_files AS manifests
+            ON manifests.workspace_id = units.workspace_id
+           AND manifests.relative_path = units.relative_path
+        JOIN indexed_files AS files
+            ON files.workspace_id = units.workspace_id
+           AND files.relative_path = units.relative_path
+        WHERE indexed_code_unit_search MATCH ?
+          AND units.workspace_id = ?
+          AND manifests.status = 'ok'
+        ORDER BY bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
+                 units.relative_path, units.line, units.column
+        LIMIT ?
+        """,
+        (query.all_fts_expression, workspace_id, candidate_limit),
+    ).fetchall()
+    ranked_by_ref: dict[str, _RankedProjectHit] = {}
+    for row in rows:
+        (
+            relative_path,
+            name,
+            qualified_name,
+            symbol_kind,
+            line,
+            raw_score,
+            manifest_sha256,
+            raw_kind,
+            indexed_sha256,
+        ) = row
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(name, str)
+            or not isinstance(qualified_name, str)
+            or not isinstance(symbol_kind, str)
+            or isinstance(line, bool)
+            or not isinstance(line, int)
+            or line <= 0
+            or not isinstance(raw_score, (int, float))
+            or not isinstance(manifest_sha256, str)
+            or not isinstance(indexed_sha256, str)
+            or raw_kind != IndexedFileKind.FILE.value
+            or is_document_path(relative_path)
+            or is_generated_text_output_path(relative_path)
+        ):
+            raise ProjectRetrievalError(
+                "indexed code-unit search crossed authoritative index state"
+            )
+        if manifest_sha256 != indexed_sha256:
+            continue
+        phrase_match = contains_term_phrase(query.terms, name) or contains_term_phrase(
+            query.terms, qualified_name
+        )
+        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if phrase_match else _QUALITY_ALL_TERMS
+        reason = (
+            "code unit definition phrase" if phrase_match else "code unit definition (all terms)"
+        )
+        ref = f"code:{relative_path}"
+        candidate = _RankedProjectHit(
+            hit=ProjectSearchHit(
+                ref=ref,
+                kind=ProjectSearchKind.CODE,
+                title=Path(relative_path).name,
+                location=relative_path,
+                short_summary=_truncate_utf8(
+                    f"{symbol_kind} {qualified_name}",
+                    _SUMMARY_MAX_BYTES,
+                ),
+                match_reason=reason,
+                freshness="indexed_snapshot",
+                path=relative_path,
+            ),
+            quality=quality,
+            matched_terms=len(query.terms),
+            lexical_score=float(raw_score),
+            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 1,
+        )
+        previous = ranked_by_ref.get(ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[ref] = candidate
+    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
 
 
 def _indexed_content_hits(
@@ -1472,7 +1584,12 @@ def _attach_current_source_evidence(
         )
         if read.status is SearchEvidenceReadStatus.CHANGED_SINCE_INDEX:
             annotated.append(
-                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX)
+                replace(
+                    hit,
+                    short_summary=None,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX,
+                )
             )
             continue
         if read.status is not SearchEvidenceReadStatus.OK or read.text is None:
