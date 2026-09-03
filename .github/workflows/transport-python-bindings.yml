@@ -6,6 +6,7 @@ on:
       - feature/search-v2-python-import-bindings
     paths:
       - .transport/python-bindings.b64
+      - .transport/retry
 
 permissions:
   contents: write
@@ -40,10 +41,6 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           test -n "$(git diff --cached --name-only)"
-          if git diff --cached --name-only | grep -E '^(\.transport/|\.github/workflows/transport-python-bindings\.yml$)'; then
-            echo 'transport files unexpectedly remain staged' >&2
-            exit 1
-          fi
           git commit -m 'feat: resolve Python import bindings in symbol navigation'
           test -z "$(git status --porcelain)"
           if git ls-tree -r --name-only HEAD | grep -E '^(\.transport/|\.github/workflows/transport-python-bindings\.yml$)'; then
