@@ -475,6 +475,37 @@ def test_symbol_navigation_validates_relative_python_import_against_package_expo
         connection.close()
 
 
+def test_symbol_navigation_validates_pure_relative_import_only_against_package_init(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "pkg.py": "def target_call():\n    return 99\n",
+            "pkg/__init__.py": "def target_call():\n    return 1\n",
+            "pkg/use.py": ("from . import target_call as tc\n\ndef invoke():\n    return tc()\n"),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "target_call",
+            scope=ProjectSearchScope.CODE,
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "pkg/use.py"
+        )
+        assert call.resolved_target == ".target_call"
+        assert call.resolved_definition_path == "pkg/__init__.py"
+        assert call.resolution_validation_kind == "python_workspace_direct_export"
+    finally:
+        connection.close()
+
+
 def test_symbol_navigation_workspace_export_validation_fails_closed_on_ambiguous_module(
     tmp_path: Path,
 ) -> None:

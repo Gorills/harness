@@ -2211,7 +2211,11 @@ def _python_workspace_module_candidates(
         base_parts = parent_parts[: len(parent_parts) - ascend]
         module_parts = (*base_parts, *tail_parts)
         module_path = PurePosixPath(*module_parts) if module_parts else PurePosixPath(".")
-        exact_paths = _python_module_file_paths(module_path)
+        exact_paths = (
+            _python_module_file_paths(module_path)
+            if tail_parts
+            else _python_package_init_paths(module_path)
+        )
         return tuple(module_file for module_file in module_files if module_file.path in exact_paths)
 
     if not tail_parts:
@@ -2240,6 +2244,12 @@ def _python_module_file_paths(module_path: PurePosixPath) -> frozenset[str]:
             f"{value}/__init__.pyi",
         }
     )
+
+
+def _python_package_init_paths(module_path: PurePosixPath) -> frozenset[str]:
+    value = "" if str(module_path) == "." else str(module_path)
+    prefix = "" if not value else f"{value}/"
+    return frozenset({f"{prefix}__init__.py", f"{prefix}__init__.pyi"})
 
 
 def _fit_symbol_navigation_to_budget(
