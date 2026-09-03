@@ -1,0 +1,66 @@
+name: Repair PR 106 wheel smoke
+
+on:
+  push:
+    branches:
+      - feature/search-v2-polyglot-navigation
+
+permissions:
+  contents: write
+
+jobs:
+  repair:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/search-v2-polyglot-navigation
+
+      - name: Patch wheel smoke runtime dependency contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path("scripts/smoke_wheel.py")
+          text = path.read_text(encoding="utf-8")
+
+          replacements = {
+              'DECLARED_MCP_REQUIREMENT = "mcp==2.0.0"': (
+                  'DECLARED_RUNTIME_REQUIREMENTS = ("ast-grep-py==0.45.1", "mcp==2.0.0")'
+              ),
+              '''def _install_wheel(uv: str, python: Path, wheel: Path, workspace: Path) -> None:\n    """Install the built wheel, then its declared MCP runtime dependency.\n\n    ``--no-deps`` keeps undeclared packages out of the smoke venv. ADR-0037\n    starts daemon-owned Streamable HTTP during ``harnessd serve``, so the\n    pinned MCP SDK (and its uvicorn/starlette graph) must still be present.\n    """\n    _run(\n        (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),\n        cwd=workspace,\n    )\n    _run(\n        (uv, "pip", "install", "--python", str(python), DECLARED_MCP_REQUIREMENT),\n        cwd=workspace,\n    )\n''': '''def _install_wheel(uv: str, python: Path, wheel: Path, workspace: Path) -> None:\n    """Install the wheel, then each declared runtime dependency explicitly.\n\n    ``--no-deps`` keeps undeclared packages out of the smoke venv while still\n    proving that every shipping runtime dependency is present and installable.\n    """\n    _run(\n        (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),\n        cwd=workspace,\n    )\n    for requirement in DECLARED_RUNTIME_REQUIREMENTS:\n        _run(\n            (uv, "pip", "install", "--python", str(python), requirement),\n            cwd=workspace,\n        )\n''',
+              '''        if f"Requires-Dist: {DECLARED_MCP_REQUIREMENT}" not in metadata:\n            raise RuntimeError(\n                "wheel metadata does not pin the official MCP SDK runtime dependency"\n            )\n''': '''        missing_requirements = [\n            requirement\n            for requirement in DECLARED_RUNTIME_REQUIREMENTS\n            if f"Requires-Dist: {requirement}" not in metadata\n        ]\n        if missing_requirements:\n            raise RuntimeError(\n                f"wheel metadata is missing pinned runtime dependencies: {missing_requirements!r}"\n            )\n''',
+          }
+
+          for old, new in replacements.items():
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one replacement target, found {count}")
+              text = text.replace(old, new)
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Verify repair shape
+        run: |
+          python -m py_compile scripts/smoke_wheel.py
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("scripts/smoke_wheel.py").read_text(encoding="utf-8")
+          assert "DECLARED_MCP_REQUIREMENT" not in text
+          assert 'DECLARED_RUNTIME_REQUIREMENTS = ("ast-grep-py==0.45.1", "mcp==2.0.0")' in text
+          assert "for requirement in DECLARED_RUNTIME_REQUIREMENTS" in text
+          assert "missing_requirements = [" in text
+          PY
+
+      - name: Commit repair
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/smoke_wheel.py
+          git diff --cached --check
+          git diff --cached --exit-code -- .github/workflows/repair-106.yml
+          git commit -m "Fix wheel smoke runtime dependency install"
+          git push origin HEAD:feature/search-v2-polyglot-navigation
