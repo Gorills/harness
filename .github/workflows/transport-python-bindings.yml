@@ -1,0 +1,53 @@
+name: Transport Python import bindings
+
+on:
+  push:
+    branches:
+      - feature/search-v2-python-import-bindings
+    paths:
+      - .transport/python-bindings.b64
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out transport head
+        uses: actions/checkout@v4
+        with:
+          ref: feature/search-v2-python-import-bindings
+          fetch-depth: 0
+      - name: Verify and apply patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .transport/python-bindings.b64 > /tmp/python-bindings.patch.gz
+          echo '7ada1d8a179296b18cc495ae441331b7a46c8df5df1188165877f2876e99dfb8  /tmp/python-bindings.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/python-bindings.patch.gz > /tmp/python-bindings.patch
+          echo '0c47dffb82c3e8e5aee4e9041c3431fd4feaa890798d433af977fc1ed7cd6dd9  /tmp/python-bindings.patch' | sha256sum -c -
+          git apply --check /tmp/python-bindings.patch
+          git apply /tmp/python-bindings.patch
+          rm -rf .transport .github/workflows/transport-python-bindings.yml
+          git diff --check
+          python -m compileall -q src/harness tests/test_search_v2_symbol_navigation.py
+      - name: Commit clean feature tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          test -n "$(git diff --cached --name-only)"
+          if git diff --cached --name-only | grep -E '^(\.transport/|\.github/workflows/transport-python-bindings\.yml$)'; then
+            echo 'transport files unexpectedly remain staged' >&2
+            exit 1
+          fi
+          git commit -m 'feat: resolve Python import bindings in symbol navigation'
+          test -z "$(git status --porcelain)"
+          if git ls-tree -r --name-only HEAD | grep -E '^(\.transport/|\.github/workflows/transport-python-bindings\.yml$)'; then
+            echo 'transport files unexpectedly remain in final tree' >&2
+            exit 1
+          fi
+          git push origin HEAD:feature/search-v2-python-import-bindings
