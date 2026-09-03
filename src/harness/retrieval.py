@@ -45,6 +45,7 @@ from harness.symbol_navigation import (
     SyntaxRelation,
     analyze_precise_symbol_relations,
     is_precise_symbol_path,
+    precise_symbol_language,
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
 from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
@@ -432,6 +433,7 @@ def search_exact_source_inspection(
     locations_truncated = False
     budget_exhausted = False
 
+    precise_languages: set[str] = set()
     candidate_precise_files = 0
     parsed_precise_files = 0
     parse_failures = 0
@@ -507,6 +509,10 @@ def search_exact_source_inspection(
                 and symbol_candidate_text in read.text
             ):
                 candidate_precise_files += 1
+                language = precise_symbol_language(raw_path)
+                if language is None:
+                    raise ProjectRetrievalError("precise symbol path has no parser language")
+                precise_languages.add(language)
                 analysis = analyze_precise_symbol_relations(
                     raw_path,
                     read.text,
@@ -546,6 +552,7 @@ def search_exact_source_inspection(
         navigation = _build_symbol_navigation(
             symbol_needle,
             syntax_relations,
+            precise_languages=tuple(sorted(precise_languages)),
             candidate_precise_files=candidate_precise_files,
             parsed_precise_files=parsed_precise_files,
             parse_failures=parse_failures,
@@ -1646,6 +1653,7 @@ def _build_symbol_navigation(
     needle: str,
     syntax_relations: list[SyntaxRelation],
     *,
+    precise_languages: tuple[str, ...],
     candidate_precise_files: int,
     parsed_precise_files: int,
     parse_failures: int,
@@ -1667,7 +1675,7 @@ def _build_symbol_navigation(
     truncated = len(relations) > MAX_SYMBOL_NAVIGATION_RELATIONS
     navigation = ProjectSymbolNavigation(
         needle=needle,
-        precise_languages=("python",),
+        precise_languages=precise_languages,
         candidate_precise_files=candidate_precise_files,
         parsed_precise_files=parsed_precise_files,
         parse_failures=parse_failures,
@@ -1683,6 +1691,7 @@ def _build_symbol_navigation(
             and candidate_precise_files == parsed_precise_files
             and parse_failures == 0
             and parse_skipped_files == 0
+            and matching_unsupported_files == 0
         ),
         relations_truncated=truncated,
         evidence_truncated=False,

@@ -9,6 +9,7 @@ description = "Local-first control plane for coding agents"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "ast-grep-py==0.45.1",
     "mcp==2.0.0",
 ]
 

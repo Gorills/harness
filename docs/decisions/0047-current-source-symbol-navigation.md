@@ -4,6 +4,9 @@
 - **Date:** 2026-09-03
 - **Deciders:** Repository architecture baseline
 
+> **Extended by ADR-0048 (2026-09-03):** the provider boundary now includes a locked offline
+> ast-grep provider for JS/JSX, TS/TSX, Go, Rust, and Java; Python remains stdlib AST.
+
 ## Context
 
 ADR-0046 made explicit identifier/literal search current-worktree and exhaustive when bounded

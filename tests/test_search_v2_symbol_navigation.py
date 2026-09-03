@@ -195,7 +195,7 @@ def test_symbol_navigation_reports_unsupported_matching_code_without_regex_class
 ) -> None:
     _root, connection, workspace_id = _registered(
         tmp_path,
-        {"src/app.ts": "function target_call() {}\ntarget_call()\n"},
+        {"src/app.vue": "function target_call() {}\ntarget_call()\n"},
     )
     try:
         inspection = search_exact_source_inspection(
@@ -212,6 +212,7 @@ def test_symbol_navigation_reports_unsupported_matching_code_without_regex_class
         assert navigation.candidate_precise_files == 0
         assert navigation.parsed_precise_files == 0
         assert navigation.matching_unsupported_files == 1
+        assert navigation.precise_classification_complete is False
         assert navigation.relations == ()
     finally:
         connection.close()
@@ -427,5 +428,446 @@ def test_symbol_navigation_preserves_relative_import_target(tmp_path: Path) -> N
         assert navigation is not None
         relation = next(item for item in navigation.relations if item.kind == "import")
         assert relation.target == ".service.target_call"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_typescript_relations(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.ts": "export function target_call(value: number) { return value + 1 }\n",
+            "src/use.ts": (
+                "import { target_call } from './service'\n"
+                "export function run() { return target_call(1) }\n"
+            ),
+            "tests/service.test.ts": (
+                "import { target_call } from '../src/service'\n"
+                "test('works', () => target_call(1))\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.precise_languages == ("typescript",)
+        assert navigation.candidate_precise_files == 3
+        assert navigation.parsed_precise_files == 3
+        assert navigation.definition_count == 1
+        assert navigation.call_count == 2
+        assert navigation.test_call_count == 1
+        assert navigation.import_count == 2
+        assert navigation.precise_classification_complete is True
+        assert navigation.relations[0].kind == "definition"
+        assert navigation.relations[0].target == "target_call"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_javascript_inheritance_and_method(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/model.js": (
+                "class Base {}\n"
+                "class Client extends Base { fetch() { return 1 } }\n"
+                "function run() { return new Client().fetch() }\n"
+            )
+        },
+    )
+    try:
+        base = search_exact_source_inspection(
+            connection, workspace_id, "Base", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        fetch = search_exact_source_inspection(
+            connection, workspace_id, "fetch", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert base is not None
+        assert base.precise_languages == ("javascript",)
+        assert base.definition_count == 1
+        assert base.inheritance_count == 1
+        assert fetch is not None
+        definition = next(item for item in fetch.relations if item.kind == "definition")
+        call = next(item for item in fetch.relations if item.kind == "call")
+        assert definition.target == "Client.fetch"
+        assert definition.symbol_kind == "method"
+        assert call.target.endswith(".fetch")
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_go_method_and_calls(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/client.go": (
+                "package service\n"
+                "type Client struct{}\n"
+                "func (c Client) Fetch() { target_call() }\n"
+                "func target_call() {}\n"
+            )
+        },
+    )
+    try:
+        target = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        fetch = search_exact_source_inspection(
+            connection, workspace_id, "Fetch", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert target is not None
+        assert target.precise_languages == ("go",)
+        assert target.definition_count == 1
+        assert target.call_count == 1
+        assert fetch is not None
+        definition = next(item for item in fetch.relations if item.kind == "definition")
+        assert definition.target == "Client.Fetch"
+        assert definition.scope == "Client"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_rust_trait_impl_calls_and_use(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/lib.rs": (
+                "use crate::service::target_call;\n"
+                "trait Repo { fn fetch(&self); }\n"
+                "struct Client;\n"
+                "impl Repo for Client { fn fetch(&self) { target_call(); } }\n"
+            )
+        },
+    )
+    try:
+        target = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        repo = search_exact_source_inspection(
+            connection, workspace_id, "Repo", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        fetch = search_exact_source_inspection(
+            connection, workspace_id, "fetch", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert target is not None
+        assert target.precise_languages == ("rust",)
+        assert target.call_count == 1
+        assert target.import_count == 1
+        assert repo is not None
+        assert repo.definition_count == 1
+        assert repo.inheritance_count == 1
+        assert fetch is not None
+        assert fetch.definition_count == 2
+        assert {item.target for item in fetch.relations if item.kind == "definition"} == {
+            "Repo.fetch",
+            "Client.fetch",
+        }
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_java_relations(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/Client.java": (
+                "import pkg.Target;\n"
+                "class Base {}\n"
+                "interface Repo {}\n"
+                "class Client extends Base implements Repo {\n"
+                "  void fetch() { target_call(); }\n"
+                "  static void target_call() {}\n"
+                "}\n"
+            )
+        },
+    )
+    try:
+        target = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        base = search_exact_source_inspection(
+            connection, workspace_id, "Base", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert target is not None
+        assert target.precise_languages == ("java",)
+        assert target.definition_count == 1
+        assert target.call_count == 1
+        assert next(item for item in target.relations if item.kind == "definition").target == (
+            "Client.target_call"
+        )
+        assert base is not None
+        assert base.definition_count == 1
+        assert base.inheritance_count == 1
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_reports_polyglot_parse_error_without_guessing(tmp_path: Path) -> None:
+    root, connection, _workspace_id = _registered(
+        tmp_path,
+        {"src/app.ts": "function old_name() {}\n"},
+    )
+    try:
+        (root / "src/app.ts").write_text(
+            "function target_call( { target_call()\n",
+            encoding="utf-8",
+        )
+        result = read_project_search(
+            connection,
+            (WorkspaceHint(root, "explicit-root"),),
+            "target_call",
+            5,
+            ProjectSearchScope.CODE,
+            Lock(),
+        )
+        assert result.exact_coverage is not None
+        navigation = result.symbol_navigation
+        assert navigation is not None
+        assert navigation.precise_languages == ("typescript",)
+        assert navigation.parse_failures == 1
+        assert navigation.parsed_precise_files == 0
+        assert navigation.relations == ()
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_reports_multiple_precise_languages(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/a.ts": "export function target_call() {}\n",
+            "src/b.go": "package b\nfunc target_call() {}\n",
+            "src/c.vue": "function target_call() {}\n",
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.precise_languages == ("go", "typescript")
+        assert navigation.candidate_precise_files == 2
+        assert navigation.parsed_precise_files == 2
+        assert navigation.matching_unsupported_files == 1
+        assert navigation.precise_classification_complete is False
+        assert navigation.definition_count == 2
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_tsx_definition_and_call(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/Button.tsx": "export function Button() { return <button onClick={() => Button()} /> }\n"
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Button", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.precise_languages == ("tsx",)
+        assert navigation.definition_count == 1
+        assert navigation.call_count == 1
+        assert navigation.precise_classification_complete is True
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_java_import(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {"src/App.java": "import pkg.Target;\nclass App { Target value; }\n"},
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Target", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.import_count == 1
+        assert any(
+            item.kind == "import" and item.target == "pkg.Target" for item in navigation.relations
+        )
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_classifies_rust_alias_and_grouped_imports(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/lib.rs": (
+                "use crate::service::target_call as tc;\n"
+                "use crate::service::{other_call, third_call as third};\n"
+                "fn run() { tc(); other_call(); third(); }\n"
+            )
+        },
+    )
+    try:
+        alias = search_exact_source_inspection(
+            connection, workspace_id, "tc", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        grouped = search_exact_source_inspection(
+            connection, workspace_id, "other_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        grouped_alias = search_exact_source_inspection(
+            connection, workspace_id, "third", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert alias is not None
+        assert alias.import_count == 1
+        assert any(
+            item.kind == "import" and item.target == "crate::service::target_call"
+            for item in alias.relations
+        )
+        assert alias.call_count == 1
+        assert grouped is not None
+        assert any(
+            item.kind == "import" and item.target == "crate::service::other_call"
+            for item in grouped.relations
+        )
+        assert grouped_alias is not None
+        assert any(
+            item.kind == "import" and item.target == "crate::service::third_call"
+            for item in grouped_alias.relations
+        )
+    finally:
+        connection.close()
+
+
+def test_qualified_polyglot_calls_do_not_claim_runtime_receiver_types(tmp_path: Path) -> None:
+    cases: tuple[tuple[str, str, str, str, set[str]], ...] = (
+        (
+            "src/app.ts",
+            "class Client { fetch() {} }\nfunction run(client: Client) { client.fetch(); new Client().fetch(); }\n",
+            "Client.fetch",
+            "typescript",
+            {"Client.fetch"},
+        ),
+        (
+            "src/app.go",
+            "package p\ntype Client struct{}\nfunc (c Client) Fetch(){}\nfunc run(c Client){ c.Fetch(); Client.Fetch(c) }\n",
+            "Client.Fetch",
+            "go",
+            {"Client.Fetch"},
+        ),
+        (
+            "src/app.rs",
+            "struct Client; impl Client { fn fetch(&self){} } fn run(c: Client){ c.fetch(); Client::fetch(&c); }\n",
+            "Client.fetch",
+            "rust",
+            {"Client::fetch"},
+        ),
+        (
+            "src/App.java",
+            "class Client { void fetch() {} } class App { void run(Client client) { client.fetch(); } }\n",
+            "Client.fetch",
+            "java",
+            set(),
+        ),
+    )
+    for index, (path, source, needle, language, expected_call_targets) in enumerate(cases):
+        case_root = tmp_path / f"case-{index}"
+        case_root.mkdir()
+        _root, connection, workspace_id = _registered(case_root, {path: source})
+        try:
+            navigation = search_exact_source_inspection(
+                connection, workspace_id, needle, scope=ProjectSearchScope.CODE
+            ).symbol_navigation
+            assert navigation is not None
+            assert navigation.precise_languages == (language,)
+            call_targets = {item.target for item in navigation.relations if item.kind == "call"}
+            assert call_targets == expected_call_targets
+            assert all(
+                not target.lower().startswith("client.") or target in expected_call_targets
+                for target in call_targets
+            )
+        finally:
+            connection.close()
+
+
+def test_java_symbol_navigation_only_classifies_field_declarators_as_class_variables(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/App.java": (
+                "class App {\n"
+                "  int target_field = 1;\n"
+                "  Runnable r = () -> { int target_local = 2; };\n"
+                "  void run() { int target_method_local = 3; }\n"
+                "}\n"
+            )
+        },
+    )
+    try:
+        field = search_exact_source_inspection(
+            connection, workspace_id, "target_field", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        lambda_local = search_exact_source_inspection(
+            connection, workspace_id, "target_local", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        method_local = search_exact_source_inspection(
+            connection, workspace_id, "target_method_local", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert field is not None
+        assert any(
+            item.kind == "definition" and item.target == "App.target_field"
+            for item in field.relations
+        )
+        assert lambda_local is not None
+        assert lambda_local.definition_count == 0
+        assert method_local is not None
+        assert method_local.definition_count == 0
+    finally:
+        connection.close()
+
+
+def test_polyglot_symbol_navigation_reports_unicode_character_column(tmp_path: Path) -> None:
+    source = "const π = 1; function target_call() { return π }\n"
+    _root, connection, workspace_id = _registered(tmp_path, {"src/app.ts": source})
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        definition = next(item for item in navigation.relations if item.kind == "definition")
+        assert definition.line == 1
+        assert definition.column == source.index("target_call") + 1
+    finally:
+        connection.close()
+
+
+def test_typescript_symbol_navigation_classifies_import_alias_and_generic_inheritance(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/model.ts": "export interface Base<T> {}\nexport interface Child extends Base<string> {}\n",
+            "src/use.ts": "import { target_call as tc } from './service'; tc();\n",
+        },
+    )
+    try:
+        alias = search_exact_source_inspection(
+            connection, workspace_id, "tc", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        base = search_exact_source_inspection(
+            connection, workspace_id, "Base", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert alias is not None
+        assert alias.import_count == 1
+        assert alias.call_count == 1
+        assert any(
+            item.kind == "import" and item.target == "./service.target_call"
+            for item in alias.relations
+        )
+        assert base is not None
+        assert base.definition_count == 1
+        assert base.inheritance_count == 1
+        assert any(item.kind == "inheritance" and item.target == "Base" for item in base.relations)
     finally:
         connection.close()
