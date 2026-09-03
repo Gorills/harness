@@ -1,0 +1,83 @@
+name: Search v2 JS TS parser compatibility
+
+on:
+  push:
+    branches:
+      - experiment/search-v2-js-ts-runtime
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out main-derived experiment
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.5"
+      - name: Install Python 3.13
+        run: uv python install 3.13
+      - name: Build exact parser environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv "$RUNNER_TEMP/parser-venv" --python 3.13
+          uv pip install --python "$RUNNER_TEMP/parser-venv/bin/python" \
+            tree-sitter==0.25.0 \
+            tree-sitter-javascript==0.25.0 \
+            tree-sitter-typescript==0.23.2
+      - name: Prove JS TS TSX runtime compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/parser-venv/bin/python" - <<'PY'
+          from tree_sitter import Language, Parser
+          import tree_sitter_javascript as tsjs
+          import tree_sitter_typescript as tsts
+
+          samples = [
+              (
+                  "javascript",
+                  Language(tsjs.language()),
+                  b"import {run as execute} from './worker'; class Client extends Base { fetch(x) { return execute(x); } } const arrow = (x) => execute(x);",
+              ),
+              (
+                  "typescript",
+                  Language(tsts.language_typescript()),
+                  b"import {run as execute} from './worker'; interface Service { fetch(x: string): Promise<string> } class Client extends Base implements Service { async fetch(x: string): Promise<string> { return execute(x); } }",
+              ),
+              (
+                  "tsx",
+                  Language(tsts.language_tsx()),
+                  b"import React from 'react'; export function Widget({run}: {run: () => void}) { return <button onClick={() => run()}>Go</button>; }",
+              ),
+          ]
+          for name, language, source in samples:
+              parser = Parser(language)
+              tree = parser.parse(source)
+              root = tree.root_node
+              assert not root.has_error, (name, root)
+              print(f"=== {name} ===")
+              print(root)
+          PY
+      - name: Archive parser site-packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          site="$RUNNER_TEMP/parser-venv/lib/python3.13/site-packages"
+          tar -czf "$RUNNER_TEMP/search-v2-js-ts-parser-site-packages.tar.gz" \
+            -C "$site" \
+            tree_sitter tree_sitter-0.25.0.dist-info \
+            tree_sitter_javascript tree_sitter_javascript-0.25.0.dist-info \
+            tree_sitter_typescript tree_sitter_typescript-0.23.2.dist-info
+      - name: Upload parser environment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: search-v2-js-ts-parser-site-packages
+          path: ${{ runner.temp }}/search-v2-js-ts-parser-site-packages.tar.gz
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
