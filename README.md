@@ -97,6 +97,7 @@ Codex and Cursor production MCP are project-only and use Harness-owned intent ra
 - [ADR-0049: Persistent code-unit candidates](docs/decisions/0049-persistent-code-unit-candidates.md)
 - [ADR-0050: Persistent syntactic code relations](docs/decisions/0050-persistent-syntactic-code-relations.md)
 - [ADR-0051: Current-source Python import binding resolution](docs/decisions/0051-current-source-python-import-binding-resolution.md)
+- [ADR-0052: Current-source Python Workspace export validation](docs/decisions/0052-current-source-python-workspace-export-validation.md)
 - [ADR-0022: Linux Claude Code installation lifecycle](docs/decisions/0022-linux-claude-installation-lifecycle.md)
 - [ADR-0023: Linux operational diagnostics and upgrade-safe runtime identity](docs/decisions/0023-linux-operational-diagnostics-and-upgrade-safety.md)
 - [ADR-0024: Linux Cursor MCP integration and multi-host lifecycle](docs/decisions/0024-linux-cursor-multi-host-lifecycle.md)

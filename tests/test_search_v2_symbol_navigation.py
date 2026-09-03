@@ -356,6 +356,11 @@ def test_symbol_navigation_resolves_python_from_import_alias_call(tmp_path: Path
         assert alias_call.target == "tc"
         assert alias_call.resolved_target == "service.target_call"
         assert alias_call.resolution_kind == "python_from_import_binding"
+        assert alias_call.resolved_definition_path == "src/service.py"
+        assert alias_call.resolved_definition_line == 1
+        assert alias_call.resolved_definition_column == 5
+        assert alias_call.resolved_definition_kind == "function"
+        assert alias_call.resolution_validation_kind == "python_workspace_direct_export"
         payload = project_symbol_navigation_payload(navigation)
         relations_payload = payload["relations"]
         assert isinstance(relations_payload, list)
@@ -369,6 +374,12 @@ def test_symbol_navigation_resolves_python_from_import_alias_call(tmp_path: Path
         assert payload_call["target"] == "tc"
         assert payload_call["resolved_target"] == "service.target_call"
         assert payload_call["resolution_kind"] == "python_from_import_binding"
+        assert payload_call["resolved_definition_path"] == "src/service.py"
+        assert payload_call["resolved_definition_line"] == 1
+        assert payload_call["resolved_definition_column"] == 5
+        assert payload_call["resolved_definition_kind"] == "function"
+        assert payload_call["resolution_validation_kind"] == "python_workspace_direct_export"
+        assert "resolution_module" not in payload_call
     finally:
         connection.close()
 
@@ -394,6 +405,177 @@ def test_symbol_navigation_resolves_python_module_alias_qualified_call(tmp_path:
         assert call.target == "svc.target_call"
         assert call.resolved_target == "service.target_call"
         assert call.resolution_kind == "python_import_binding"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_validates_python_module_alias_against_unique_workspace_export(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": "import service as svc\n\ndef invoke():\n    return svc.target_call()\n",
+        },
+    )
+    try:
+        inspection = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "service.target_call",
+            scope=ProjectSearchScope.CODE,
+        )
+        assert inspection.coverage is not None
+        assert inspection.coverage.matched_occurrences == 0
+        navigation = inspection.symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.resolved_target == "service.target_call"
+        assert call.resolved_definition_path == "src/service.py"
+        assert call.resolved_definition_line == 1
+        assert call.resolved_definition_kind == "function"
+        assert call.resolution_validation_kind == "python_workspace_direct_export"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_validates_relative_python_import_against_package_export(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "pkg/__init__.py": "",
+            "pkg/service.py": "def target_call():\n    return 1\n",
+            "pkg/use.py": (
+                "from .service import target_call as tc\n\ndef invoke():\n    return tc()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "target_call",
+            scope=ProjectSearchScope.CODE,
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "pkg/use.py"
+        )
+        assert call.resolved_target == ".service.target_call"
+        assert call.resolved_definition_path == "pkg/service.py"
+        assert call.resolution_validation_kind == "python_workspace_direct_export"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_workspace_export_validation_fails_closed_on_ambiguous_module(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "other/service.py": "def target_call():\n    return 2\n",
+            "src/use.py": (
+                "from service import target_call as tc\n\ndef invoke():\n    return tc()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "target_call",
+            scope=ProjectSearchScope.CODE,
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/use.py"
+        )
+        assert call.resolved_target == "service.target_call"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_workspace_export_validation_does_not_follow_reexport_chain(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/impl.py": "def target_call():\n    return 1\n",
+            "src/service.py": "from impl import target_call\n",
+            "src/use.py": (
+                "from service import target_call as tc\n\ndef invoke():\n    return tc()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "target_call",
+            scope=ProjectSearchScope.CODE,
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/use.py"
+        )
+        assert call.resolved_target == "service.target_call"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_workspace_export_validation_drops_changed_target_definition(
+    tmp_path: Path,
+) -> None:
+    root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": (
+                "from service import target_call as tc\n\ndef invoke():\n    return tc()\n"
+            ),
+        },
+    )
+    try:
+        (root / "src" / "service.py").write_text(
+            "def replacement():\n    return 2\n",
+            encoding="utf-8",
+        )
+        inspection = search_exact_source_inspection(
+            connection,
+            workspace_id,
+            "target_call",
+            scope=ProjectSearchScope.CODE,
+        )
+        assert inspection.coverage is not None
+        assert inspection.coverage.complete is False
+        navigation = inspection.symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/use.py"
+        )
+        assert call.resolved_target == "service.target_call"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
     finally:
         connection.close()
 
