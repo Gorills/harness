@@ -16,7 +16,7 @@ from mcp.client.stdio import stdio_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "0.1.0.dev0"
-DECLARED_MCP_REQUIREMENT = "mcp==2.0.0"
+DECLARED_RUNTIME_REQUIREMENTS = ("ast-grep-py==0.45.1", "mcp==2.0.0")
 
 
 def _run(
@@ -45,20 +45,20 @@ def _venv_scripts_dir(venv: Path) -> Path:
 
 
 def _install_wheel(uv: str, python: Path, wheel: Path, workspace: Path) -> None:
-    """Install the built wheel, then its declared MCP runtime dependency.
+    """Install the wheel, then each declared runtime dependency explicitly.
 
-    ``--no-deps`` keeps undeclared packages out of the smoke venv. ADR-0037
-    starts daemon-owned Streamable HTTP during ``harnessd serve``, so the
-    pinned MCP SDK (and its uvicorn/starlette graph) must still be present.
+    ``--no-deps`` keeps undeclared packages out of the smoke venv while still
+    proving that every shipping runtime dependency is present and installable.
     """
     _run(
         (uv, "pip", "install", "--python", str(python), "--no-deps", str(wheel)),
         cwd=workspace,
     )
-    _run(
-        (uv, "pip", "install", "--python", str(python), DECLARED_MCP_REQUIREMENT),
-        cwd=workspace,
-    )
+    for requirement in DECLARED_RUNTIME_REQUIREMENTS:
+        _run(
+            (uv, "pip", "install", "--python", str(python), requirement),
+            cwd=workspace,
+        )
 
 
 def _isolated_wheel_env() -> dict[str, str]:
@@ -370,9 +370,14 @@ def main() -> int:
             if len(metadata_names) != 1:
                 raise RuntimeError("wheel must contain exactly one dist-info/METADATA file")
             metadata = archive.read(metadata_names[0]).decode("utf-8")
-        if f"Requires-Dist: {DECLARED_MCP_REQUIREMENT}" not in metadata:
+        missing_requirements = [
+            requirement
+            for requirement in DECLARED_RUNTIME_REQUIREMENTS
+            if f"Requires-Dist: {requirement}" not in metadata
+        ]
+        if missing_requirements:
             raise RuntimeError(
-                "wheel metadata does not pin the official MCP SDK runtime dependency"
+                f"wheel metadata is missing pinned runtime dependencies: {missing_requirements!r}"
             )
 
         _run((uv, "venv", "--python", "3.13", "--no-project", str(venv)), cwd=workspace)
