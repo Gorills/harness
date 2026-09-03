@@ -1,0 +1,82 @@
+name: Transport Search v2 code-unit slice
+
+on:
+  push:
+    branches:
+      - feature/search-v2-persistent-code-units
+    paths:
+      - .transport/ready
+
+permissions:
+  contents: write
+
+jobs:
+  transport:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/search-v2-persistent-code-units
+
+      - name: Apply verified source and compatibility patches
+        run: |
+          git apply --check .transport/01-core.patch .transport/02-core.patch .transport/03-compat.patch .transport/04-compat.patch
+          git apply .transport/01-core.patch .transport/02-core.patch .transport/03-compat.patch .transport/04-compat.patch
+
+      - name: Update Search v2 architecture notes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          readme = Path("README.md")
+          text = readme.read_text(encoding="utf-8")
+          replacements = {
+              "- [ADR-0046: Search v2 current exact coverage](docs/decisions/0046-search-v2-current-exact-coverage.md)\n- [ADR-0047: Current-source symbol navigation](docs/decisions/0047-current-source-symbol-navigation.md)\n": "- [ADR-0046: Search v2 current exact coverage](docs/decisions/0046-search-v2-current-exact-coverage.md)\n- [ADR-0047: Current-source symbol navigation](docs/decisions/0047-current-source-symbol-navigation.md)\n- [ADR-0048: Offline polyglot symbol providers](docs/decisions/0048-offline-polyglot-symbol-providers.md)\n- [ADR-0049: Persistent code-unit candidates](docs/decisions/0049-persistent-code-unit-candidates.md)\n",
+              "The index and FTS projection remain derived/rebuildable data; current-source symbol navigation is search-time only, while persistent parser-backed symbol indexes and structural graphs are still later slices.": "The index, lexical projection, and schema-v18 definition-only code-unit index remain derived/rebuildable data; code-unit rows persist only bounded names/kinds/locations and negative parser manifests, not source bodies. Query-time symbol navigation still supplies current-source relation evidence; persistent graph edges and type-aware resolution remain later slices.",
+              "Persistent/type-aware code-unit graphs and hybrid semantic retrieval remain later Search v2 slices; optional embeddings are an additional candidate channel rather than a replacement for deterministic exact search.": "Natural code queries additionally fuse the schema-v18 contentless definition index as an explainable same-file candidate/ranking channel. Persistent graph edges, type-aware resolution, and hybrid semantic retrieval remain later Search v2 slices; optional embeddings are an additional candidate channel rather than a replacement for deterministic exact search.",
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f"README transport target count mismatch: {text.count(old)}")
+              text = text.replace(old, new)
+          readme.write_text(text, encoding="utf-8")
+
+          architecture = Path("ARCHITECTURE.md")
+          text = architecture.read_text(encoding="utf-8")
+          old = "Persistent/type-aware code-unit graph navigation remains the next Search-v2 structural layer; semantic embeddings/reranking follow as an additional candidate channel rather than replacing exact search."
+          new = "Schema-v18 now derives a bounded definition-only code-unit candidate index inside the same Structural Index transaction; it stores only names, kinds, locations, SHA-keyed parser status, and no source bodies. Persistent graph edges and type-aware resolution remain the next Search-v2 structural layers; semantic embeddings/reranking follow as an additional candidate channel rather than replacing exact search."
+          if text.count(old) != 1:
+              raise SystemExit(f"ARCHITECTURE transport target count mismatch: {text.count(old)}")
+          architecture.write_text(text.replace(old, new), encoding="utf-8")
+          PY
+
+      - name: Verify transported tree shape
+        run: |
+          python -m py_compile src/harness/index.py src/harness/retrieval.py src/harness/storage.py src/harness/symbol_navigation.py tests/test_search_v2_code_units.py
+          python - <<'PY'
+          from pathlib import Path
+          storage = Path("src/harness/storage.py").read_text(encoding="utf-8")
+          index = Path("src/harness/index.py").read_text(encoding="utf-8")
+          retrieval = Path("src/harness/retrieval.py").read_text(encoding="utf-8")
+          symbols = Path("src/harness/symbol_navigation.py").read_text(encoding="utf-8")
+          tests = Path("tests/test_search_v2_code_units.py").read_text(encoding="utf-8")
+          assert "SCHEMA_VERSION = 18" in storage
+          assert "CREATE TABLE indexed_code_units" in storage
+          assert "def _reconcile_code_units(" in index
+          assert "def _indexed_code_unit_hits(" in retrieval
+          assert "def analyze_precise_code_units(" in symbols
+          assert "test_incremental_scan_replaces_code_units_and_caches_parse_failure" in tests
+          PY
+          git diff --check
+
+      - name: Commit clean feature tree
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r .transport .github/workflows/transport-code-units.yml
+          git add ARCHITECTURE.md README.md docs/decisions/0049-persistent-code-unit-candidates.md src/harness tests
+          git diff --cached --check
+          git commit -m "Add persistent Search v2 code-unit candidates"
+          git push origin HEAD:feature/search-v2-persistent-code-units
