@@ -1,0 +1,45 @@
+name: Transport stale code-unit fix
+
+on:
+  push:
+    branches:
+      - feature/search-v2-persistent-code-units
+
+permissions:
+  contents: write
+
+jobs:
+  transport:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feature/search-v2-persistent-code-units
+          fetch-depth: 0
+
+      - name: Apply verified stale-candidate fix
+        run: |
+          git apply --check .transport/retrieval-stale.patch
+          git apply .transport/retrieval-stale.patch
+          python3 -m py_compile src/harness/retrieval.py
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('src/harness/retrieval.py').read_text()
+          assert 'if manifest_sha256 != indexed_sha256:\n            continue' in text
+          assert 'short_summary=None' in text
+          PY
+          git diff --check
+
+      - name: Commit clean feature tree
+        run: |
+          rm .transport/retrieval-stale.patch
+          rmdir .transport 2>/dev/null || true
+          rm .github/workflows/transport-stale-code-units.yml
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: keep code-unit evidence fail-closed'
+          git push origin HEAD:feature/search-v2-persistent-code-units
