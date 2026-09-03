@@ -213,9 +213,11 @@ class ProjectSymbolRelation:
     symbol_kind: str | None
     in_test: bool
     evidence: ProjectSearchEvidence | None
+    resolved_target: str | None = None
+    resolution_kind: str | None = None
 
     def to_wire(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "kind": self.kind,
             "path": self.path,
             "line": self.line,
@@ -226,6 +228,11 @@ class ProjectSymbolRelation:
             "in_test": self.in_test,
             "evidence": None if self.evidence is None else self.evidence.to_wire(),
         }
+        if self.resolved_target is not None:
+            payload["resolved_target"] = self.resolved_target
+        if self.resolution_kind is not None:
+            payload["resolution_kind"] = self.resolution_kind
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -2019,6 +2026,12 @@ def _project_symbol_relation(relation: SyntaxRelation) -> ProjectSymbolRelation:
         target=_truncate_utf8(relation.target, MAX_SYMBOL_RELATION_TEXT_BYTES),
         symbol_kind=relation.symbol_kind,
         in_test=relation.in_test,
+        resolved_target=(
+            None
+            if relation.resolved_target is None
+            else _truncate_utf8(relation.resolved_target, MAX_SYMBOL_RELATION_TEXT_BYTES)
+        ),
+        resolution_kind=relation.resolution_kind,
         evidence=ProjectSearchEvidence(
             start_line=evidence.start_line,
             end_line=evidence.end_line,

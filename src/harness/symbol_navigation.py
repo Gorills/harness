@@ -47,6 +47,8 @@ class SyntaxRelation:
     symbol_kind: str | None
     in_test: bool
     evidence: SyntaxRelationEvidence
+    resolved_target: str | None = None
+    resolution_kind: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,8 +132,13 @@ def _analyze_python_relations(
         tree = ast.parse(text, filename=relative_path, type_comments=True)
     except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         return SyntaxRelationAnalysis("python", "parse_error", ())
+    binding_analysis = None if needle is None else _collect_python_import_bindings(tree)
     visitor = _PythonRelationVisitor(
-        relative_path, text, needle, collect_references=collect_references
+        relative_path,
+        text,
+        needle,
+        collect_references=collect_references,
+        binding_analysis=binding_analysis,
     )
     visitor.visit(tree)
     relations = tuple(sorted(visitor.relations, key=_relation_key))
@@ -156,6 +163,190 @@ def _relation_key(relation: SyntaxRelation) -> tuple[int, int, str, int, int, st
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PythonImportBinding:
+    target: str
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonImportBindingAnalysis:
+    imports_by_scope: dict[str, dict[str, tuple[_PythonImportBinding, ...]]]
+    bound_names_by_scope: dict[str, frozenset[str]]
+    globally_declared_names: frozenset[str]
+
+    def safe_binding(self, scope: str, name: str) -> _PythonImportBinding | None:
+        if name in self.bound_names_by_scope.get(scope, frozenset()):
+            return None
+        bindings = self.imports_by_scope.get(scope, {}).get(name, ())
+        if len(bindings) != 1:
+            return None
+        if scope == "" and name in self.globally_declared_names:
+            return None
+        return bindings[0]
+
+    def scope_claims_name(self, scope: str, name: str) -> bool:
+        return name in self.bound_names_by_scope.get(
+            scope, frozenset()
+        ) or name in self.imports_by_scope.get(scope, {})
+
+
+class _PythonImportBindingCollector(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.scope_stack: list[tuple[str, str]] = [("", "module")]
+        self.imports_by_scope: dict[str, dict[str, list[_PythonImportBinding]]] = {"": {}}
+        self.bound_names_by_scope: dict[str, set[str]] = {"": set()}
+        self.globally_declared_names: set[str] = set()
+
+    def analysis(self) -> _PythonImportBindingAnalysis:
+        return _PythonImportBindingAnalysis(
+            imports_by_scope={
+                scope: {name: tuple(bindings) for name, bindings in imports.items()}
+                for scope, imports in self.imports_by_scope.items()
+            },
+            bound_names_by_scope={
+                scope: frozenset(names) for scope, names in self.bound_names_by_scope.items()
+            },
+            globally_declared_names=frozenset(self.globally_declared_names),
+        )
+
+    @property
+    def _scope(self) -> str:
+        return self.scope_stack[-1][0]
+
+    def _bind(self, name: str | None) -> None:
+        if name:
+            self.bound_names_by_scope.setdefault(self._scope, set()).add(name)
+
+    def _add_import(self, local_name: str, target: str, kind: str) -> None:
+        self.imports_by_scope.setdefault(self._scope, {}).setdefault(local_name, []).append(
+            _PythonImportBinding(target=target, kind=kind)
+        )
+
+    def _push_scope(self, name: str, kind: str) -> None:
+        parent = self._scope
+        qualified = name if not parent else f"{parent}.{name}"
+        self.scope_stack.append((qualified, kind))
+        self.imports_by_scope.setdefault(qualified, {})
+        self.bound_names_by_scope.setdefault(qualified, set())
+
+    def _pop_scope(self) -> None:
+        self.scope_stack.pop()
+
+    def visit_Name(self, node: ast.Name) -> None:
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            self._bind(node.id)
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.asname:
+                local = alias.asname
+                target = alias.name
+            else:
+                local = alias.name.split(".", 1)[0]
+                target = local
+            self._add_import(local, target, "python_import_binding")
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        module = node.module or ""
+        prefix = "." * node.level
+        for alias in node.names:
+            if alias.name == "*":
+                continue
+            local = alias.asname or alias.name
+            target = f"{prefix}{module}.{alias.name}" if module else f"{prefix}{alias.name}"
+            self._add_import(local, target, "python_from_import_binding")
+
+    def visit_Global(self, node: ast.Global) -> None:
+        for name in node.names:
+            self._bind(name)
+            self.globally_declared_names.add(name)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
+        for name in node.names:
+            self._bind(name)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs) -> None:
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar) -> None:
+        self._bind(node.name)
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._bind(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+        if node.returns is not None:
+            self.visit(node.returns)
+        self._push_scope(node.name, "function")
+        for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
+            self._bind(argument.arg)
+        if node.args.vararg is not None:
+            self._bind(node.args.vararg.arg)
+        if node.args.kwarg is not None:
+            self._bind(node.args.kwarg.arg)
+        for statement in node.body:
+            self.visit(statement)
+        self._pop_scope()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._bind(node.name)
+        for decorator in node.decorator_list:
+            self.visit(decorator)
+        for base in node.bases:
+            self.visit(base)
+        for keyword_node in node.keywords:
+            self.visit(keyword_node.value)
+        self._push_scope(node.name, "class")
+        for statement in node.body:
+            self.visit(statement)
+        self._pop_scope()
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                self.visit(default)
+
+    def _visit_comprehension_scope(self, node: ast.AST) -> None:
+        for descendant in ast.walk(node):
+            if isinstance(descendant, ast.NamedExpr):
+                for name_node in _assignment_names(descendant.target):
+                    self._bind(name_node.id)
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_comprehension_scope(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_comprehension_scope(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_comprehension_scope(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_comprehension_scope(node)
+
+
+def _collect_python_import_bindings(tree: ast.AST) -> _PythonImportBindingAnalysis:
+    collector = _PythonImportBindingCollector()
+    collector.visit(tree)
+    return collector.analysis()
+
+
 class _PythonRelationVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -164,11 +355,14 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         needle: str | None,
         *,
         collect_references: bool,
+        binding_analysis: _PythonImportBindingAnalysis | None,
     ) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
         self.collect_references = collect_references
+        self.binding_analysis = binding_analysis
+        self.binding_resolution_suspended = 0
         self.needle_leaf = "" if needle is None else needle.rsplit(".", 1)[-1]
         self.scopes: list[tuple[str, str]] = []
         self.relations: list[SyntaxRelation] = []
@@ -194,8 +388,18 @@ class _PythonRelationVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:
         target = _dotted_expression(node.func)
-        if target is not None and self._target_matches(target):
-            self._add_reference("call", node.func, target)
+        if target is not None:
+            resolved_target, resolution_kind = self._resolved_import_call_target(target)
+            if self._target_matches(target) or (
+                resolved_target is not None and self._target_matches(resolved_target)
+            ):
+                self._add_reference(
+                    "call",
+                    node.func,
+                    target,
+                    resolved_target=resolved_target,
+                    resolution_kind=resolution_kind,
+                )
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -223,6 +427,28 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             ):
                 self._add_reference("import", node, target)
         self.generic_visit(node)
+
+    def visit_Lambda(self, node: ast.Lambda) -> None:
+        self.binding_resolution_suspended += 1
+        self.generic_visit(node)
+        self.binding_resolution_suspended -= 1
+
+    def visit_ListComp(self, node: ast.ListComp) -> None:
+        self._visit_suspended_binding_scope(node)
+
+    def visit_SetComp(self, node: ast.SetComp) -> None:
+        self._visit_suspended_binding_scope(node)
+
+    def visit_DictComp(self, node: ast.DictComp) -> None:
+        self._visit_suspended_binding_scope(node)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+        self._visit_suspended_binding_scope(node)
+
+    def _visit_suspended_binding_scope(self, node: ast.AST) -> None:
+        self.binding_resolution_suspended += 1
+        self.generic_visit(node)
+        self.binding_resolution_suspended -= 1
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if not self._inside_callable():
@@ -280,7 +506,15 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             )
         )
 
-    def _add_reference(self, kind: str, node: ast.AST, target: str) -> None:
+    def _add_reference(
+        self,
+        kind: str,
+        node: ast.AST,
+        target: str,
+        *,
+        resolved_target: str | None = None,
+        resolution_kind: str | None = None,
+    ) -> None:
         line = _line_number(node)
         evidence = _reference_evidence(self.lines, line)
         self.relations.append(
@@ -294,8 +528,51 @@ class _PythonRelationVisitor(ast.NodeVisitor):
                 symbol_kind=None,
                 in_test=self.in_test,
                 evidence=evidence,
+                resolved_target=resolved_target,
+                resolution_kind=resolution_kind,
             )
         )
+
+    def _resolved_import_call_target(self, target: str) -> tuple[str | None, str | None]:
+        analysis = self.binding_analysis
+        if analysis is None or self.binding_resolution_suspended:
+            return None, None
+        function_scopes = [
+            ".".join(scope_name for scope_name, _scope_kind in self.scopes[: index + 1])
+            for index, (_scope_name, scope_kind) in enumerate(self.scopes)
+            if scope_kind in {"function", "method"}
+        ]
+        if not function_scopes and any(scope_kind == "class" for _name, scope_kind in self.scopes):
+            return None, None
+
+        root, separator, remainder = target.partition(".")
+        if function_scopes:
+            current_scope = function_scopes[-1]
+            binding = analysis.safe_binding(current_scope, root)
+            if binding is not None:
+                return self._apply_import_binding(binding, remainder if separator else "")
+            if analysis.scope_claims_name(current_scope, root):
+                return None, None
+            for outer_scope in reversed(function_scopes[:-1]):
+                if analysis.scope_claims_name(outer_scope, root):
+                    return None, None
+
+        binding = analysis.safe_binding("", root)
+        if binding is None:
+            return None, None
+        return self._apply_import_binding(binding, remainder if separator else "")
+
+    @staticmethod
+    def _apply_import_binding(
+        binding: _PythonImportBinding,
+        remainder: str,
+    ) -> tuple[str | None, str | None]:
+        if binding.kind == "python_from_import_binding":
+            if remainder:
+                return None, None
+            return binding.target, binding.kind
+        resolved = binding.target if not remainder else f"{binding.target}.{remainder}"
+        return resolved, binding.kind
 
     def _definition_matches(self, name: str, qualified: str) -> bool:
         if self.needle is None:
