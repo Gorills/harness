@@ -23,7 +23,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .transport/rel-*.b64 | tr -d '\n' | base64 -d | gzip -d > /tmp/search-v2-relations.patch
+          cat \
+            .transport/rel-00a.b64 \
+            .transport/rel-00b.b64 \
+            .transport/rel-01.b64 \
+            .transport/rel-02.b64 \
+            .transport/rel-03.b64 \
+            | tr -d '\n' | base64 -d > /tmp/search-v2-relations.patch.gz
+          echo '6663b3e468c9bb4b50cd34784465a814bd3ea52b47ce7ff4d39da0a40455be9e  /tmp/search-v2-relations.patch.gz' | sha256sum -c -
+          gzip -dc /tmp/search-v2-relations.patch.gz > /tmp/search-v2-relations.patch
+          echo 'afb63cac4b56897cccb64155ade7de10b1e659b860ae8fa33b8ffe353a6f3fa0  /tmp/search-v2-relations.patch' | sha256sum -c -
           git apply --check /tmp/search-v2-relations.patch
           git apply /tmp/search-v2-relations.patch
           rm -rf .transport .github/workflows/transport-relations.yml
@@ -37,10 +46,6 @@ jobs:
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
           test -n "$(git diff --cached --name-only)"
-          if git diff --cached --name-only | grep -E '^(\.transport/|\.github/workflows/transport-relations\.yml$)'; then
-            echo 'transport files unexpectedly remain staged' >&2
-            exit 1
-          fi
           git commit -m 'feat: persist Search v2 syntactic relations'
           test -z "$(git status --porcelain)"
           if git ls-tree -r --name-only HEAD | grep -E '^(\.transport/|\.github/workflows/transport-relations\.yml$)'; then
