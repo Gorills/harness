@@ -166,8 +166,7 @@ def test_natural_code_query_prefers_definition_unit_over_lexical_mention(tmp_pat
         {
             "src/engine.py": "def rotateRefreshToken():\n    return 1\n",
             "src/commentary.py": (
-                "# rotate refresh token rotate refresh token rotate refresh token\n"
-                "VALUE = 1\n"
+                "# rotate refresh token rotate refresh token rotate refresh token\nVALUE = 1\n"
             ),
         },
     )
@@ -212,9 +211,12 @@ def test_incremental_scan_replaces_code_units_and_caches_parse_failure(
             "SELECT qualified_name FROM indexed_code_units WHERE workspace_id = ?",
             (workspace_id,),
         ).fetchall() == [("newTarget",)]
-        assert connection.execute(
-            "SELECT rowid FROM indexed_code_unit_search WHERE indexed_code_unit_search MATCH 'oldTarget'"
-        ).fetchall() == []
+        assert (
+            connection.execute(
+                "SELECT rowid FROM indexed_code_unit_search WHERE indexed_code_unit_search MATCH 'oldTarget'"
+            ).fetchall()
+            == []
+        )
         assert connection.execute(
             "SELECT rowid FROM indexed_code_unit_search WHERE indexed_code_unit_search MATCH 'newTarget'"
         ).fetchall()
@@ -228,27 +230,38 @@ def test_incremental_scan_replaces_code_units_and_caches_parse_failure(
             """,
             (workspace_id,),
         ).fetchone() == ("parse_error",)
-        assert connection.execute(
-            "SELECT qualified_name FROM indexed_code_units WHERE workspace_id = ?",
-            (workspace_id,),
-        ).fetchall() == []
+        assert (
+            connection.execute(
+                "SELECT qualified_name FROM indexed_code_units WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            == []
+        )
 
         def unexpected_parse(_relative_path: str, _text: str) -> SyntaxRelationAnalysis:
-            raise AssertionError("unchanged parse-error source must use the persisted negative manifest")
+            raise AssertionError(
+                "unchanged parse-error source must use the persisted negative manifest"
+            )
 
         monkeypatch.setattr(index_module, "analyze_precise_code_units", unexpected_parse)
         scan_workspace_paths(connection, workspace_id, ("src/service.py",))
 
         service.unlink()
         scan_workspace_paths(connection, workspace_id, ("src/service.py",))
-        assert connection.execute(
-            "SELECT relative_path FROM indexed_code_unit_files WHERE workspace_id = ?",
-            (workspace_id,),
-        ).fetchall() == []
-        assert connection.execute(
-            "SELECT qualified_name FROM indexed_code_units WHERE workspace_id = ?",
-            (workspace_id,),
-        ).fetchall() == []
+        assert (
+            connection.execute(
+                "SELECT relative_path FROM indexed_code_unit_files WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            == []
+        )
+        assert (
+            connection.execute(
+                "SELECT qualified_name FROM indexed_code_units WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            == []
+        )
     finally:
         connection.close()
 
@@ -326,9 +339,7 @@ def test_schema_18_migrates_existing_17_database_in_place(
     assert status.schema_version == 18
     connection = sqlite3.connect(database)
     try:
-        assert connection.execute("SELECT id FROM projects").fetchall() == [
-            ("preserved-project",)
-        ]
+        assert connection.execute("SELECT id FROM projects").fetchall() == [("preserved-project",)]
         for table in (
             "indexed_code_unit_files",
             "indexed_code_units",
