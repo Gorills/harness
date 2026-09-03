@@ -1,0 +1,96 @@
+diff --git a/tests/test_task_checkpoint_schema.py b/tests/test_task_checkpoint_schema.py
+--- a/tests/test_task_checkpoint_schema.py
++++ b/tests/test_task_checkpoint_schema.py
+@@ -97,7 +97,7 @@
+ 
+ 
+ def test_schema_version_includes_knowledge_schema() -> None:
+-    assert SCHEMA_VERSION == 17
++    assert SCHEMA_VERSION == 18
+ 
+ 
+ def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
+diff --git a/tests/test_task_operator_review_schema.py b/tests/test_task_operator_review_schema.py
+--- a/tests/test_task_operator_review_schema.py
++++ b/tests/test_task_operator_review_schema.py
+@@ -31,7 +31,7 @@
+     connection = sqlite3.connect(database)
+     connection.execute("PRAGMA foreign_keys = ON")
+     try:
+-        assert SCHEMA_VERSION == 17
++        assert SCHEMA_VERSION == 18
+         _seed_task(connection)
+         connection.execute(
+             """
+@@ -162,6 +162,9 @@
+             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
+         ).fetchall():
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
++        connection.execute("DROP TABLE indexed_code_unit_search")
++        connection.execute("DROP TABLE indexed_code_units")
++        connection.execute("DROP TABLE indexed_code_unit_files")
+         connection.execute("DROP TABLE indexed_content_search")
+         connection.execute("DROP TABLE indexed_search_documents")
+         connection.execute("DROP TABLE project_skill_exclusions")
+@@ -177,7 +180,7 @@
+         connection.close()
+ 
+     status = initialize_database(database)
+-    assert status.schema_version == SCHEMA_VERSION == 17
++    assert status.schema_version == SCHEMA_VERSION == 18
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute(
+diff --git a/tests/test_task_stack_hints_schema.py b/tests/test_task_stack_hints_schema.py
+--- a/tests/test_task_stack_hints_schema.py
++++ b/tests/test_task_stack_hints_schema.py
+@@ -13,7 +13,7 @@
+     initialize_database(database)
+     connection = connect_database(database)
+     try:
+-        assert SCHEMA_VERSION == 17
++        assert SCHEMA_VERSION == 18
+         connection.execute("INSERT INTO projects(id) VALUES ('project')")
+         connection.execute(
+             """
+@@ -80,6 +80,9 @@
+             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
+         ).fetchall():
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
++        connection.execute("DROP TABLE indexed_code_unit_search")
++        connection.execute("DROP TABLE indexed_code_units")
++        connection.execute("DROP TABLE indexed_code_unit_files")
+         connection.execute("DROP TABLE indexed_content_search")
+         connection.execute("DROP TABLE indexed_search_documents")
+         connection.execute("DROP TABLE project_skill_exclusions")
+@@ -96,7 +99,7 @@
+ 
+     status = initialize_database(database)
+ 
+-    assert status.schema_version == SCHEMA_VERSION == 17
++    assert status.schema_version == SCHEMA_VERSION == 18
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute("SELECT id, title FROM tasks").fetchall() == [("task", "Task")]
+diff --git a/tests/test_task_workflow_schema.py b/tests/test_task_workflow_schema.py
+--- a/tests/test_task_workflow_schema.py
++++ b/tests/test_task_workflow_schema.py
+@@ -163,6 +163,9 @@
+             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
+         ).fetchall():
+             connection.execute(f'DROP TRIGGER "{trigger_name}"')
++        connection.execute("DROP TABLE indexed_code_unit_search")
++        connection.execute("DROP TABLE indexed_code_units")
++        connection.execute("DROP TABLE indexed_code_unit_files")
+         connection.execute("DROP TABLE indexed_content_search")
+         connection.execute("DROP TABLE indexed_search_documents")
+         connection.execute("DROP TABLE project_skill_exclusions")
+@@ -179,7 +182,7 @@
+ 
+     status = initialize_database(database)
+ 
+-    assert status.schema_version == SCHEMA_VERSION == 17
++    assert status.schema_version == SCHEMA_VERSION == 18
+     connection = sqlite3.connect(database)
+     try:
+         assert connection.execute(
