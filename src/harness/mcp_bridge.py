@@ -57,6 +57,7 @@ from harness.retrieval import (
     ProjectSearchScope,
     project_exact_search_coverage_payload,
     project_search_hit_payload,
+    project_symbol_navigation_payload,
 )
 from harness.runtime_paths import default_runtime_paths
 from harness.tasks import TaskState, TaskWaitReason
@@ -82,8 +83,11 @@ _PROJECT_SEARCH_DESCRIPTION = (
     "Search current Project Intelligence across local code/doc text and identifiers, durable "
     "Knowledge, and Task history. Harness reconciles watcher lag before retrieval. Explicit "
     "identifiers and quoted/backticked literals may return exact_coverage with current-source "
-    "locations and aggregate counts. When exact_coverage.complete=true and "
-    "locations_truncated=false, do not repeat that needle with native rg/grep. Code/doc hits may "
+    "locations and aggregate counts. Identifier coverage may also include symbol_navigation: "
+    "current-source precise Python AST definitions/calls/imports/inheritance with relation evidence; "
+    "unsupported matching code remains exact text coverage, not guessed syntax. When "
+    "exact_coverage.complete=true and locations_truncated=false, do not repeat that needle with "
+    "native rg/grep. Code/doc hits may "
     "include current-source evidence; use it directly. If evidence is absent or more source is "
     "needed, targeted native read is allowed. If exact coverage is incomplete, targeted native "
     "search fallback is allowed. project_context is not required for those kinds. Use after "
@@ -510,6 +514,11 @@ def build_mcp_server(
                     None
                     if result.exact_coverage is None
                     else project_exact_search_coverage_payload(result.exact_coverage)
+                ),
+                "symbol_navigation": (
+                    None
+                    if result.symbol_navigation is None
+                    else project_symbol_navigation_payload(result.symbol_navigation)
                 ),
                 "results": hits,
             },

@@ -15,12 +15,13 @@ from harness.ipc import ProjectSearchResult
 from harness.registry import create_project, get_workspace, register_workspace
 from harness.retrieval import (
     PROJECT_SEARCH_MAX_BYTES,
-    ProjectExactSearchCoverage,
+    ProjectExactSearchInspection,
     ProjectSearchScope,
     exact_coverage_response_reserve,
     project_exact_search_coverage_payload,
     project_search_hit_payload,
     search_exact_source_coverage,
+    search_exact_source_inspection,
     search_project,
 )
 from harness.search_currentness import (
@@ -158,16 +159,16 @@ def test_project_search_retries_aba_index_change_during_retrieval(
     root, connection, workspace_id, scan_lock = _registered(tmp_path)
     try:
         _search(connection, root, scan_lock, "oldSymbol")
-        original = search_exact_source_coverage
+        original = search_exact_source_inspection
         calls = 0
 
-        def racing_exact_coverage(
+        def racing_exact_inspection(
             connection_arg: sqlite3.Connection,
             workspace_id_arg: str,
             query_arg: str,
             *,
             scope: ProjectSearchScope,
-        ) -> ProjectExactSearchCoverage | None:
+        ) -> ProjectExactSearchInspection:
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -189,7 +190,9 @@ def test_project_search_retries_aba_index_change_during_retrieval(
                 scope=scope,
             )
 
-        monkeypatch.setattr("harness.daemon.search_exact_source_coverage", racing_exact_coverage)
+        monkeypatch.setattr(
+            "harness.daemon.search_exact_source_inspection", racing_exact_inspection
+        )
         result = _search(connection, root, scan_lock, "oldSymbol")
 
         assert calls == 2

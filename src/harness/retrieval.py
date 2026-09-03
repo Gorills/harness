@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import keyword
 import re
 import sqlite3
 from dataclasses import dataclass, replace
@@ -40,6 +41,11 @@ from harness.search_text import (
     is_generated_text_output_path,
     matching_term_count,
 )
+from harness.symbol_navigation import (
+    SyntaxRelation,
+    analyze_precise_symbol_relations,
+    is_precise_symbol_path,
+)
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
 from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
 from harness.verification import list_checkpoint_verification
@@ -66,6 +72,9 @@ MAX_EXACT_SEARCH_LOCATIONS = 24
 MAX_EXACT_SEARCH_PREVIEW_BYTES = 160
 MAX_EXACT_SEARCH_SCAN_BYTES = 64 * 1024 * 1024
 MAX_EXACT_SEARCH_COVERAGE_BYTES = 4 * 1024
+MAX_SYMBOL_NAVIGATION_RELATIONS = 16
+MAX_SYMBOL_NAVIGATION_BYTES = 5 * 1024
+MAX_SYMBOL_RELATION_TEXT_BYTES = 512
 PROJECT_SEARCH_MAX_BYTES = 12 * 1024
 _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
 EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
@@ -169,6 +178,78 @@ class ProjectExactSearchCoverage:
             "locations_truncated": self.locations_truncated,
             "locations": [location.to_wire() for location in self.locations],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSymbolRelation:
+    kind: str
+    path: str
+    line: int
+    column: int
+    scope: str | None
+    target: str
+    symbol_kind: str | None
+    in_test: bool
+    evidence: ProjectSearchEvidence | None
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "path": self.path,
+            "line": self.line,
+            "column": self.column,
+            "scope": self.scope,
+            "target": self.target,
+            "symbol_kind": self.symbol_kind,
+            "in_test": self.in_test,
+            "evidence": None if self.evidence is None else self.evidence.to_wire(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSymbolNavigation:
+    needle: str
+    precise_languages: tuple[str, ...]
+    candidate_precise_files: int
+    parsed_precise_files: int
+    parse_failures: int
+    parse_skipped_files: int
+    matching_unsupported_files: int
+    definition_count: int
+    call_count: int
+    test_call_count: int
+    import_count: int
+    inheritance_count: int
+    precise_classification_complete: bool
+    relations_truncated: bool
+    evidence_truncated: bool
+    relations: tuple[ProjectSymbolRelation, ...]
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "needle": self.needle,
+            "precise_languages": list(self.precise_languages),
+            "candidate_precise_files": self.candidate_precise_files,
+            "parsed_precise_files": self.parsed_precise_files,
+            "parse_failures": self.parse_failures,
+            "parse_skipped_files": self.parse_skipped_files,
+            "matching_unsupported_files": self.matching_unsupported_files,
+            "definition_count": self.definition_count,
+            "call_count": self.call_count,
+            "test_call_count": self.test_call_count,
+            "import_count": self.import_count,
+            "inheritance_count": self.inheritance_count,
+            "precise_classification_complete": self.precise_classification_complete,
+            "relations_truncated": self.relations_truncated,
+            "evidence_truncated": self.evidence_truncated,
+            "relations": [relation.to_wire() for relation in self.relations],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectExactSearchInspection:
+    coverage: ProjectExactSearchCoverage | None
+    symbol_navigation: ProjectSymbolNavigation | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,20 +384,28 @@ def search_project(
     )
 
 
-def search_exact_source_coverage(
+def search_exact_source_inspection(
     connection: sqlite3.Connection,
     workspace_id: str,
     query: str,
     *,
     scope: ProjectSearchScope,
-) -> ProjectExactSearchCoverage | None:
-    """Return exhaustive current-source literal locations when the query exposes one exact needle."""
+) -> ProjectExactSearchInspection:
+    """Inspect exhaustive exact source and precise syntax relations in one current-source pass."""
     if scope not in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS}:
-        return None
+        return ProjectExactSearchInspection(None, None)
     needle = _exact_search_needle(query)
     if needle is None:
-        return None
+        return ProjectExactSearchInspection(None, None)
     needle_text, needle_kind = needle
+    symbol_needle = (
+        needle_text
+        if scope is not ProjectSearchScope.DOCS
+        and _is_identifier_exact_needle(needle_text)
+        and needle_kind != "quoted_literal"
+        else None
+    )
+    symbol_candidate_text = None if symbol_needle is None else symbol_needle.rsplit(".", 1)[-1]
     workspace = get_workspace(connection, workspace_id)
     rows = connection.execute(
         """
@@ -342,6 +431,14 @@ def search_exact_source_coverage(
     locations: list[ProjectExactSearchLocation] = []
     locations_truncated = False
     budget_exhausted = False
+
+    candidate_precise_files = 0
+    parsed_precise_files = 0
+    parse_failures = 0
+    parse_skipped_files = 0
+    matching_unsupported_files = 0
+    syntax_relations: list[SyntaxRelation] = []
+
     for raw_path, raw_kind, raw_size, file_sha in rows:
         if (
             not isinstance(raw_path, str)
@@ -403,23 +500,87 @@ def search_exact_source_coverage(
             matched_files += 1
             matched_occurrences += file_occurrences
             matched_lines += file_matched_lines
+        if symbol_needle is not None and not is_doc:
+            if (
+                is_precise_symbol_path(raw_path)
+                and symbol_candidate_text is not None
+                and symbol_candidate_text in read.text
+            ):
+                candidate_precise_files += 1
+                analysis = analyze_precise_symbol_relations(
+                    raw_path,
+                    read.text,
+                    symbol_needle,
+                )
+                if analysis.status == "ok":
+                    parsed_precise_files += 1
+                    syntax_relations.extend(analysis.relations)
+                elif analysis.status == "too_large":
+                    parse_skipped_files += 1
+                else:
+                    parse_failures += 1
+            elif file_occurrences and not is_precise_symbol_path(raw_path):
+                matching_unsupported_files += 1
 
-    coverage = ProjectExactSearchCoverage(
-        needle=needle_text,
-        needle_kind=needle_kind,
-        case_sensitive=True,
-        matched_files=matched_files,
-        matched_occurrences=matched_occurrences,
-        matched_lines=matched_lines,
-        scanned_files=scanned_files,
-        scanned_bytes=scanned_bytes,
-        non_text_files=non_text_files,
-        unavailable_files=unavailable_files,
-        complete=not budget_exhausted and unavailable_files == 0,
-        locations_truncated=locations_truncated,
-        locations=tuple(locations),
+    coverage = _fit_exact_coverage_to_budget(
+        ProjectExactSearchCoverage(
+            needle=needle_text,
+            needle_kind=needle_kind,
+            case_sensitive=True,
+            matched_files=matched_files,
+            matched_occurrences=matched_occurrences,
+            matched_lines=matched_lines,
+            scanned_files=scanned_files,
+            scanned_bytes=scanned_bytes,
+            non_text_files=non_text_files,
+            unavailable_files=unavailable_files,
+            complete=not budget_exhausted and unavailable_files == 0,
+            locations_truncated=locations_truncated,
+            locations=tuple(locations),
+        )
     )
-    return _fit_exact_coverage_to_budget(coverage)
+    navigation = None
+    if symbol_needle is not None and (
+        candidate_precise_files > 0 or matching_unsupported_files > 0
+    ):
+        navigation = _build_symbol_navigation(
+            symbol_needle,
+            syntax_relations,
+            candidate_precise_files=candidate_precise_files,
+            parsed_precise_files=parsed_precise_files,
+            parse_failures=parse_failures,
+            parse_skipped_files=parse_skipped_files,
+            matching_unsupported_files=matching_unsupported_files,
+            source_scan_complete=(not budget_exhausted and unavailable_files == 0),
+        )
+    return ProjectExactSearchInspection(coverage, navigation)
+
+
+def search_exact_source_coverage(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: str,
+    *,
+    scope: ProjectSearchScope,
+) -> ProjectExactSearchCoverage | None:
+    """Compatibility wrapper for callers that only need exact current-source coverage."""
+    return search_exact_source_inspection(
+        connection,
+        workspace_id,
+        query,
+        scope=scope,
+    ).coverage
+
+
+def symbol_navigation_response_reserve(navigation: ProjectSymbolNavigation | None) -> int:
+    if navigation is None:
+        return 0
+    encoded = json.dumps(
+        project_symbol_navigation_payload(navigation),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return len(encoded) + 128
 
 
 def exact_coverage_response_reserve(coverage: ProjectExactSearchCoverage | None) -> int:
@@ -1473,6 +1634,155 @@ def project_exact_search_coverage_payload(
     coverage: ProjectExactSearchCoverage,
 ) -> dict[str, object]:
     return coverage.to_wire()
+
+
+def project_symbol_navigation_payload(
+    navigation: ProjectSymbolNavigation,
+) -> dict[str, object]:
+    return navigation.to_wire()
+
+
+def _build_symbol_navigation(
+    needle: str,
+    syntax_relations: list[SyntaxRelation],
+    *,
+    candidate_precise_files: int,
+    parsed_precise_files: int,
+    parse_failures: int,
+    parse_skipped_files: int,
+    matching_unsupported_files: int,
+    source_scan_complete: bool,
+) -> ProjectSymbolNavigation:
+    relations = tuple(
+        sorted(
+            (_project_symbol_relation(relation) for relation in syntax_relations),
+            key=_project_symbol_relation_key,
+        )
+    )
+    definition_count = sum(relation.kind == "definition" for relation in relations)
+    call_count = sum(relation.kind == "call" for relation in relations)
+    test_call_count = sum(relation.kind == "call" and relation.in_test for relation in relations)
+    import_count = sum(relation.kind == "import" for relation in relations)
+    inheritance_count = sum(relation.kind == "inheritance" for relation in relations)
+    truncated = len(relations) > MAX_SYMBOL_NAVIGATION_RELATIONS
+    navigation = ProjectSymbolNavigation(
+        needle=needle,
+        precise_languages=("python",),
+        candidate_precise_files=candidate_precise_files,
+        parsed_precise_files=parsed_precise_files,
+        parse_failures=parse_failures,
+        parse_skipped_files=parse_skipped_files,
+        matching_unsupported_files=matching_unsupported_files,
+        definition_count=definition_count,
+        call_count=call_count,
+        test_call_count=test_call_count,
+        import_count=import_count,
+        inheritance_count=inheritance_count,
+        precise_classification_complete=(
+            source_scan_complete
+            and candidate_precise_files == parsed_precise_files
+            and parse_failures == 0
+            and parse_skipped_files == 0
+        ),
+        relations_truncated=truncated,
+        evidence_truncated=False,
+        relations=relations[:MAX_SYMBOL_NAVIGATION_RELATIONS],
+    )
+    return _fit_symbol_navigation_to_budget(navigation)
+
+
+def _project_symbol_relation_key(
+    relation: ProjectSymbolRelation,
+) -> tuple[int, str, int, int, str, str]:
+    priority = {
+        "definition": 0,
+        "call": 2 if relation.in_test else 1,
+        "inheritance": 3,
+        "import": 4,
+    }
+    return (
+        priority.get(relation.kind, 9),
+        relation.path,
+        relation.line,
+        relation.column,
+        relation.scope or "",
+        relation.target,
+    )
+
+
+def _project_symbol_relation(relation: SyntaxRelation) -> ProjectSymbolRelation:
+    evidence = relation.evidence
+    return ProjectSymbolRelation(
+        kind=relation.kind,
+        path=relation.path,
+        line=relation.line,
+        column=relation.column,
+        scope=(
+            None
+            if relation.scope is None
+            else _truncate_utf8(relation.scope, MAX_SYMBOL_RELATION_TEXT_BYTES)
+        ),
+        target=_truncate_utf8(relation.target, MAX_SYMBOL_RELATION_TEXT_BYTES),
+        symbol_kind=relation.symbol_kind,
+        in_test=relation.in_test,
+        evidence=ProjectSearchEvidence(
+            start_line=evidence.start_line,
+            end_line=evidence.end_line,
+            snippet=evidence.snippet,
+            truncated=evidence.truncated,
+        ),
+    )
+
+
+def _fit_symbol_navigation_to_budget(
+    navigation: ProjectSymbolNavigation,
+) -> ProjectSymbolNavigation:
+    fitted = navigation
+    while True:
+        encoded = json.dumps(
+            project_symbol_navigation_payload(fitted),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) <= MAX_SYMBOL_NAVIGATION_BYTES:
+            return fitted
+        relations = list(fitted.relations)
+        evidence_index = next(
+            (
+                index
+                for index in range(len(relations) - 1, -1, -1)
+                if relations[index].evidence is not None
+            ),
+            None,
+        )
+        if evidence_index is not None:
+            relations[evidence_index] = replace(relations[evidence_index], evidence=None)
+            fitted = replace(
+                fitted,
+                evidence_truncated=True,
+                relations=tuple(relations),
+            )
+            continue
+        if relations:
+            fitted = replace(
+                fitted,
+                relations_truncated=True,
+                relations=tuple(relations[:-1]),
+            )
+            continue
+        return fitted
+
+
+def _is_identifier_exact_needle(value: str) -> bool:
+    if (
+        re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
+            value,
+        )
+        is None
+    ):
+        return False
+    return not keyword.iskeyword(value.rsplit(".", 1)[-1])
 
 
 def _exact_search_needle(query: str) -> tuple[str, str] | None:

@@ -92,8 +92,9 @@ from harness.retrieval import (
     ProjectSearchScope,
     exact_coverage_response_reserve,
     read_project_context,
-    search_exact_source_coverage,
+    search_exact_source_inspection,
     search_project,
+    symbol_navigation_response_reserve,
 )
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
@@ -484,19 +485,24 @@ def read_project_search(
                     "workspace registry identity changed during Project search"
                 )
             project = get_project(connection, workspace.project_id)
-            exact_coverage = search_exact_source_coverage(
+            exact_inspection = search_exact_source_inspection(
                 connection,
                 workspace.workspace_id,
                 query,
                 scope=scope,
             )
+            exact_coverage = exact_inspection.coverage
+            symbol_navigation = exact_inspection.symbol_navigation
             hits = search_project(
                 connection,
                 workspace.workspace_id,
                 query,
                 scope=scope,
                 limit=limit,
-                response_reserve_bytes=exact_coverage_response_reserve(exact_coverage),
+                response_reserve_bytes=(
+                    exact_coverage_response_reserve(exact_coverage)
+                    + symbol_navigation_response_reserve(symbol_navigation)
+                ),
             )
             connection.execute("COMMIT")
         except Exception:
@@ -519,6 +525,7 @@ def read_project_search(
                 project_id=project.project_id,
                 workspace_state="current",
                 exact_coverage=exact_coverage,
+                symbol_navigation=symbol_navigation,
                 results=hits,
             )
     raise SearchCurrentnessError("Workspace changed repeatedly during Project search")
