@@ -55,6 +55,7 @@ from harness.retrieval import (
     MAX_PROJECT_CONTEXT_REF_BYTES,
     PROJECT_SEARCH_MAX_BYTES,
     ProjectSearchScope,
+    project_exact_search_coverage_payload,
     project_search_hit_payload,
 )
 from harness.runtime_paths import default_runtime_paths
@@ -64,29 +65,30 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
-    "Harness is required. project_status must be the first repository action of each task. "
-    "Before any shell command, repository read/search, browser inspection, or change, locate "
-    "Harness tools if deferred or omitted from the initial visible tool list and call "
-    "project_status. Tool discovery is the only allowed pre-status action; omission is not "
-    f"failure. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
-    "title/body. stack_hints are optional Task metadata. After status, "
-    "start/resume a Task before diagnosis or edits; on schema error retry, never skip. Do not "
-    "skip Task because work looks small or the path is known. Then "
-    "project_search before broad native work; an already-known exact path may skip search, "
-    "not Task. Use evidence; else a code/doc path may be read natively; "
-    "project_context is not required for those kinds. Checkpoint each stage. New request or "
-    "implement-after-diagnosis: complete/wait then new Task. Keep task_id+expected_revision; "
-    "never infer write targets. Hidden mode forbids durable SCM mutations."
+    "Harness required. project_status must be the first repository action. "
+    "Before any shell command/read/search/change, locate Harness tools if deferred or omitted from "
+    "the initial visible tool list and call project_status. Tool discovery is the only allowed "
+    f"pre-status action. Use {_OPERATOR_LANGUAGE} in Task title/summary/next_step and Knowledge "
+    "title/body. stack_hints are optional Task metadata. After status, start/resume a Task before "
+    "diagnosis or edits; schema error: retry, never skip. Do not skip Task because work looks small "
+    "or the path is known. Then project_search before broad native work; a known exact path may skip "
+    "search, not Task. Complete untruncated exact_coverage replaces native rg/grep for that needle. "
+    "Use evidence; otherwise a code/doc path may be read natively; project_context is not required "
+    "for those kinds. Checkpoint each stage. New request or implement-after-diagnosis: complete/wait "
+    "then new Task. Keep task_id+expected_revision; never infer write targets. Hidden mode forbids "
+    "durable SCM mutations."
 )
 _PROJECT_SEARCH_DESCRIPTION = (
-    "Search bounded Project Intelligence across local code/doc text and identifiers, "
-    "durable Knowledge, and Task history. Natural queries may include conversational "
-    "filler. Results are compact refs. Code/doc hits may include bounded current-source "
-    "evidence after a live-file SHA match; that evidence is the repository read for the "
-    "returned range, not an FTS snippet. Use evidence directly. If evidence is absent or "
-    "more source is needed, targeted native read is allowed; project_context is not required "
-    "for those kinds. Use after task_start or resume, before broad native exploration. Skip "
-    "this search only when an exact path is already in hand; Task remains required."
+    "Search current Project Intelligence across local code/doc text and identifiers, durable "
+    "Knowledge, and Task history. Harness reconciles watcher lag before retrieval. Explicit "
+    "identifiers and quoted/backticked literals may return exact_coverage with current-source "
+    "locations and aggregate counts. When exact_coverage.complete=true and "
+    "locations_truncated=false, do not repeat that needle with native rg/grep. Code/doc hits may "
+    "include current-source evidence; use it directly. If evidence is absent or more source is "
+    "needed, targeted native read is allowed. If exact coverage is incomplete, targeted native "
+    "search fallback is allowed. project_context is not required for those kinds. Use after "
+    "task_start or resume, before broad native exploration. Skip this search only when an exact "
+    "path is already in hand; Task remains required."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
@@ -500,7 +502,17 @@ def build_mcp_server(
         )
         hits = [project_search_hit_payload(hit) for hit in result.results[:limit]]
         return _bounded(
-            {"query": query, "scope": scope, "results": hits},
+            {
+                "query": query,
+                "scope": scope,
+                "workspace_state": result.workspace_state,
+                "exact_coverage": (
+                    None
+                    if result.exact_coverage is None
+                    else project_exact_search_coverage_payload(result.exact_coverage)
+                ),
+                "results": hits,
+            },
             _SEARCH_MAX_BYTES,
             "project_search response exceeds model exposure budget",
         )

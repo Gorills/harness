@@ -90,11 +90,18 @@ from harness.retrieval import (
     ProjectRetrievalError,
     ProjectRetrievalRefError,
     ProjectSearchScope,
+    exact_coverage_response_reserve,
     read_project_context,
+    search_exact_source_coverage,
     search_project,
 )
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
+from harness.search_currentness import (
+    SearchCurrentnessError,
+    ensure_workspace_search_index_current,
+    workspace_search_state_is_unchanged,
+)
 from harness.skill_runtime import (
     SkillRuntimeError,
     cleanup_projected_skills,
@@ -160,6 +167,7 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
 _SCAN_DEADLINE_SECONDS = 30.0
+_PROJECT_SEARCH_CURRENTNESS_SECONDS = 25.0
 _MAX_CLIENT_WORKERS = 8
 
 
@@ -455,37 +463,65 @@ def read_project_search(
     query: str,
     limit: int,
     scope: ProjectSearchScope,
+    scan_lock: Lock,
 ) -> ProjectSearchResult:
-    """Resolve one Workspace and read one consistent Project Intelligence search snapshot."""
+    """Resolve one Workspace and read one current Project Intelligence search snapshot."""
     workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
-    connection.execute("BEGIN")
-    try:
-        current_workspace = get_workspace(connection, workspace.workspace_id)
-        if current_workspace != workspace:
-            raise WorkspaceResolutionError(
-                "workspace registry identity changed during Project search"
-            )
-        project = get_project(connection, workspace.project_id)
-        hits = search_project(
+    deadline = monotonic() + _PROJECT_SEARCH_CURRENTNESS_SECONDS
+    project = get_project(connection, workspace.project_id)
+    for _attempt in range(2):
+        currentness = ensure_workspace_search_index_current(
             connection,
-            workspace.workspace_id,
-            query,
-            scope=scope,
-            limit=limit,
+            workspace,
+            scan_lock,
+            deadline=deadline,
         )
-        connection.execute("COMMIT")
-    except Exception:
-        if connection.in_transaction:
-            connection.execute("ROLLBACK")
-        raise
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during Project search")
-    return ProjectSearchResult(
-        schema_version=SCHEMA_VERSION,
-        workspace_id=workspace.workspace_id,
-        project_id=project.project_id,
-        results=hits,
-    )
+        connection.execute("BEGIN")
+        try:
+            current_workspace = get_workspace(connection, workspace.workspace_id)
+            if current_workspace != workspace:
+                raise WorkspaceResolutionError(
+                    "workspace registry identity changed during Project search"
+                )
+            project = get_project(connection, workspace.project_id)
+            exact_coverage = search_exact_source_coverage(
+                connection,
+                workspace.workspace_id,
+                query,
+                scope=scope,
+            )
+            hits = search_project(
+                connection,
+                workspace.workspace_id,
+                query,
+                scope=scope,
+                limit=limit,
+                response_reserve_bytes=exact_coverage_response_reserve(exact_coverage),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        if workspace_search_state_is_unchanged(
+            connection,
+            workspace,
+            currentness,
+            deadline=deadline,
+        ):
+            if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+                raise WorkspaceResolutionError(
+                    "workspace Git identity changed during Project search"
+                )
+            return ProjectSearchResult(
+                schema_version=SCHEMA_VERSION,
+                workspace_id=workspace.workspace_id,
+                project_id=project.project_id,
+                workspace_state="current",
+                exact_coverage=exact_coverage,
+                results=hits,
+            )
+    raise SearchCurrentnessError("Workspace changed repeatedly during Project search")
 
 
 def read_project_context_result(
@@ -1028,6 +1064,7 @@ def _serve_client(
             request.search_query,
             request.search_limit,
             request.project_search_scope,
+            scan_lock,
         )
         return
     if request.method == "project_context" and request.context_refs is not None:
@@ -1328,9 +1365,10 @@ def _serve_project_search(
     query: str,
     limit: int,
     scope: ProjectSearchScope,
+    scan_lock: Lock,
 ) -> None:
     try:
-        result = read_project_search(database, hints, query, limit, scope)
+        result = read_project_search(database, hints, query, limit, scope, scan_lock)
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client, request_id=request_id, code="workspace_resolution_error", message=str(exc)
@@ -1350,7 +1388,7 @@ def _serve_project_search(
     except SearchError as exc:
         _try_send_error(client, request_id=request_id, code="search_error", message=str(exc))
         return
-    except (ProjectRetrievalError, KnowledgeError, TaskError):
+    except (ProjectRetrievalError, KnowledgeError, TaskError, IndexingError):
         _try_send_error(
             client,
             request_id=request_id,

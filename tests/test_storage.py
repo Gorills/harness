@@ -691,6 +691,8 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
         connection.execute("DROP TABLE project_skill_exclusions")
+        connection.execute("DROP TABLE workspace_search_index_dirty_paths")
+        connection.execute("DROP TABLE workspace_search_index_state")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")

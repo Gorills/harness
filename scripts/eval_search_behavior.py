@@ -165,6 +165,7 @@ SANITIZED_METRIC_KEYS = (
     "search_before_broad_native",
     "good_hit_to_targeted_read",
     "good_hit_to_duplicate_broad_search",
+    "complete_exact_to_native_search",
     "zero_hit_to_native_fallback",
 )
 
@@ -204,6 +205,7 @@ class SearchBehaviorReport:
     search_before_broad_native: bool
     good_hit_to_targeted_read: bool
     good_hit_to_duplicate_broad_search: bool
+    complete_exact_to_native_search: bool
     zero_hit_to_native_fallback: bool
     project_search_query: str | None
     candidate_paths: tuple[str, ...]
@@ -222,6 +224,7 @@ class SearchBehaviorReport:
                 "search_before_broad_native": self.search_before_broad_native,
                 "good_hit_to_targeted_read": self.good_hit_to_targeted_read,
                 "good_hit_to_duplicate_broad_search": self.good_hit_to_duplicate_broad_search,
+                "complete_exact_to_native_search": self.complete_exact_to_native_search,
                 "zero_hit_to_native_fallback": self.zero_hit_to_native_fallback,
             },
             "evidence": {
@@ -287,7 +290,20 @@ def evaluate_search_behavior(
     followup = (
         native_commands[0].command_class if native_commands else CommandClass.UNRELATED_COMMAND
     )
-    duplicate = _duplicate_broad_search(quality, query, native_commands)
+    fallback_exact_needle = _exact_needle_requiring_native_fallback(search_item)
+    duplicate = _duplicate_broad_search(
+        quality,
+        query,
+        native_commands,
+        allowed_exact_fallback=fallback_exact_needle,
+    )
+    exact_needle = _complete_exact_needle(search_item)
+    complete_exact_to_native_search = exact_needle is not None and any(
+        command.command_class in {CommandClass.TARGETED_SEARCH, CommandClass.BROAD_SEARCH}
+        and command.search_pattern is not None
+        and _substantially_repeats(command.search_pattern, exact_needle)
+        for command in native_commands
+    )
     targeted_read = any(
         command.command_class is CommandClass.TARGETED_READ for command in native_commands
     )
@@ -303,6 +319,7 @@ def evaluate_search_behavior(
         search_before_broad_native=not first_broad_before_search,
         good_hit_to_targeted_read=quality is SearchHitQuality.STRONG and targeted_read,
         good_hit_to_duplicate_broad_search=duplicate,
+        complete_exact_to_native_search=complete_exact_to_native_search,
         zero_hit_to_native_fallback=quality
         in {SearchHitQuality.ZERO, SearchHitQuality.INSUFFICIENT}
         and broad_after,
@@ -358,9 +375,17 @@ def _search_outcome(
     results = payload.get("results")
     if not isinstance(results, list):
         return query, SearchHitQuality.INSUFFICIENT, ()
+    coverage = payload.get("exact_coverage")
+    exact_paths = _exact_coverage_paths(coverage)
+    paths = tuple(dict.fromkeys((*_candidate_paths(results), *exact_paths)))
+    exact_occurrences = _exact_coverage_occurrences(coverage)
+    exact_complete = isinstance(coverage, Mapping) and coverage.get("complete") is True
+    if exact_complete and exact_occurrences > 0 and paths:
+        return query, SearchHitQuality.STRONG, paths
     if not results:
-        return query, SearchHitQuality.ZERO, ()
-    paths = tuple(_candidate_paths(results))
+        if isinstance(coverage, Mapping) and not exact_complete:
+            return query, SearchHitQuality.INSUFFICIENT, paths
+        return query, SearchHitQuality.ZERO, paths
     if not paths:
         return query, SearchHitQuality.INSUFFICIENT, ()
 
@@ -383,12 +408,74 @@ def _search_outcome(
     return query, SearchHitQuality.STRONG, paths
 
 
+def _exact_coverage_paths(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Mapping):
+        return ()
+    locations = value.get("locations")
+    if not isinstance(locations, list):
+        return ()
+    paths: list[str] = []
+    seen: set[str] = set()
+    for location in locations:
+        if not isinstance(location, Mapping):
+            continue
+        path = location.get("path")
+        if not isinstance(path, str) or not path.strip() or path in seen:
+            continue
+        seen.add(path)
+        paths.append(path)
+    return tuple(paths)
+
+
+def _exact_coverage_occurrences(value: object) -> int:
+    if not isinstance(value, Mapping):
+        return 0
+    occurrences = value.get("matched_occurrences")
+    if isinstance(occurrences, bool) or not isinstance(occurrences, int) or occurrences < 0:
+        return 0
+    return occurrences
+
+
 def _has_current_source_evidence(hit: Mapping[str, Any]) -> bool:
     evidence = hit.get("evidence")
     if not isinstance(evidence, Mapping):
         return False
     snippet = evidence.get("snippet")
     return isinstance(snippet, str) and bool(snippet.strip())
+
+
+def _exact_needle_requiring_native_fallback(item: Mapping[str, Any] | None) -> str | None:
+    if item is None:
+        return None
+    payload = _search_result_payload(item)
+    if payload is None:
+        return None
+    coverage = payload.get("exact_coverage")
+    if not isinstance(coverage, Mapping):
+        return None
+    if coverage.get("complete") is True and coverage.get("locations_truncated") is False:
+        return None
+    needle = coverage.get("needle")
+    if not isinstance(needle, str) or not needle.strip():
+        return None
+    return needle
+
+
+def _complete_exact_needle(item: Mapping[str, Any] | None) -> str | None:
+    if item is None:
+        return None
+    payload = _search_result_payload(item)
+    if payload is None:
+        return None
+    coverage = payload.get("exact_coverage")
+    if not isinstance(coverage, Mapping):
+        return None
+    if coverage.get("complete") is not True or coverage.get("locations_truncated") is not False:
+        return None
+    needle = coverage.get("needle")
+    if not isinstance(needle, str) or not needle.strip():
+        return None
+    return needle
 
 
 def _search_query(item: Mapping[str, Any]) -> str | None:
@@ -631,12 +718,18 @@ def _duplicate_broad_search(
     quality: SearchHitQuality,
     query: str | None,
     native_commands: Sequence[NativeCommandEvidence],
+    *,
+    allowed_exact_fallback: str | None = None,
 ) -> bool:
     if quality is not SearchHitQuality.STRONG or not query:
         return False
     return any(
         command.command_class is CommandClass.BROAD_SEARCH
         and command.search_pattern is not None
+        and not (
+            allowed_exact_fallback is not None
+            and _substantially_repeats(command.search_pattern, allowed_exact_fallback)
+        )
         and _substantially_repeats(command.search_pattern, query)
         for command in native_commands
     )

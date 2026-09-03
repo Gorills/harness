@@ -20,10 +20,16 @@ from harness.knowledge import (
     KnowledgeKind,
 )
 from harness.retrieval import (
+    MAX_EXACT_SEARCH_COVERAGE_BYTES,
+    MAX_EXACT_SEARCH_LOCATIONS,
+    MAX_EXACT_SEARCH_NEEDLE_BYTES,
+    MAX_EXACT_SEARCH_PREVIEW_BYTES,
     MAX_PROJECT_CONTEXT_REF_BYTES,
     MAX_SEARCH_EVIDENCE_SNIPPET_BYTES,
     MAX_SEARCH_EVIDENCE_SNIPPET_LINES,
     ProjectContextItem,
+    ProjectExactSearchCoverage,
+    ProjectExactSearchLocation,
     ProjectSearchEvidence,
     ProjectSearchHit,
     ProjectSearchKind,
@@ -67,6 +73,7 @@ _HINT_PATH_MAX_LENGTH = 4096
 _MAX_WORKSPACE_HINTS = 4
 _DEFAULT_TIMEOUT_SECONDS = 2.0
 _SEARCH_REQUEST_TIMEOUT_SECONDS = 8.0
+_PROJECT_SEARCH_REQUEST_TIMEOUT_SECONDS = 35.0
 _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
 _TASK_REQUEST_TIMEOUT_SECONDS = 60.0
 _TASK_ID_MAX_LENGTH = 128
@@ -281,11 +288,13 @@ class WorkspaceIndexEntryResult:
 
 @dataclass(frozen=True, slots=True)
 class ProjectSearchResult:
-    """Bounded Project Intelligence search result returned by the daemon."""
+    """Bounded current Project Intelligence search result returned by the daemon."""
 
     schema_version: int
     workspace_id: str
     project_id: str
+    workspace_state: str
+    exact_coverage: ProjectExactSearchCoverage | None
     results: tuple[ProjectSearchHit, ...]
 
 
@@ -628,7 +637,7 @@ def request_project_search(
     *,
     scope: ProjectSearchScope,
     limit: int = DEFAULT_SEARCH_LIMIT,
-    timeout: float = _SEARCH_REQUEST_TIMEOUT_SECONDS,
+    timeout: float = _PROJECT_SEARCH_REQUEST_TIMEOUT_SECONDS,
 ) -> ProjectSearchResult:
     """Request one daemon-owned bounded Project Intelligence search."""
     _validate_search_query(query)
@@ -1257,6 +1266,10 @@ def send_project_search_response(
                     "schema_version": result.schema_version,
                     "workspace_id": result.workspace_id,
                     "project_id": result.project_id,
+                    "workspace_state": result.workspace_state,
+                    "exact_coverage": (
+                        None if result.exact_coverage is None else result.exact_coverage.to_wire()
+                    ),
                     "results": [_project_search_hit_to_wire(hit) for hit in result.results],
                 },
             }
@@ -2829,22 +2842,126 @@ def _validate_json_value(value: object, *, depth: int) -> None:
     raise IpcProtocolError("daemon project context data contains unsupported value")
 
 
+def _project_exact_search_coverage_from_wire(
+    value: object,
+) -> ProjectExactSearchCoverage | None:
+    if value is None:
+        return None
+    fields = {
+        "needle",
+        "needle_kind",
+        "case_sensitive",
+        "matched_files",
+        "matched_occurrences",
+        "matched_lines",
+        "scanned_files",
+        "scanned_bytes",
+        "non_text_files",
+        "unavailable_files",
+        "complete",
+        "locations_truncated",
+        "locations",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise IpcProtocolError("daemon exact search coverage does not match the IPC schema")
+    needle = _bounded_response_string(
+        value["needle"], "exact_coverage.needle", MAX_EXACT_SEARCH_NEEDLE_BYTES
+    )
+    needle_kind = _bounded_response_string(value["needle_kind"], "exact_coverage.needle_kind", 32)
+    if needle_kind not in {"quoted_literal", "identifier", "single_term"}:
+        raise IpcProtocolError("daemon exact search coverage has unsupported needle kind")
+    case_sensitive = value["case_sensitive"]
+    complete = value["complete"]
+    locations_truncated = value["locations_truncated"]
+    if not all(isinstance(item, bool) for item in (case_sensitive, complete, locations_truncated)):
+        raise IpcProtocolError("daemon exact search coverage has invalid boolean fields")
+    counts = tuple(
+        _bounded_nonnegative_int(value[name], f"exact_coverage.{name}")
+        for name in (
+            "matched_files",
+            "matched_occurrences",
+            "matched_lines",
+            "scanned_files",
+            "scanned_bytes",
+            "non_text_files",
+            "unavailable_files",
+        )
+    )
+    raw_locations = value["locations"]
+    if not isinstance(raw_locations, list) or len(raw_locations) > MAX_EXACT_SEARCH_LOCATIONS:
+        raise IpcProtocolError("daemon exact search coverage locations exceed item limit")
+    locations: list[ProjectExactSearchLocation] = []
+    for raw in raw_locations:
+        if not isinstance(raw, dict) or set(raw) != {"path", "line", "column", "preview"}:
+            raise IpcProtocolError("daemon exact search location does not match the IPC schema")
+        path = _bounded_response_string(raw["path"], "exact_coverage.path", 4096)
+        line = _bounded_nonnegative_int(raw["line"], "exact_coverage.line")
+        column = _bounded_nonnegative_int(raw["column"], "exact_coverage.column")
+        if line < 1 or column < 1:
+            raise IpcProtocolError("daemon exact search location has invalid coordinates")
+        preview = _bounded_response_string(
+            raw["preview"],
+            "exact_coverage.preview",
+            MAX_EXACT_SEARCH_PREVIEW_BYTES + 8,
+        )
+        locations.append(ProjectExactSearchLocation(path, line, column, preview))
+    coverage = ProjectExactSearchCoverage(
+        needle=needle,
+        needle_kind=needle_kind,
+        case_sensitive=case_sensitive,
+        matched_files=counts[0],
+        matched_occurrences=counts[1],
+        matched_lines=counts[2],
+        scanned_files=counts[3],
+        scanned_bytes=counts[4],
+        non_text_files=counts[5],
+        unavailable_files=counts[6],
+        complete=complete,
+        locations_truncated=locations_truncated,
+        locations=tuple(locations),
+    )
+    encoded = json.dumps(coverage.to_wire(), ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(encoded) > MAX_EXACT_SEARCH_COVERAGE_BYTES:
+        raise IpcProtocolError("daemon exact search coverage exceeds byte limit")
+    return coverage
+
+
 def _project_search_from_response(
     response: dict[str, Any],
     *,
     expected_request_id: str,
 ) -> ProjectSearchResult:
     result = _success_result(response, expected_request_id=expected_request_id)
-    if set(result) != {"schema_version", "workspace_id", "project_id", "results"}:
+    if set(result) != {
+        "schema_version",
+        "workspace_id",
+        "project_id",
+        "workspace_state",
+        "exact_coverage",
+        "results",
+    }:
         raise IpcProtocolError("daemon project search result does not match the IPC schema")
     schema_version = _bounded_nonnegative_int(result["schema_version"], "schema_version")
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
     project_id = _bounded_response_string(result["project_id"], "project_id", 128)
+    workspace_state = _bounded_response_string(result["workspace_state"], "workspace_state", 16)
+    if workspace_state != "current":
+        raise IpcProtocolError("daemon project search workspace state is unsupported")
+    exact_coverage = _project_exact_search_coverage_from_wire(result["exact_coverage"])
     raw_results = result["results"]
     if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
         raise IpcProtocolError("daemon project search results exceed the item limit")
     hits = tuple(_project_search_hit_from_wire(raw) for raw in raw_results)
-    return ProjectSearchResult(schema_version, workspace_id, project_id, hits)
+    return ProjectSearchResult(
+        schema_version,
+        workspace_id,
+        project_id,
+        workspace_state,
+        exact_coverage,
+        hits,
+    )
 
 
 def _project_context_from_response(
