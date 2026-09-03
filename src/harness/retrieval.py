@@ -810,7 +810,7 @@ def _indexed_code_unit_hits(
             or line <= 0
             or not isinstance(raw_score, (int, float))
             or not isinstance(manifest_sha256, str)
-            or manifest_sha256 != indexed_sha256
+            or not isinstance(indexed_sha256, str)
             or raw_kind != IndexedFileKind.FILE.value
             or is_document_path(relative_path)
             or is_generated_text_output_path(relative_path)
@@ -818,6 +818,8 @@ def _indexed_code_unit_hits(
             raise ProjectRetrievalError(
                 "indexed code-unit search crossed authoritative index state"
             )
+        if manifest_sha256 != indexed_sha256:
+            continue
         phrase_match = contains_term_phrase(query.terms, name) or contains_term_phrase(
             query.terms, qualified_name
         )
@@ -1582,7 +1584,12 @@ def _attach_current_source_evidence(
         )
         if read.status is SearchEvidenceReadStatus.CHANGED_SINCE_INDEX:
             annotated.append(
-                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX)
+                replace(
+                    hit,
+                    short_summary=None,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX,
+                )
             )
             continue
         if read.status is not SearchEvidenceReadStatus.OK or read.text is None:
