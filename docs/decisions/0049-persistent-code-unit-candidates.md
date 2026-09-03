@@ -73,6 +73,12 @@ normalized identifier tokens, and symbol kind. It cannot return source text. For
 `project_search` may fuse matching definition rows into the existing per-file candidates while
 retaining the normal `code:<path>` ref and live-source evidence validation.
 
+Candidate fusion fails closed per row. If a persisted code-unit manifest SHA no longer matches the
+current `indexed_files` SHA, that structural candidate is ignored rather than failing the whole query.
+If live-source validation reports `changed_since_index`, the source-derived structural summary is
+removed together with evidence, leaving only safe locator metadata. Invalid persisted row types and
+other impossible index state remain hard retrieval errors.
+
 A matching code-unit definition can outrank an otherwise same-tier lexical mention. Exact path and
 filename tiers remain stronger. The result explains the structural reason and may expose a bounded
 summary such as `method Client.fetch`; it does not expose internal BM25 scores or parser state.
@@ -98,6 +104,8 @@ structural evidence.
 - Full and incremental scans maintain parser-derived candidates without a second freshness protocol.
 - Malformed, non-text, oversized, or definition-explosive source fails closed and is not repeatedly
   reparsed until its SHA changes.
+- Stale code-unit candidates cannot fail an otherwise valid search or leak a stale symbol summary when
+  live-source validation proves that the file changed.
 - SQLite still does not become a source-code store; only bounded names, kinds, and locations persist.
 - The schema advances from v17 to v18 and older databases migrate in place.
 - Structural search gains persistent definitions, while call graphs and type-aware navigation remain
@@ -116,6 +124,8 @@ Acceptance coverage must prove:
 - incremental source changes replace old units and FTS rows;
 - parse failures remove stale units, persist a negative manifest, and are not reparsed while the SHA
   is unchanged;
+- stale manifest/index SHA divergence drops only the structural candidate, while changed live source
+  suppresses stale structural summary/evidence without losing the safe locator;
 - deleted paths cascade all code-unit state;
 - the per-file unit bound fails closed without a partial unit set;
 - existing exact coverage, query-time symbol navigation, migrations, quality gates, wheel smoke, and
