@@ -90,13 +90,20 @@ def analyze_precise_symbol_relations(
 
 def analyze_precise_code_units(relative_path: str, text: str) -> SyntaxRelationAnalysis:
     """Extract every precise named definition from one bounded current source file."""
-    return _analyze_precise_relations(relative_path, text, None)
+    return _analyze_precise_relations(relative_path, text, None, collect_references=False)
+
+
+def analyze_precise_code_structure(relative_path: str, text: str) -> SyntaxRelationAnalysis:
+    """Extract every bounded precise definition and supported syntactic reference."""
+    return _analyze_precise_relations(relative_path, text, None, collect_references=True)
 
 
 def _analyze_precise_relations(
     relative_path: str,
     text: str,
     needle: str | None,
+    *,
+    collect_references: bool = False,
 ) -> SyntaxRelationAnalysis:
     language = precise_symbol_language(relative_path)
     if language is None:
@@ -104,20 +111,28 @@ def _analyze_precise_relations(
     if len(text.encode("utf-8")) > MAX_SYMBOL_PARSE_BYTES:
         return SyntaxRelationAnalysis(language, "too_large", ())
     if language == "python":
-        return _analyze_python_relations(relative_path, text, needle)
-    return _analyze_polyglot_relations(relative_path, text, needle, language)
+        return _analyze_python_relations(
+            relative_path, text, needle, collect_references=collect_references
+        )
+    return _analyze_polyglot_relations(
+        relative_path, text, needle, language, collect_references=collect_references
+    )
 
 
 def _analyze_python_relations(
     relative_path: str,
     text: str,
     needle: str | None,
+    *,
+    collect_references: bool,
 ) -> SyntaxRelationAnalysis:
     try:
         tree = ast.parse(text, filename=relative_path, type_comments=True)
     except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         return SyntaxRelationAnalysis("python", "parse_error", ())
-    visitor = _PythonRelationVisitor(relative_path, text, needle)
+    visitor = _PythonRelationVisitor(
+        relative_path, text, needle, collect_references=collect_references
+    )
     visitor.visit(tree)
     relations = tuple(sorted(visitor.relations, key=_relation_key))
     return SyntaxRelationAnalysis("python", "ok", relations)
@@ -142,10 +157,18 @@ def _relation_key(relation: SyntaxRelation) -> tuple[int, int, str, int, int, st
 
 
 class _PythonRelationVisitor(ast.NodeVisitor):
-    def __init__(self, relative_path: str, text: str, needle: str | None) -> None:
+    def __init__(
+        self,
+        relative_path: str,
+        text: str,
+        needle: str | None,
+        *,
+        collect_references: bool,
+    ) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
+        self.collect_references = collect_references
         self.needle_leaf = "" if needle is None else needle.rsplit(".", 1)[-1]
         self.scopes: list[tuple[str, str]] = []
         self.relations: list[SyntaxRelation] = []
@@ -283,7 +306,7 @@ class _PythonRelationVisitor(ast.NodeVisitor):
 
     def _target_matches(self, target: str) -> bool:
         if self.needle is None:
-            return False
+            return self.collect_references
         if "." in self.needle:
             return target == self.needle or target.endswith(f".{self.needle}")
         return target.rsplit(".", 1)[-1] == self.needle_leaf
@@ -371,6 +394,8 @@ def _analyze_polyglot_relations(
     text: str,
     needle: str | None,
     language: str,
+    *,
+    collect_references: bool,
 ) -> SyntaxRelationAnalysis:
     try:
         root = SgRoot(text, language).root()
@@ -378,7 +403,9 @@ def _analyze_polyglot_relations(
         return SyntaxRelationAnalysis(language, "parse_error", ())
     if root.find(kind="ERROR") is not None:
         return SyntaxRelationAnalysis(language, "parse_error", ())
-    collector = _PolyglotRelationCollector(relative_path, text, needle, language)
+    collector = _PolyglotRelationCollector(
+        relative_path, text, needle, language, collect_references=collect_references
+    )
     collector.collect(root)
     return SyntaxRelationAnalysis(
         language,
@@ -388,10 +415,19 @@ def _analyze_polyglot_relations(
 
 
 class _PolyglotRelationCollector:
-    def __init__(self, relative_path: str, text: str, needle: str | None, language: str) -> None:
+    def __init__(
+        self,
+        relative_path: str,
+        text: str,
+        needle: str | None,
+        language: str,
+        *,
+        collect_references: bool,
+    ) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
+        self.collect_references = collect_references
         self.needle_leaf = "" if needle is None else _target_leaf(needle)
         self.language = language
         self.in_test = is_test_path(relative_path)
@@ -687,7 +723,7 @@ class _PolyglotRelationCollector:
 
     def _target_matches(self, target: str) -> bool:
         if self.needle is None:
-            return False
+            return self.collect_references
         if "." in self.needle:
             normalized = target.replace("::", ".")
             return normalized == self.needle or normalized.endswith(f".{self.needle}")

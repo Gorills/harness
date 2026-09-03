@@ -13,7 +13,7 @@ def test_schema_v9_task_stack_hint_constraints_and_cascade(tmp_path: Path) -> No
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 18
+        assert SCHEMA_VERSION == 19
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
         connection.execute(
             """
@@ -80,6 +80,8 @@ def test_schema_v8_migrates_to_v9_without_losing_tasks(tmp_path: Path) -> None:
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        connection.execute("DROP TABLE indexed_code_relation_search")
+        connection.execute("DROP TABLE indexed_code_relations")
         connection.execute("DROP TABLE indexed_code_unit_search")
         connection.execute("DROP TABLE indexed_code_units")
         connection.execute("DROP TABLE indexed_code_unit_files")
@@ -99,7 +101,7 @@ def test_schema_v8_migrates_to_v9_without_losing_tasks(tmp_path: Path) -> None:
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 18
+    assert status.schema_version == SCHEMA_VERSION == 19
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id, title FROM tasks").fetchall() == [("task", "Task")]
