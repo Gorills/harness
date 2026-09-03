@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1592,6 +1592,85 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 PRIMARY KEY (workspace_id, relative_path)
             )
             """
+        )
+        return
+    if target_version == 18:
+        connection.execute(
+            """
+            CREATE TABLE indexed_code_unit_files (
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+                language TEXT NOT NULL CHECK (
+                    language IN (
+                        'python', 'javascript', 'typescript', 'tsx', 'go', 'rust', 'java'
+                    )
+                ),
+                status TEXT NOT NULL CHECK (
+                    status IN ('ok', 'parse_error', 'too_large', 'non_text', 'unit_limit')
+                ),
+                PRIMARY KEY (workspace_id, relative_path),
+                FOREIGN KEY (workspace_id, relative_path)
+                    REFERENCES indexed_files(workspace_id, relative_path) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE indexed_code_units (
+                id INTEGER PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                position INTEGER NOT NULL CHECK (position >= 0 AND position < 4096),
+                name TEXT NOT NULL CHECK (
+                    name <> '' AND length(CAST(name AS BLOB)) <= 512
+                ),
+                qualified_name TEXT NOT NULL CHECK (
+                    qualified_name <> '' AND length(CAST(qualified_name AS BLOB)) <= 1024
+                ),
+                symbol_kind TEXT NOT NULL CHECK (
+                    symbol_kind IN (
+                        'class', 'function', 'method', 'variable', 'interface', 'type',
+                        'enum', 'struct', 'constructor', 'record'
+                    )
+                ),
+                line INTEGER NOT NULL CHECK (line > 0),
+                column INTEGER NOT NULL CHECK (column > 0),
+                UNIQUE (workspace_id, relative_path, position),
+                FOREIGN KEY (workspace_id, relative_path)
+                    REFERENCES indexed_code_unit_files(workspace_id, relative_path)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX indexed_code_units_workspace_path_idx
+            ON indexed_code_units(workspace_id, relative_path, line, column)
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE indexed_code_unit_search USING fts5(
+                name,
+                qualified_name,
+                identifier_tokens,
+                symbol_kind,
+                content = '',
+                contentless_delete = 1,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TRIGGER indexed_code_unit_search_delete
+            AFTER DELETE ON indexed_code_units
+            BEGIN
+                DELETE FROM indexed_code_unit_search WHERE rowid = OLD.id;
+            END;
+            """,
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

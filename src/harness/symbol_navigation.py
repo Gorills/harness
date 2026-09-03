@@ -85,6 +85,19 @@ def analyze_precise_symbol_relations(
     needle: str,
 ) -> SyntaxRelationAnalysis:
     """Classify current exact occurrences using a precise built-in parser when available."""
+    return _analyze_precise_relations(relative_path, text, needle)
+
+
+def analyze_precise_code_units(relative_path: str, text: str) -> SyntaxRelationAnalysis:
+    """Extract every precise named definition from one bounded current source file."""
+    return _analyze_precise_relations(relative_path, text, None)
+
+
+def _analyze_precise_relations(
+    relative_path: str,
+    text: str,
+    needle: str | None,
+) -> SyntaxRelationAnalysis:
     language = precise_symbol_language(relative_path)
     if language is None:
         return SyntaxRelationAnalysis("unsupported", "unsupported", ())
@@ -98,7 +111,7 @@ def analyze_precise_symbol_relations(
 def _analyze_python_relations(
     relative_path: str,
     text: str,
-    needle: str,
+    needle: str | None,
 ) -> SyntaxRelationAnalysis:
     try:
         tree = ast.parse(text, filename=relative_path, type_comments=True)
@@ -129,11 +142,11 @@ def _relation_key(relation: SyntaxRelation) -> tuple[int, int, str, int, int, st
 
 
 class _PythonRelationVisitor(ast.NodeVisitor):
-    def __init__(self, relative_path: str, text: str, needle: str) -> None:
+    def __init__(self, relative_path: str, text: str, needle: str | None) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
-        self.needle_leaf = needle.rsplit(".", 1)[-1]
+        self.needle_leaf = "" if needle is None else needle.rsplit(".", 1)[-1]
         self.scopes: list[tuple[str, str]] = []
         self.relations: list[SyntaxRelation] = []
         self.in_test = is_test_path(relative_path)
@@ -262,11 +275,15 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         )
 
     def _definition_matches(self, name: str, qualified: str) -> bool:
+        if self.needle is None:
+            return True
         if "." in self.needle:
             return qualified == self.needle or qualified.endswith(f".{self.needle}")
         return name == self.needle
 
     def _target_matches(self, target: str) -> bool:
+        if self.needle is None:
+            return False
         if "." in self.needle:
             return target == self.needle or target.endswith(f".{self.needle}")
         return target.rsplit(".", 1)[-1] == self.needle_leaf
@@ -352,7 +369,7 @@ _IDENTIFIER_KINDS = frozenset(
 def _analyze_polyglot_relations(
     relative_path: str,
     text: str,
-    needle: str,
+    needle: str | None,
     language: str,
 ) -> SyntaxRelationAnalysis:
     try:
@@ -371,11 +388,11 @@ def _analyze_polyglot_relations(
 
 
 class _PolyglotRelationCollector:
-    def __init__(self, relative_path: str, text: str, needle: str, language: str) -> None:
+    def __init__(self, relative_path: str, text: str, needle: str | None, language: str) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
-        self.needle_leaf = _target_leaf(needle)
+        self.needle_leaf = "" if needle is None else _target_leaf(needle)
         self.language = language
         self.in_test = is_test_path(relative_path)
         self.relations: list[SyntaxRelation] = []
@@ -662,11 +679,15 @@ class _PolyglotRelationCollector:
         return node.range().start.column + 1
 
     def _definition_matches(self, name: str, qualified: str) -> bool:
+        if self.needle is None:
+            return True
         if "." in self.needle:
             return qualified == self.needle or qualified.endswith(f".{self.needle}")
         return name == self.needle
 
     def _target_matches(self, target: str) -> bool:
+        if self.needle is None:
+            return False
         if "." in self.needle:
             normalized = target.replace("::", ".")
             return normalized == self.needle or normalized.endswith(f".{self.needle}")

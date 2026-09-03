@@ -163,6 +163,9 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
+        connection.execute("DROP TABLE indexed_code_unit_search")
+        connection.execute("DROP TABLE indexed_code_units")
+        connection.execute("DROP TABLE indexed_code_unit_files")
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
         connection.execute("DROP TABLE project_skill_exclusions")
@@ -179,7 +182,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 17
+    assert status.schema_version == SCHEMA_VERSION == 18
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(
