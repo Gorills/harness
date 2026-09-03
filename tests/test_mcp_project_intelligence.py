@@ -263,6 +263,18 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert exact_coverage["locations_truncated"] is False
             assert exact_coverage["matched_occurrences"] == 1
             assert exact_coverage["locations"][0]["path"] == "src/token_service.py"
+            symbol_navigation = exact.structured_content["symbol_navigation"]
+            assert symbol_navigation is not None
+            assert symbol_navigation["precise_languages"] == ["python"]
+            assert symbol_navigation["candidate_precise_files"] == 1
+            assert symbol_navigation["parsed_precise_files"] == 1
+            assert symbol_navigation["precise_classification_complete"] is True
+            assert symbol_navigation["definition_count"] == 1
+            assert symbol_navigation["call_count"] == 0
+            symbol_definition = symbol_navigation["relations"][0]
+            assert symbol_definition["kind"] == "definition"
+            assert symbol_definition["path"] == "src/token_service.py"
+            assert "def rotateRefreshToken" in symbol_definition["evidence"]["snippet"]
 
             assert knowledge_results[0].get("evidence") is None
             assert tasks.structured_content["results"][0].get("evidence") is None

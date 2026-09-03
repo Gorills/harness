@@ -27,6 +27,9 @@ from harness.retrieval import (
     MAX_PROJECT_CONTEXT_REF_BYTES,
     MAX_SEARCH_EVIDENCE_SNIPPET_BYTES,
     MAX_SEARCH_EVIDENCE_SNIPPET_LINES,
+    MAX_SYMBOL_NAVIGATION_BYTES,
+    MAX_SYMBOL_NAVIGATION_RELATIONS,
+    MAX_SYMBOL_RELATION_TEXT_BYTES,
     ProjectContextItem,
     ProjectExactSearchCoverage,
     ProjectExactSearchLocation,
@@ -34,6 +37,8 @@ from harness.retrieval import (
     ProjectSearchHit,
     ProjectSearchKind,
     ProjectSearchScope,
+    ProjectSymbolNavigation,
+    ProjectSymbolRelation,
 )
 from harness.search import (
     DEFAULT_SEARCH_LIMIT,
@@ -295,6 +300,7 @@ class ProjectSearchResult:
     project_id: str
     workspace_state: str
     exact_coverage: ProjectExactSearchCoverage | None
+    symbol_navigation: ProjectSymbolNavigation | None
     results: tuple[ProjectSearchHit, ...]
 
 
@@ -1269,6 +1275,11 @@ def send_project_search_response(
                     "workspace_state": result.workspace_state,
                     "exact_coverage": (
                         None if result.exact_coverage is None else result.exact_coverage.to_wire()
+                    ),
+                    "symbol_navigation": (
+                        None
+                        if result.symbol_navigation is None
+                        else result.symbol_navigation.to_wire()
                     ),
                     "results": [_project_search_hit_to_wire(hit) for hit in result.results],
                 },
@@ -2928,6 +2939,155 @@ def _project_exact_search_coverage_from_wire(
     return coverage
 
 
+def _project_symbol_navigation_from_wire(
+    value: object,
+) -> ProjectSymbolNavigation | None:
+    if value is None:
+        return None
+    fields = {
+        "needle",
+        "precise_languages",
+        "candidate_precise_files",
+        "parsed_precise_files",
+        "parse_failures",
+        "parse_skipped_files",
+        "matching_unsupported_files",
+        "definition_count",
+        "call_count",
+        "test_call_count",
+        "import_count",
+        "inheritance_count",
+        "precise_classification_complete",
+        "relations_truncated",
+        "evidence_truncated",
+        "relations",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise IpcProtocolError("daemon symbol navigation does not match the IPC schema")
+    needle = _bounded_response_string(
+        value["needle"], "symbol_navigation.needle", MAX_EXACT_SEARCH_NEEDLE_BYTES
+    )
+    raw_languages = value["precise_languages"]
+    if (
+        not isinstance(raw_languages, list)
+        or not 1 <= len(raw_languages) <= 4
+        or any(not isinstance(item, str) for item in raw_languages)
+    ):
+        raise IpcProtocolError("daemon symbol navigation precise languages are invalid")
+    languages = tuple(
+        _bounded_response_string(item, "symbol_navigation.precise_language", 32)
+        for item in raw_languages
+    )
+    if languages != ("python",):
+        raise IpcProtocolError("daemon symbol navigation precise language is unsupported")
+    count_names = (
+        "candidate_precise_files",
+        "parsed_precise_files",
+        "parse_failures",
+        "parse_skipped_files",
+        "matching_unsupported_files",
+        "definition_count",
+        "call_count",
+        "test_call_count",
+        "import_count",
+        "inheritance_count",
+    )
+    counts = {
+        name: _bounded_nonnegative_int(value[name], f"symbol_navigation.{name}")
+        for name in count_names
+    }
+    boolean_names = (
+        "precise_classification_complete",
+        "relations_truncated",
+        "evidence_truncated",
+    )
+    booleans: dict[str, bool] = {}
+    for name in boolean_names:
+        raw = value[name]
+        if not isinstance(raw, bool):
+            raise IpcProtocolError(f"daemon symbol navigation {name} flag is invalid")
+        booleans[name] = raw
+    raw_relations = value["relations"]
+    if not isinstance(raw_relations, list) or len(raw_relations) > MAX_SYMBOL_NAVIGATION_RELATIONS:
+        raise IpcProtocolError("daemon symbol navigation relations exceed item limit")
+    relations: list[ProjectSymbolRelation] = []
+    relation_fields = {
+        "kind",
+        "path",
+        "line",
+        "column",
+        "scope",
+        "target",
+        "symbol_kind",
+        "in_test",
+        "evidence",
+    }
+    for raw in raw_relations:
+        if not isinstance(raw, dict) or set(raw) != relation_fields:
+            raise IpcProtocolError("daemon symbol relation does not match the IPC schema")
+        kind = _bounded_response_string(raw["kind"], "symbol_navigation.kind", 32)
+        if kind not in {"definition", "call", "import", "inheritance"}:
+            raise IpcProtocolError("daemon symbol relation kind is unsupported")
+        path = _bounded_response_string(raw["path"], "symbol_navigation.path", 4096)
+        line = _bounded_nonnegative_int(raw["line"], "symbol_navigation.line")
+        column = _bounded_nonnegative_int(raw["column"], "symbol_navigation.column")
+        if line < 1 or column < 1:
+            raise IpcProtocolError("daemon symbol relation has invalid coordinates")
+        scope = raw["scope"]
+        if scope is not None:
+            scope = _bounded_response_string(
+                scope, "symbol_navigation.scope", MAX_SYMBOL_RELATION_TEXT_BYTES + 8
+            )
+        target = _bounded_response_string(
+            raw["target"], "symbol_navigation.target", MAX_SYMBOL_RELATION_TEXT_BYTES + 8
+        )
+        symbol_kind = raw["symbol_kind"]
+        if symbol_kind is not None:
+            symbol_kind = _bounded_response_string(symbol_kind, "symbol_navigation.symbol_kind", 32)
+            if symbol_kind not in {"class", "function", "method", "variable"}:
+                raise IpcProtocolError("daemon symbol relation symbol kind is unsupported")
+        in_test = raw["in_test"]
+        if not isinstance(in_test, bool):
+            raise IpcProtocolError("daemon symbol relation test flag is invalid")
+        relations.append(
+            ProjectSymbolRelation(
+                kind=kind,
+                path=path,
+                line=line,
+                column=column,
+                scope=cast(str | None, scope),
+                target=target,
+                symbol_kind=cast(str | None, symbol_kind),
+                in_test=in_test,
+                evidence=_project_search_evidence_from_wire(raw["evidence"]),
+            )
+        )
+    navigation = ProjectSymbolNavigation(
+        needle=needle,
+        precise_languages=languages,
+        candidate_precise_files=counts["candidate_precise_files"],
+        parsed_precise_files=counts["parsed_precise_files"],
+        parse_failures=counts["parse_failures"],
+        parse_skipped_files=counts["parse_skipped_files"],
+        matching_unsupported_files=counts["matching_unsupported_files"],
+        definition_count=counts["definition_count"],
+        call_count=counts["call_count"],
+        test_call_count=counts["test_call_count"],
+        import_count=counts["import_count"],
+        inheritance_count=counts["inheritance_count"],
+        precise_classification_complete=booleans["precise_classification_complete"],
+        relations_truncated=booleans["relations_truncated"],
+        evidence_truncated=booleans["evidence_truncated"],
+        relations=tuple(relations),
+    )
+    encoded = json.dumps(navigation.to_wire(), ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(encoded) > MAX_SYMBOL_NAVIGATION_BYTES:
+        raise IpcProtocolError("daemon symbol navigation exceeds byte limit")
+    return navigation
+
+
 def _project_search_from_response(
     response: dict[str, Any],
     *,
@@ -2940,6 +3100,7 @@ def _project_search_from_response(
         "project_id",
         "workspace_state",
         "exact_coverage",
+        "symbol_navigation",
         "results",
     }:
         raise IpcProtocolError("daemon project search result does not match the IPC schema")
@@ -2950,6 +3111,7 @@ def _project_search_from_response(
     if workspace_state != "current":
         raise IpcProtocolError("daemon project search workspace state is unsupported")
     exact_coverage = _project_exact_search_coverage_from_wire(result["exact_coverage"])
+    symbol_navigation = _project_symbol_navigation_from_wire(result["symbol_navigation"])
     raw_results = result["results"]
     if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
         raise IpcProtocolError("daemon project search results exceed the item limit")
@@ -2960,6 +3122,7 @@ def _project_search_from_response(
         project_id,
         workspace_state,
         exact_coverage,
+        symbol_navigation,
         hits,
     )
 
