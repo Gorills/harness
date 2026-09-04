@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1734,6 +1734,134 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             AFTER DELETE ON indexed_code_relations
             BEGIN
                 DELETE FROM indexed_code_relation_search WHERE rowid = OLD.id;
+            END;
+            """,
+        )
+        return
+    if target_version == 20:
+        connection.execute(
+            """
+            ALTER TABLE indexed_code_unit_files
+            ADD COLUMN resolution_status TEXT NOT NULL DEFAULT 'unindexed' CHECK (
+                resolution_status IN ('unindexed', 'ok', 'resolution_limit')
+            )
+            """
+        )
+        connection.execute(
+            """
+            ALTER TABLE indexed_code_relations
+            ADD COLUMN resolved_target TEXT CHECK (
+                resolved_target IS NULL OR (
+                    resolved_target <> '' AND length(CAST(resolved_target AS BLOB)) <= 1024
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            ALTER TABLE indexed_code_relations
+            ADD COLUMN resolution_kind TEXT CHECK (
+                resolution_kind IS NULL OR resolution_kind IN (
+                    'python_import_binding', 'python_from_import_binding'
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            ALTER TABLE indexed_code_relations
+            ADD COLUMN resolution_module TEXT CHECK (
+                resolution_module IS NULL OR (
+                    resolution_module <> ''
+                    AND length(CAST(resolution_module AS BLOB)) <= 1024
+                )
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE indexed_python_reexports (
+                workspace_id TEXT NOT NULL,
+                relative_path TEXT NOT NULL,
+                position INTEGER NOT NULL CHECK (position >= 0 AND position < 4096),
+                exported_name TEXT NOT NULL CHECK (
+                    exported_name <> '' AND length(CAST(exported_name AS BLOB)) <= 512
+                ),
+                imported_name TEXT NOT NULL CHECK (
+                    imported_name <> '' AND length(CAST(imported_name AS BLOB)) <= 512
+                ),
+                module TEXT NOT NULL CHECK (
+                    module <> '' AND length(CAST(module AS BLOB)) <= 1024
+                ),
+                PRIMARY KEY (workspace_id, relative_path, position),
+                FOREIGN KEY (workspace_id, relative_path)
+                    REFERENCES indexed_code_unit_files(workspace_id, relative_path)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX indexed_python_reexports_workspace_path_idx
+            ON indexed_python_reexports(workspace_id, relative_path, exported_name)
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE indexed_resolved_relation_workspaces (
+                workspace_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL CHECK (status IN ('ok', 'edge_limit')),
+                edge_count INTEGER NOT NULL CHECK (edge_count >= 0 AND edge_count <= 32768),
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE indexed_resolved_code_relations (
+                relation_id INTEGER PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                target_unit_id INTEGER NOT NULL,
+                validation_kind TEXT NOT NULL CHECK (
+                    validation_kind IN (
+                        'python_workspace_direct_export',
+                        'python_workspace_reexport_chain'
+                    )
+                ),
+                FOREIGN KEY (relation_id) REFERENCES indexed_code_relations(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_unit_id) REFERENCES indexed_code_units(id) ON DELETE CASCADE,
+                FOREIGN KEY (workspace_id)
+                    REFERENCES indexed_resolved_relation_workspaces(workspace_id)
+                    ON DELETE CASCADE
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX indexed_resolved_code_relations_workspace_idx
+            ON indexed_resolved_code_relations(workspace_id, relation_id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE VIRTUAL TABLE indexed_resolved_code_relation_search USING fts5(
+                resolved_target,
+                identifier_tokens,
+                scope,
+                relation_terms,
+                content = '',
+                contentless_delete = 1,
+                tokenize = 'unicode61 remove_diacritics 2'
+            )
+            """
+        )
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TRIGGER indexed_resolved_code_relation_search_delete
+            AFTER DELETE ON indexed_resolved_code_relations
+            BEGIN
+                DELETE FROM indexed_resolved_code_relation_search WHERE rowid = OLD.relation_id;
             END;
             """,
         )
