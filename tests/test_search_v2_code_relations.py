@@ -376,6 +376,108 @@ def test_scan_persists_proven_python_direct_resolved_edge_and_searches_it(
         connection.close()
 
 
+def test_scan_persists_proven_python_closure_import_edge(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/caller.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def inner():\n"
+                "        return tc()\n"
+                "    return inner\n"
+            ),
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+
+        relation = connection.execute(
+            """
+            SELECT id, scope, target, resolved_target, resolution_kind, resolution_module
+            FROM indexed_code_relations
+            WHERE workspace_id = ?
+              AND relative_path = 'src/caller.py'
+              AND relation_kind = 'call'
+            """,
+            (workspace_id,),
+        ).fetchone()
+        assert relation is not None
+        relation_id, scope, target, resolved_target, resolution_kind, resolution_module = relation
+        assert (scope, target, resolved_target, resolution_kind, resolution_module) == (
+            "outer.inner",
+            "tc",
+            "service.target_call",
+            "python_from_import_binding",
+            "service",
+        )
+        assert connection.execute(
+            """
+            SELECT targets.relative_path, targets.qualified_name, resolved.validation_kind
+            FROM indexed_resolved_code_relations AS resolved
+            JOIN indexed_code_units AS targets ON targets.id = resolved.target_unit_id
+            WHERE resolved.relation_id = ?
+            """,
+            (relation_id,),
+        ).fetchone() == (
+            "src/service.py",
+            "target_call",
+            "python_workspace_direct_export",
+        )
+        results = search_project(
+            connection,
+            workspace_id,
+            "who calls service target call",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+        assert results[0].ref == "code:src/caller.py"
+        assert results[0].match_reason == "code resolved call relation"
+        assert results[0].short_summary == "resolved call service.target_call in outer.inner"
+    finally:
+        connection.close()
+
+
+def test_persistent_closure_resolution_fails_closed_on_intermediate_shadowing(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/caller.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def middle():\n"
+                "        tc = lambda: 0\n"
+                "        def inner():\n"
+                "            return tc()\n"
+                "        return inner\n"
+                "    return middle\n"
+            ),
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+        assert connection.execute(
+            """
+            SELECT resolved_target
+            FROM indexed_code_relations
+            WHERE workspace_id = ?
+              AND relative_path = 'src/caller.py'
+              AND relation_kind = 'call'
+            """,
+            (workspace_id,),
+        ).fetchall() == [(None,)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM indexed_resolved_code_relations WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_scan_persists_bounded_python_reexport_chain_edge(tmp_path: Path) -> None:
     _root, connection, workspace_id = _registered(
         tmp_path,
