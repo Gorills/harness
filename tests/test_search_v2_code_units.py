@@ -317,13 +317,13 @@ def test_code_unit_limit_fails_closed_and_is_cached(
         connection.close()
 
 
-def test_schema_19_migrates_existing_18_database_in_place(
+def test_schema_20_migrates_existing_18_database_in_place(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "harness.db"
     current = storage.SCHEMA_VERSION
-    assert current == 19
+    assert current == 20
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 18)
     initialize_database(database)
     connection = sqlite3.connect(database)
@@ -336,7 +336,7 @@ def test_schema_19_migrates_existing_18_database_in_place(
     monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
     status = initialize_database(database)
 
-    assert status.schema_version == 19
+    assert status.schema_version == 20
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [("preserved-project",)]
@@ -351,6 +351,6 @@ def test_schema_19_migrates_existing_18_database_in_place(
             ).fetchone() == (table,)
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone() == (19,)
+        ).fetchone() == (20,)
     finally:
         connection.close()

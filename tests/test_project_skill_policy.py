@@ -93,7 +93,7 @@ def _write_skill(
 def test_schema_v16_project_skill_policy_is_bounded_and_cascades(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 19
+    assert status.schema_version == SCHEMA_VERSION == 20
     connection = connect_database(database)
     try:
         project = create_project(connection)

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from ast_grep_py import SgNode, SgRoot
 
@@ -53,17 +54,18 @@ class SyntaxRelation:
 
 
 @dataclass(frozen=True, slots=True)
-class SyntaxRelationAnalysis:
-    language: str
-    status: str
-    relations: tuple[SyntaxRelation, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class PythonTopLevelReexport:
     exported_name: str
     imported_name: str
     module: str
+
+
+@dataclass(frozen=True, slots=True)
+class SyntaxRelationAnalysis:
+    language: str
+    status: str
+    relations: tuple[SyntaxRelation, ...]
+    python_reexports: tuple[PythonTopLevelReexport, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,34 +138,11 @@ def analyze_python_module_exports(
         for relation in relation_analysis.relations
         if relation.kind == "definition" and relation.scope is None
     )
-    binding_analysis = _collect_python_import_bindings(tree)
-    reexports: list[PythonTopLevelReexport] = []
-    for statement in tree.body:
-        if not isinstance(statement, ast.ImportFrom) or statement.module is None:
-            continue
-        module = f"{'.' * statement.level}{statement.module}"
-        for alias in statement.names:
-            if alias.name == "*":
-                continue
-            exported_name = alias.asname or alias.name
-            if not exported_name.isidentifier() or not alias.name.isidentifier():
-                continue
-            target = f"{module}.{alias.name}"
-            binding = binding_analysis.safe_binding("", exported_name)
-            if (
-                binding is not None
-                and binding.kind == "python_from_import_binding"
-                and binding.target == target
-                and binding.module == module
-            ):
-                reexports.append(
-                    PythonTopLevelReexport(
-                        exported_name=exported_name,
-                        imported_name=alias.name,
-                        module=module,
-                    )
-                )
-    return PythonModuleExportAnalysis("ok", definitions, tuple(reexports))
+    return PythonModuleExportAnalysis(
+        "ok",
+        definitions,
+        _safe_top_level_python_reexports(tree),
+    )
 
 
 def analyze_precise_code_structure(relative_path: str, text: str) -> SyntaxRelationAnalysis:
@@ -220,7 +199,9 @@ def _analyze_python_tree_relations(
     *,
     collect_references: bool,
 ) -> SyntaxRelationAnalysis:
-    binding_analysis = None if needle is None else _collect_python_import_bindings(tree)
+    binding_analysis = (
+        _collect_python_import_bindings(tree) if needle is not None or collect_references else None
+    )
     visitor = _PythonRelationVisitor(
         relative_path,
         text,
@@ -230,7 +211,98 @@ def _analyze_python_tree_relations(
     )
     visitor.visit(tree)
     relations = tuple(sorted(visitor.relations, key=_relation_key))
-    return SyntaxRelationAnalysis("python", "ok", relations)
+    reexports = _safe_top_level_python_reexports(tree) if collect_references else ()
+    return SyntaxRelationAnalysis("python", "ok", relations, reexports)
+
+
+def _safe_top_level_python_reexports(tree: ast.Module) -> tuple[PythonTopLevelReexport, ...]:
+    binding_analysis = _collect_python_import_bindings(tree)
+    reexports: list[PythonTopLevelReexport] = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.ImportFrom) or statement.module is None:
+            continue
+        module = f"{'.' * statement.level}{statement.module}"
+        for alias in statement.names:
+            if alias.name == "*":
+                continue
+            exported_name = alias.asname or alias.name
+            if not exported_name.isidentifier() or not alias.name.isidentifier():
+                continue
+            target = f"{module}.{alias.name}"
+            binding = binding_analysis.safe_binding("", exported_name)
+            if (
+                binding is not None
+                and binding.kind == "python_from_import_binding"
+                and binding.target == target
+                and binding.module == module
+            ):
+                reexports.append(
+                    PythonTopLevelReexport(
+                        exported_name=exported_name,
+                        imported_name=alias.name,
+                        module=module,
+                    )
+                )
+    return tuple(reexports)
+
+
+def python_workspace_module_candidate_paths(
+    source_path: str,
+    module: str,
+    module_paths: Sequence[str],
+) -> tuple[str, ...]:
+    """Map one syntactic Python module spelling to unique-candidate Workspace paths."""
+    leading_dots = len(module) - len(module.lstrip("."))
+    module_tail = module[leading_dots:]
+    tail_parts = tuple(part for part in module_tail.split(".") if part)
+    if any(not part.isidentifier() for part in tail_parts):
+        return ()
+
+    if leading_dots:
+        source_parent = PurePosixPath(source_path).parent
+        parent_parts = source_parent.parts
+        ascend = leading_dots - 1
+        if ascend > len(parent_parts):
+            return ()
+        base_parts = parent_parts[: len(parent_parts) - ascend]
+        module_parts = (*base_parts, *tail_parts)
+        module_path = PurePosixPath(*module_parts) if module_parts else PurePosixPath(".")
+        exact_paths = (
+            _python_module_file_paths(module_path)
+            if tail_parts
+            else _python_package_init_paths(module_path)
+        )
+        return tuple(path for path in module_paths if path in exact_paths)
+
+    if not tail_parts:
+        return ()
+    module_path = PurePosixPath(*tail_parts)
+    suffixes = _python_module_file_paths(module_path)
+    return tuple(
+        path
+        for path in module_paths
+        if any(path == suffix or path.endswith(f"/{suffix}") for suffix in suffixes)
+    )
+
+
+def _python_module_file_paths(module_path: PurePosixPath) -> frozenset[str]:
+    value = "" if str(module_path) == "." else str(module_path)
+    if not value:
+        return frozenset({"__init__.py", "__init__.pyi"})
+    return frozenset(
+        {
+            f"{value}.py",
+            f"{value}.pyi",
+            f"{value}/__init__.py",
+            f"{value}/__init__.pyi",
+        }
+    )
+
+
+def _python_package_init_paths(module_path: PurePosixPath) -> frozenset[str]:
+    value = "" if str(module_path) == "." else str(module_path)
+    prefix = "" if not value else f"{value}/"
+    return frozenset({f"{prefix}__init__.py", f"{prefix}__init__.pyi"})
 
 
 def _relation_key(relation: SyntaxRelation) -> tuple[int, int, str, int, int, str, str]:

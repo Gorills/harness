@@ -27,9 +27,11 @@ from harness.search_text import (
 )
 from harness.symbol_navigation import (
     MAX_SYMBOL_PARSE_BYTES,
+    PythonTopLevelReexport,
     SyntaxRelation,
     analyze_precise_code_structure,
     precise_symbol_language,
+    python_workspace_module_candidate_paths,
 )
 
 _DEFAULT_EXCLUDES = (
@@ -50,6 +52,9 @@ MAX_EXACT_SEARCH_FILE_BYTES = 8 * 1024 * 1024
 MAX_INDEXED_IDENTIFIER_TOKENS_BYTES = 256 * 1024
 MAX_INDEXED_CODE_UNITS_PER_FILE = 4096
 MAX_INDEXED_CODE_RELATIONS_PER_FILE = 8192
+MAX_INDEXED_PYTHON_REEXPORTS_PER_FILE = 4096
+MAX_INDEXED_RESOLVED_CODE_RELATIONS_PER_WORKSPACE = 32768
+MAX_PYTHON_REEXPORT_EDGES = 4
 MAX_INDEXED_CODE_UNIT_NAME_BYTES = 512
 MAX_INDEXED_CODE_UNIT_QUALIFIED_NAME_BYTES = 1024
 MAX_INDEXED_CODE_RELATION_SCOPE_BYTES = 1024
@@ -307,6 +312,11 @@ def _persist_snapshot(
             connection,
             workspace,
             snapshot,
+            deadline=deadline,
+        )
+        _rebuild_resolved_code_relations(
+            connection,
+            workspace,
             deadline=deadline,
         )
 
@@ -813,17 +823,26 @@ def _reconcile_code_units(
 ) -> None:
     rows = connection.execute(
         """
-        SELECT relative_path, content_sha256, language, status, relation_status
+        SELECT relative_path, content_sha256, language, status, relation_status,
+               resolution_status
         FROM indexed_code_unit_files
         WHERE workspace_id = ?
         ORDER BY relative_path
         """,
         (workspace.workspace_id,),
     ).fetchall()
-    existing: dict[str, tuple[str, str, str, str]] = {}
+    existing: dict[str, tuple[str, str, str, str, str]] = {}
     valid_statuses = {"ok", "parse_error", "too_large", "non_text", "unit_limit"}
     valid_relation_statuses = {"unindexed", "ok", "relation_limit"}
-    for relative_path, content_sha256, language, status, relation_status in rows:
+    valid_resolution_statuses = {"unindexed", "ok", "resolution_limit"}
+    for (
+        relative_path,
+        content_sha256,
+        language,
+        status,
+        relation_status,
+        resolution_status,
+    ) in rows:
         if (
             not isinstance(relative_path, str)
             or relative_path in existing
@@ -834,9 +853,17 @@ def _reconcile_code_units(
             or status not in valid_statuses
             or not isinstance(relation_status, str)
             or relation_status not in valid_relation_statuses
+            or not isinstance(resolution_status, str)
+            or resolution_status not in valid_resolution_statuses
         ):
             raise IndexingError("indexed code-unit manifest row has invalid persisted types")
-        existing[relative_path] = (content_sha256, language, status, relation_status)
+        existing[relative_path] = (
+            content_sha256,
+            language,
+            status,
+            relation_status,
+            resolution_status,
+        )
 
     unit_ids_by_path: dict[str, set[int]] = {}
     for raw_id, relative_path in connection.execute(
@@ -878,9 +905,18 @@ def _reconcile_code_units(
         fts_ids_by_path.setdefault(relative_path, set()).add(raw_id)
 
     relation_ids_by_path: dict[str, set[int]] = {}
-    for raw_id, relative_path in connection.execute(
+    relation_resolution_ids_by_path: dict[str, set[int]] = {}
+    for (
+        raw_id,
+        relative_path,
+        relation_kind,
+        resolved_target,
+        resolution_kind,
+        resolution_module,
+    ) in connection.execute(
         """
-        SELECT id, relative_path
+        SELECT id, relative_path, relation_kind, resolved_target, resolution_kind,
+               resolution_module
         FROM indexed_code_relations
         WHERE workspace_id = ?
         ORDER BY relative_path, position
@@ -892,9 +928,18 @@ def _reconcile_code_units(
             or not isinstance(raw_id, int)
             or raw_id <= 0
             or not isinstance(relative_path, str)
+            or not isinstance(relation_kind, str)
         ):
             raise IndexingError("indexed code relation row has invalid persisted types")
+        has_resolution = _validate_persisted_relation_resolution(
+            relation_kind,
+            resolved_target,
+            resolution_kind,
+            resolution_module,
+        )
         relation_ids_by_path.setdefault(relative_path, set()).add(raw_id)
+        if has_resolution:
+            relation_resolution_ids_by_path.setdefault(relative_path, set()).add(raw_id)
 
     relation_fts_ids_by_path: dict[str, set[int]] = {}
     for raw_id, relative_path in connection.execute(
@@ -917,6 +962,34 @@ def _reconcile_code_units(
             raise IndexingError("indexed code relation search returned an invalid row identity")
         relation_fts_ids_by_path.setdefault(relative_path, set()).add(raw_id)
 
+    reexport_positions_by_path: dict[str, set[int]] = {}
+    for relative_path, position, exported_name, imported_name, module in connection.execute(
+        """
+        SELECT relative_path, position, exported_name, imported_name, module
+        FROM indexed_python_reexports
+        WHERE workspace_id = ?
+        ORDER BY relative_path, position
+        """,
+        (workspace.workspace_id,),
+    ).fetchall():
+        if (
+            not isinstance(relative_path, str)
+            or isinstance(position, bool)
+            or not isinstance(position, int)
+            or position < 0
+            or not isinstance(exported_name, str)
+            or not exported_name.isidentifier()
+            or not isinstance(imported_name, str)
+            or not imported_name.isidentifier()
+            or not isinstance(module, str)
+            or not module
+        ):
+            raise IndexingError("indexed Python re-export row has invalid persisted types")
+        positions = reexport_positions_by_path.setdefault(relative_path, set())
+        if position in positions:
+            raise IndexingError("indexed Python re-export positions are not unique")
+        positions.add(position)
+
     eligible_paths: set[str] = set()
     for record in snapshot.values():
         _require_scan_deadline(deadline)
@@ -929,6 +1002,8 @@ def _reconcile_code_units(
         fts_ids = fts_ids_by_path.get(record.relative_path, set())
         relation_ids = relation_ids_by_path.get(record.relative_path, set())
         relation_fts_ids = relation_fts_ids_by_path.get(record.relative_path, set())
+        relation_resolution_ids = relation_resolution_ids_by_path.get(record.relative_path, set())
+        reexport_positions = reexport_positions_by_path.get(record.relative_path, set())
         if _code_unit_manifest_is_current(
             prior,
             content_sha256=record.content_sha256,
@@ -937,6 +1012,8 @@ def _reconcile_code_units(
             fts_ids=fts_ids,
             relation_ids=relation_ids,
             relation_fts_ids=relation_fts_ids,
+            relation_resolution_ids=relation_resolution_ids,
+            reexport_positions=reexport_positions,
         ):
             continue
 
@@ -948,8 +1025,10 @@ def _reconcile_code_units(
                 language=language,
                 status="too_large",
                 relation_status="unindexed",
+                resolution_status="unindexed",
                 definitions=(),
                 relations=(),
+                reexports=(),
             )
             continue
 
@@ -961,11 +1040,14 @@ def _reconcile_code_units(
         )
         definitions: tuple[SyntaxRelation, ...]
         relations: tuple[SyntaxRelation, ...]
+        reexports: tuple[PythonTopLevelReexport, ...]
         if text is None:
             status = "non_text"
             relation_status = "unindexed"
+            resolution_status = "unindexed"
             definitions = ()
             relations = ()
+            reexports = ()
         else:
             analysis = analyze_precise_code_structure(record.relative_path, text)
             if analysis.language != language:
@@ -977,26 +1059,42 @@ def _reconcile_code_units(
                 relations = tuple(
                     relation for relation in analysis.relations if relation.kind != "definition"
                 )
+                reexports = analysis.python_reexports if language == "python" else ()
                 status = "ok"
                 relation_status = "ok"
                 if not _code_unit_definitions_fit_bounds(definitions):
                     definitions = ()
                     relations = ()
+                    reexports = ()
                     status = "unit_limit"
                     relation_status = "unindexed"
-                elif not _code_relations_fit_bounds(relations):
-                    relations = ()
-                    relation_status = "relation_limit"
+                    resolution_status = "unindexed"
+                else:
+                    if not _code_relations_fit_bounds(relations):
+                        relations = ()
+                        relation_status = "relation_limit"
+                    if language == "python":
+                        if _code_resolution_metadata_fit_bounds(relations, reexports):
+                            resolution_status = "ok"
+                        else:
+                            resolution_status = "resolution_limit"
+                            reexports = ()
+                    else:
+                        resolution_status = "unindexed"
             elif analysis.status == "too_large":
                 definitions = ()
                 relations = ()
+                reexports = ()
                 status = "too_large"
                 relation_status = "unindexed"
+                resolution_status = "unindexed"
             else:
                 definitions = ()
                 relations = ()
+                reexports = ()
                 status = "parse_error"
                 relation_status = "unindexed"
+                resolution_status = "unindexed"
 
         _replace_code_unit_file(
             connection,
@@ -1005,8 +1103,10 @@ def _reconcile_code_units(
             language=language,
             status=status,
             relation_status=relation_status,
+            resolution_status=resolution_status,
             definitions=definitions,
             relations=relations,
+            reexports=reexports,
         )
 
     for relative_path in sorted(set(existing) - eligible_paths):
@@ -1020,8 +1120,32 @@ def _reconcile_code_units(
         )
 
 
+def _validate_persisted_relation_resolution(
+    relation_kind: object,
+    resolved_target: object,
+    resolution_kind: object,
+    resolution_module: object,
+) -> bool:
+    values = (resolved_target, resolution_kind, resolution_module)
+    if all(value is None for value in values):
+        return False
+    if any(value is None for value in values):
+        raise IndexingError("indexed code relation has partial resolution provenance")
+    if (
+        relation_kind != "call"
+        or not isinstance(resolved_target, str)
+        or not resolved_target
+        or not isinstance(resolution_kind, str)
+        or resolution_kind not in {"python_import_binding", "python_from_import_binding"}
+        or not isinstance(resolution_module, str)
+        or not resolution_module
+    ):
+        raise IndexingError("indexed code relation has invalid resolution provenance")
+    return True
+
+
 def _code_unit_manifest_is_current(
-    prior: tuple[str, str, str, str] | None,
+    prior: tuple[str, str, str, str, str] | None,
     *,
     content_sha256: str,
     language: str,
@@ -1029,25 +1153,46 @@ def _code_unit_manifest_is_current(
     fts_ids: set[int],
     relation_ids: set[int],
     relation_fts_ids: set[int],
+    relation_resolution_ids: set[int],
+    reexport_positions: set[int],
 ) -> bool:
     if prior is None or prior[:2] != (content_sha256, language):
         return False
     status = prior[2]
     relation_status = prior[3]
+    resolution_status = prior[4]
     if status == "ok":
         if unit_ids != fts_ids:
             return False
         if relation_status == "ok":
-            return relation_ids == relation_fts_ids
-        if relation_status == "relation_limit":
-            return not relation_ids and not relation_fts_ids
-        return False
+            if relation_ids != relation_fts_ids:
+                return False
+        elif relation_status == "relation_limit":
+            if relation_ids or relation_fts_ids:
+                return False
+        else:
+            return False
+
+        if language == "python":
+            if resolution_status == "ok":
+                return reexport_positions == set(range(len(reexport_positions)))
+            if resolution_status == "resolution_limit":
+                return not reexport_positions and not relation_resolution_ids
+            return False
+        return (
+            resolution_status == "unindexed"
+            and not reexport_positions
+            and not relation_resolution_ids
+        )
     return (
         relation_status == "unindexed"
+        and resolution_status == "unindexed"
         and not unit_ids
         and not fts_ids
         and not relation_ids
         and not relation_fts_ids
+        and not relation_resolution_ids
+        and not reexport_positions
     )
 
 
@@ -1085,6 +1230,48 @@ def _code_relations_fit_bounds(relations: Sequence[SyntaxRelation]) -> bool:
     return True
 
 
+def _code_resolution_metadata_fit_bounds(
+    relations: Sequence[SyntaxRelation],
+    reexports: Sequence[PythonTopLevelReexport],
+) -> bool:
+    if len(reexports) > MAX_INDEXED_PYTHON_REEXPORTS_PER_FILE:
+        return False
+    for reexport in reexports:
+        if (
+            not reexport.exported_name.isidentifier()
+            or not reexport.imported_name.isidentifier()
+            or not reexport.module
+        ):
+            raise IndexingError("Python re-export parser returned invalid syntax provenance")
+        if (
+            len(reexport.exported_name.encode("utf-8")) > MAX_INDEXED_CODE_UNIT_NAME_BYTES
+            or len(reexport.imported_name.encode("utf-8")) > MAX_INDEXED_CODE_UNIT_NAME_BYTES
+            or len(reexport.module.encode("utf-8")) > MAX_INDEXED_CODE_RELATION_TARGET_BYTES
+        ):
+            return False
+    for relation in relations:
+        values = (relation.resolved_target, relation.resolution_kind, relation.resolution_module)
+        if all(value is None for value in values):
+            continue
+        if any(value is None for value in values):
+            raise IndexingError("precise code relation returned partial resolution provenance")
+        if (
+            relation.kind != "call"
+            or relation.resolution_kind
+            not in {"python_import_binding", "python_from_import_binding"}
+            or not relation.resolved_target
+            or not relation.resolution_module
+        ):
+            raise IndexingError("precise code relation returned invalid resolution provenance")
+        if (
+            len(relation.resolved_target.encode("utf-8")) > MAX_INDEXED_CODE_RELATION_TARGET_BYTES
+            or len(relation.resolution_module.encode("utf-8"))
+            > MAX_INDEXED_CODE_RELATION_TARGET_BYTES
+        ):
+            return False
+    return True
+
+
 def _replace_code_unit_file(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -1093,8 +1280,10 @@ def _replace_code_unit_file(
     language: str,
     status: str,
     relation_status: str,
+    resolution_status: str,
     definitions: Sequence[SyntaxRelation],
     relations: Sequence[SyntaxRelation],
+    reexports: Sequence[PythonTopLevelReexport],
 ) -> None:
     connection.execute(
         "DELETE FROM indexed_code_unit_files WHERE workspace_id = ? AND relative_path = ?",
@@ -1103,8 +1292,9 @@ def _replace_code_unit_file(
     connection.execute(
         """
         INSERT INTO indexed_code_unit_files(
-            workspace_id, relative_path, content_sha256, language, status, relation_status
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            workspace_id, relative_path, content_sha256, language, status, relation_status,
+            resolution_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             workspace_id,
@@ -1113,16 +1303,28 @@ def _replace_code_unit_file(
             language,
             status,
             relation_status,
+            resolution_status,
         ),
     )
     if status != "ok":
-        if relation_status != "unindexed" or definitions or relations:
+        if (
+            relation_status != "unindexed"
+            or resolution_status != "unindexed"
+            or definitions
+            or relations
+            or reexports
+        ):
             raise IndexingError("non-ok code-unit manifest cannot persist structural rows")
         return
     if relation_status == "relation_limit" and relations:
         raise IndexingError("relation-limit manifest cannot persist code relations")
     if relation_status not in {"ok", "relation_limit"}:
         raise IndexingError("ok code-unit manifest has invalid relation status")
+    if resolution_status == "resolution_limit" and reexports:
+        raise IndexingError("resolution-limit manifest cannot persist Python re-exports")
+    if resolution_status not in {"unindexed", "ok", "resolution_limit"}:
+        raise IndexingError("ok code-unit manifest has invalid resolution status")
+
     for position, definition in enumerate(definitions):
         target = definition.target
         symbol_kind = definition.symbol_kind
@@ -1162,14 +1364,18 @@ def _replace_code_unit_file(
             (row[0], name, target, normalized_tokens, symbol_kind),
         )
 
+    persist_resolution = resolution_status == "ok"
     for position, relation in enumerate(relations):
         scope = relation.scope or ""
+        resolved_target = relation.resolved_target if persist_resolution else None
+        resolution_kind = relation.resolution_kind if persist_resolution else None
+        resolution_module = relation.resolution_module if persist_resolution else None
         row = connection.execute(
             """
             INSERT INTO indexed_code_relations(
                 workspace_id, relative_path, position, relation_kind, scope, target,
-                line, column, in_test
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                line, column, in_test, resolved_target, resolution_kind, resolution_module
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -1182,6 +1388,9 @@ def _replace_code_unit_file(
                 relation.line,
                 relation.column,
                 int(relation.in_test),
+                resolved_target,
+                resolution_kind,
+                resolution_module,
             ),
         ).fetchone()
         if row is None or isinstance(row[0], bool) or not isinstance(row[0], int):
@@ -1201,6 +1410,315 @@ def _replace_code_unit_file(
                 _CODE_RELATION_SEARCH_TERMS[relation.kind],
             ),
         )
+
+    if persist_resolution:
+        for position, reexport in enumerate(reexports):
+            connection.execute(
+                """
+                INSERT INTO indexed_python_reexports(
+                    workspace_id, relative_path, position, exported_name, imported_name, module
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    workspace_id,
+                    record.relative_path,
+                    position,
+                    reexport.exported_name,
+                    reexport.imported_name,
+                    reexport.module,
+                ),
+            )
+
+
+def _rebuild_resolved_code_relations(
+    connection: sqlite3.Connection,
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float | None,
+) -> None:
+    workspace_id = workspace.workspace_id
+    _require_scan_deadline(deadline)
+    connection.execute(
+        "DELETE FROM indexed_resolved_relation_workspaces WHERE workspace_id = ?",
+        (workspace_id,),
+    )
+
+    module_status: dict[str, str] = {}
+    module_paths: list[str] = []
+    for (
+        relative_path,
+        manifest_sha,
+        status,
+        resolution_status,
+        file_sha,
+        raw_kind,
+    ) in connection.execute(
+        """
+        SELECT manifests.relative_path, manifests.content_sha256, manifests.status,
+               manifests.resolution_status, files.content_sha256, files.kind
+        FROM indexed_code_unit_files AS manifests
+        JOIN indexed_files AS files
+          ON files.workspace_id = manifests.workspace_id
+         AND files.relative_path = manifests.relative_path
+        WHERE manifests.workspace_id = ? AND manifests.language = 'python'
+        ORDER BY manifests.relative_path
+        """,
+        (workspace_id,),
+    ).fetchall():
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(manifest_sha, str)
+            or not isinstance(file_sha, str)
+            or manifest_sha != file_sha
+            or raw_kind != IndexedFileKind.FILE.value
+            or status not in {"ok", "parse_error", "too_large", "non_text", "unit_limit"}
+            or resolution_status not in {"unindexed", "ok", "resolution_limit"}
+        ):
+            raise IndexingError("resolved relation rebuild crossed invalid Python manifest state")
+        module_status[relative_path] = resolution_status
+        module_paths.append(relative_path)
+
+    direct_units: dict[tuple[str, str], list[int]] = {}
+    for raw_id, relative_path, name, qualified_name in connection.execute(
+        """
+        SELECT units.id, units.relative_path, units.name, units.qualified_name
+        FROM indexed_code_units AS units
+        JOIN indexed_code_unit_files AS manifests
+          ON manifests.workspace_id = units.workspace_id
+         AND manifests.relative_path = units.relative_path
+        WHERE units.workspace_id = ?
+          AND manifests.language = 'python'
+          AND manifests.status = 'ok'
+        ORDER BY units.relative_path, units.position
+        """,
+        (workspace_id,),
+    ).fetchall():
+        if (
+            isinstance(raw_id, bool)
+            or not isinstance(raw_id, int)
+            or raw_id <= 0
+            or not isinstance(relative_path, str)
+            or not isinstance(name, str)
+            or not isinstance(qualified_name, str)
+        ):
+            raise IndexingError("resolved relation rebuild crossed invalid code-unit state")
+        if name == qualified_name:
+            direct_units.setdefault((relative_path, name), []).append(raw_id)
+
+    reexports: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for (
+        relative_path,
+        exported_name,
+        imported_name,
+        module,
+        resolution_status,
+    ) in connection.execute(
+        """
+        SELECT reexports.relative_path, reexports.exported_name, reexports.imported_name,
+               reexports.module, manifests.resolution_status
+        FROM indexed_python_reexports AS reexports
+        JOIN indexed_code_unit_files AS manifests
+          ON manifests.workspace_id = reexports.workspace_id
+         AND manifests.relative_path = reexports.relative_path
+        WHERE reexports.workspace_id = ?
+        ORDER BY reexports.relative_path, reexports.position
+        """,
+        (workspace_id,),
+    ).fetchall():
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(exported_name, str)
+            or not isinstance(imported_name, str)
+            or not isinstance(module, str)
+            or resolution_status != "ok"
+        ):
+            raise IndexingError("resolved relation rebuild crossed invalid re-export state")
+        reexports.setdefault((relative_path, exported_name), []).append((imported_name, module))
+
+    caller_rows = connection.execute(
+        """
+        SELECT relations.id, relations.relative_path, relations.scope,
+               relations.resolved_target, relations.resolution_kind,
+               relations.resolution_module, manifests.language, manifests.status,
+               manifests.relation_status, manifests.resolution_status,
+               manifests.content_sha256, files.content_sha256, files.kind
+        FROM indexed_code_relations AS relations
+        JOIN indexed_code_unit_files AS manifests
+          ON manifests.workspace_id = relations.workspace_id
+         AND manifests.relative_path = relations.relative_path
+        JOIN indexed_files AS files
+          ON files.workspace_id = relations.workspace_id
+         AND files.relative_path = relations.relative_path
+        WHERE relations.workspace_id = ?
+          AND relations.relation_kind = 'call'
+          AND relations.resolved_target IS NOT NULL
+        ORDER BY relations.relative_path, relations.position
+        """,
+        (workspace_id,),
+    ).fetchall()
+    if len(caller_rows) > MAX_INDEXED_RESOLVED_CODE_RELATIONS_PER_WORKSPACE:
+        connection.execute(
+            """
+            INSERT INTO indexed_resolved_relation_workspaces(workspace_id, status, edge_count)
+            VALUES (?, 'edge_limit', 0)
+            """,
+            (workspace_id,),
+        )
+        return
+
+    connection.execute(
+        """
+        INSERT INTO indexed_resolved_relation_workspaces(workspace_id, status, edge_count)
+        VALUES (?, 'ok', 0)
+        """,
+        (workspace_id,),
+    )
+
+    def resolve_export(
+        module_path: str,
+        export_name: str,
+        *,
+        followed_edges: int,
+        seen: frozenset[tuple[str, str]],
+    ) -> tuple[int, str] | None:
+        direct = direct_units.get((module_path, export_name), ())
+        if len(direct) == 1:
+            return (
+                direct[0],
+                "python_workspace_direct_export"
+                if followed_edges == 0
+                else "python_workspace_reexport_chain",
+            )
+        if direct or followed_edges >= MAX_PYTHON_REEXPORT_EDGES:
+            return None
+        if module_status.get(module_path) != "ok":
+            return None
+        reexport = reexports.get((module_path, export_name), ())
+        if len(reexport) != 1:
+            return None
+        imported_name, module = reexport[0]
+        candidates = python_workspace_module_candidate_paths(
+            module_path,
+            module,
+            module_paths,
+        )
+        if len(candidates) != 1:
+            return None
+        state = (candidates[0], imported_name)
+        if state in seen:
+            return None
+        return resolve_export(
+            candidates[0],
+            imported_name,
+            followed_edges=followed_edges + 1,
+            seen=seen | {state},
+        )
+
+    edge_count = 0
+    for row in caller_rows:
+        _require_scan_deadline(deadline)
+        (
+            relation_id,
+            source_path,
+            scope,
+            resolved_target,
+            resolution_kind,
+            resolution_module,
+            language,
+            status,
+            relation_status,
+            resolution_status,
+            manifest_sha,
+            file_sha,
+            raw_kind,
+        ) = row
+        if (
+            isinstance(relation_id, bool)
+            or not isinstance(relation_id, int)
+            or relation_id <= 0
+            or not isinstance(source_path, str)
+            or not isinstance(scope, str)
+            or not isinstance(resolved_target, str)
+            or not isinstance(resolution_kind, str)
+            or not isinstance(resolution_module, str)
+            or language != "python"
+            or status != "ok"
+            or relation_status != "ok"
+            or resolution_status != "ok"
+            or not isinstance(manifest_sha, str)
+            or manifest_sha != file_sha
+            or raw_kind != IndexedFileKind.FILE.value
+        ):
+            raise IndexingError("resolved relation rebuild crossed invalid caller state")
+        _validate_persisted_relation_resolution(
+            "call",
+            resolved_target,
+            resolution_kind,
+            resolution_module,
+        )
+        export_name = _python_resolved_export_name(resolved_target, resolution_module)
+        if export_name is None:
+            continue
+        candidates = python_workspace_module_candidate_paths(
+            source_path,
+            resolution_module,
+            module_paths,
+        )
+        if len(candidates) != 1:
+            continue
+        initial_state = (candidates[0], export_name)
+        resolved = resolve_export(
+            candidates[0],
+            export_name,
+            followed_edges=0,
+            seen=frozenset({initial_state}),
+        )
+        if resolved is None:
+            continue
+        target_unit_id, validation_kind = resolved
+        connection.execute(
+            """
+            INSERT INTO indexed_resolved_code_relations(
+                relation_id, workspace_id, target_unit_id, validation_kind
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (relation_id, workspace_id, target_unit_id, validation_kind),
+        )
+        normalized_tokens = " ".join(dict.fromkeys(identifier_tokens(resolved_target)))
+        connection.execute(
+            """
+            INSERT INTO indexed_resolved_code_relation_search(
+                rowid, resolved_target, identifier_tokens, scope, relation_terms
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                relation_id,
+                resolved_target,
+                normalized_tokens,
+                scope,
+                _CODE_RELATION_SEARCH_TERMS["call"],
+            ),
+        )
+        edge_count += 1
+
+    connection.execute(
+        """
+        UPDATE indexed_resolved_relation_workspaces
+        SET edge_count = ?
+        WHERE workspace_id = ?
+        """,
+        (edge_count, workspace_id),
+    )
+
+
+def _python_resolved_export_name(resolved_target: str, module: str) -> str | None:
+    prefix = module if module.endswith(".") else f"{module}."
+    if not resolved_target.startswith(prefix):
+        return None
+    export_name = resolved_target[len(prefix) :]
+    if not export_name or "." in export_name or not export_name.isidentifier():
+        return None
+    return export_name
 
 
 def _code_unit_name(qualified_name: str) -> str:

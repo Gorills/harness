@@ -7,7 +7,7 @@ import sqlite3
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from itertools import pairwise
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from harness.index import (
     MAX_EXACT_SEARCH_FILE_BYTES,
@@ -49,6 +49,7 @@ from harness.symbol_navigation import (
     analyze_python_module_exports,
     is_precise_symbol_path,
     precise_symbol_language,
+    python_workspace_module_candidate_paths,
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
 from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
@@ -803,6 +804,12 @@ def _file_hits(
             previous = ranked_by_ref.get(candidate.hit.ref)
             if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
                 ranked_by_ref[candidate.hit.ref] = candidate
+        for candidate in _indexed_resolved_code_relation_hits(
+            connection, workspace_id, query, limit
+        ):
+            previous = ranked_by_ref.get(candidate.hit.ref)
+            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+                ranked_by_ref[candidate.hit.ref] = candidate
         for candidate in _indexed_code_relation_hits(connection, workspace_id, query, limit):
             previous = ranked_by_ref.get(candidate.hit.ref)
             if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
@@ -911,6 +918,146 @@ def _indexed_code_unit_hits(
             matched_terms=len(query.terms),
             lexical_score=float(raw_score),
             relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 1,
+        )
+        previous = ranked_by_ref.get(ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[ref] = candidate
+    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _indexed_resolved_code_relation_hits(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    query: AnalyzedSearchQuery,
+    limit: int,
+) -> tuple[_RankedProjectHit, ...]:
+    plan = _code_relation_query_plan(query)
+    if plan is None:
+        return ()
+    fts_expression, relation_kinds, target_terms, explicit_intent = plan
+    if "call" not in relation_kinds:
+        return ()
+    candidate_limit = min(
+        _FILE_CANDIDATE_LIMIT,
+        max(24, limit * 8, len(target_terms) * 16),
+    )
+    rows = connection.execute(
+        """
+        SELECT
+            relations.relative_path,
+            relations.scope,
+            relations.resolved_target,
+            relations.line,
+            relations.in_test,
+            resolved.validation_kind,
+            targets.relative_path,
+            bm25(indexed_resolved_code_relation_search, 7.0, 5.0, 1.0, 0.5),
+            source_manifests.content_sha256,
+            source_files.kind,
+            source_files.content_sha256,
+            target_manifests.content_sha256,
+            target_files.kind,
+            target_files.content_sha256
+        FROM indexed_resolved_code_relation_search
+        JOIN indexed_resolved_code_relations AS resolved
+          ON resolved.relation_id = indexed_resolved_code_relation_search.rowid
+        JOIN indexed_resolved_relation_workspaces AS resolved_workspaces
+          ON resolved_workspaces.workspace_id = resolved.workspace_id
+        JOIN indexed_code_relations AS relations
+          ON relations.id = resolved.relation_id
+        JOIN indexed_code_unit_files AS source_manifests
+          ON source_manifests.workspace_id = relations.workspace_id
+         AND source_manifests.relative_path = relations.relative_path
+        JOIN indexed_files AS source_files
+          ON source_files.workspace_id = relations.workspace_id
+         AND source_files.relative_path = relations.relative_path
+        JOIN indexed_code_units AS targets
+          ON targets.id = resolved.target_unit_id
+        JOIN indexed_code_unit_files AS target_manifests
+          ON target_manifests.workspace_id = targets.workspace_id
+         AND target_manifests.relative_path = targets.relative_path
+        JOIN indexed_files AS target_files
+          ON target_files.workspace_id = targets.workspace_id
+         AND target_files.relative_path = targets.relative_path
+        WHERE indexed_resolved_code_relation_search MATCH ?
+          AND resolved.workspace_id = ?
+          AND resolved_workspaces.status = 'ok'
+          AND relations.relation_kind = 'call'
+          AND source_manifests.status = 'ok'
+          AND source_manifests.relation_status = 'ok'
+          AND source_manifests.resolution_status = 'ok'
+          AND target_manifests.status = 'ok'
+        ORDER BY bm25(indexed_resolved_code_relation_search, 7.0, 5.0, 1.0, 0.5),
+                 relations.relative_path, relations.line, relations.column
+        LIMIT ?
+        """,
+        (fts_expression, workspace_id, candidate_limit),
+    ).fetchall()
+    ranked_by_ref: dict[str, _RankedProjectHit] = {}
+    for row in rows:
+        (
+            relative_path,
+            scope,
+            resolved_target,
+            line,
+            in_test,
+            validation_kind,
+            target_path,
+            raw_score,
+            source_manifest_sha,
+            source_kind,
+            source_indexed_sha,
+            target_manifest_sha,
+            target_kind,
+            target_indexed_sha,
+        ) = row
+        if (
+            not isinstance(relative_path, str)
+            or not isinstance(scope, str)
+            or not isinstance(resolved_target, str)
+            or not resolved_target
+            or isinstance(line, bool)
+            or not isinstance(line, int)
+            or line <= 0
+            or isinstance(in_test, bool)
+            or not isinstance(in_test, int)
+            or in_test not in {0, 1}
+            or validation_kind
+            not in {"python_workspace_direct_export", "python_workspace_reexport_chain"}
+            or not isinstance(target_path, str)
+            or not isinstance(raw_score, (int, float))
+            or not isinstance(source_manifest_sha, str)
+            or source_manifest_sha != source_indexed_sha
+            or source_kind != IndexedFileKind.FILE.value
+            or not isinstance(target_manifest_sha, str)
+            or target_manifest_sha != target_indexed_sha
+            or target_kind != IndexedFileKind.FILE.value
+            or is_document_path(relative_path)
+            or is_generated_text_output_path(relative_path)
+        ):
+            raise ProjectRetrievalError(
+                "resolved code relation search crossed authoritative index state"
+            )
+        ref = f"code:{relative_path}"
+        summary = f"resolved call {resolved_target}"
+        if scope:
+            summary = f"{summary} in {scope}"
+        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if explicit_intent else _QUALITY_ALL_TERMS
+        candidate = _RankedProjectHit(
+            hit=ProjectSearchHit(
+                ref=ref,
+                kind=ProjectSearchKind.CODE,
+                title=Path(relative_path).name,
+                location=relative_path,
+                short_summary=_truncate_utf8(summary, _SUMMARY_MAX_BYTES),
+                match_reason="code resolved call relation",
+                freshness="indexed_snapshot",
+                path=relative_path,
+            ),
+            quality=quality,
+            matched_terms=len(query.terms),
+            lexical_score=float(raw_score),
+            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 2,
         )
         previous = ranked_by_ref.get(ref)
         if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
@@ -2243,60 +2390,13 @@ def _python_workspace_module_candidates(
     module: str,
     module_files: list[_PythonIndexedModuleFile],
 ) -> tuple[_PythonIndexedModuleFile, ...]:
-    leading_dots = len(module) - len(module.lstrip("."))
-    module_tail = module[leading_dots:]
-    tail_parts = tuple(part for part in module_tail.split(".") if part)
-    if any(not part.isidentifier() for part in tail_parts):
-        return ()
-
-    if leading_dots:
-        source_parent = PurePosixPath(source_path).parent
-        parent_parts = source_parent.parts
-        ascend = leading_dots - 1
-        if ascend > len(parent_parts):
-            return ()
-        base_parts = parent_parts[: len(parent_parts) - ascend]
-        module_parts = (*base_parts, *tail_parts)
-        module_path = PurePosixPath(*module_parts) if module_parts else PurePosixPath(".")
-        exact_paths = (
-            _python_module_file_paths(module_path)
-            if tail_parts
-            else _python_package_init_paths(module_path)
-        )
-        return tuple(module_file for module_file in module_files if module_file.path in exact_paths)
-
-    if not tail_parts:
-        return ()
-    module_path = PurePosixPath(*tail_parts)
-    suffixes = _python_module_file_paths(module_path)
-    return tuple(
-        module_file
-        for module_file in module_files
-        if any(
-            module_file.path == suffix or module_file.path.endswith(f"/{suffix}")
-            for suffix in suffixes
-        )
+    by_path = {module_file.path: module_file for module_file in module_files}
+    candidate_paths = python_workspace_module_candidate_paths(
+        source_path,
+        module,
+        tuple(by_path),
     )
-
-
-def _python_module_file_paths(module_path: PurePosixPath) -> frozenset[str]:
-    value = "" if str(module_path) == "." else str(module_path)
-    if not value:
-        return frozenset({"__init__.py", "__init__.pyi"})
-    return frozenset(
-        {
-            f"{value}.py",
-            f"{value}.pyi",
-            f"{value}/__init__.py",
-            f"{value}/__init__.pyi",
-        }
-    )
-
-
-def _python_package_init_paths(module_path: PurePosixPath) -> frozenset[str]:
-    value = "" if str(module_path) == "." else str(module_path)
-    prefix = "" if not value else f"{value}/"
-    return frozenset({f"{prefix}__init__.py", f"{prefix}__init__.pyi"})
+    return tuple(by_path[path] for path in candidate_paths)
 
 
 def _fit_symbol_navigation_to_budget(

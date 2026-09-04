@@ -97,7 +97,7 @@ def test_schema_v7_checkpoint_constraints_and_cascade(tmp_path: Path) -> None:
 
 
 def test_schema_version_includes_knowledge_schema() -> None:
-    assert SCHEMA_VERSION == 19
+    assert SCHEMA_VERSION == 20
 
 
 def test_checkpoint_reader_rejects_corrupt_unsafe_changed_path(tmp_path: Path) -> None:
