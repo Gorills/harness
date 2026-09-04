@@ -727,6 +727,9 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             if analysis.scope_claims_name(current_scope, root):
                 return None, None, None
             for outer_scope in reversed(function_scopes[:-1]):
+                binding = analysis.safe_binding(outer_scope, root)
+                if binding is not None:
+                    return self._apply_import_binding(binding, remainder if separator else "")
                 if analysis.scope_claims_name(outer_scope, root):
                     return None, None, None
 

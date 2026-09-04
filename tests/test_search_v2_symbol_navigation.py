@@ -858,6 +858,132 @@ def test_symbol_navigation_workspace_export_validation_drops_changed_target_defi
         connection.close()
 
 
+def test_symbol_navigation_resolves_python_import_from_enclosing_function(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def inner():\n"
+                "        return tc()\n"
+                "    return inner\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/use.py"
+        )
+        assert call.scope == "outer.inner"
+        assert call.target == "tc"
+        assert call.resolved_target == "service.target_call"
+        assert call.resolution_kind == "python_from_import_binding"
+        assert call.resolved_definition_path == "src/service.py"
+        assert call.resolution_validation_kind == "python_workspace_direct_export"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_resolves_nearest_safe_enclosing_function_import(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def middle():\n"
+                "        def inner():\n"
+                "            return tc()\n"
+                "        return inner\n"
+                "    return middle\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/use.py"
+        )
+        assert call.scope == "outer.middle.inner"
+        assert call.resolved_target == "service.target_call"
+        assert call.resolved_definition_path == "src/service.py"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_enclosing_import_fails_closed_on_intermediate_shadowing(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def middle():\n"
+                "        tc = lambda: 0\n"
+                "        def inner():\n"
+                "            return tc()\n"
+                "        return inner\n"
+                "    return middle\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.import_count == 1
+        assert navigation.call_count == 0
+        assert all(item.resolved_target is None for item in navigation.relations)
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_enclosing_import_fails_closed_on_nonlocal_declaration(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/service.py": "def target_call():\n    return 1\n",
+            "src/use.py": (
+                "def outer():\n"
+                "    from service import target_call as tc\n"
+                "    def inner():\n"
+                "        nonlocal tc\n"
+                "        return tc()\n"
+                "    return inner\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.import_count == 1
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
 def test_symbol_navigation_python_import_binding_fails_closed_on_rebinding(tmp_path: Path) -> None:
     _root, connection, workspace_id = _registered(
         tmp_path,
