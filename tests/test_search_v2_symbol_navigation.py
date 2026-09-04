@@ -984,6 +984,256 @@ def test_symbol_navigation_enclosing_import_fails_closed_on_nonlocal_declaration
         connection.close()
 
 
+def test_symbol_navigation_resolves_direct_self_method_receiver(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.scope == "Worker.invoke"
+        assert call.target == "self.target_call"
+        assert call.resolved_target == "Worker.target_call"
+        assert call.resolution_kind == "python_self_method_binding"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
+        payload = project_symbol_navigation_payload(navigation)
+        payload_relations = payload["relations"]
+        assert isinstance(payload_relations, list)
+        payload_call = next(
+            item
+            for item in payload_relations
+            if isinstance(item, dict) and item.get("kind") == "call"
+        )
+        assert payload_call["resolved_target"] == "Worker.target_call"
+        assert payload_call["resolution_kind"] == "python_self_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_resolves_direct_cls_method_receiver(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    @classmethod\n"
+                "    def target_call(cls):\n"
+                "        return 1\n\n"
+                "    @classmethod\n"
+                "    def invoke(cls):\n"
+                "        return cls.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.target == "cls.target_call"
+        assert call.resolved_target == "Worker.target_call"
+        assert call.resolution_kind == "python_cls_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_accepts_safe_static_target(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    @staticmethod\n"
+                "    def target_call():\n"
+                "        return 1\n\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.resolved_target == "Worker.target_call"
+        assert call.resolution_kind == "python_self_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_requires_receiver_as_first_positional_parameter(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    def invoke(other, self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_fails_closed_on_decorated_caller(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "def trace(fn):\n"
+                "    return fn\n\n"
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    @trace\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_fails_closed_on_receiver_rebinding(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    def invoke(self):\n"
+                "        self = object()\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+        assert all(item.resolved_target is None for item in navigation.relations)
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_fails_closed_on_custom_target_descriptor(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    @property\n"
+                "    def target_call(self):\n"
+                "        return lambda: 1\n\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_does_not_infer_inherited_method(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "class Worker(Base):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_receiver_resolution_does_not_follow_member_chain(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    def invoke(self):\n"
+                "        return self.helper.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
 def test_symbol_navigation_python_import_binding_fails_closed_on_rebinding(tmp_path: Path) -> None:
     _root, connection, workspace_id = _registered(
         tmp_path,

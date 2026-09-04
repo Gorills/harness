@@ -439,6 +439,39 @@ def test_scan_persists_proven_python_closure_import_edge(tmp_path: Path) -> None
         connection.close()
 
 
+def test_scan_does_not_persist_current_source_receiver_resolution(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+        assert connection.execute(
+            """
+            SELECT target, resolved_target, resolution_kind, resolution_module
+            FROM indexed_code_relations
+            WHERE workspace_id = ?
+              AND relative_path = 'src/worker.py'
+              AND relation_kind = 'call'
+            """,
+            (workspace_id,),
+        ).fetchall() == [("self.target_call", None, None, None)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM indexed_resolved_code_relations WHERE workspace_id = ?",
+            (workspace_id,),
+        ).fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_persistent_closure_resolution_fails_closed_on_intermediate_shadowing(
     tmp_path: Path,
 ) -> None:
