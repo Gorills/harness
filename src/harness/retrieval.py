@@ -43,9 +43,10 @@ from harness.search_text import (
 )
 from harness.symbol_navigation import (
     MAX_SYMBOL_PARSE_BYTES,
+    PythonModuleExportAnalysis,
     SyntaxRelation,
-    analyze_precise_code_units,
     analyze_precise_symbol_relations,
+    analyze_python_module_exports,
     is_precise_symbol_path,
     precise_symbol_language,
 )
@@ -79,6 +80,7 @@ MAX_SYMBOL_NAVIGATION_RELATIONS = 16
 MAX_SYMBOL_NAVIGATION_BYTES = 5 * 1024
 MAX_SYMBOL_RELATION_TEXT_BYTES = 512
 MAX_SYMBOL_IMPORT_VALIDATION_BYTES = 4 * 1024 * 1024
+MAX_PYTHON_REEXPORT_EDGES = 4
 PROJECT_SEARCH_MAX_BYTES = 12 * 1024
 _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
 EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
@@ -2078,7 +2080,7 @@ def _validate_python_workspace_exports(
     indexed_rows: list[tuple[object, ...]],
     navigation: ProjectSymbolNavigation,
 ) -> ProjectSymbolNavigation:
-    """Attach positive-only direct-export locations for proven Python import bindings."""
+    """Attach positive-only direct or bounded re-export locations for Python imports."""
     module_files: list[_PythonIndexedModuleFile] = []
     for raw_path, raw_kind, raw_size, raw_sha in indexed_rows:
         if (
@@ -2099,12 +2101,12 @@ def _validate_python_workspace_exports(
                 )
             )
 
-    parse_cache: dict[str, tuple[SyntaxRelation, ...] | None] = {}
+    parse_cache: dict[str, PythonModuleExportAnalysis | None] = {}
     validation_bytes = 0
 
-    def direct_definitions(
+    def module_exports(
         module_file: _PythonIndexedModuleFile,
-    ) -> tuple[SyntaxRelation, ...] | None:
+    ) -> PythonModuleExportAnalysis | None:
         nonlocal validation_bytes
         if module_file.path in parse_cache:
             return parse_cache[module_file.path]
@@ -2123,17 +2125,60 @@ def _validate_python_workspace_exports(
         if read.status is not ExactSearchReadStatus.OK or read.text is None:
             parse_cache[module_file.path] = None
             return None
-        analysis = analyze_precise_code_units(module_file.path, read.text)
+        analysis = analyze_python_module_exports(module_file.path, read.text)
         if analysis.status != "ok":
             parse_cache[module_file.path] = None
             return None
+        parse_cache[module_file.path] = analysis
+        return analysis
+
+    def resolve_export(
+        module_file: _PythonIndexedModuleFile,
+        export_name: str,
+        *,
+        followed_edges: int,
+        seen: frozenset[tuple[str, str]],
+    ) -> tuple[SyntaxRelation, str] | None:
+        analysis = module_exports(module_file)
+        if analysis is None:
+            return None
+
         definitions = tuple(
-            relation
-            for relation in analysis.relations
-            if relation.kind == "definition" and relation.scope is None
+            definition for definition in analysis.definitions if definition.target == export_name
         )
-        parse_cache[module_file.path] = definitions
-        return definitions
+        if len(definitions) == 1:
+            validation_kind = (
+                "python_workspace_direct_export"
+                if followed_edges == 0
+                else "python_workspace_reexport_chain"
+            )
+            return definitions[0], validation_kind
+        if definitions or followed_edges >= MAX_PYTHON_REEXPORT_EDGES:
+            return None
+
+        reexports = tuple(
+            reexport for reexport in analysis.reexports if reexport.exported_name == export_name
+        )
+        if len(reexports) != 1:
+            return None
+        reexport = reexports[0]
+        candidates = _python_workspace_module_candidates(
+            module_file.path,
+            reexport.module,
+            module_files,
+        )
+        if len(candidates) != 1:
+            return None
+        next_file = candidates[0]
+        state = (next_file.path, reexport.imported_name)
+        if state in seen:
+            return None
+        return resolve_export(
+            next_file,
+            reexport.imported_name,
+            followed_edges=followed_edges + 1,
+            seen=seen | {state},
+        )
 
     validated: list[ProjectSymbolRelation] = []
     for relation in navigation.relations:
@@ -2149,15 +2194,17 @@ def _validate_python_workspace_exports(
         if len(candidates) != 1:
             validated.append(relation)
             continue
-        definitions = direct_definitions(candidates[0])
-        if definitions is None:
+        initial_state = (candidates[0].path, export_name)
+        resolved = resolve_export(
+            candidates[0],
+            export_name,
+            followed_edges=0,
+            seen=frozenset({initial_state}),
+        )
+        if resolved is None:
             validated.append(relation)
             continue
-        matches = [definition for definition in definitions if definition.target == export_name]
-        if len(matches) != 1:
-            validated.append(relation)
-            continue
-        definition = matches[0]
+        definition, validation_kind = resolved
         validated.append(
             replace(
                 relation,
@@ -2165,7 +2212,7 @@ def _validate_python_workspace_exports(
                 resolved_definition_line=definition.line,
                 resolved_definition_column=definition.column,
                 resolved_definition_kind=definition.symbol_kind,
-                resolution_validation_kind="python_workspace_direct_export",
+                resolution_validation_kind=validation_kind,
             )
         )
     return _fit_symbol_navigation_to_budget(replace(navigation, relations=tuple(validated)))
