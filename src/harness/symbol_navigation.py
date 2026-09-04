@@ -334,6 +334,7 @@ class _PythonImportBinding:
 class _PythonImportBindingAnalysis:
     imports_by_scope: dict[str, dict[str, tuple[_PythonImportBinding, ...]]]
     bound_names_by_scope: dict[str, frozenset[str]]
+    rebound_names_by_scope: dict[str, frozenset[str]]
     globally_declared_names: frozenset[str]
 
     def safe_binding(self, scope: str, name: str) -> _PythonImportBinding | None:
@@ -351,12 +352,18 @@ class _PythonImportBindingAnalysis:
             scope, frozenset()
         ) or name in self.imports_by_scope.get(scope, {})
 
+    def receiver_name_is_rebound(self, scope: str, name: str) -> bool:
+        return name in self.rebound_names_by_scope.get(
+            scope, frozenset()
+        ) or name in self.imports_by_scope.get(scope, {})
+
 
 class _PythonImportBindingCollector(ast.NodeVisitor):
     def __init__(self) -> None:
         self.scope_stack: list[tuple[str, str]] = [("", "module")]
         self.imports_by_scope: dict[str, dict[str, list[_PythonImportBinding]]] = {"": {}}
         self.bound_names_by_scope: dict[str, set[str]] = {"": set()}
+        self.rebound_names_by_scope: dict[str, set[str]] = {"": set()}
         self.globally_declared_names: set[str] = set()
 
     def analysis(self) -> _PythonImportBindingAnalysis:
@@ -368,6 +375,9 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
             bound_names_by_scope={
                 scope: frozenset(names) for scope, names in self.bound_names_by_scope.items()
             },
+            rebound_names_by_scope={
+                scope: frozenset(names) for scope, names in self.rebound_names_by_scope.items()
+            },
             globally_declared_names=frozenset(self.globally_declared_names),
         )
 
@@ -375,9 +385,11 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
     def _scope(self) -> str:
         return self.scope_stack[-1][0]
 
-    def _bind(self, name: str | None) -> None:
+    def _bind(self, name: str | None, *, parameter: bool = False) -> None:
         if name:
             self.bound_names_by_scope.setdefault(self._scope, set()).add(name)
+            if not parameter:
+                self.rebound_names_by_scope.setdefault(self._scope, set()).add(name)
 
     def _add_import(self, local_name: str, target: str, kind: str, *, module: str) -> None:
         self.imports_by_scope.setdefault(self._scope, {}).setdefault(local_name, []).append(
@@ -390,6 +402,7 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
         self.scope_stack.append((qualified, kind))
         self.imports_by_scope.setdefault(qualified, {})
         self.bound_names_by_scope.setdefault(qualified, set())
+        self.rebound_names_by_scope.setdefault(qualified, set())
 
     def _pop_scope(self) -> None:
         self.scope_stack.pop()
@@ -461,11 +474,11 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
             self.visit(node.returns)
         self._push_scope(node.name, "function")
         for argument in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs):
-            self._bind(argument.arg)
+            self._bind(argument.arg, parameter=True)
         if node.args.vararg is not None:
-            self._bind(node.args.vararg.arg)
+            self._bind(node.args.vararg.arg, parameter=True)
         if node.args.kwarg is not None:
-            self._bind(node.args.kwarg.arg)
+            self._bind(node.args.kwarg.arg, parameter=True)
         for statement in node.body:
             self.visit(statement)
         self._pop_scope()
@@ -513,6 +526,65 @@ def _collect_python_import_bindings(tree: ast.AST) -> _PythonImportBindingAnalys
     return collector.analysis()
 
 
+@dataclass(frozen=True, slots=True)
+class _PythonClassReceiverContext:
+    qualified_name: str
+    direct_methods: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonMethodReceiverContext:
+    receiver_name: str
+    resolution_kind: str
+    class_context: _PythonClassReceiverContext
+    scope: str
+
+
+def _python_safe_direct_method_names(node: ast.ClassDef) -> frozenset[str]:
+    methods_by_name: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for statement in node.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods_by_name.setdefault(statement.name, []).append(statement)
+    safe: set[str] = set()
+    for name, methods in methods_by_name.items():
+        if len(methods) != 1:
+            continue
+        decorators = methods[0].decorator_list
+        if not decorators or (
+            len(decorators) == 1
+            and _dotted_expression(decorators[0]) in {"classmethod", "staticmethod"}
+        ):
+            safe.add(name)
+    return frozenset(safe)
+
+
+def _python_method_receiver(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    class_context: _PythonClassReceiverContext,
+    scope: str,
+) -> _PythonMethodReceiverContext | None:
+    positional = (*node.args.posonlyargs, *node.args.args)
+    if not positional:
+        return None
+    decorators = tuple(_dotted_expression(decorator) for decorator in node.decorator_list)
+    first_name = positional[0].arg
+    if not decorators and first_name == "self":
+        return _PythonMethodReceiverContext(
+            receiver_name="self",
+            resolution_kind="python_self_method_binding",
+            class_context=class_context,
+            scope=scope,
+        )
+    if decorators == ("classmethod",) and first_name == "cls":
+        return _PythonMethodReceiverContext(
+            receiver_name="cls",
+            resolution_kind="python_cls_method_binding",
+            class_context=class_context,
+            scope=scope,
+        )
+    return None
+
+
 class _PythonRelationVisitor(ast.NodeVisitor):
     def __init__(
         self,
@@ -531,6 +603,8 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         self.binding_resolution_suspended = 0
         self.needle_leaf = "" if needle is None else needle.rsplit(".", 1)[-1]
         self.scopes: list[tuple[str, str]] = []
+        self.class_receiver_contexts: list[_PythonClassReceiverContext] = []
+        self.callable_receiver_contexts: list[_PythonMethodReceiverContext | None] = []
         self.relations: list[SyntaxRelation] = []
         self.in_test = is_test_path(relative_path)
 
@@ -543,7 +617,14 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             if target is not None and self._target_matches(target):
                 self._add_reference("inheritance", base, target)
         self.scopes.append((node.name, "class"))
+        self.class_receiver_contexts.append(
+            _PythonClassReceiverContext(
+                qualified_name=qualified,
+                direct_methods=_python_safe_direct_method_names(node),
+            )
+        )
         self.generic_visit(node)
+        self.class_receiver_contexts.pop()
         self.scopes.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -558,6 +639,8 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             resolved_target, resolution_kind, resolution_module = self._resolved_import_call_target(
                 target
             )
+            if resolved_target is None:
+                resolved_target, resolution_kind = self._resolved_receiver_call_target(target)
             if self._target_matches(target) or (
                 resolved_target is not None and self._target_matches(resolved_target)
             ):
@@ -642,8 +725,17 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         symbol_kind = "method" if parent_kind == "class" else "function"
         if self._definition_matches(node.name, qualified):
             self._add_definition(node, node.name, symbol_kind, qualified)
+        receiver_context = None
+        if parent_kind == "class" and self.class_receiver_contexts:
+            receiver_context = _python_method_receiver(
+                node,
+                self.class_receiver_contexts[-1],
+                qualified,
+            )
         self.scopes.append((node.name, symbol_kind))
+        self.callable_receiver_contexts.append(receiver_context)
         self.generic_visit(node)
+        self.callable_receiver_contexts.pop()
         self.scopes.pop()
 
     def _add_definition(
@@ -737,6 +829,24 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         if binding is None:
             return None, None, None
         return self._apply_import_binding(binding, remainder if separator else "")
+
+    def _resolved_receiver_call_target(self, target: str) -> tuple[str | None, str | None]:
+        if self.needle is None or self.binding_resolution_suspended:
+            return None, None
+        if not self.callable_receiver_contexts:
+            return None, None
+        receiver = self.callable_receiver_contexts[-1]
+        if receiver is None:
+            return None, None
+        root, separator, member = target.partition(".")
+        if not separator or "." in member or root != receiver.receiver_name:
+            return None, None
+        if member not in receiver.class_context.direct_methods:
+            return None, None
+        analysis = self.binding_analysis
+        if analysis is None or analysis.receiver_name_is_rebound(receiver.scope, root):
+            return None, None
+        return f"{receiver.class_context.qualified_name}.{member}", receiver.resolution_kind
 
     @staticmethod
     def _apply_import_binding(
