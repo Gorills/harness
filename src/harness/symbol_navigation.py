@@ -59,6 +59,20 @@ class SyntaxRelationAnalysis:
     relations: tuple[SyntaxRelation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class PythonTopLevelReexport:
+    exported_name: str
+    imported_name: str
+    module: str
+
+
+@dataclass(frozen=True, slots=True)
+class PythonModuleExportAnalysis:
+    status: str
+    definitions: tuple[SyntaxRelation, ...]
+    reexports: tuple[PythonTopLevelReexport, ...]
+
+
 def precise_symbol_language(relative_path: str) -> str | None:
     suffix = Path(relative_path.casefold()).suffix
     if suffix in _PYTHON_SUFFIXES:
@@ -94,6 +108,62 @@ def analyze_precise_symbol_relations(
 def analyze_precise_code_units(relative_path: str, text: str) -> SyntaxRelationAnalysis:
     """Extract every precise named definition from one bounded current source file."""
     return _analyze_precise_relations(relative_path, text, None, collect_references=False)
+
+
+def analyze_python_module_exports(
+    relative_path: str,
+    text: str,
+) -> PythonModuleExportAnalysis:
+    """Extract direct definitions and safe explicit top-level Python re-exports."""
+    if precise_symbol_language(relative_path) != "python":
+        return PythonModuleExportAnalysis("unsupported", (), ())
+    if len(text.encode("utf-8")) > MAX_SYMBOL_PARSE_BYTES:
+        return PythonModuleExportAnalysis("too_large", (), ())
+    try:
+        tree = ast.parse(text, filename=relative_path, type_comments=True)
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+        return PythonModuleExportAnalysis("parse_error", (), ())
+
+    relation_analysis = _analyze_python_tree_relations(
+        relative_path,
+        text,
+        tree,
+        None,
+        collect_references=False,
+    )
+    definitions = tuple(
+        relation
+        for relation in relation_analysis.relations
+        if relation.kind == "definition" and relation.scope is None
+    )
+    binding_analysis = _collect_python_import_bindings(tree)
+    reexports: list[PythonTopLevelReexport] = []
+    for statement in tree.body:
+        if not isinstance(statement, ast.ImportFrom) or statement.module is None:
+            continue
+        module = f"{'.' * statement.level}{statement.module}"
+        for alias in statement.names:
+            if alias.name == "*":
+                continue
+            exported_name = alias.asname or alias.name
+            if not exported_name.isidentifier() or not alias.name.isidentifier():
+                continue
+            target = f"{module}.{alias.name}"
+            binding = binding_analysis.safe_binding("", exported_name)
+            if (
+                binding is not None
+                and binding.kind == "python_from_import_binding"
+                and binding.target == target
+                and binding.module == module
+            ):
+                reexports.append(
+                    PythonTopLevelReexport(
+                        exported_name=exported_name,
+                        imported_name=alias.name,
+                        module=module,
+                    )
+                )
+    return PythonModuleExportAnalysis("ok", definitions, tuple(reexports))
 
 
 def analyze_precise_code_structure(relative_path: str, text: str) -> SyntaxRelationAnalysis:
@@ -133,6 +203,23 @@ def _analyze_python_relations(
         tree = ast.parse(text, filename=relative_path, type_comments=True)
     except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
         return SyntaxRelationAnalysis("python", "parse_error", ())
+    return _analyze_python_tree_relations(
+        relative_path,
+        text,
+        tree,
+        needle,
+        collect_references=collect_references,
+    )
+
+
+def _analyze_python_tree_relations(
+    relative_path: str,
+    text: str,
+    tree: ast.Module,
+    needle: str | None,
+    *,
+    collect_references: bool,
+) -> SyntaxRelationAnalysis:
     binding_analysis = None if needle is None else _collect_python_import_bindings(tree)
     visitor = _PythonRelationVisitor(
         relative_path,
