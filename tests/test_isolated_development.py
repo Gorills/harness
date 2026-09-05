@@ -286,6 +286,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     )
 
 
+@pytest.mark.usefixtures("isolated_harness_http_ports")
 def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Path) -> None:
     harness = _console_script("harness")
     fake_home = tmp_path / "home"
@@ -1216,6 +1217,33 @@ def test_install_global_doctor_only_dry_run_does_not_reinstall(tmp_path: Path) -
     assert "tool install" not in log
 
 
+def test_install_global_does_not_pass_checkout_imports_to_installed_runtime(
+    tmp_path: Path,
+) -> None:
+    inherited = {
+        "PYTHONPATH": str(REPO_ROOT / "src"),
+        "PYTHONHOME": str(REPO_ROOT / ".venv"),
+        "HARNESS_HOST_PROFILE": "codex",
+        "HARNESS_WORKSPACE_ROOT": str(REPO_ROOT),
+        "HARNESS_DEV_SKILL_PROFILES": "codex,cursor",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT": "12345",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT": "12346",
+    }
+    env = _install_global_env(tmp_path, extra=inherited)
+    installed = Path(env["FAKE_UV_BIN_DIR"]) / "harness"
+    installed.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = doctor || exit 98\n'
+        + "".join(f'test -z "${{{key}-}}" || exit 97\n' for key in inherited),
+        encoding="utf-8",
+    )
+    installed.chmod(0o755)
+    result = _run(["make", "doctor-global"], cwd=REPO_ROOT, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
+    log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
+    assert "tool install" not in log
+
+
 def _write_overlay(root: Path) -> None:
     cursor = root / ".cursor"
     cursor.mkdir()
@@ -1583,6 +1611,7 @@ def test_isolated_doctor_ignores_user_global_cursor_claude_and_skills(tmp_path: 
     assert "/foreign-global" not in " ".join(check.detail for check in report.checks)
 
 
+@pytest.mark.usefixtures("isolated_harness_http_ports")
 def test_simulated_global_cursor_update_does_not_touch_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

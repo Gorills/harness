@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from time import monotonic
 
 from harness.host_adapters import (
     HostIntegrationError,
@@ -166,13 +165,13 @@ class CursorAdapter:
 
     def project_registration_state(self, workspace_root: Path) -> HostRegistrationState:
         root = _workspace_root(workspace_root)
-        return self._registration_state(self._project_config(root), self._project_desired())
+        return self._registration_state(self._project_config(root), self._project_desired(root))
 
     def project_registration_diagnostic(self, workspace_root: Path) -> CursorRegistrationDiagnostic:
         """Inspect one Workspace override, including ownership/adoption preflight errors."""
         root = _workspace_root(workspace_root)
         diagnostic = self._registration_diagnostic(
-            self._project_config(root), self._project_desired()
+            self._project_config(root), self._project_desired(root)
         )
         try:
             self.preflight_project_reconcile(root)
@@ -289,7 +288,6 @@ class CursorAdapter:
                 enable_command=command,
             )
         timeout = _AGENT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-        deadline = None if timeout_seconds is None else monotonic() + max(timeout, 0.0)
         listed = _run_cursor_agent(
             agent,
             ["mcp", "list-tools", _SERVER_NAME],
@@ -305,33 +303,11 @@ class CursorAdapter:
                 tools=agent_tools,
                 detail="project harness exposes the five Harness tools",
             )
-        remaining = None if deadline is None else deadline - monotonic()
-        owned_tools = (
-            _probe_owned_project_mcp_tools(
-                root,
-                python_executable=self.python_executable,
-                environment=environment,
-                timeout_seconds=remaining,
-            )
-            if remaining is None or remaining > 0
-            else ()
-        )
-        if owned_tools == CURSOR_PROJECT_MCP_TOOLS:
-            return CursorProjectRuntimeResult(
-                workspace_root=root,
-                status=CursorProjectRuntimeStatus.VERIFIED,
-                tools=owned_tools,
-                detail=(
-                    "project harness exposes the five Harness tools via owned launch probe; "
-                    "Cursor CLI list-tools did not interpolate ${workspaceFolder}"
-                ),
-            )
-        tools = agent_tools if agent_tools else owned_tools
         detail = _bounded_agent_output(listed.stdout) or "Cursor MCP tool catalog is empty"
         return CursorProjectRuntimeResult(
             workspace_root=root,
             status=CursorProjectRuntimeStatus.UNAVAILABLE,
-            tools=tools,
+            tools=agent_tools,
             detail=detail,
             enable_command=cursor_project_enable_command(root),
         )
@@ -341,7 +317,7 @@ class CursorAdapter:
         path = self._project_config(root)
         if self._project_is_isolated_development(root):
             return
-        state = self._registration_state(path, self._project_desired())
+        state = self._registration_state(path, self._project_desired(root))
         if state is HostRegistrationState.FOREIGN:
             raise HostRegistrationCollisionError(
                 f"Cursor project config already has a non-Harness MCP server named 'harness': {path}"
@@ -366,7 +342,7 @@ class CursorAdapter:
         path = self._project_config(root)
         if self._project_is_isolated_development(root):
             return
-        state = self._registration_state(path, self._project_desired())
+        state = self._registration_state(path, self._project_desired(root))
         if state is HostRegistrationState.FOREIGN:
             raise HostRegistrationCollisionError(
                 f"Cursor project config has a non-Harness MCP server named 'harness': {path}"
@@ -392,7 +368,7 @@ class CursorAdapter:
         if self._project_is_isolated_development(root):
             return IntegrationChange.UNCHANGED
         path = self._project_config(root)
-        state = self._registration_state(path, self._project_desired())
+        state = self._registration_state(path, self._project_desired(root))
         if state is HostRegistrationState.CURRENT:
             return IntegrationChange.UNCHANGED
 
@@ -407,7 +383,7 @@ class CursorAdapter:
                 marker = _OwnerMarker(workspace_root=str(root), exclude_owned=True)
                 self._write_owner_marker(root, marker)
         try:
-            return self._ensure_entry(path, self._project_desired())
+            return self._ensure_entry(path, self._project_desired(root))
         except Exception:
             # Leave a valid marker/exclude pair after an interrupted creation. It proves only
             # Harness-owned intent for this absent/new config and lets a retry recover safely.
@@ -460,14 +436,14 @@ class CursorAdapter:
             )
         return successor_root
 
-    def _project_desired(self) -> dict[str, object]:
+    def _project_desired(self, root: Path | None = None) -> dict[str, object]:
         return {
             "type": "stdio",
             "command": str(self.python_executable),
             "args": ["-m", "harness.mcp_process"],
             "env": {
                 _HOST_PROFILE_ENV: _CURSOR_PROFILE,
-                _WORKSPACE_ROOT_ENV: _WORKSPACE_FOLDER,
+                _WORKSPACE_ROOT_ENV: _WORKSPACE_FOLDER if root is None else str(root),
             },
         }
 
@@ -612,7 +588,7 @@ class CursorAdapter:
 
 
 def interpolated_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
-    """Return Harness-owned interpolated ${workspaceFolder}, or None when absent/literal."""
+    """Return an explicit Harness Workspace root, rejecting absent or unresolved values."""
     configured = environment.get(_WORKSPACE_ROOT_ENV)
     if not configured or configured == _WORKSPACE_FOLDER:
         return None
@@ -620,9 +596,9 @@ def interpolated_cursor_workspace_root(environment: Mapping[str, str]) -> str | 
 
 
 def configured_cursor_workspace_root(environment: Mapping[str, str]) -> str | None:
-    """Return interpolated ``HARNESS_WORKSPACE_ROOT``, or None when absent/literal.
+    """Return explicit ``HARNESS_WORKSPACE_ROOT``, or None when absent/literal.
 
-    Project-scoped MCP interpolates ``HARNESS_WORKSPACE_ROOT=${workspaceFolder}``.
+    Production project MCP stores the canonical absolute Workspace root directly.
     Leftover profile-scoped ``user-harness`` does not set that env. Cursor may still
     inject ``WORKSPACE_FOLDER_PATHS`` on a shared process, but that names the spawn
     window rather than the calling window and is not Workspace identity.
@@ -634,7 +610,7 @@ def cursor_user_mcp_missing_workspace_root(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> bool:
-    """Return True when Cursor profile MCP has no interpolated Workspace root."""
+    """Return True when Cursor profile MCP has no explicit Workspace root."""
     values = os.environ if environment is None else environment
     if values.get(_HOST_PROFILE_ENV) != _CURSOR_PROFILE:
         return False
@@ -708,128 +684,6 @@ def _parse_cursor_mcp_tools(output: str) -> tuple[str, ...]:
         return ()
     tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", cleaned))
     return tuple(name for name in CURSOR_PROJECT_MCP_TOOLS if name in tokens)
-
-
-def _interpolated_project_launch_environment(
-    root: Path,
-    desired: Mapping[str, object],
-    base_environment: Mapping[str, str],
-) -> dict[str, str]:
-    launch = dict(base_environment)
-    env_block = desired.get("env")
-    if isinstance(env_block, dict):
-        for key, value in env_block.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                continue
-            if key == _WORKSPACE_ROOT_ENV and value == _WORKSPACE_FOLDER:
-                launch[key] = str(root)
-            else:
-                launch[key] = value
-    return launch
-
-
-def _owned_project_desired(python_executable: Path) -> dict[str, object]:
-    return {
-        "type": "stdio",
-        "command": str(python_executable),
-        "args": ["-m", "harness.mcp_process"],
-        "env": {
-            _HOST_PROFILE_ENV: _CURSOR_PROFILE,
-            _WORKSPACE_ROOT_ENV: _WORKSPACE_FOLDER,
-        },
-    }
-
-
-def _parse_stdio_mcp_tools(stdout: str, *, response_id: int) -> tuple[str, ...]:
-    names: set[str] = set()
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            message = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        if message.get("id") != response_id:
-            continue
-        result = message.get("result")
-        if not isinstance(result, dict):
-            continue
-        tools = result.get("tools")
-        if not isinstance(tools, list):
-            continue
-        for tool in tools:
-            if isinstance(tool, dict) and isinstance(tool.get("name"), str):
-                names.add(tool["name"])
-    return tuple(name for name in CURSOR_PROJECT_MCP_TOOLS if name in names)
-
-
-def _probe_owned_project_mcp_tools(
-    workspace_root: Path,
-    *,
-    python_executable: Path,
-    environment: Mapping[str, str] | None = None,
-    timeout_seconds: float | None = None,
-) -> tuple[str, ...]:
-    """Spawn the owned project MCP launch with interpolated ``HARNESS_WORKSPACE_ROOT``.
-
-    Official ``agent mcp list-tools`` can spawn project MCP with a literal
-    ``${workspaceFolder}`` env and report an empty catalog even when Cursor IDE
-    would expose the five tools after interpolation.
-    """
-    root = _workspace_root(workspace_root)
-    desired = _owned_project_desired(python_executable)
-    command = desired.get("command")
-    args = desired.get("args")
-    if not isinstance(command, str) or not isinstance(args, list):
-        return ()
-    argv = [command, *[str(arg) for arg in args]]
-    base = os.environ if environment is None else {**os.environ, **dict(environment)}
-    launch_env = _interpolated_project_launch_environment(root, desired, base)
-    timeout = _AGENT_COMMAND_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
-    requests = (
-        json.dumps(
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "harness-cursor-probe", "version": "1.0"},
-                },
-            },
-            separators=(",", ":"),
-        )
-        + "\n"
-        + json.dumps(
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-            separators=(",", ":"),
-        )
-        + "\n"
-        + json.dumps(
-            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-            separators=(",", ":"),
-        )
-        + "\n"
-    )
-    try:
-        completed = subprocess.run(
-            argv,
-            input=requests,
-            cwd=root,
-            env=launch_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return ()
-    if completed.returncode != 0:
-        return ()
-    return _parse_stdio_mcp_tools(completed.stdout, response_id=2)
 
 
 def _bounded_agent_output(output: str) -> str:
@@ -953,7 +807,7 @@ def production_mcp_isolated_checkout_root(
     """Return the overlay root when production host-profile MCP must refuse tools.
 
     Isolated overlay launches omit ``HARNESS_HOST_PROFILE`` and are not refused.
-    Cursor-profile overlay refuse requires an interpolated ``HARNESS_WORKSPACE_ROOT``
+    Cursor-profile overlay refuse requires an explicit ``HARNESS_WORKSPACE_ROOT``
     that resolves to the overlay. ``WORKSPACE_FOLDER_PATHS`` is not an identity
     alternative and cannot keep tools attached to another window. Missing or
     literal ``${workspaceFolder}`` is the missing-root path, not overlay refuse.

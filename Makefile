@@ -2,7 +2,7 @@
 #
 # Isolated development remains `scripts/dev`. These targets leave overlay env
 # first, then run `uv tool install` plus the tool-installed `harness install`.
-# Checkout agents must not invoke them.
+# Agents use explicit profile sets after authorized machine acceptance; see AGENTS.md.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -19,9 +19,9 @@ help:
 	  '  make install-global                       refresh the user-global uv-tool Harness' \
 	  '  make install-global HOST=cursor           install one profile only' \
 	  '  make install-global HOST=codex' \
-	  '  make install-global HOST=cursor,codex   install an explicit profile set' \
+	  '  make install-global HOST=cursor,codex     install an explicit profile set' \
 	  '  make accept-global-codex                 install package, test Codex with temporary state' \
-	  '  make benchmark-hot-paths                 measure project_status, watcher, and scan costs' \
+	  '  make benchmark-hot-paths                 measure status, search, watcher, and scan costs' \
 	  '  make doctor-global                        run the user-global harness doctor only' \
 	  '' \
 	  'install-global reinstalls this tree with uv 0.12.5, then runs that' \

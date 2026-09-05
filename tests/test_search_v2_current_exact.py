@@ -3,16 +3,20 @@ from __future__ import annotations
 import json
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic
+from typing import Any
 
 import pytest
 
+import harness.search_currentness as currentness_module
+import harness.watcher as watcher_module
 from harness.daemon import read_project_search
-from harness.index import scan_workspace
+from harness.index import list_workspace_candidate_paths, scan_workspace
 from harness.ipc import ProjectSearchResult
-from harness.registry import create_project, get_workspace, register_workspace
+from harness.registry import WorkspaceRecord, create_project, get_workspace, register_workspace
 from harness.retrieval import (
     PROJECT_SEARCH_MAX_BYTES,
     ProjectExactSearchInspection,
@@ -25,6 +29,8 @@ from harness.retrieval import (
     search_project,
 )
 from harness.search_currentness import (
+    SearchCurrentnessError,
+    SearchCurrentnessTimeoutError,
     ensure_workspace_search_index_current,
     workspace_search_state_is_unchanged,
 )
@@ -120,6 +126,220 @@ def test_project_search_reads_immediate_dirty_edits_and_reverts(tmp_path: Path) 
         assert reverted.exact_coverage.matched_occurrences == 0
         restored = _search(connection, root, scan_lock, "oldSymbol")
         assert restored.results[0].path == "src/service.py"
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("query", ['"->"', "`->`", "->"])
+@pytest.mark.parametrize("scope", [ProjectSearchScope.CODE, ProjectSearchScope.ALL])
+def test_project_search_returns_punctuation_exact_coverage(
+    tmp_path: Path, query: str, scope: ProjectSearchScope
+) -> None:
+    root, connection, _workspace_id, scan_lock = _registered(tmp_path)
+    try:
+        (root / "src" / "service.py").write_text(
+            "def oldSymbol() -> int:\n    return 1\n", encoding="utf-8"
+        )
+        result = read_project_search(
+            connection, (WorkspaceHint(root, "explicit-root"),), query, 5, scope, scan_lock
+        )
+        assert result.workspace_state == "current"
+        assert result.results == ()
+        assert result.exact_coverage is not None
+        assert result.exact_coverage.complete is True
+        assert result.exact_coverage.matched_occurrences == 1
+        assert [(hit.path, hit.line, hit.column) for hit in result.exact_coverage.locations] == [
+            ("src/service.py", 1, 17)
+        ]
+
+        missing = _search(connection, root, scan_lock, '"???"')
+        assert missing.exact_coverage is not None
+        assert missing.exact_coverage.complete is True
+        assert missing.exact_coverage.matched_occurrences == 0
+        assert missing.results == ()
+    finally:
+        connection.close()
+
+
+def test_warm_search_does_not_wait_for_another_workspace_watcher_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, connection, workspace_id, scan_lock = _registered(tmp_path)
+    foreign_root = tmp_path / "a-foreign"
+    foreign_root.mkdir()
+    (foreign_root / "other.py").write_text("def foreignSymbol(): pass\n", encoding="utf-8")
+    _git(foreign_root, "init", "-b", "main")
+    _commit(foreign_root, "foreign")
+    foreign_project = create_project(connection)
+    foreign = register_workspace(
+        connection, project_id=foreign_project.project_id, path=foreign_root
+    )
+    scan_workspace(connection, foreign.workspace_id)
+    _search(connection, root, scan_lock, "oldSymbol")
+    entered = Event()
+    release = Event()
+    original_scan = scan_workspace
+
+    def blocking_foreign_scan(
+        writer: sqlite3.Connection, selected_id: str, *, deadline: float | None = None
+    ) -> object:
+        if selected_id == foreign.workspace_id:
+            writer.execute("BEGIN IMMEDIATE")
+            try:
+                writer.execute(
+                    "UPDATE workspace_index_reconcile SET index_revision = index_revision + 1 "
+                    "WHERE workspace_id = ?",
+                    (selected_id,),
+                )
+                entered.set()
+                assert release.wait(10)
+            finally:
+                writer.execute("ROLLBACK")
+        return original_scan(writer, selected_id, deadline=deadline)
+
+    def watch() -> None:
+        writer = connect_database(tmp_path / "harness.db")
+        try:
+            watcher = watcher_module.WorkspaceWatcher(writer, scan_lock, debounce_seconds=0.01)
+            watcher.poll(now=0)
+            watcher.poll(now=1)
+        finally:
+            writer.close()
+
+    monkeypatch.setattr(watcher_module, "scan_workspace", blocking_foreign_scan)
+    monkeypatch.setattr(watcher_module, "list_workspaces", lambda _connection: (foreign,))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(watch)
+            try:
+                assert entered.wait(5)
+                before_changes = connection.total_changes
+                result = _search(connection, root, scan_lock, "oldSymbol")
+                assert result.workspace_state == "current"
+                assert result.results[0].path == "src/service.py"
+                assert connection.total_changes == before_changes
+                assert not connection.in_transaction
+                assert scan_lock.locked()
+                assert not release.is_set()
+
+                # Dirty and never-proven Workspaces still require reconciliation ownership.
+                (root / "src/service.py").write_text("def newSymbol(): pass\n", encoding="utf-8")
+                for selected in (get_workspace(connection, workspace_id), foreign):
+                    with pytest.raises(SearchCurrentnessTimeoutError):
+                        ensure_workspace_search_index_current(
+                            connection, selected, scan_lock, deadline=monotonic() + 0.05
+                        )
+                    assert not connection.in_transaction
+            finally:
+                release.set()
+                future.result(timeout=5)
+    finally:
+        connection.close()
+
+
+def test_contended_read_proof_releases_own_transaction_and_preserves_caller_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, connection, workspace_id, scan_lock = _registered(tmp_path)
+    _search(connection, root, scan_lock, "oldSymbol")
+    workspace = get_workspace(connection, workspace_id)
+    try:
+        connection.execute("BEGIN")
+        with pytest.raises(SearchCurrentnessError, match="no active transaction"):
+            ensure_workspace_search_index_current(
+                connection, workspace, scan_lock, deadline=monotonic() + 1
+            )
+        assert bool(connection.in_transaction)
+        connection.execute("ROLLBACK")
+
+        def fail_candidates(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+            raise RuntimeError("synthetic candidate failure")
+
+        monkeypatch.setattr(currentness_module, "list_workspace_candidate_paths", fail_candidates)
+        with scan_lock:
+            with pytest.raises(RuntimeError, match="synthetic candidate failure"):
+                ensure_workspace_search_index_current(
+                    connection, workspace, scan_lock, deadline=monotonic() + 1
+                )
+            assert not connection.in_transaction
+            assert scan_lock.locked()
+    finally:
+        connection.close()
+
+
+def test_contended_read_proof_retries_a_same_workspace_index_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, connection, workspace_id, scan_lock = _registered(tmp_path)
+    _search(connection, root, scan_lock, "oldSymbol")
+    original_candidates = list_workspace_candidate_paths
+    raced = False
+    candidate_reads = 0
+    scan_lock.acquire()
+
+    def racing_candidates(
+        selected: WorkspaceRecord, *, deadline: float | None = None
+    ) -> tuple[str, ...]:
+        nonlocal raced, candidate_reads
+        candidate_reads += 1
+        candidates = original_candidates(selected, deadline=deadline)
+        if not raced:
+            raced = True
+            (root / "src/service.py").write_text("def newSymbol(): pass\n", encoding="utf-8")
+            writer = connect_database(tmp_path / "harness.db")
+            try:
+                scan_workspace(writer, workspace_id)
+            finally:
+                writer.close()
+                _git(root, "restore", "src/service.py")
+                scan_lock.release()
+        return candidates
+
+    monkeypatch.setattr(currentness_module, "list_workspace_candidate_paths", racing_candidates)
+    try:
+        result = _search(connection, root, scan_lock, "newSymbol")
+        assert raced
+        assert candidate_reads > 1
+        assert result.workspace_state == "current"
+        assert result.exact_coverage is not None
+        assert result.exact_coverage.complete is True
+        assert result.exact_coverage.matched_occurrences == 0
+        assert result.results == ()
+        assert not connection.in_transaction
+    finally:
+        if scan_lock.locked():
+            scan_lock.release()
+        connection.close()
+
+
+def test_branch_change_diff_timeout_retains_search_timeout_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, connection, _workspace_id, scan_lock = _registered(tmp_path)
+    try:
+        _search(connection, root, scan_lock, "oldSymbol")
+        (root / "src/service.py").write_text("def newSymbol(): pass\n", encoding="utf-8")
+        _commit(root, "new head")
+        original_run = subprocess.run
+        diffs = 0
+
+        def fail_diff(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            nonlocal diffs
+            if args and args[0][:2] == ["git", "diff"]:
+                diffs += 1
+                raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", fail_diff)
+        with pytest.raises(SearchCurrentnessTimeoutError, match="branch-diff deadline"):
+            _search(connection, root, scan_lock, "newSymbol")
+        assert diffs == 1
+        assert not scan_lock.locked()
+        assert not connection.in_transaction
+        with pytest.raises(SearchCurrentnessTimeoutError):
+            currentness_module._git_changed_paths(
+                root, "a" * 40, "b" * 40, deadline=monotonic() - 1
+            )
     finally:
         connection.close()
 

@@ -19,8 +19,8 @@ Do not combine unrelated cleanup with feature or bug work.
 Harness development uses `uv 0.12.5` with Python 3.13 and the committed `uv.lock`:
 
 ```text
-uv sync --locked --all-groups
-uv run --frozen python scripts/quality.py
+scripts/dev sync
+scripts/dev quality
 ```
 
 The quality gate checks lock freshness, Ruff formatting/lint, strict mypy, pytest, and an isolated wheel-install smoke test for the `harness` and `harnessd` console scripts.
@@ -40,11 +40,11 @@ To refresh a separately installed user-global Harness from this checkout, operat
 
 ```text
 make install-global
-make install-global HOST=all
+make install-global HOST=cursor,codex
 make doctor-global
 ```
 
-That helper leaves overlay XDG/`HARNESS_DEV_ROOT`, reinstalls with `uv tool install --force --reinstall --python 3.13 .`, then runs the tool-installed `harness install`. Checkout agents must not invoke it.
+That helper leaves overlay XDG/`HARNESS_DEV_ROOT` and Python import overrides, reinstalls with `uv tool install --force --reinstall --python 3.13 .`, then runs the tool-installed `harness install` for Cursor and Codex by default. `HOST=cursor`, `HOST=codex`, and `HOST=cursor,codex` select explicit profiles; this helper does not accept `HOST=all`. Checkout agents may run `make accept-global-codex` after explicit authorization for machine acceptance, and activate an explicitly named live profile set only after successful acceptance and authorization. See the [installed-release testing workflow](docs/release-linux.md#testing-an-installed-release-while-developing).
 
 If direct Git/network access is unavailable but authenticated GitHub object access remains available, follow [`docs/development/network-constrained-git.md`](docs/development/network-constrained-git.md). Prefer `scripts/publish_git_data.py preflight` plus `publish`. When the execution shell cannot reach GitHub but a connected Git Data tool can create blobs, raw UTF-8 blob publication is also allowed for staged files that are valid UTF-8, with the returned remote blob SHA required to match the staged SHA before any tree/commit/ref publication. Never manually assemble base64; binary or non-UTF-8 changes require a byte-safe machine transport.
 

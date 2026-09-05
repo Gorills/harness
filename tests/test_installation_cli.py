@@ -27,7 +27,10 @@ from harness.runtime_paths import default_runtime_paths
 from harness.storage import connect_database, initialize_database
 from harness.visibility import set_project_visibility
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX installation lifecycle")
+pytestmark = [
+    pytest.mark.skipif(os.name == "nt", reason="POSIX installation lifecycle"),
+    pytest.mark.usefixtures("isolated_harness_http_ports"),
+]
 
 
 def _git(cwd: Path, *arguments: str) -> None:
@@ -125,10 +128,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "Projects: OK" in doctor_output
     assert "Index state: OK" in doctor_output
     assert "Generated skills: OK" in doctor_output
-    assert "Dashboard: OK" in doctor_output or (
-        "Dashboard: WARN (daemon is running but dashboard listener is not; "
-        "expected 127.0.0.1:17373)" in doctor_output
-    )
+    assert "Dashboard: OK" in doctor_output
     assert "Stale integrations: OK" in doctor_output
     assert "0 FAIL" in doctor_output
 
@@ -550,8 +550,8 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert "`project_status` must be the first project action" in scan_output
     config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
     entry = config["mcp_servers"]["harness"]
-    assert entry["url"].startswith("http://127.0.0.1:")
-    assert entry["url"].endswith("/mcp")
+    port = os.environ["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"]
+    assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
     assert entry["required"] is True
     assert entry["http_headers"]["X-Harness-Workspace-Root"] == str(repo.resolve())
     assert entry["http_headers"]["Authorization"].startswith("Bearer ")
@@ -761,6 +761,8 @@ def test_codex_install_supports_existing_hidden_project_without_changing_agents_
     assert state["profiles"] == ["codex"]
     config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))
     assert config["developer_instructions"] == codex_developer_instructions(hidden=True)
+    port = os.environ["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"]
+    assert config["mcp_servers"]["harness"]["url"] == f"http://127.0.0.1:{port}/mcp"
     assert agents.read_bytes() == agents_before
     assert paths.socket.exists()
 
@@ -906,7 +908,7 @@ def test_multi_host_codex_cursor_install_scan_uninstall_preserves_codex(
     project_value = json.loads(project_config.read_text(encoding="utf-8"))
     assert project_value["mcpServers"]["harness"]["env"] == {
         "HARNESS_HOST_PROFILE": "cursor",
-        "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+        "HARNESS_WORKSPACE_ROOT": str(repo.resolve()),
     }
     host_state = json.loads(
         (state_home / "harness" / "host-integrations.json").read_text(encoding="utf-8")
@@ -942,7 +944,7 @@ def test_multi_host_codex_cursor_install_scan_uninstall_preserves_codex(
     assert str(project_config) in broken_doctor
     assert f"expected Python: {os.path.abspath(sys.executable)}" in broken_doctor
     assert "configured Python: /stale/cursor/python" in broken_doctor
-    assert "expected HARNESS_WORKSPACE_ROOT=${workspaceFolder}" in broken_doctor
+    assert f"expected HARNESS_WORKSPACE_ROOT={repo.resolve()}" in broken_doctor
     assert "remediation: harness install --host cursor" in broken_doctor
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
@@ -1030,8 +1032,8 @@ def test_cursor_install_enables_independent_workspaces_and_linked_worktree(
         assert harness_main() == 0
         capsys.readouterr()
         project = json.loads((root / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
-        assert project["mcpServers"]["harness"]["env"]["HARNESS_WORKSPACE_ROOT"] == (
-            "${workspaceFolder}"
+        assert project["mcpServers"]["harness"]["env"]["HARNESS_WORKSPACE_ROOT"] == str(
+            root.resolve()
         )
 
     enabled = json.loads(agent_state.read_text(encoding="utf-8"))["enabled"]

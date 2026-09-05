@@ -1071,7 +1071,7 @@ def _inspect_projects_and_workspaces(
                             f"current at {cursor_project.path}; configured Python: "
                             f"{configured_python}; expected Python: "
                             f"{cursor_project.expected_python}; "
-                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                            f"HARNESS_WORKSPACE_ROOT={workspace.workspace_root}",
                         )
                     )
                 else:
@@ -1083,7 +1083,7 @@ def _inspect_projects_and_workspaces(
                             f"{cursor_project.path}: {cursor_project.state.value}; expected Python: "
                             f"{cursor_project.expected_python}; configured Python: "
                             f"{configured_python}; expected "
-                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}; configured "
+                            f"HARNESS_WORKSPACE_ROOT={workspace.workspace_root}; configured "
                             f"HARNESS_WORKSPACE_ROOT={configured_root}; remediation: "
                             "harness install --host cursor",
                         )
@@ -1318,7 +1318,7 @@ def _inspect_projects_and_workspaces(
                 cursor_severity,
                 f"{cursor_projects_current} current, {cursor_projects_isolated} "
                 "isolated-development, 0 missing/stale/foreign; required root contract "
-                "is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                "is the exact absolute Workspace root in HARNESS_WORKSPACE_ROOT",
             )
         )
     elif cursor_projects_isolated:

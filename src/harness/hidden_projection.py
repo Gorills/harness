@@ -362,12 +362,15 @@ def _leftover_hidden_surfaces() -> tuple[HiddenInstructionSurface, ...]:
 
 def _codex_adapter() -> CodexAdapter:
     from harness.codex_adapter import CodexAdapter
-    from harness.runtime_paths import default_runtime_paths
+    from harness.runtime_paths import DASHBOARD_HOST, default_runtime_paths, mcp_http_listen_port
 
+    paths = default_runtime_paths()
+    port = mcp_http_listen_port(paths.socket)
     return CodexAdapter(
         executable=Path("codex"),
         python_executable=Path(os.path.abspath(sys.executable)),
-        mcp_http_database=default_runtime_paths().database,
+        mcp_http_url=f"http://{DASHBOARD_HOST}:{port}/mcp",
+        mcp_http_database=paths.database,
     )
 
 

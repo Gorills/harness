@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from collections.abc import Iterator
 from pathlib import Path
 from time import monotonic, sleep
@@ -28,6 +29,8 @@ def isolate_harness_xdg_from_user_home(
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
     monkeypatch.delenv("HARNESS_DEV_ROOT", raising=False)
     monkeypatch.delenv("HARNESS_SKILL_REGISTRY", raising=False)
+    monkeypatch.delenv("HARNESS_ACCEPTANCE_DASHBOARD_PORT", raising=False)
+    monkeypatch.delenv("HARNESS_ACCEPTANCE_MCP_HTTP_PORT", raising=False)
 
     yield
 
@@ -47,3 +50,16 @@ def isolate_harness_xdg_from_user_home(
         while socket_path.exists() and monotonic() < deadline:
             sleep(_DAEMON_SHUTDOWN_POLL_SECONDS)
         assert not socket_path.exists(), "test Harness daemon did not stop cleanly"
+
+
+@pytest.fixture
+def isolated_harness_http_ports(
+    isolate_harness_xdg_from_user_home: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give synthetic canonical runtimes their own listeners beside live Harness."""
+    with socket.socket() as dashboard, socket.socket() as mcp:
+        dashboard.bind(("127.0.0.1", 0))
+        mcp.bind(("127.0.0.1", 0))
+        monkeypatch.setenv("HARNESS_ACCEPTANCE_DASHBOARD_PORT", str(dashboard.getsockname()[1]))
+        monkeypatch.setenv("HARNESS_ACCEPTANCE_MCP_HTTP_PORT", str(mcp.getsockname()[1]))

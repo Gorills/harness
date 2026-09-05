@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from statistics import fmean, median
 from threading import Event, Lock
@@ -24,19 +25,21 @@ import anyio
 from mcp import Client, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from harness.daemon import serve_daemon
+from harness.daemon import read_project_search, serve_daemon
 from harness.index import list_indexed_files, scan_workspace, scan_workspace_paths
 from harness.registry import (
     WorkspaceRecord,
     create_project,
     register_workspace,
 )
+from harness.retrieval import ProjectSearchScope
 from harness.storage import connect_database, initialize_database
 from harness.watcher import (
     WATCH_METADATA_FILE_SAMPLE_LIMIT,
     list_workspace_metadata_directories,
     read_workspace_metadata_token,
 )
+from harness.workspace_resolution import WorkspaceHint
 
 _PROJECT_STATUS_GIT_BUDGET = 13
 _PROJECT_STATUS_IPC_BUDGET = 2
@@ -382,10 +385,49 @@ def _benchmark_fixture(
                 iterations=iterations,
                 warmup=warmup,
             )
+
+            search_lock = Lock()
+
+            def search(query: str) -> None:
+                result = read_project_search(
+                    connection,
+                    (WorkspaceHint(fixture.root, "explicit-root"),),
+                    query,
+                    5,
+                    ProjectSearchScope.CODE,
+                    search_lock,
+                )
+                if result.workspace_state != "current" or not result.results:
+                    raise RuntimeError("benchmark search did not find current fixture source")
+
+            # Establish search currentness even when --warmup=0, keeping cold reconciliation
+            # separate from these explicitly warm, daemon-domain retrieval measurements.
+            search("module value")
+            search_measurements: dict[str, object] = {}
+            for name, query in (
+                ("project_search_natural_warm", "module value"),
+                ("project_search_exact_warm", "VALUE_000000"),
+            ):
+                latency, counts = _measure(
+                    partial(search, query),
+                    counter,
+                    iterations=iterations,
+                    warmup=warmup,
+                )
+                search_measurements[name] = {
+                    "query": query,
+                    "boundary": "daemon_domain",
+                    "latency": latency,
+                    "git_subprocesses_per_iteration": _per_iteration(
+                        _git_total(counts), iterations
+                    ),
+                    "git_commands": counts,
+                }
         finally:
             connection.close()
 
     return {
+        **search_measurements,
         "project_status": {
             "latency": status_latency,
             "ipc_round_trips_per_iteration": _PROJECT_STATUS_IPC_BUDGET,

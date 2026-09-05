@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import tomllib
@@ -814,6 +815,11 @@ raise SystemExit(2)
             fake_env["HOME"] = str(fake_home)
             fake_env["XDG_STATE_HOME"] = str(workspace / "fake-state-home")
             fake_env["XDG_RUNTIME_DIR"] = str(workspace / "fake-runtime-home")
+            with socket.socket() as dashboard, socket.socket() as mcp:
+                dashboard.bind(("127.0.0.1", 0))
+                mcp.bind(("127.0.0.1", 0))
+                fake_env["HARNESS_ACCEPTANCE_DASHBOARD_PORT"] = str(dashboard.getsockname()[1])
+                fake_env["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"] = str(mcp.getsockname()[1])
 
             skills_list = _run((str(harness), "skills", "list"), cwd=workspace, env=fake_env)
             if "python-helper" not in skills_list.stdout or "Skills: 1" not in skills_list.stdout:

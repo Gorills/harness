@@ -1574,6 +1574,18 @@ def _rebuild_resolved_code_relations(
         (workspace_id,),
     )
 
+    module_candidate_cache: dict[tuple[str, str], str | None] = {}
+
+    def resolve_module(source_path: str, module: str) -> str | None:
+        # The module inventory is fixed for this rebuild. Absolute imports share candidates
+        # across callers; relative imports retain their source identity. Keep only uniqueness,
+        # and discard the cache before the next reconciliation can change that inventory.
+        key = (source_path if module.startswith(".") else "", module)
+        if key not in module_candidate_cache:
+            candidates = python_workspace_module_candidate_paths(source_path, module, module_paths)
+            module_candidate_cache[key] = candidates[0] if len(candidates) == 1 else None
+        return module_candidate_cache[key]
+
     def resolve_export(
         module_path: str,
         export_name: str,
@@ -1597,18 +1609,14 @@ def _rebuild_resolved_code_relations(
         if len(reexport) != 1:
             return None
         imported_name, module = reexport[0]
-        candidates = python_workspace_module_candidate_paths(
-            module_path,
-            module,
-            module_paths,
-        )
-        if len(candidates) != 1:
+        candidate = resolve_module(module_path, module)
+        if candidate is None:
             return None
-        state = (candidates[0], imported_name)
+        state = (candidate, imported_name)
         if state in seen:
             return None
         return resolve_export(
-            candidates[0],
+            candidate,
             imported_name,
             followed_edges=followed_edges + 1,
             seen=seen | {state},
@@ -1659,16 +1667,12 @@ def _rebuild_resolved_code_relations(
         export_name = _python_resolved_export_name(resolved_target, resolution_module)
         if export_name is None:
             continue
-        candidates = python_workspace_module_candidate_paths(
-            source_path,
-            resolution_module,
-            module_paths,
-        )
-        if len(candidates) != 1:
+        candidate = resolve_module(source_path, resolution_module)
+        if candidate is None:
             continue
-        initial_state = (candidates[0], export_name)
+        initial_state = (candidate, export_name)
         resolved = resolve_export(
-            candidates[0],
+            candidate,
             export_name,
             followed_edges=0,
             seen=frozenset({initial_state}),

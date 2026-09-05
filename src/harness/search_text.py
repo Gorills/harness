@@ -179,15 +179,22 @@ def query_term_prefixes(term: str) -> tuple[str, ...]:
 
 def matching_term_count(terms: tuple[str, ...], *values: str) -> int:
     """Count query terms represented by exact or FTS-equivalent prefix tokens."""
+    return len(matching_terms(terms, *values))
+
+
+def matching_terms(terms: tuple[str, ...], *values: str) -> tuple[str, ...]:
+    """Match all query terms against one tokenization of the supplied text."""
     candidates = frozenset(token for value in values for token in identifier_tokens(value))
-    return sum(
-        any(
+    matched: list[str] = []
+    for term in terms:
+        prefixes = _query_prefixes(term)
+        if any(
             candidate == prefix or (len(prefix) >= 3 and candidate.startswith(prefix))
             for candidate in candidates
-            for prefix in _query_prefixes(term)
-        )
-        for term in terms
-    )
+            for prefix in prefixes
+        ):
+            matched.append(term)
+    return tuple(matched)
 
 
 def contains_term_phrase(terms: tuple[str, ...], value: str) -> bool:

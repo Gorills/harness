@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
+from time import monotonic, sleep
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import accept_codex as acceptance_module
 import eval_search_behavior
 from accept_codex import (
     _MODEL_USAGE_DISCLOSURE,
@@ -49,7 +55,149 @@ from accept_codex import (
 
 from harness.builtin_skills import BUILTIN_SKILLS, sync_builtin_skills
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
+from harness.daemon import _acquire_daemon_lock, serve_daemon
+from harness.runtime_paths import default_runtime_paths
 from harness.skills import DetectedProjectStack, load_skill_registry, resolve_skills
+
+
+@pytest.mark.parametrize("failure_stage", ["install", "verification"])
+def test_acceptance_cleans_partial_install_and_reports_uninstall_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "user-codex"))
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text('{"all_five_wire_tools_verified": true}', encoding="utf-8")
+    observed: list[str] = []
+    roots: list[Path] = []
+
+    def environment(root: Path, _codex: Path) -> dict[str, str]:
+        roots.append(root)
+        return {
+            "HARNESS_ACCEPTANCE_MCP_HTTP_PORT": "17376",
+            "HARNESS_SKILL_REGISTRY": str(root / "skills"),
+            "XDG_RUNTIME_DIR": str(root / "runtime"),
+        }
+
+    def run(command: Sequence[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[0] == "/installed/harness":
+            observed.append(command[1])
+            if command[1] == "install" and failure_stage == "install":
+                raise CodexAcceptanceError("installation failed after daemon startup")
+            if command[1] == "uninstall":
+                raise CodexAcceptanceError("uninstall could not clean project config")
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    def stop(python: Path, root: Path, values: Mapping[str, str]) -> None:
+        assert python == Path("/installed/python")
+        assert Path(values["XDG_RUNTIME_DIR"]).is_relative_to(root)
+        observed.append("stop")
+
+    monkeypatch.setattr(acceptance_module, "_isolated_environment", environment)
+    monkeypatch.setattr(
+        acceptance_module,
+        "_build_installed_wheel",
+        lambda *_args: (Path("/installed/harness"), Path("/installed/python")),
+    )
+    monkeypatch.setattr(acceptance_module, "_run", run)
+    monkeypatch.setattr(acceptance_module, "_stop_acceptance_daemon", stop)
+
+    def fail_verification(*_args: object) -> None:
+        raise CodexAcceptanceError("synthetic skill verification failed")
+
+    monkeypatch.setattr(acceptance_module, "write_synthetic_acceptance_skills", fail_verification)
+    with pytest.raises(CodexAcceptanceError) as failure:
+        acceptance_module.run_acceptance(
+            codex=Path("/codex"),
+            uv=Path("/uv"),
+            timeout=1,
+            model=None,
+            evidence_path=evidence,
+            run_model=False,
+        )
+
+    assert observed == ["install", "uninstall", "stop"]
+    assert ("installation failed" if failure_stage == "install" else "verification failed") in (
+        str(failure.value)
+    )
+    assert "uninstall could not clean project config" in str(failure.value)
+    assert not roots[0].exists()
+    assert not evidence.exists()
+
+
+def test_acceptance_preserves_temporary_state_when_daemon_shutdown_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "acceptance"
+    root.mkdir()
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda **_kwargs: str(root))
+    with pytest.raises(CodexAcceptanceError, match="daemon shutdown failed"):
+        with acceptance_module._acceptance_directory() as actual:
+            (actual / "harness.sock").write_text("recovery evidence", encoding="utf-8")
+            raise acceptance_module._AcceptanceDaemonCleanupError("daemon shutdown failed")
+    assert (root / "harness.sock").read_text() == "recovery evidence"
+
+
+def test_acceptance_daemon_cleanup_refuses_external_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        acceptance_module, "_run", lambda *_args, **_kwargs: pytest.fail("cleanup launched")
+    )
+    with pytest.raises(CodexAcceptanceError, match="outside temporary state"):
+        acceptance_module._stop_acceptance_daemon(
+            Path("/installed/python"),
+            tmp_path / "acceptance",
+            {
+                "XDG_RUNTIME_DIR": str(tmp_path / "unrelated-runtime"),
+                "XDG_STATE_HOME": str(tmp_path / "acceptance" / "state"),
+            },
+        )
+
+
+def test_acceptance_shutdown_waits_for_temporary_daemon_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = _isolated_environment(tmp_path, Path(sys.executable))
+    for name, value in environment.items():
+        if name.startswith(("XDG_", "HARNESS_")):
+            monkeypatch.setenv(name, value)
+    paths = default_runtime_paths(environment=environment)
+    stop = Event()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        daemon = executor.submit(serve_daemon, paths.database, paths.socket, stop_event=stop)
+        try:
+            deadline = monotonic() + 10
+            while not paths.socket.exists():
+                if daemon.done():
+                    daemon.result()
+                if monotonic() >= deadline:
+                    pytest.fail("temporary daemon did not start")
+                sleep(0.01)
+            acceptance_module._stop_acceptance_daemon(Path(sys.executable), tmp_path, environment)
+            daemon.result(timeout=10)
+            assert not paths.socket.exists()
+        finally:
+            stop.set()
+
+
+def test_acceptance_shutdown_refuses_locked_runtime_before_socket_is_bound(tmp_path: Path) -> None:
+    environment = {
+        **os.environ,
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+        "PYTHONOPTIMIZE": "1",
+    }
+    paths = default_runtime_paths(environment=environment)
+    paths.socket.parent.mkdir(parents=True, mode=0o700)
+    descriptor = _acquire_daemon_lock(paths.socket)
+    try:
+        assert not paths.socket.exists()
+        with pytest.raises(CodexAcceptanceError, match="still owns a runtime lock"):
+            acceptance_module._stop_acceptance_daemon(
+                Path(sys.executable), tmp_path, environment, timeout_seconds=0.1
+            )
+    finally:
+        os.close(descriptor)
 
 
 def test_codex_acceptance_scopes_api_key_away_from_local_commands(

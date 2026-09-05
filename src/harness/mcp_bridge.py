@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import anyio
 from mcp.server import MCPServer
@@ -61,6 +61,7 @@ from harness.retrieval import (
     project_symbol_navigation_payload,
 )
 from harness.runtime_paths import default_runtime_paths
+from harness.search import MAX_SEARCH_QUERY_BYTES
 from harness.tasks import TaskState, TaskWaitReason
 from harness.verification import VerificationDraft, VerificationStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -504,12 +505,24 @@ def build_mcp_server(
     @server.tool(description=_PROJECT_SEARCH_DESCRIPTION)
     def project_search(
         ctx: Context[Any, Any],
-        query: str,
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description=(
+                    f"Non-empty text; at most {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes after trimming "
+                    "surrounding whitespace. NUL is not allowed. Quote exact literals."
+                ),
+            ),
+        ],
         scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
-        limit: StrictInt = _SEARCH_DEFAULT_LIMIT,
+        limit: Annotated[StrictInt, Field(ge=1, le=_SEARCH_HARD_LIMIT)] = _SEARCH_DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         if not 1 <= limit <= _SEARCH_HARD_LIMIT:
             raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
+        # The domain query bound applies after trimming. Forward and expose that same
+        # spelling so accepted padding cannot consume the model response budget.
+        query = query.strip()
         result = request_project_search(
             _socket_path(),
             _workspace_hints(ctx, workspace_transport=workspace_transport),

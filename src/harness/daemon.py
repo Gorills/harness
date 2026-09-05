@@ -99,7 +99,8 @@ from harness.retrieval import (
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
 from harness.search_currentness import (
-    SearchCurrentnessError,
+    SearchCurrentnessTimeoutError,
+    SearchCurrentnessUnstableError,
     ensure_workspace_search_index_current,
     workspace_search_state_is_unchanged,
 )
@@ -528,7 +529,7 @@ def read_project_search(
                 symbol_navigation=symbol_navigation,
                 results=hits,
             )
-    raise SearchCurrentnessError("Workspace changed repeatedly during Project search")
+    raise SearchCurrentnessUnstableError("Workspace changed repeatedly during Project search")
 
 
 def read_project_context_result(
@@ -1394,6 +1395,22 @@ def _serve_project_search(
         return
     except SearchError as exc:
         _try_send_error(client, request_id=request_id, code="search_error", message=str(exc))
+        return
+    except (SearchCurrentnessTimeoutError, ScanDeadlineExceededError):
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="search_timeout",
+            message="Project search exceeded its execution deadline; retry after pending indexing settles",
+        )
+        return
+    except SearchCurrentnessUnstableError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="search_workspace_changed",
+            message="Workspace changed repeatedly during Project search; retry after edits settle",
+        )
         return
     except (ProjectRetrievalError, KnowledgeError, TaskError, IndexingError):
         _try_send_error(

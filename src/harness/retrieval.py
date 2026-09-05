@@ -40,6 +40,7 @@ from harness.search_text import (
     is_document_path,
     is_generated_text_output_path,
     matching_term_count,
+    matching_terms,
     query_term_prefixes,
 )
 from harness.symbol_navigation import (
@@ -378,11 +379,16 @@ def search_project(
     project = get_project(connection, workspace.project_id)
     normalized = _normalize_query(query)
     analyzed = analyze_search_query(normalized)
-    if not analyzed.terms:
-        raise SearchError("project search query has no searchable tokens")
     _validate_limit(limit)
     if not isinstance(scope, ProjectSearchScope):
         raise SearchError("project search scope is unsupported")
+    if not analyzed.terms:
+        if scope in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS} and (
+            _exact_search_needle(normalized) is not None
+        ):
+            # Literal punctuation has exact source coverage but no lexical candidate channel.
+            return ()
+        raise SearchError("project search query has no searchable tokens")
 
     if scope is ProjectSearchScope.CODE:
         hits = _project_hits(
@@ -2173,17 +2179,15 @@ def _indexed_content_sha256(
 
 
 def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearchEvidence | None:
-    present_terms = tuple(term for term in terms if matching_term_count((term,), text) == 1)
-    if not present_terms:
-        return None
     lines = text.splitlines()
     if not lines:
         return None
 
-    line_terms = tuple(
-        frozenset(term for term in present_terms if matching_term_count((term,), line) == 1)
-        for line in lines
-    )
+    line_terms = tuple(frozenset(matching_terms(terms, line)) for line in lines)
+    present = frozenset(term for matched in line_terms for term in matched)
+    present_terms = tuple(term for term in terms if term in present)
+    if not present_terms:
+        return None
     matches = [
         (line_index, term)
         for line_index, matched in enumerate(line_terms)
@@ -2233,9 +2237,7 @@ def _search_evidence_at_line(
     if line < 1 or line > len(lines):
         return None
     match_line = line - 1
-    matched_terms = tuple(
-        term for term in terms if matching_term_count((term,), lines[match_line]) == 1
-    )
+    matched_terms = matching_terms(terms, lines[match_line])
     if not matched_terms:
         return None
     return _search_evidence_from_line_range(lines, match_line, match_line, matched_terms)

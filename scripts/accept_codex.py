@@ -9,8 +9,10 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import textwrap
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -101,7 +103,9 @@ _MODEL_USAGE_DISCLOSURE = (
     "Workspace/Task IDs, path metadata, and acceptance Task text. No user repository source is "
     "included.\n"
     "Local effects: the exact Harness wheel, daemon state, generated skills, project Codex config, "
-    "and Task data live under one temporary directory and are removed after the run. The runner "
+    "and Task data live under one temporary directory and are removed after verified cleanup. "
+    "If daemon shutdown cannot be verified, the run fails and preserves that directory for recovery. "
+    "The runner "
     "uses a temporary trusted CODEX_HOME, does not read saved Codex authentication or write user "
     "trust/~/.codex/config.toml, and fails if that user config's bytes change."
 )
@@ -116,6 +120,88 @@ _GLOBAL_INSTALL_DISCLOSURE = (
 
 class CodexAcceptanceError(RuntimeError):
     """Raised when real Codex CLI acceptance cannot be proven."""
+
+
+class _AcceptanceDaemonCleanupError(CodexAcceptanceError):
+    """Keep temporary runtime files available when daemon shutdown cannot be proven."""
+
+
+@contextmanager
+def _acceptance_directory() -> Iterator[Path]:
+    root = Path(tempfile.mkdtemp(prefix="harness-codex-real-host-"))
+    remove = True
+    try:
+        yield root
+    except _AcceptanceDaemonCleanupError:
+        remove = False
+        raise
+    finally:
+        if remove:
+            shutil.rmtree(root)
+
+
+def _stop_acceptance_daemon(
+    python: Path, root: Path, environment: Mapping[str, str], *, timeout_seconds: float = 10
+) -> None:
+    """Use the tested runtime to stop only this acceptance directory's daemon."""
+    socket_path = Path(environment["XDG_RUNTIME_DIR"]) / "harness" / "harness.sock"
+    database = Path(environment["XDG_STATE_HOME"]) / "harness" / "harness.db"
+    if any(not path.resolve().is_relative_to(root.resolve()) for path in (socket_path, database)):
+        raise CodexAcceptanceError(
+            "acceptance cleanup refused runtime paths outside temporary state"
+        )
+    script = textwrap.dedent("""\
+        import os
+        import sys
+        import time
+        from pathlib import Path
+        from harness.daemon import (
+            DaemonAlreadyRunningError, _acquire_daemon_lock, _acquire_database_lock,
+        )
+        from harness.ipc import IpcError, request_shutdown
+
+        path, database = Path(sys.argv[1]), Path(sys.argv[2])
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        deadline = time.monotonic() + float(sys.argv[3])
+        while True:
+            socket_lock = database_lock = None
+            try:
+                socket_lock = _acquire_daemon_lock(path)
+                database_lock = _acquire_database_lock(database)
+            except DaemonAlreadyRunningError:
+                pass
+            else:
+                break
+            finally:
+                for descriptor in (database_lock, socket_lock):
+                    if descriptor is not None:
+                        os.close(descriptor)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('temporary daemon still owns a runtime lock')
+            if path.exists():
+                try:
+                    result = request_shutdown(path, timeout=min(remaining, 1))
+                    if not result.accepted:
+                        raise RuntimeError('daemon rejected shutdown')
+                except IpcError:
+                    pass
+            time.sleep(min(0.05, remaining))
+        """)
+    _run(
+        (
+            str(python),
+            "-c",
+            script,
+            str(socket_path),
+            str(database),
+            str(timeout_seconds),
+        ),
+        cwd=root,
+        environment=environment,
+        timeout=30,
+        show_output=False,
+    )
 
 
 def reject_skill_delivery_fields(payload: object, *, surface: str) -> None:
@@ -1045,6 +1131,8 @@ def run_acceptance(
     run_model: bool,
     global_install: bool = False,
 ) -> dict[str, object]:
+    if evidence_path is not None:
+        evidence_path.unlink(missing_ok=True)
     user_config = _codex_user_config(os.environ)
     user_config_before = _optional_bytes(user_config)
     global_runtime = (
@@ -1052,8 +1140,7 @@ def run_acceptance(
         if global_install
         else None
     )
-    with tempfile.TemporaryDirectory(prefix="harness-codex-real-host-") as temporary:
-        root = Path(temporary)
+    with _acceptance_directory() as root:
         environment = _isolated_environment(root, codex)
         expected_mcp_url = f"http://127.0.0.1:{environment['HARNESS_ACCEPTANCE_MCP_HTTP_PORT']}/mcp"
         harness, _python = (
@@ -1070,18 +1157,18 @@ def run_acceptance(
             )
         primary_workspace = workspaces[0]
         environment["CODEX_HOME"] = str(_prepare_temporary_codex_home(root, workspaces))
-        installed = False
+        install_attempted = False
         primary_error: BaseException | None = None
         report: dict[str, object] = {}
         skill_nonces = generate_acceptance_skill_nonces()
         skill_read_prompt = _skill_read_prompt()
         try:
+            install_attempted = True
             _run(
                 (str(harness), "install", "--host", "codex"),
                 cwd=primary_workspace,
                 environment=environment,
             )
-            installed = True
             write_synthetic_acceptance_skills(
                 Path(environment["HARNESS_SKILL_REGISTRY"]),
                 skill_nonces,
@@ -1292,7 +1379,8 @@ def run_acceptance(
             primary_error = exc
             raise
         finally:
-            if installed:
+            cleanup_error: BaseException | None = None
+            if install_attempted:
                 try:
                     _run(
                         (str(harness), "uninstall", "--host", "codex", "--purge"),
@@ -1300,9 +1388,30 @@ def run_acceptance(
                         environment=environment,
                         show_output=primary_error is None,
                     )
-                except BaseException:
-                    if primary_error is None:
-                        raise
+                except BaseException as exc:
+                    cleanup_error = exc
+                try:
+                    _stop_acceptance_daemon(_python, root, environment)
+                except BaseException as exc:
+                    detail = "; ".join(
+                        str(error)
+                        for error in (primary_error, cleanup_error, exc)
+                        if error is not None
+                    )
+                    raise _AcceptanceDaemonCleanupError(
+                        _redact_skill_nonces(
+                            f"temporary daemon shutdown could not be verified; preserved {root}: "
+                            f"{detail}",
+                            skill_nonces,
+                        )
+                    ) from exc
+            if cleanup_error is not None:
+                detail = f"acceptance cleanup failed: {cleanup_error}"
+                if primary_error is not None:
+                    detail = f"{primary_error}; {detail}"
+                raise CodexAcceptanceError(_redact_skill_nonces(detail, skill_nonces)) from (
+                    cleanup_error
+                )
             surviving_configs = [
                 workspace / ".codex" / "config.toml"
                 for workspace in workspaces

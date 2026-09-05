@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -73,6 +74,25 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
             MCP_HTTP_AUTHORIZATION_HEADER: f"Bearer {token}",
             MCP_HTTP_WORKSPACE_ROOT_HEADER: str(root),
         }
+        oversized_request = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "project_search", "arguments": {"query": " " * 17000 + "token"}},
+            }
+        )
+        async with httpx2.AsyncClient() as raw:
+            oversized = await raw.post(
+                url,
+                content=oversized_request,
+                headers={
+                    **headers,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                },
+            )
+        assert oversized.status_code == 413
         async with create_mcp_http_client(headers=headers) as http_client:
             transport = streamable_http_client(url, http_client=http_client)
             async with Client(transport, mode="legacy") as client:
@@ -88,6 +108,11 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
                 assert not result.is_error
                 assert result.structured_content is not None
                 assert result.structured_content["workspace_id"] == scan.workspace_id
+                padded = await client.call_tool("project_search", {"query": " " * 13000 + "token"})
+                assert not padded.is_error
+                assert padded.structured_content is not None
+                assert padded.structured_content["query"] == "token"
+                assert len(json.dumps(padded.structured_content).encode("utf-8")) < 12 * 1024
 
         missing_root_headers = {
             MCP_HTTP_AUTHORIZATION_HEADER: f"Bearer {token}",

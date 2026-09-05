@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import harness.retrieval as retrieval_module
+import harness.search_text as search_text_module
 from harness.index import (
     SearchEvidenceRead,
     SearchEvidenceReadStatus,
@@ -295,6 +296,30 @@ def test_search_evidence_uses_densest_partial_term_window(tmp_path: Path) -> Non
         assert "distant_epsilon" not in results[0].evidence.snippet
     finally:
         connection.close()
+
+
+def test_evidence_tokenization_cost_does_not_multiply_by_query_terms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = ["unrelated placeholder"] * 200
+    lines[90] = "rotateRefreshToken invalidates credentials"
+    lines[91] = "кэш обновления"
+    tokenizations = 0
+    original = search_text_module.identifier_tokens
+
+    def count_tokenization(value: str) -> tuple[str, ...]:
+        nonlocal tokenizations
+        tokenizations += 1
+        return original(value)
+
+    monkeypatch.setattr(search_text_module, "identifier_tokens", count_tokenization)
+    evidence = retrieval_module._relocate_search_evidence(
+        "\n".join(lines), ("rotate", "refresh", "token", "credential", "кэш", "обновление")
+    )
+    assert evidence is not None
+    assert "rotateRefreshToken invalidates credentials\nкэш обновления" in evidence.snippet
+    assert evidence.end_line - evidence.start_line + 1 <= MAX_SEARCH_EVIDENCE_SNIPPET_LINES
+    assert tokenizations <= len(lines) + 1
 
 
 def test_failed_evidence_reads_do_not_consume_later_evidence_slots(tmp_path: Path) -> None:

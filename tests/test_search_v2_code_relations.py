@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from harness.symbol_navigation import (
     SyntaxRelationAnalysis,
     SyntaxRelationEvidence,
     analyze_precise_code_structure,
+    python_workspace_module_candidate_paths,
 )
 
 
@@ -612,6 +614,73 @@ def test_scan_persists_bounded_python_reexport_chain_edge(tmp_path: Path) -> Non
             """,
             (workspace_id,),
         ).fetchone() == ("src/impl.py", "python_workspace_reexport_chain")
+    finally:
+        connection.close()
+
+
+def test_resolved_module_candidates_are_cached_only_within_one_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        "src/shared.py": "def target(): pass\n",
+        **{
+            f"src/caller_{index}.py": "from shared import target\n" + "target()\n" * 10
+            for index in range(4)
+        },
+        **{
+            f"src/{package}/{name}.py": content
+            for package in ("one", "two")
+            for name, content in (
+                ("local", "def target(): pass\n"),
+                ("caller", "from .local import target\ntarget()\n"),
+            )
+        },
+    }
+    root, connection, workspace_id = _registered(tmp_path, files)
+    calls: list[tuple[str, str]] = []
+    original = python_workspace_module_candidate_paths
+
+    def count_candidates(source: str, module: str, paths: Sequence[str]) -> tuple[str, ...]:
+        calls.append((source, module))
+        return original(source, module, paths)
+
+    monkeypatch.setattr(index_module, "python_workspace_module_candidate_paths", count_candidates)
+
+    def targets() -> list[tuple[str, int]]:
+        return connection.execute(
+            """
+            SELECT targets.relative_path, COUNT(*)
+            FROM indexed_resolved_code_relations AS resolved
+            JOIN indexed_code_units AS targets ON targets.id = resolved.target_unit_id
+            WHERE resolved.workspace_id = ?
+            GROUP BY targets.relative_path ORDER BY targets.relative_path
+            """,
+            (workspace_id,),
+        ).fetchall()
+
+    try:
+        scan_workspace(connection, workspace_id)
+        assert len(calls) == 3
+        assert targets() == [
+            ("src/one/local.py", 1),
+            ("src/shared.py", 40),
+            ("src/two/local.py", 1),
+        ]
+        duplicate = root / "other" / "shared.py"
+        duplicate.parent.mkdir()
+        duplicate.write_text("def target(): pass\n", encoding="utf-8")
+        calls.clear()
+        scan_workspace_paths(connection, workspace_id, ("other/shared.py",))
+        assert len(calls) == 3
+        assert targets() == [("src/one/local.py", 1), ("src/two/local.py", 1)]
+
+        duplicate.unlink()
+        scan_workspace_paths(connection, workspace_id, ("other/shared.py",))
+        assert targets() == [
+            ("src/one/local.py", 1),
+            ("src/shared.py", 40),
+            ("src/two/local.py", 1),
+        ]
     finally:
         connection.close()
 
