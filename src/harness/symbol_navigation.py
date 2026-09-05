@@ -12,6 +12,7 @@ MAX_SYMBOL_PARSE_BYTES = 1024 * 1024
 MAX_SYMBOL_RELATION_EVIDENCE_LINES = 32
 MAX_SYMBOL_DEFINITION_EVIDENCE_BYTES = 2048
 MAX_SYMBOL_REFERENCE_EVIDENCE_BYTES = 1024
+MAX_PYTHON_RECEIVER_INHERITANCE_EDGES = 4
 _PYTHON_SUFFIXES = frozenset({".py", ".pyi"})
 _POLYGLOT_SUFFIX_LANGUAGE = {
     ".js": "javascript",
@@ -208,6 +209,7 @@ def _analyze_python_tree_relations(
         needle,
         collect_references=collect_references,
         binding_analysis=binding_analysis,
+        top_level_receiver_classes=_python_top_level_receiver_classes(tree, binding_analysis),
     )
     visitor.visit(tree)
     relations = tuple(sorted(visitor.relations, key=_relation_key))
@@ -335,6 +337,7 @@ class _PythonImportBindingAnalysis:
     imports_by_scope: dict[str, dict[str, tuple[_PythonImportBinding, ...]]]
     bound_names_by_scope: dict[str, frozenset[str]]
     rebound_names_by_scope: dict[str, frozenset[str]]
+    binding_counts_by_scope: dict[str, dict[str, int]]
     globally_declared_names: frozenset[str]
 
     def safe_binding(self, scope: str, name: str) -> _PythonImportBinding | None:
@@ -357,6 +360,9 @@ class _PythonImportBindingAnalysis:
             scope, frozenset()
         ) or name in self.imports_by_scope.get(scope, {})
 
+    def binding_count(self, scope: str, name: str) -> int:
+        return self.binding_counts_by_scope.get(scope, {}).get(name, 0)
+
 
 class _PythonImportBindingCollector(ast.NodeVisitor):
     def __init__(self) -> None:
@@ -364,6 +370,7 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
         self.imports_by_scope: dict[str, dict[str, list[_PythonImportBinding]]] = {"": {}}
         self.bound_names_by_scope: dict[str, set[str]] = {"": set()}
         self.rebound_names_by_scope: dict[str, set[str]] = {"": set()}
+        self.binding_counts_by_scope: dict[str, dict[str, int]] = {"": {}}
         self.globally_declared_names: set[str] = set()
 
     def analysis(self) -> _PythonImportBindingAnalysis:
@@ -378,6 +385,9 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
             rebound_names_by_scope={
                 scope: frozenset(names) for scope, names in self.rebound_names_by_scope.items()
             },
+            binding_counts_by_scope={
+                scope: dict(counts) for scope, counts in self.binding_counts_by_scope.items()
+            },
             globally_declared_names=frozenset(self.globally_declared_names),
         )
 
@@ -385,9 +395,14 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
     def _scope(self) -> str:
         return self.scope_stack[-1][0]
 
+    def _record_binding(self, name: str) -> None:
+        counts = self.binding_counts_by_scope.setdefault(self._scope, {})
+        counts[name] = counts.get(name, 0) + 1
+
     def _bind(self, name: str | None, *, parameter: bool = False) -> None:
         if name:
             self.bound_names_by_scope.setdefault(self._scope, set()).add(name)
+            self._record_binding(name)
             if not parameter:
                 self.rebound_names_by_scope.setdefault(self._scope, set()).add(name)
 
@@ -395,6 +410,7 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
         self.imports_by_scope.setdefault(self._scope, {}).setdefault(local_name, []).append(
             _PythonImportBinding(target=target, kind=kind, module=module)
         )
+        self._record_binding(local_name)
 
     def _push_scope(self, name: str, kind: str) -> None:
         parent = self._scope
@@ -403,6 +419,7 @@ class _PythonImportBindingCollector(ast.NodeVisitor):
         self.imports_by_scope.setdefault(qualified, {})
         self.bound_names_by_scope.setdefault(qualified, set())
         self.rebound_names_by_scope.setdefault(qualified, set())
+        self.binding_counts_by_scope.setdefault(qualified, {})
 
     def _pop_scope(self) -> None:
         self.scope_stack.pop()
@@ -530,6 +547,8 @@ def _collect_python_import_bindings(tree: ast.AST) -> _PythonImportBindingAnalys
 class _PythonClassReceiverContext:
     qualified_name: str
     direct_methods: frozenset[str]
+    base_name: str | None = None
+    inheritance_supported: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,7 +559,12 @@ class _PythonMethodReceiverContext:
     scope: str
 
 
-def _python_safe_direct_method_names(node: ast.ClassDef) -> frozenset[str]:
+def _python_safe_direct_method_names(
+    node: ast.ClassDef,
+    *,
+    qualified_name: str,
+    binding_analysis: _PythonImportBindingAnalysis | None,
+) -> frozenset[str]:
     methods_by_name: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
     for statement in node.body:
         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -549,6 +573,11 @@ def _python_safe_direct_method_names(node: ast.ClassDef) -> frozenset[str]:
     for name, methods in methods_by_name.items():
         if len(methods) != 1:
             continue
+        if (
+            binding_analysis is not None
+            and binding_analysis.binding_count(qualified_name, name) != 1
+        ):
+            continue
         decorators = methods[0].decorator_list
         if not decorators or (
             len(decorators) == 1
@@ -556,6 +585,44 @@ def _python_safe_direct_method_names(node: ast.ClassDef) -> frozenset[str]:
         ):
             safe.add(name)
     return frozenset(safe)
+
+
+def _python_top_level_receiver_classes(
+    tree: ast.Module,
+    binding_analysis: _PythonImportBindingAnalysis | None,
+) -> dict[str, _PythonClassReceiverContext]:
+    if binding_analysis is None:
+        return {}
+    classes_by_name: dict[str, list[ast.ClassDef]] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.ClassDef):
+            classes_by_name.setdefault(statement.name, []).append(statement)
+
+    result: dict[str, _PythonClassReceiverContext] = {}
+    for name, classes in classes_by_name.items():
+        if len(classes) != 1 or binding_analysis.binding_count("", name) != 1:
+            continue
+        node = classes[0]
+        inheritance_supported = (
+            not node.decorator_list and not node.keywords and len(node.bases) <= 1
+        )
+        base_name: str | None = None
+        if len(node.bases) == 1:
+            if not isinstance(node.bases[0], ast.Name):
+                inheritance_supported = False
+            else:
+                base_name = node.bases[0].id
+        result[name] = _PythonClassReceiverContext(
+            qualified_name=name,
+            direct_methods=_python_safe_direct_method_names(
+                node,
+                qualified_name=name,
+                binding_analysis=binding_analysis,
+            ),
+            base_name=base_name,
+            inheritance_supported=inheritance_supported,
+        )
+    return result
 
 
 def _python_method_receiver(
@@ -594,12 +661,14 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         *,
         collect_references: bool,
         binding_analysis: _PythonImportBindingAnalysis | None,
+        top_level_receiver_classes: dict[str, _PythonClassReceiverContext],
     ) -> None:
         self.relative_path = relative_path
         self.lines = text.splitlines()
         self.needle = needle
         self.collect_references = collect_references
         self.binding_analysis = binding_analysis
+        self.top_level_receiver_classes = top_level_receiver_classes
         self.binding_resolution_suspended = 0
         self.needle_leaf = "" if needle is None else needle.rsplit(".", 1)[-1]
         self.scopes: list[tuple[str, str]] = []
@@ -617,12 +686,19 @@ class _PythonRelationVisitor(ast.NodeVisitor):
             if target is not None and self._target_matches(target):
                 self._add_reference("inheritance", base, target)
         self.scopes.append((node.name, "class"))
-        self.class_receiver_contexts.append(
-            _PythonClassReceiverContext(
-                qualified_name=qualified,
-                direct_methods=_python_safe_direct_method_names(node),
-            )
+        class_context = (
+            self.top_level_receiver_classes.get(node.name) if qualified == node.name else None
         )
+        if class_context is None:
+            class_context = _PythonClassReceiverContext(
+                qualified_name=qualified,
+                direct_methods=_python_safe_direct_method_names(
+                    node,
+                    qualified_name=qualified,
+                    binding_analysis=self.binding_analysis,
+                ),
+            )
+        self.class_receiver_contexts.append(class_context)
         self.generic_visit(node)
         self.class_receiver_contexts.pop()
         self.scopes.pop()
@@ -841,12 +917,45 @@ class _PythonRelationVisitor(ast.NodeVisitor):
         root, separator, member = target.partition(".")
         if not separator or "." in member or root != receiver.receiver_name:
             return None, None
-        if member not in receiver.class_context.direct_methods:
-            return None, None
         analysis = self.binding_analysis
         if analysis is None or analysis.receiver_name_is_rebound(receiver.scope, root):
             return None, None
-        return f"{receiver.class_context.qualified_name}.{member}", receiver.resolution_kind
+        if member in receiver.class_context.direct_methods:
+            return f"{receiver.class_context.qualified_name}.{member}", receiver.resolution_kind
+        if analysis.binding_count(receiver.class_context.qualified_name, member):
+            return None, None
+        inherited_target = self._resolved_inherited_receiver_member(receiver.class_context, member)
+        if inherited_target is None:
+            return None, None
+        suffix = "self" if receiver.receiver_name == "self" else "cls"
+        return inherited_target, f"python_{suffix}_inherited_method_binding"
+
+    def _resolved_inherited_receiver_member(
+        self,
+        class_context: _PythonClassReceiverContext,
+        member: str,
+    ) -> str | None:
+        analysis = self.binding_analysis
+        if analysis is None or not class_context.inheritance_supported:
+            return None
+        current = class_context
+        seen = {current.qualified_name}
+        for _edge in range(MAX_PYTHON_RECEIVER_INHERITANCE_EDGES):
+            base_name = current.base_name
+            if base_name is None or base_name in seen:
+                return None
+            base = self.top_level_receiver_classes.get(base_name)
+            if base is None:
+                return None
+            seen.add(base_name)
+            if member in base.direct_methods:
+                return f"{base.qualified_name}.{member}"
+            if analysis.binding_count(base.qualified_name, member):
+                return None
+            if not base.inheritance_supported:
+                return None
+            current = base
+        return None
 
     @staticmethod
     def _apply_import_binding(
