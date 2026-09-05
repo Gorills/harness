@@ -1183,7 +1183,7 @@ def test_symbol_navigation_receiver_resolution_fails_closed_on_custom_target_des
         connection.close()
 
 
-def test_symbol_navigation_receiver_resolution_does_not_infer_inherited_method(
+def test_symbol_navigation_resolves_single_same_file_inherited_self_method(
     tmp_path: Path,
 ) -> None:
     _root, connection, workspace_id = _registered(
@@ -1201,10 +1201,310 @@ def test_symbol_navigation_receiver_resolution_does_not_infer_inherited_method(
     )
     try:
         navigation = search_exact_source_inspection(
+            connection, workspace_id, "Base.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.target == "self.target_call"
+        assert call.resolved_target == "Base.target_call"
+        assert call.resolution_kind == "python_self_inherited_method_binding"
+        assert call.resolved_definition_path is None
+        assert call.resolution_validation_kind is None
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_resolves_nearest_same_file_override(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "class Middle(Base):\n"
+                "    def target_call(self):\n"
+                "        return 2\n\n"
+                "class Worker(Middle):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Middle.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.resolved_target == "Middle.target_call"
+        assert call.resolution_kind == "python_self_inherited_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_resolves_same_file_inherited_cls_method(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    @classmethod\n"
+                "    def target_call(cls):\n"
+                "        return 1\n\n"
+                "class Worker(Base):\n"
+                "    @classmethod\n"
+                "    def invoke(cls):\n"
+                "        return cls.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Base.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.resolved_target == "Base.target_call"
+        assert call.resolution_kind == "python_cls_inherited_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_accepts_four_base_edges(tmp_path: Path) -> None:
+    source = "class C4:\n    def target_call(self):\n        return 1\n\n"
+    for index in range(3, -1, -1):
+        body = (
+            "    def invoke(self):\n        return self.target_call()\n"
+            if index == 0
+            else "    pass\n"
+        )
+        source += f"class C{index}(C{index + 1}):\n{body}\n"
+    _root, connection, workspace_id = _registered(tmp_path, {"src/worker.py": source})
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "C4.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.resolved_target == "C4.target_call"
+        assert call.resolution_kind == "python_self_inherited_method_binding"
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_rejects_fifth_base_edge(tmp_path: Path) -> None:
+    source = "class C5:\n    def target_call(self):\n        return 1\n\n"
+    for index in range(4, -1, -1):
+        body = (
+            "    def invoke(self):\n        return self.target_call()\n"
+            if index == 0
+            else "    pass\n"
+        )
+        source += f"class C{index}(C{index + 1}):\n{body}\n"
+    _root, connection, workspace_id = _registered(tmp_path, {"src/worker.py": source})
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "C5.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_fails_closed_on_multiple_inheritance(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Left:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "class Right:\n"
+                "    pass\n\n"
+                "class Worker(Left, Right):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Left.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_fails_closed_on_class_attribute_shadow(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "class Middle(Base):\n"
+                "    target_call = None\n\n"
+                "class Worker(Middle):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Base.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_fails_closed_on_unsafe_override(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "class Middle(Base):\n"
+                "    @property\n"
+                "    def target_call(self):\n"
+                "        return lambda: 2\n\n"
+                "class Worker(Middle):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Base.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_direct_receiver_fails_closed_when_method_is_rebound_in_class(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Worker:\n"
+                "    def target_call(self):\n"
+                "        return 1\n"
+                "    target_call = None\n\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
             connection, workspace_id, "Worker.target_call", scope=ProjectSearchScope.CODE
         ).symbol_navigation
         assert navigation is not None
         assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_fails_closed_on_rebound_base_name(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class Base:\n"
+                "    def target_call(self):\n"
+                "        return 1\n\n"
+                "Base = object\n\n"
+                "class Worker(Base):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "Base.target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        assert navigation.call_count == 0
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_fails_closed_on_same_file_cycle(
+    tmp_path: Path,
+) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/worker.py": (
+                "class A(B):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n\n"
+                "class B(A):\n"
+                "    pass\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        call = next(item for item in navigation.relations if item.kind == "call")
+        assert call.target == "self.target_call"
+        assert call.resolved_target is None
+        assert call.resolution_kind is None
+    finally:
+        connection.close()
+
+
+def test_symbol_navigation_inherited_receiver_does_not_cross_files(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/base.py": "class Base:\n    def target_call(self):\n        return 1\n",
+            "src/worker.py": (
+                "from base import Base\n\n"
+                "class Worker(Base):\n"
+                "    def invoke(self):\n"
+                "        return self.target_call()\n"
+            ),
+        },
+    )
+    try:
+        navigation = search_exact_source_inspection(
+            connection, workspace_id, "target_call", scope=ProjectSearchScope.CODE
+        ).symbol_navigation
+        assert navigation is not None
+        worker_calls = [
+            item
+            for item in navigation.relations
+            if item.kind == "call" and item.path == "src/worker.py"
+        ]
+        assert len(worker_calls) == 1
+        assert worker_calls[0].resolved_target is None
     finally:
         connection.close()
 
