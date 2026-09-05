@@ -164,7 +164,11 @@ def test_natural_code_query_prefers_definition_unit_over_lexical_mention(tmp_pat
     _root, connection, workspace_id = _registered(
         tmp_path,
         {
-            "src/engine.py": "def rotateRefreshToken():\n    return 1\n",
+            "src/engine.py": (
+                "# rotate refresh token is discussed before the implementation\n"
+                + ("# padding\n" * 60)
+                + "def rotateRefreshToken():\n    return 1\n"
+            ),
             "src/commentary.py": (
                 "# rotate refresh token rotate refresh token rotate refresh token\nVALUE = 1\n"
             ),
@@ -184,6 +188,9 @@ def test_natural_code_query_prefers_definition_unit_over_lexical_mention(tmp_pat
         assert results[0].ref == "code:src/engine.py"
         assert results[0].match_reason == "code unit definition phrase"
         assert results[0].short_summary == "function rotateRefreshToken"
+        assert results[0].evidence is not None
+        assert "def rotateRefreshToken" in results[0].evidence.snippet
+        assert results[0].evidence.start_line > 1
         assert any(hit.ref == "code:src/commentary.py" for hit in results)
     finally:
         connection.close()

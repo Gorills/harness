@@ -32,6 +32,7 @@ from harness.retrieval import (
     project_search_hit_payload,
     search_project,
 )
+from harness.search_text import analyze_search_query
 from harness.storage import connect_database, initialize_database
 
 
@@ -257,8 +258,79 @@ def test_search_evidence_respects_per_hit_line_budget(tmp_path: Path) -> None:
             <= MAX_SEARCH_EVIDENCE_SNIPPET_LINES
         )
         wide_hit = next(hit for hit in compact_hits if hit.path == "wide_window.py")
-        assert wide_hit.evidence is None
-        assert wide_hit.evidence_reason == EVIDENCE_REASON_NOT_RELOCATED
+        assert wide_hit.evidence is not None
+        assert wide_hit.evidence_reason is None
+        assert "line_budget_alpha" in wide_hit.evidence.snippet
+        assert "line_budget_beta" not in wide_hit.evidence.snippet
+    finally:
+        connection.close()
+
+
+def test_search_evidence_uses_densest_partial_term_window(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        workspace_id = _indexed_repo(connection, root)
+        (root / "dense_window.py").write_text(
+            "dense_alpha dense_beta dense_gamma\n"
+            + ("padding\n" * (MAX_SEARCH_EVIDENCE_SNIPPET_LINES + 4))
+            + "distant_delta distant_epsilon\n",
+            encoding="utf-8",
+        )
+        _commit(root)
+        scan_workspace(connection, workspace_id)
+
+        results = _search_code(
+            connection,
+            workspace_id,
+            "dense_alpha dense_beta dense_gamma distant_delta distant_epsilon",
+        )
+
+        assert results[0].evidence is not None
+        assert results[0].evidence_reason is None
+        assert "dense_alpha dense_beta dense_gamma" in results[0].evidence.snippet
+        assert "distant_delta" not in results[0].evidence.snippet
+        assert "distant_epsilon" not in results[0].evidence.snippet
+    finally:
+        connection.close()
+
+
+def test_failed_evidence_reads_do_not_consume_later_evidence_slots(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        workspace_id = _indexed_repo(connection, root)
+        wide = (
+            "slot_alpha\n" + ("padding\n" * (MAX_SEARCH_EVIDENCE_SNIPPET_LINES + 2)) + "slot_beta\n"
+        )
+        paths = [f"wide_{index}.py" for index in range(MAX_SEARCH_EVIDENCE_HITS)]
+        for path in paths:
+            (root / path).write_text(wide, encoding="utf-8")
+        successful_path = "later_success.py"
+        (root / successful_path).write_text("slot_alpha slot_beta\n", encoding="utf-8")
+        _commit(root)
+        scan_workspace(connection, workspace_id)
+        for path in paths:
+            (root / path).write_text(wide + "changed after index\n", encoding="utf-8")
+        hits = tuple(_code_hit(path, evidence=None) for path in [*paths, successful_path])
+
+        results = retrieval_module._attach_current_source_evidence(
+            connection,
+            get_workspace(connection, workspace_id),
+            analyze_search_query("slot_alpha slot_beta"),
+            hits,
+        )
+
+        assert all(hit.evidence is None for hit in results[:-1])
+        assert all(
+            hit.evidence_reason == EVIDENCE_REASON_CHANGED_SINCE_INDEX for hit in results[:-1]
+        )
+        assert results[-1].evidence is not None
+        assert "slot_alpha slot_beta" in results[-1].evidence.snippet
     finally:
         connection.close()
 

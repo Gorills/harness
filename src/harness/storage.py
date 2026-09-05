@@ -206,6 +206,7 @@ BEGIN
 END;
 """
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 _WAL_LOCK_RETRY_ATTEMPTS = 5
 _WAL_LOCK_RETRY_DELAY_SECONDS = 0.02
 _SQLITE_HEADER_MIN_BYTES = 20
@@ -392,7 +393,12 @@ def _connect(path: Path, *, must_exist: bool = False) -> sqlite3.Connection:
         database = f"{path.absolute().as_uri()}?mode=rw"
         uri = True
 
-    connection = sqlite3.connect(database, uri=uri, autocommit=True)
+    connection = sqlite3.connect(
+        database,
+        uri=uri,
+        autocommit=True,
+        timeout=_SQLITE_BUSY_TIMEOUT_SECONDS,
+    )
     connection.execute("PRAGMA foreign_keys = ON")
     foreign_keys_row = connection.execute("PRAGMA foreign_keys").fetchone()
     if foreign_keys_row != (1,):

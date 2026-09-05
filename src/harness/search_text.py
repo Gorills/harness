@@ -16,6 +16,7 @@ _SEARCH_STOP_WORDS = frozenset(
         "as",
         "at",
         "be",
+        "before",
         "by",
         "for",
         "from",
@@ -58,6 +59,8 @@ _SEARCH_STOP_WORDS = frozenset(
         "это",
     }
 )
+_LOCATION_QUERY_MARKERS = frozenset({"how", "test", "testing", "tests", "where", "who"})
+_LOCATION_INTENT_TERMS = frozenset({"enforced", "implemented", "verifies"})
 _DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 _GENERATED_TEXT_OUTPUT_EXTENSIONS = {".log", ".out"}
 _QUERY_TERM_LIMIT = 24
@@ -66,6 +69,7 @@ _ENGLISH_QUERY_SUFFIXES = (
     "edly",
     "ness",
     "ment",
+    "ation",
     "ions",
     "ion",
     "ing",
@@ -127,7 +131,10 @@ class AnalyzedSearchQuery:
 def analyze_search_query(query: str) -> AnalyzedSearchQuery:
     """Remove conversational filler while retaining a safe FTS5 prefix expression."""
     all_terms = _deduplicate(identifier_tokens(query))[:_QUERY_TERM_LIMIT]
-    meaningful = tuple(term for term in all_terms if term not in _SEARCH_STOP_WORDS)
+    ignored = _SEARCH_STOP_WORDS
+    if any(term in _LOCATION_QUERY_MARKERS for term in all_terms):
+        ignored = ignored | _LOCATION_INTENT_TERMS
+    meaningful = tuple(term for term in all_terms if term not in ignored)
     terms = meaningful or all_terms
     operands = tuple(_fts_term_operand(term) for term in terms)
     return AnalyzedSearchQuery(

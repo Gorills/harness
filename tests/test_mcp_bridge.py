@@ -28,6 +28,8 @@ from harness.mcp_bridge import (
     _STATUS_MAX_BYTES,
     _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
+    _fit_project_search_payload,
+    _structured_search_result_size,
     _unknown_tool_argument_error,
 )
 from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
@@ -90,6 +92,8 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     assert "exact path" in description
     assert "targeted native read is allowed" in description
     assert "Python/JS/TS/TSX/Go/Rust/Java" in description
+    assert "structuredContent" in description
+    assert "results_truncated=true" in description
     assert "project_context is not required for those kinds" in description
     assert "after task_start or resume" in description
     assert "Skip this search only when an" in description
@@ -1258,22 +1262,103 @@ def test_project_search_success_wire_stays_within_model_budget(tmp_path: Path) -
                 continue
             assert len(raw.encode("utf-8")) < 12 * 1024
             response = json.loads(raw)
-            if request["id"] == 2:
-                assert response["result"]["isError"] is False
-                assert response["result"]["content"]
-                assert len(response["result"]["structuredContent"]["results"]) == 3
-            else:
-                assert response["result"]["isError"] is True
-                assert (
-                    "response exceeds model exposure budget"
-                    in response["result"]["content"][0]["text"]
-                )
+            assert response["result"]["isError"] is False
+            assert response["result"]["content"] == []
+            structured = response["result"]["structuredContent"]
+            assert structured["results_truncated"] is False
+            expected_count = 3 if request["id"] == 2 else 10
+            assert len(structured["results"]) == expected_count
     finally:
         process.terminate()
         process.wait(timeout=3)
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+
+def _search_payload_hit(index: int, *, evidence: str | None) -> dict[str, object]:
+    return {
+        "ref": f"code:src/service_{index}.py",
+        "kind": "code",
+        "title": f"service_{index}.py",
+        "location": f"src/service_{index}.py",
+        "short_summary": None,
+        "match_reason": "lexical content (all terms)",
+        "freshness": "indexed_snapshot",
+        "evidence": (
+            None
+            if evidence is None
+            else {
+                "start_line": 1,
+                "end_line": 1,
+                "snippet": evidence,
+                "truncated": True,
+            }
+        ),
+        "evidence_reason": None,
+        "path": f"src/service_{index}.py",
+    }
+
+
+def _search_payload(results: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "query": "service token",
+        "scope": "code",
+        "workspace_state": "current",
+        "exact_coverage": None,
+        "symbol_navigation": None,
+        "results_truncated": False,
+        "results": results,
+    }
+
+
+def test_project_search_compaction_drops_tail_evidence_before_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _search_payload_hit(1, evidence="first token " + ("a" * 512))
+    second = _search_payload_hit(2, evidence="second token " + ("b" * 512))
+    payload = _search_payload([first, second])
+    without_tail_evidence = _search_payload(
+        [
+            first,
+            {
+                **second,
+                "evidence": None,
+                "evidence_reason": "response_budget",
+            },
+        ]
+    )
+    budget = _structured_search_result_size(without_tail_evidence)
+    assert _structured_search_result_size(payload) > budget
+    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
+
+    fitted = _fit_project_search_payload(payload)
+
+    assert fitted["results_truncated"] is False
+    assert len(fitted["results"]) == 2
+    assert fitted["results"][0]["evidence"] is not None
+    assert fitted["results"][1]["evidence"] is None
+    assert fitted["results"][1]["evidence_reason"] == "response_budget"
+
+
+def test_project_search_compaction_marks_tail_hit_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = [_search_payload_hit(index, evidence=None) for index in range(3)]
+    payload = _search_payload(hits)
+    two_hit_payload = _search_payload(hits[:2])
+    two_hit_payload["results_truncated"] = True
+    budget = _structured_search_result_size(two_hit_payload)
+    assert _structured_search_result_size(payload) > budget
+    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
+
+    fitted = _fit_project_search_payload(payload)
+
+    assert fitted["results_truncated"] is True
+    assert [hit["ref"] for hit in fitted["results"]] == [
+        "code:src/service_0.py",
+        "code:src/service_1.py",
+    ]
 
 
 @pytest.mark.anyio

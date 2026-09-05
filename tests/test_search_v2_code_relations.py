@@ -154,7 +154,11 @@ def test_relation_intent_query_prefers_precise_caller_over_lexical_question(tmp_
         tmp_path,
         {
             "src/service.py": "def rotateRefreshToken():\n    return 1\n",
-            "src/caller.py": ("def issueSession():\n    return rotateRefreshToken()\n"),
+            "src/caller.py": (
+                "# who calls rotate refresh token is discussed here\n"
+                + ("# padding\n" * 60)
+                + "def issueSession():\n    return rotateRefreshToken()\n"
+            ),
             "src/commentary.py": (
                 "# who calls rotate refresh token who calls rotate refresh token\nVALUE = 1\n"
             ),
@@ -174,7 +178,38 @@ def test_relation_intent_query_prefers_precise_caller_over_lexical_question(tmp_
         assert results[0].ref == "code:src/caller.py"
         assert results[0].match_reason == "code call relation"
         assert results[0].short_summary == "call rotateRefreshToken in issueSession"
+        assert results[0].evidence is not None
+        assert "return rotateRefreshToken()" in results[0].evidence.snippet
+        assert results[0].evidence.start_line > 1
         assert any(hit.ref == "code:src/commentary.py" for hit in results)
+    finally:
+        connection.close()
+
+
+def test_persistence_intent_prefers_precise_call_relation(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/checkpoint.py": ("def writer():\n    return persistTaskCheckpointKnowledge()\n"),
+            "src/commentary.py": "# task checkpoint persists knowledge\n",
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "where task checkpoint persists knowledge",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert results[0].ref == "code:src/checkpoint.py"
+        assert results[0].match_reason == "code call relation"
+        assert results[0].short_summary == "call persistTaskCheckpointKnowledge in writer"
+        assert results[0].evidence is not None
+        assert "persistTaskCheckpointKnowledge()" in results[0].evidence.snippet
     finally:
         connection.close()
 

@@ -268,6 +268,19 @@ def test_connect_database_enforces_foreign_keys(tmp_path: Path) -> None:
         connection.close()
 
 
+def test_connect_database_configures_bounded_writer_wait(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+
+    connection = connect_database(database)
+    try:
+        assert connection.execute("PRAGMA busy_timeout").fetchone() == (
+            int(storage._SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
+        )
+    finally:
+        connection.close()
+
+
 def test_initialize_database_migrates_existing_version_zero_database(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     connection = sqlite3.connect(database)
