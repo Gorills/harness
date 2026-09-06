@@ -880,23 +880,23 @@ raise SystemExit(2)
                 env=fake_env,
             )
             scan_a = _run(
-                (str(harness), "scan", str(lifecycle_project)),
+                (str(harness), "init", str(lifecycle_project)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_a.stdout:
-                raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
+                raise RuntimeError(f"installed repo-A init was unexpected: {scan_a.stdout!r}")
 
             independent_project = workspace / "installed-independent-project"
             _git_init_with_file(independent_project, fake_env, "other.py", "OTHER = 1\n")
             scan_c = _run(
-                (str(harness), "scan", str(independent_project)),
+                (str(harness), "init", str(independent_project)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_c.stdout:
                 raise RuntimeError(
-                    f"installed independent Workspace scan was unexpected: {scan_c.stdout!r}"
+                    f"installed independent Workspace init was unexpected: {scan_c.stdout!r}"
                 )
 
             agents_before_hidden = (lifecycle_project / "AGENTS.md").read_bytes()
@@ -943,12 +943,12 @@ raise SystemExit(2)
             )
             (lifecycle_worktree / "linked.py").write_text("LINKED = 1\n", encoding="utf-8")
             scan_b = _run(
-                (str(harness), "scan", str(lifecycle_worktree)),
+                (str(harness), "init", str(lifecycle_worktree)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_b.stdout:
-                raise RuntimeError(f"installed worktree-B scan was unexpected: {scan_b.stdout!r}")
+                raise RuntimeError(f"installed worktree-B init was unexpected: {scan_b.stdout!r}")
             codex_project_b = lifecycle_worktree / ".codex" / "config.toml"
             _require_codex_config(codex_project_b, python, lifecycle_worktree)
             codex_projected_skill = lifecycle_project / ".agents" / "skills" / "python-helper"
