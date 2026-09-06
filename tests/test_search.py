@@ -17,6 +17,7 @@ from harness.search import (
     SearchMatchKind,
     search_indexed_paths,
 )
+from harness.search_text import analyze_search_query, query_term_prefixes
 from harness.storage import connect_database, initialize_database
 
 
@@ -145,6 +146,16 @@ def test_search_ignores_conversational_filler_and_matches_prefix_inflections(
         assert all(result.match_kind is SearchMatchKind.IDENTIFIER_TOKENS for result in results)
     finally:
         connection.close()
+
+
+def test_natural_location_intent_does_not_overconstrain_search_terms() -> None:
+    budget = analyze_search_query("where project search response budget is enforced")
+    installation = analyze_search_query("where global Codex installation is implemented")
+
+    assert budget.terms == ("project", "search", "response", "budget")
+    assert installation.terms == ("global", "codex", "installation")
+    assert query_term_prefixes("installation") == ("installation", "install")
+    assert analyze_search_query("enforced policy").terms == ("enforced", "policy")
 
 
 def test_search_uses_deterministic_substring_fallback(tmp_path: Path) -> None:

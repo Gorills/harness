@@ -15,7 +15,7 @@ from harness.daemon import _serve_skill_cleanup, serve_daemon
 from harness.ipc import (
     request_shutdown,
     request_skill_cleanup,
-    request_workspace_scan,
+    request_workspace_init,
     request_workspace_skills_reconcile,
 )
 from harness.skill_runtime import SkillCleanupResult as RuntimeSkillCleanupResult
@@ -90,7 +90,7 @@ def test_daemon_reconciles_and_cleans_project_skills_then_shuts_down(
     socket_path = tmp_path / "run" / "harness.sock"
     stop, executor, future = _start_daemon(database, socket_path)
     try:
-        scan = request_workspace_scan(socket_path, root)
+        scan = request_workspace_init(socket_path, root)
         hints = (
             WorkspaceHint(
                 path=scan.workspace_root,
@@ -145,7 +145,7 @@ def test_global_skill_cleanup_skips_replaced_workspace_identity(
     socket_path = tmp_path / "run" / "harness.sock"
     stop, executor, future = _start_daemon(database, socket_path)
     try:
-        scan = request_workspace_scan(socket_path, root)
+        scan = request_workspace_init(socket_path, root)
         request_workspace_skills_reconcile(
             socket_path,
             (
@@ -189,7 +189,7 @@ def test_global_skill_cleanup_skips_unsafe_projection_parent_without_following_i
     socket_path = tmp_path / "run" / "harness.sock"
     stop, executor, future = _start_daemon(database, socket_path)
     try:
-        request_workspace_scan(socket_path, root)
+        request_workspace_init(socket_path, root)
         outside = tmp_path / "outside"
         outside.mkdir()
         sentinel = outside / "sentinel.txt"

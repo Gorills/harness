@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -206,6 +206,7 @@ BEGIN
 END;
 """
 _FTS5_PROBE_TABLE = "__harness_fts5_probe"
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
 _WAL_LOCK_RETRY_ATTEMPTS = 5
 _WAL_LOCK_RETRY_DELAY_SECONDS = 0.02
 _SQLITE_HEADER_MIN_BYTES = 20
@@ -392,7 +393,12 @@ def _connect(path: Path, *, must_exist: bool = False) -> sqlite3.Connection:
         database = f"{path.absolute().as_uri()}?mode=rw"
         uri = True
 
-    connection = sqlite3.connect(database, uri=uri, autocommit=True)
+    connection = sqlite3.connect(
+        database,
+        uri=uri,
+        autocommit=True,
+        timeout=_SQLITE_BUSY_TIMEOUT_SECONDS,
+    )
     connection.execute("PRAGMA foreign_keys = ON")
     foreign_keys_row = connection.execute("PRAGMA foreign_keys").fetchone()
     if foreign_keys_row != (1,):
@@ -1864,6 +1870,57 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                 DELETE FROM indexed_resolved_code_relation_search WHERE rowid = OLD.relation_id;
             END;
             """,
+        )
+        return
+    if target_version == 21:
+        connection.execute(
+            """
+            CREATE TABLE project_skill_inclusions (
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                facet TEXT NOT NULL CHECK (
+                    facet IN (
+                        'backend-service',
+                        'web-frontend',
+                        'mobile-app',
+                        'database-backed',
+                        'godot-project',
+                        'containerized',
+                        'observability',
+                        'ci-pipeline',
+                        'deployment-ops'
+                    )
+                ),
+                PRIMARY KEY (project_id, facet)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER project_skill_inclusion_excludes_exclusion
+            BEFORE INSERT ON project_skill_inclusions
+            BEGIN
+                SELECT RAISE(ABORT, 'skill facet cannot be included and excluded')
+                WHERE EXISTS (
+                    SELECT 1 FROM project_skill_exclusions
+                    WHERE project_skill_exclusions.project_id = NEW.project_id
+                      AND project_skill_exclusions.facet = NEW.facet
+                );
+            END
+            """
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER project_skill_exclusion_excludes_inclusion
+            BEFORE INSERT ON project_skill_exclusions
+            BEGIN
+                SELECT RAISE(ABORT, 'skill facet cannot be included and excluded')
+                WHERE EXISTS (
+                    SELECT 1 FROM project_skill_inclusions
+                    WHERE project_skill_inclusions.project_id = NEW.project_id
+                      AND project_skill_inclusions.facet = NEW.facet
+                );
+            END
+            """
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

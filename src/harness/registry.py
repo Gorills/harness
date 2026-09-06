@@ -6,7 +6,11 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import uuid4
 
-from harness.git_workspace import GitWorkspaceLayout, inspect_git_workspace
+from harness.git_workspace import (
+    GitWorkspaceLayout,
+    inspect_workspace_layout,
+    layout_has_git,
+)
 
 
 class RegistryError(RuntimeError):
@@ -50,12 +54,26 @@ class ProjectRecord:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRecord:
-    """Durable physical Workspace identity derived from Git and explicit Project membership."""
+    """Durable physical Workspace identity derived from Git or a bound filesystem root."""
 
     workspace_id: str
     project_id: str
     workspace_root: Path
     git_common_dir: Path
+
+
+def workspace_has_git(workspace: WorkspaceRecord) -> bool:
+    """Return whether the Workspace has an attached Git common directory."""
+    return workspace.git_common_dir != workspace.workspace_root
+
+
+def workspace_layout_compatible(workspace: WorkspaceRecord, layout: GitWorkspaceLayout) -> bool:
+    """Return whether live layout matches registration or is a filesystem-to-Git attach."""
+    if layout.workspace_root != workspace.workspace_root:
+        return False
+    if layout.git_common_dir == workspace.git_common_dir:
+        return True
+    return not workspace_has_git(workspace) and layout_has_git(layout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +147,7 @@ def relocate_workspace(
     """
     if not new_path.is_absolute():
         raise WorkspaceRelocationConflictError("new Workspace path must be absolute")
-    layout = inspect_git_workspace(new_path)
+    layout = inspect_workspace_layout(new_path)
     connection.execute("BEGIN IMMEDIATE")
     try:
         workspace = get_workspace(connection, workspace_id)
@@ -142,10 +160,15 @@ def relocate_workspace(
 
         other_project_ids = set(_project_ids_by_common_dir(connection, layout.git_common_dir))
         other_project_ids.discard(project.project_id)
-        if other_project_ids:
+        if layout_has_git(layout) and other_project_ids:
             raise WorkspaceRelocationConflictError(
                 "new Git common directory is registered to another Project"
             )
+        _reject_overlapping_workspace_roots(
+            connection,
+            layout.workspace_root,
+            except_workspace_id=workspace_id,
+        )
         _require_common_dir_visibility(
             connection,
             git_common_dir=layout.git_common_dir,
@@ -245,24 +268,33 @@ def register_workspace(
     project_id: str,
     path: Path,
 ) -> WorkspaceRecord:
-    """Register one canonical Git worktree under an explicit Project identity."""
-    layout = inspect_git_workspace(path)
+    """Register one canonical Workspace root under an explicit Project identity."""
+    layout = inspect_workspace_layout(path)
     connection.execute("BEGIN IMMEDIATE")
     try:
         project = get_project(connection, project_id)
         existing = _workspace_by_root(connection, layout.workspace_root)
         if existing is not None:
-            _require_matching_workspace(existing, project_id=project_id, layout=layout)
+            existing = _require_matching_workspace(
+                connection,
+                existing,
+                project_id=project_id,
+                layout=layout,
+            )
+            _require_common_dir_visibility(
+                connection,
+                git_common_dir=layout.git_common_dir,
+                visibility_mode=project.visibility_mode,
+            )
+            connection.execute("COMMIT")
+            return existing
 
+        _reject_overlapping_workspace_roots(connection, layout.workspace_root)
         _require_common_dir_visibility(
             connection,
             git_common_dir=layout.git_common_dir,
             visibility_mode=project.visibility_mode,
         )
-        if existing is not None:
-            connection.execute("COMMIT")
-            return existing
-
         workspace = _insert_workspace(connection, project_id=project_id, layout=layout)
         connection.execute("COMMIT")
         return workspace
@@ -277,24 +309,85 @@ def register_workspace_for_scan(
     *,
     path: Path,
 ) -> WorkspaceScanRegistration:
-    """Resolve or create the Project/Workspace identity needed by ``harness scan``.
+    """Reuse one already-registered Workspace for ``harness scan``.
 
-    A previously registered root is reused. A new linked worktree is attached to the one
-    existing Project sharing its Git common directory. Independent clones are not inferred to
-    be the same logical Project and therefore create a new Project. Ambiguous historical
-    common-directory membership fails closed.
+    Unregistered paths fail closed. A filesystem Workspace that later gains Git is attached
+    in place. Scan does not mint a Project.
     """
-    layout = inspect_git_workspace(path)
+    return _register_workspace_binding(connection, path=path, allow_create=False)
+
+
+def register_workspace_for_init(
+    connection: sqlite3.Connection,
+    *,
+    path: Path,
+) -> WorkspaceScanRegistration:
+    """Resolve or create the Project/Workspace identity needed by ``harness init``.
+
+    A previously registered root is reused. A new linked Git worktree is attached to the one
+    existing Project sharing its Git common directory. Independent clones and filesystem
+    directories create a new Project. Ambiguous historical common-directory membership fails
+    closed. Overlapping registered roots fail closed.
+    """
+    return _register_workspace_binding(connection, path=path, allow_create=True)
+
+
+def attach_workspace_git_if_present(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> WorkspaceRecord:
+    """Attach a real Git common directory when a filesystem Workspace later becomes a Git worktree."""
+    workspace = get_workspace(connection, workspace_id)
+    if workspace.git_common_dir != workspace.workspace_root:
+        return workspace
+    layout = inspect_workspace_layout(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, layout):
+        raise WorkspaceRegistrationConflictError(
+            f"workspace root identity changed: {workspace.workspace_root}"
+        )
+    if workspace.git_common_dir == layout.git_common_dir:
+        return workspace
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = get_workspace(connection, workspace_id)
+        updated = _require_matching_workspace(
+            connection,
+            current,
+            project_id=current.project_id,
+            layout=layout,
+        )
+        project = get_project(connection, updated.project_id)
+        _require_common_dir_visibility(
+            connection,
+            git_common_dir=layout.git_common_dir,
+            visibility_mode=project.visibility_mode,
+        )
+        connection.execute("COMMIT")
+        return updated
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def _register_workspace_binding(
+    connection: sqlite3.Connection,
+    *,
+    path: Path,
+    allow_create: bool,
+) -> WorkspaceScanRegistration:
+    layout = inspect_workspace_layout(path)
     connection.execute("BEGIN IMMEDIATE")
     try:
         existing = _workspace_by_root(connection, layout.workspace_root)
         if existing is not None:
-            _require_matching_workspace(
+            workspace = _require_matching_workspace(
+                connection,
                 existing,
                 project_id=existing.project_id,
                 layout=layout,
             )
-            project = get_project(connection, existing.project_id)
+            project = get_project(connection, workspace.project_id)
             _require_common_dir_visibility(
                 connection,
                 git_common_dir=layout.git_common_dir,
@@ -303,17 +396,26 @@ def register_workspace_for_scan(
             connection.execute("COMMIT")
             return WorkspaceScanRegistration(
                 project=project,
-                workspace=existing,
+                workspace=workspace,
                 project_created=False,
                 workspace_created=False,
             )
 
+        if not allow_create:
+            raise WorkspaceNotFoundError(
+                f"workspace is not registered; run harness init: {layout.workspace_root}"
+            )
+
+        _reject_overlapping_workspace_roots(connection, layout.workspace_root)
+
         project_ids = _project_ids_by_common_dir(connection, layout.git_common_dir)
-        if len(project_ids) > 1:
+        if layout_has_git(layout) and len(project_ids) > 1:
             raise WorkspaceRegistrationConflictError(
                 "Git common directory is already associated with multiple Projects; "
-                "automatic scan registration is ambiguous"
+                "Workspace registration is ambiguous"
             )
+        if not layout_has_git(layout):
+            project_ids = ()
 
         if project_ids:
             project = get_project(connection, project_ids[0])
@@ -470,22 +572,60 @@ def _insert_workspace(
     return workspace
 
 
+def _reject_overlapping_workspace_roots(
+    connection: sqlite3.Connection,
+    new_root: Path,
+    *,
+    except_workspace_id: str | None = None,
+) -> None:
+    for workspace in list_workspaces(connection):
+        if except_workspace_id is not None and workspace.workspace_id == except_workspace_id:
+            continue
+        existing = workspace.workspace_root
+        if existing == new_root:
+            continue
+        if new_root.is_relative_to(existing) or existing.is_relative_to(new_root):
+            raise WorkspaceRegistrationConflictError(
+                f"workspace root overlaps a registered Workspace: {new_root} vs {existing}"
+            )
+
+
 def _require_matching_workspace(
+    connection: sqlite3.Connection,
     existing: WorkspaceRecord,
     *,
     project_id: str,
     layout: GitWorkspaceLayout,
-) -> None:
+) -> WorkspaceRecord:
     if existing.project_id != project_id:
         raise WorkspaceRegistrationConflictError(
             f"workspace root is already registered to project {existing.project_id}: "
             f"{layout.workspace_root}"
         )
-    if existing.git_common_dir != layout.git_common_dir:
+    if existing.git_common_dir == layout.git_common_dir:
+        return existing
+    if workspace_has_git(existing) or not layout_has_git(layout):
         raise WorkspaceRegistrationConflictError(
             "workspace root Git common directory changed since registration: "
             f"{layout.workspace_root}"
         )
+    other_project_ids = set(_project_ids_by_common_dir(connection, layout.git_common_dir))
+    other_project_ids.discard(existing.project_id)
+    if other_project_ids:
+        raise WorkspaceRegistrationConflictError(
+            "Git common directory is already associated with another Project; "
+            "filesystem Workspace cannot attach that identity"
+        )
+    connection.execute(
+        "UPDATE workspaces SET git_common_dir = ? WHERE id = ? AND project_id = ?",
+        (str(layout.git_common_dir), existing.workspace_id, existing.project_id),
+    )
+    return WorkspaceRecord(
+        workspace_id=existing.workspace_id,
+        project_id=existing.project_id,
+        workspace_root=existing.workspace_root,
+        git_common_dir=layout.git_common_dir,
+    )
 
 
 def _require_common_dir_visibility(

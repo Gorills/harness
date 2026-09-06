@@ -149,7 +149,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
     for needle in (
         "scripts/dev sync",
         "scripts/dev harness doctor",
-        "scripts/dev harness scan",
+        "scripts/dev harness init",
         "scripts/dev harness status",
         "scripts/dev stop",
         "XDG_STATE_HOME",
@@ -286,6 +286,7 @@ def test_dev_wrapper_env_and_help_do_not_require_uv() -> None:
     )
 
 
+@pytest.mark.usefixtures("isolated_harness_http_ports")
 def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Path) -> None:
     harness = _console_script("harness")
     fake_home = tmp_path / "home"
@@ -328,7 +329,7 @@ def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Pa
         assert "FTS5: OK" in doctor.stdout
         assert not paths.database.exists()
 
-        scan = _run([str(harness), "scan", str(workspace)], cwd=tmp_path, env=env, timeout=60)
+        scan = _run([str(harness), "init", str(workspace)], cwd=tmp_path, env=env, timeout=60)
         assert scan.returncode == 0, scan.stdout + scan.stderr
         assert "created" in scan.stdout
         assert "Indexed files:" in scan.stdout
@@ -637,7 +638,7 @@ def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
     def request_scan(_socket: Path, _path: Path) -> WorkspaceScanResult:
         raise AssertionError("canonical scan must not contact the daemon")
 
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(
         entrypoints,
         "_canonical_socket",
@@ -700,9 +701,9 @@ def test_isolated_scan_projects_local_skills_without_reconciling_host_config(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["harness", "scan", str(root), "--socket", str(socket_path)],
+        ["harness", "init", str(root), "--socket", str(socket_path)],
     )
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(entrypoints, "request_workspace_skills_reconcile", skills_reconcile)
 
     assert harness_main() == 0
@@ -757,7 +758,7 @@ def test_global_dogfood_scan_indexes_overlay_without_reconciling_integrations(
             str(socket_path),
         ],
     )
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(
         entrypoints,
         "request_workspace_skills_reconcile",
@@ -797,7 +798,7 @@ def test_global_dogfood_scan_refuses_checkout_interpreter(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
     )
 
@@ -816,7 +817,7 @@ def test_global_dogfood_scan_refuses_ordinary_repository(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
     )
 
@@ -851,7 +852,7 @@ def test_global_dogfood_scan_refuses_hidden_project(
     )
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda _socket, _path: WorkspaceScanResult(
             schema_version=SCHEMA_VERSION,
             workspace_id="workspace-hidden",
@@ -1212,6 +1213,33 @@ def test_install_global_doctor_only_dry_run_does_not_reinstall(tmp_path: Path) -
     assert result.returncode == 0, result.stderr
     fields = _plan_fields(result.stdout)
     assert fields["mode"] == "doctor-only"
+    log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
+    assert "tool install" not in log
+
+
+def test_install_global_does_not_pass_checkout_imports_to_installed_runtime(
+    tmp_path: Path,
+) -> None:
+    inherited = {
+        "PYTHONPATH": str(REPO_ROOT / "src"),
+        "PYTHONHOME": str(REPO_ROOT / ".venv"),
+        "HARNESS_HOST_PROFILE": "codex",
+        "HARNESS_WORKSPACE_ROOT": str(REPO_ROOT),
+        "HARNESS_DEV_SKILL_PROFILES": "codex,cursor",
+        "HARNESS_ACCEPTANCE_DASHBOARD_PORT": "12345",
+        "HARNESS_ACCEPTANCE_MCP_HTTP_PORT": "12346",
+    }
+    env = _install_global_env(tmp_path, extra=inherited)
+    installed = Path(env["FAKE_UV_BIN_DIR"]) / "harness"
+    installed.write_text(
+        "#!/bin/sh\n"
+        'test "$1" = doctor || exit 98\n'
+        + "".join(f'test -z "${{{key}-}}" || exit 97\n' for key in inherited),
+        encoding="utf-8",
+    )
+    installed.chmod(0o755)
+    result = _run(["make", "doctor-global"], cwd=REPO_ROOT, env=env)
+    assert result.returncode == 0, result.stdout + result.stderr
     log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
     assert "tool install" not in log
 
@@ -1583,6 +1611,7 @@ def test_isolated_doctor_ignores_user_global_cursor_claude_and_skills(tmp_path: 
     assert "/foreign-global" not in " ".join(check.detail for check in report.checks)
 
 
+@pytest.mark.usefixtures("isolated_harness_http_ports")
 def test_simulated_global_cursor_update_does_not_touch_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

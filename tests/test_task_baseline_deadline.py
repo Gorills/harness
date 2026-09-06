@@ -102,7 +102,7 @@ def test_task_baseline_identity_check_rejects_deadline_overrun(
 
     monkeypatch.setattr(
         task_baseline,
-        "inspect_git_workspace_runtime_identity",
+        "inspect_workspace_runtime_identity",
         identity_inspection,
     )
     monkeypatch.setattr(task_baseline, "monotonic", lambda: current_time)

@@ -174,6 +174,9 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
         connection.execute("DROP TABLE indexed_code_unit_files")
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
+        connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
         connection.execute("DROP TABLE workspace_search_index_dirty_paths")
         connection.execute("DROP TABLE workspace_search_index_state")
@@ -188,7 +191,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 20
+    assert status.schema_version == SCHEMA_VERSION == 21
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

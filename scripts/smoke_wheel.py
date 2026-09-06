@@ -2,6 +2,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 import tempfile
 import tomllib
@@ -415,6 +416,7 @@ def main() -> int:
             "backup",
             "restore",
             "status",
+            "init",
             "scan",
             "search",
             "skills",
@@ -434,11 +436,19 @@ def main() -> int:
                 )
 
         scan_help = _run((str(harness), "scan", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--socket", "deterministic", "Git Workspace"):
+        for expected in ("--socket", "deterministic", "registered Workspace"):
             if expected not in scan_help.stdout:
                 raise RuntimeError(
                     f"installed harness scan --help did not contain {expected!r}: "
                     f"{scan_help.stdout!r}"
+                )
+
+        init_help = _run((str(harness), "init", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("--socket", "ordinary folder", "Git worktree"):
+            if expected not in init_help.stdout:
+                raise RuntimeError(
+                    f"installed harness init --help did not contain {expected!r}: "
+                    f"{init_help.stdout!r}"
                 )
 
         search_help = _run((str(harness), "search", "--help"), cwd=workspace, env=isolated_env)
@@ -814,6 +824,11 @@ raise SystemExit(2)
             fake_env["HOME"] = str(fake_home)
             fake_env["XDG_STATE_HOME"] = str(workspace / "fake-state-home")
             fake_env["XDG_RUNTIME_DIR"] = str(workspace / "fake-runtime-home")
+            with socket.socket() as dashboard, socket.socket() as mcp:
+                dashboard.bind(("127.0.0.1", 0))
+                mcp.bind(("127.0.0.1", 0))
+                fake_env["HARNESS_ACCEPTANCE_DASHBOARD_PORT"] = str(dashboard.getsockname()[1])
+                fake_env["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"] = str(mcp.getsockname()[1])
 
             skills_list = _run((str(harness), "skills", "list"), cwd=workspace, env=fake_env)
             if "python-helper" not in skills_list.stdout or "Skills: 1" not in skills_list.stdout:
@@ -865,23 +880,23 @@ raise SystemExit(2)
                 env=fake_env,
             )
             scan_a = _run(
-                (str(harness), "scan", str(lifecycle_project)),
+                (str(harness), "init", str(lifecycle_project)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_a.stdout:
-                raise RuntimeError(f"installed repo-A scan was unexpected: {scan_a.stdout!r}")
+                raise RuntimeError(f"installed repo-A init was unexpected: {scan_a.stdout!r}")
 
             independent_project = workspace / "installed-independent-project"
             _git_init_with_file(independent_project, fake_env, "other.py", "OTHER = 1\n")
             scan_c = _run(
-                (str(harness), "scan", str(independent_project)),
+                (str(harness), "init", str(independent_project)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_c.stdout:
                 raise RuntimeError(
-                    f"installed independent Workspace scan was unexpected: {scan_c.stdout!r}"
+                    f"installed independent Workspace init was unexpected: {scan_c.stdout!r}"
                 )
 
             agents_before_hidden = (lifecycle_project / "AGENTS.md").read_bytes()
@@ -928,12 +943,12 @@ raise SystemExit(2)
             )
             (lifecycle_worktree / "linked.py").write_text("LINKED = 1\n", encoding="utf-8")
             scan_b = _run(
-                (str(harness), "scan", str(lifecycle_worktree)),
+                (str(harness), "init", str(lifecycle_worktree)),
                 cwd=workspace,
                 env=fake_env,
             )
             if "Relevant skills: 7" not in scan_b.stdout:
-                raise RuntimeError(f"installed worktree-B scan was unexpected: {scan_b.stdout!r}")
+                raise RuntimeError(f"installed worktree-B init was unexpected: {scan_b.stdout!r}")
             codex_project_b = lifecycle_worktree / ".codex" / "config.toml"
             _require_codex_config(codex_project_b, python, lifecycle_worktree)
             codex_projected_skill = lifecycle_project / ".agents" / "skills" / "python-helper"

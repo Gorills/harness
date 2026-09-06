@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from harness.symbol_navigation import (
     SyntaxRelationAnalysis,
     SyntaxRelationEvidence,
     analyze_precise_code_structure,
+    python_workspace_module_candidate_paths,
 )
 
 
@@ -154,7 +156,11 @@ def test_relation_intent_query_prefers_precise_caller_over_lexical_question(tmp_
         tmp_path,
         {
             "src/service.py": "def rotateRefreshToken():\n    return 1\n",
-            "src/caller.py": ("def issueSession():\n    return rotateRefreshToken()\n"),
+            "src/caller.py": (
+                "# who calls rotate refresh token is discussed here\n"
+                + ("# padding\n" * 60)
+                + "def issueSession():\n    return rotateRefreshToken()\n"
+            ),
             "src/commentary.py": (
                 "# who calls rotate refresh token who calls rotate refresh token\nVALUE = 1\n"
             ),
@@ -174,7 +180,38 @@ def test_relation_intent_query_prefers_precise_caller_over_lexical_question(tmp_
         assert results[0].ref == "code:src/caller.py"
         assert results[0].match_reason == "code call relation"
         assert results[0].short_summary == "call rotateRefreshToken in issueSession"
+        assert results[0].evidence is not None
+        assert "return rotateRefreshToken()" in results[0].evidence.snippet
+        assert results[0].evidence.start_line > 1
         assert any(hit.ref == "code:src/commentary.py" for hit in results)
+    finally:
+        connection.close()
+
+
+def test_persistence_intent_prefers_precise_call_relation(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/checkpoint.py": ("def writer():\n    return persistTaskCheckpointKnowledge()\n"),
+            "src/commentary.py": "# task checkpoint persists knowledge\n",
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "where task checkpoint persists knowledge",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert results[0].ref == "code:src/checkpoint.py"
+        assert results[0].match_reason == "code call relation"
+        assert results[0].short_summary == "call persistTaskCheckpointKnowledge in writer"
+        assert results[0].evidence is not None
+        assert "persistTaskCheckpointKnowledge()" in results[0].evidence.snippet
     finally:
         connection.close()
 
@@ -581,6 +618,73 @@ def test_scan_persists_bounded_python_reexport_chain_edge(tmp_path: Path) -> Non
         connection.close()
 
 
+def test_resolved_module_candidates_are_cached_only_within_one_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    files = {
+        "src/shared.py": "def target(): pass\n",
+        **{
+            f"src/caller_{index}.py": "from shared import target\n" + "target()\n" * 10
+            for index in range(4)
+        },
+        **{
+            f"src/{package}/{name}.py": content
+            for package in ("one", "two")
+            for name, content in (
+                ("local", "def target(): pass\n"),
+                ("caller", "from .local import target\ntarget()\n"),
+            )
+        },
+    }
+    root, connection, workspace_id = _registered(tmp_path, files)
+    calls: list[tuple[str, str]] = []
+    original = python_workspace_module_candidate_paths
+
+    def count_candidates(source: str, module: str, paths: Sequence[str]) -> tuple[str, ...]:
+        calls.append((source, module))
+        return original(source, module, paths)
+
+    monkeypatch.setattr(index_module, "python_workspace_module_candidate_paths", count_candidates)
+
+    def targets() -> list[tuple[str, int]]:
+        return connection.execute(
+            """
+            SELECT targets.relative_path, COUNT(*)
+            FROM indexed_resolved_code_relations AS resolved
+            JOIN indexed_code_units AS targets ON targets.id = resolved.target_unit_id
+            WHERE resolved.workspace_id = ?
+            GROUP BY targets.relative_path ORDER BY targets.relative_path
+            """,
+            (workspace_id,),
+        ).fetchall()
+
+    try:
+        scan_workspace(connection, workspace_id)
+        assert len(calls) == 3
+        assert targets() == [
+            ("src/one/local.py", 1),
+            ("src/shared.py", 40),
+            ("src/two/local.py", 1),
+        ]
+        duplicate = root / "other" / "shared.py"
+        duplicate.parent.mkdir()
+        duplicate.write_text("def target(): pass\n", encoding="utf-8")
+        calls.clear()
+        scan_workspace_paths(connection, workspace_id, ("other/shared.py",))
+        assert len(calls) == 3
+        assert targets() == [("src/one/local.py", 1), ("src/two/local.py", 1)]
+
+        duplicate.unlink()
+        scan_workspace_paths(connection, workspace_id, ("other/shared.py",))
+        assert targets() == [
+            ("src/one/local.py", 1),
+            ("src/shared.py", 40),
+            ("src/two/local.py", 1),
+        ]
+    finally:
+        connection.close()
+
+
 def test_incremental_target_change_rebuilds_resolved_edges_for_unchanged_caller(
     tmp_path: Path,
 ) -> None:
@@ -741,7 +845,7 @@ def test_schema_20_migrates_existing_19_database_in_place(
 ) -> None:
     database = tmp_path / "harness.db"
     current = storage.SCHEMA_VERSION
-    assert current == 20
+    assert current == 21
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 19)
     initialize_database(database)
     connection = sqlite3.connect(database)
@@ -754,7 +858,7 @@ def test_schema_20_migrates_existing_19_database_in_place(
     monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
     status = initialize_database(database)
 
-    assert status.schema_version == 20
+    assert status.schema_version == 21
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [("preserved-project",)]
@@ -781,6 +885,6 @@ def test_schema_20_migrates_existing_19_database_in_place(
             ).fetchone() == (table,)
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone() == (20,)
+        ).fetchone() == (21,)
     finally:
         connection.close()

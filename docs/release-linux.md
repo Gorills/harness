@@ -22,19 +22,20 @@ harness doctor
 
 Omitted `--host` installs Cursor. Codex is `harness install --host codex`. `--host all` installs both. Claude Code is not a supported host ([ADR-0039](decisions/0039-retire-claude-code-host.md)).
 
-Register and index each Git worktree explicitly:
+Register and index each project folder explicitly (`harness init`). Git is optional.
+Reconcile an already-registered Workspace with `harness scan`.
 
 ```bash
-cd /path/to/repository
-harness scan
+cd /path/to/project
+harness init
 # After Harness changes Cursor MCP config, fully quit and reopen Cursor.
 agent mcp list
 harness status
 ```
 
-Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. When `agent` is installed, `harness install --host cursor` and `harness scan` run `agent mcp enable harness` and verify `agent mcp list-tools harness`. Registered Workspace roots that cannot be resolved as directories are skipped and named; they do not fail install or uninstall. Missing `agent` prints `cd <workspace> && agent mcp enable harness` plus a full Cursor quit/reopen (window reload is not enough). Leftover `user-harness` is not Workspace identity and is removed. Do not hardcode a Workspace path in `mcp.json`; doctor would mark that config stale.
+Cursor's current MCP documentation requires restarting Cursor after changing `mcp.json`. Harness prints this reminder after any actual Cursor MCP config mutation. When `agent` is installed, `harness install --host cursor` and `harness scan` run `agent mcp enable harness` and verify `agent mcp list-tools harness`. Registered Workspace roots that cannot be resolved as directories are skipped and named; they do not fail install or uninstall. Missing `agent` prints `cd <workspace> && agent mcp enable harness` plus a full Cursor quit/reopen (window reload is not enough). Leftover `user-harness` is not Workspace identity and is removed. Harness writes the exact absolute Workspace root into each production `mcp.json`; rerun `harness scan` after copying or relocating a Workspace so the path stays correct.
 
-`harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and enable/verifies that project MCP. Codex and Cursor therefore share one generated `.agents/skills` projection. `harness skills list` shows the canonical skill registry without changing projects.
+`harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying the canonical absolute Workspace root in `HARNESS_WORKSPACE_ROOT` and enable/verifies that project MCP. Codex and Cursor therefore share one generated `.agents/skills` projection. `harness skills list` shows the canonical skill registry without changing projects.
 
 When Codex intent is active, scan creates/updates only the ignored marker-owned project
 `.codex/config.toml`, with the authenticated daemon Streamable HTTP URL and exact absolute
@@ -100,6 +101,32 @@ Use `harness doctor --runtime-only` for the old ephemeral SQLite/FTS5 probe and 
 
 `scripts/quality.py` remains the exact-head repository gate. Its installed-wheel smoke installs Codex against an existing Cursor Hidden Project without changing `AGENTS.md`, restores Normal, refreshes owned Codex configs across Python environments and independent/linked Workspaces, and verifies Cursor → Codex Task continuity, doctor, partial cleanup, Cursor lifecycle, uninstall-all, and purge.
 
+## Testing an installed release while developing
+
+Use separate runtime and evidence layers:
+
+| Layer | Command | What it proves |
+| --- | --- | --- |
+| Current checkout | `scripts/dev quality` | Locked dependencies, static checks, core/IPC/HTTP contracts, performance counters, and installed-wheel lifecycle in temporary fixtures |
+| Real Codex CLI, temporary wheel | `scripts/dev python scripts/accept_codex.py --preflight-only --evidence /tmp/harness-codex-preflight.json` | Real CLI config discovery and prompt bootstrap, five SDK wire calls, two independent Workspaces, doctor and cleanup |
+| Global package, temporary state | `make accept-global-codex` | The tool-installed executable passes that Codex preflight without adding synthetic Projects to canonical state |
+| Live activation | `make install-global HOST=cursor,codex`, then `make doctor-global` | Reconciles the explicitly selected real host profiles and registered Workspaces; requires a full host restart and new Task afterwards |
+| Proprietary host behavior | Fresh Cursor and Codex sessions in two Workspaces | Natural tool use, native Skill selection, correct roots, and Task continuity across restarts/host switches |
+
+Global-package acceptance and live activation require explicit operator authorization for checkout agents. Paid Codex model
+acceptance additionally uses the disclosure and invocation-scoped key described below. A passing
+wire probe does not prove the proprietary client loaded or called the tools.
+
+Keep the installed daemon available to real projects while running checkout tests through
+`scripts/dev`. Tests own temporary Git repositories, database/socket/skill roots, and separate
+HTTP listeners. Do not stop the real daemon to make tests pass. Use the explicit global-dogfood
+route only when selected by the operator; it exercises installed code, so current edits still
+need the checkout gate. See [isolated development](development/isolated-development.md).
+
+Record the exact Git revision, client versions, successful commands and unverified matrix items
+for each candidate. `EPERM` while binding a test socket means the sandbox needs local bind
+permission; `EADDRINUSE` is an isolation failure to investigate. Neither result is a passing test.
+
 ## Explicitly authorized Cursor refresh
 
 Checkout agents ordinarily remain isolated. After explicit user authorization they may first run
@@ -108,7 +135,7 @@ Harness/Codex/Workspace state. Live activation still requires
 `make install-global HOST=<profile>`. After this project-only Cursor change lands, an operator
 should:
 
-1. Run `make install-global` from the Harness checkout; repeat with `HOST=codex` or `HOST=all` for each compatible active profile.
+1. Run `make install-global HOST=cursor` from the Harness checkout, or `HOST=cursor,codex` for both profiles. The Make helper defaults to both profiles; unlike bare `harness install --host all`, it does not accept `HOST=all`.
 2. Confirm leftover `~/.cursor/mcp.json` `mcpServers.harness` is absent.
 3. Fully quit and reopen Cursor.
 4. In two working repositories at once (for example Alia and Mangazeya), confirm `agent mcp list-tools harness` shows the five tools and that `project_status` roots/tasks are distinct.
@@ -179,12 +206,22 @@ second exec whose unmatched prompt must not return the negative sibling nonce. T
 appear in prompt metadata ahead of time. Both modes verify schemas, distinct simultaneous
 Workspace identities, the exact relevant/no irrelevant generated skill set, doctor, and owned
 cleanup, and fail if `~/.codex/config.toml` changes. The runner gives Codex project
-trust only through a temporary `CODEX_HOME`, does not use saved Codex authentication, and removes
-that temporary state after the run. It does not prove Codex IDE, ChatGPT desktop, Cursor, or other
+trust only through a temporary `CODEX_HOME` and does not use saved Codex authentication. Cleanup
+runs after partial install and verification failures as well as success; uninstall errors remain
+visible alongside the original failure. The runner verifies that the temporary daemon releases
+both runtime locks before removing its state. If shutdown cannot be verified, it fails and
+preserves the named temporary directory for recovery. A new run invalidates its prior evidence
+file so a failed rerun cannot leave a stale success report. It does not prove Codex IDE, ChatGPT
+desktop, Cursor, or other
 proprietary UI behavior; those remain open host-compatibility matrix items. Paid-model `--run-model`
 is optional and is not a required CI gate.
 
-1. Run `make install-global HOST=codex`, then `harness scan` in each Workspace.
+Failed daemon autostart also terminates and reaps its own child before returning, including a
+child delayed before its singleton lock exists. This cleanup never stops an existing or
+concurrently winning daemon; termination and kill waits are bounded.
+
+1. Run `make install-global HOST=codex`, then `harness init` in each new project folder
+   (or `harness scan` to reconcile a folder that is already registered).
 2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,
    and create a new Task; an existing Task keeps its original instruction snapshot.
 3. From each Workspace root, require `codex mcp get harness --json` to show the loopback

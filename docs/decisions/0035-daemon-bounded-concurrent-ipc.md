@@ -60,6 +60,22 @@ This ADR supersedes only ADR-0008's implementation detail that the daemon opens 
 - This decision does not implement cancellation of an already-running domain operation when its client disconnects.
 - Windows remains outside this POSIX transport decision.
 
+## 2026-09-05 amendment: bounded SQLite writer wait
+
+The Python SQLite default waits only five seconds for a competing writer. That is shorter than the
+existing 25–30 second bounded index/search reconciliation windows. After daemon startup with many
+registered Workspaces, a valid `task_start` or `task_checkpoint` could therefore return a generic
+database error while the watcher was performing an ordinary full reconciliation.
+
+Every daemon-owned writable SQLite connection now uses an explicit 30-second busy timeout, aligned
+with the longest index reconciliation deadline. This remains bounded and does not weaken Task
+revision CAS or transaction atomicity. The Task IPC timeout is 90 seconds so the writer wait plus
+the already-bounded Workspace resolution, changed-file calculation, and Knowledge anchor capture
+cannot commit after the client has timed out under their documented worst-case budgets.
+
+Automated IPC coverage holds an independent write transaction beyond a deliberately shortened
+implicit SQLite default and verifies that `task_start` waits, then succeeds after the writer commits.
+
 ## Verification
 
 Automated tests must prove:

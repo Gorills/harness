@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import os
 import sqlite3
@@ -9,16 +10,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from time import monotonic
 
-from harness.git_workspace import _git_environment, inspect_git_workspace
+from harness.git_workspace import _git_environment, inspect_workspace_layout
 from harness.knowledge import (
     reconcile_knowledge_staleness,
     snapshot_fresh_anchored_knowledge_ids,
 )
-from harness.registry import WorkspaceRecord, get_workspace
+from harness.registry import (
+    WorkspaceRecord,
+    attach_workspace_git_if_present,
+    get_workspace,
+    workspace_layout_compatible,
+)
 from harness.search_text import (
     identifier_expansion,
     identifier_tokens,
@@ -45,6 +51,9 @@ _DEFAULT_EXCLUDES = (
     ".env.*",
     "*.pem",
     "*.key",
+)
+_FILESYSTEM_DIR_EXCLUDES = frozenset(
+    {".git", "node_modules", "vendor", "dist", "build", "target", "caches"}
 )
 _HASH_CHUNK_BYTES = 128 * 1024
 MAX_INDEXED_SEARCH_BODY_BYTES = 1024 * 1024
@@ -177,6 +186,7 @@ def scan_workspace(
     """Reconcile the rebuildable file inventory for one registered Workspace."""
     _require_scan_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
+    workspace = attach_workspace_git_if_present(connection, workspace.workspace_id)
     _require_registered_layout(workspace, deadline=deadline)
     eligible_knowledge_ids = snapshot_fresh_anchored_knowledge_ids(connection, workspace_id)
     snapshot = _build_snapshot(workspace, deadline=deadline)
@@ -204,6 +214,7 @@ def scan_workspace_paths(
     _require_scan_deadline(deadline)
     selected_paths = _normalize_incremental_paths(relative_paths)
     workspace = get_workspace(connection, workspace_id)
+    workspace = attach_workspace_git_if_present(connection, workspace.workspace_id)
     _require_registered_layout(workspace, deadline=deadline)
     eligible_knowledge_ids = snapshot_fresh_anchored_knowledge_ids(connection, workspace_id)
     existing = {
@@ -211,7 +222,7 @@ def scan_workspace_paths(
     }
     harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
     candidates = _candidate_paths(
-        workspace.workspace_root,
+        workspace,
         harnessignore_rules,
         deadline=deadline,
         pathspecs=selected_paths,
@@ -394,7 +405,7 @@ def list_workspace_candidate_paths(
     _require_registered_layout(workspace, deadline=deadline)
     harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
     paths = _candidate_paths(
-        workspace.workspace_root,
+        workspace,
         harnessignore_rules,
         deadline=deadline,
     )
@@ -439,13 +450,10 @@ def get_indexed_file(
 def _require_registered_layout(
     workspace: WorkspaceRecord, *, deadline: float | None = None
 ) -> None:
-    layout = inspect_git_workspace(workspace.workspace_root, deadline=deadline)
-    if (
-        layout.workspace_root != workspace.workspace_root
-        or layout.git_common_dir != workspace.git_common_dir
-    ):
+    layout = inspect_workspace_layout(workspace.workspace_root, deadline=deadline)
+    if not workspace_layout_compatible(workspace, layout):
         raise WorkspaceIndexMismatchError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
+            f"registered workspace identity changed: {workspace.workspace_root}"
         )
 
 
@@ -457,7 +465,7 @@ def _build_snapshot(
     _require_scan_deadline(deadline)
     harnessignore_rules = _read_harnessignore_rules(workspace.workspace_root)
     relative_paths = _candidate_paths(
-        workspace.workspace_root,
+        workspace,
         harnessignore_rules,
         deadline=deadline,
     )
@@ -1574,6 +1582,18 @@ def _rebuild_resolved_code_relations(
         (workspace_id,),
     )
 
+    module_candidate_cache: dict[tuple[str, str], str | None] = {}
+
+    def resolve_module(source_path: str, module: str) -> str | None:
+        # The module inventory is fixed for this rebuild. Absolute imports share candidates
+        # across callers; relative imports retain their source identity. Keep only uniqueness,
+        # and discard the cache before the next reconciliation can change that inventory.
+        key = (source_path if module.startswith(".") else "", module)
+        if key not in module_candidate_cache:
+            candidates = python_workspace_module_candidate_paths(source_path, module, module_paths)
+            module_candidate_cache[key] = candidates[0] if len(candidates) == 1 else None
+        return module_candidate_cache[key]
+
     def resolve_export(
         module_path: str,
         export_name: str,
@@ -1597,18 +1617,14 @@ def _rebuild_resolved_code_relations(
         if len(reexport) != 1:
             return None
         imported_name, module = reexport[0]
-        candidates = python_workspace_module_candidate_paths(
-            module_path,
-            module,
-            module_paths,
-        )
-        if len(candidates) != 1:
+        candidate = resolve_module(module_path, module)
+        if candidate is None:
             return None
-        state = (candidates[0], imported_name)
+        state = (candidate, imported_name)
         if state in seen:
             return None
         return resolve_export(
-            candidates[0],
+            candidate,
             imported_name,
             followed_edges=followed_edges + 1,
             seen=seen | {state},
@@ -1659,16 +1675,12 @@ def _rebuild_resolved_code_relations(
         export_name = _python_resolved_export_name(resolved_target, resolution_module)
         if export_name is None:
             continue
-        candidates = python_workspace_module_candidate_paths(
-            source_path,
-            resolution_module,
-            module_paths,
-        )
-        if len(candidates) != 1:
+        candidate = resolve_module(source_path, resolution_module)
+        if candidate is None:
             continue
-        initial_state = (candidates[0], export_name)
+        initial_state = (candidate, export_name)
         resolved = resolve_export(
-            candidates[0],
+            candidate,
             export_name,
             followed_edges=0,
             seen=frozenset({initial_state}),
@@ -1726,16 +1738,23 @@ def _code_unit_name(qualified_name: str) -> str:
 
 
 def _candidate_paths(
-    workspace_root: Path,
+    workspace: WorkspaceRecord,
     harnessignore_rules: bytes | None,
     *,
     deadline: float | None,
     pathspecs: Sequence[str] = (),
 ) -> tuple[str, ...]:
+    if workspace.git_common_dir == workspace.workspace_root:
+        return _candidate_paths_from_filesystem(
+            workspace.workspace_root,
+            harnessignore_rules,
+            deadline=deadline,
+            pathspecs=pathspecs,
+        )
     exclude_arguments = [f"--exclude={pattern}" for pattern in _DEFAULT_EXCLUDES]
     if harnessignore_rules is None:
         return _candidate_paths_from_git(
-            workspace_root,
+            workspace.workspace_root,
             exclude_arguments,
             deadline=deadline,
             pathspecs=pathspecs,
@@ -1748,13 +1767,122 @@ def _candidate_paths(
             exclude_file.write_bytes(harnessignore_rules)
             exclude_arguments.append(f"--exclude-from={exclude_file}")
             return _candidate_paths_from_git(
-                workspace_root,
+                workspace.workspace_root,
                 exclude_arguments,
                 deadline=deadline,
                 pathspecs=pathspecs,
             )
     except OSError as exc:
         raise IndexingError("Workspace .harnessignore snapshot could not be prepared") from exc
+
+
+def _candidate_paths_from_filesystem(
+    workspace_root: Path,
+    harnessignore_rules: bytes | None,
+    *,
+    deadline: float | None,
+    pathspecs: Sequence[str],
+) -> tuple[str, ...]:
+    ignore_patterns = _harnessignore_patterns(harnessignore_rules)
+    if pathspecs:
+        selected: list[str] = []
+        for relative_path in pathspecs:
+            _require_scan_deadline(deadline)
+            if _filesystem_relative_excluded(
+                relative_path,
+                is_dir=False,
+                ignore_patterns=ignore_patterns,
+            ):
+                continue
+            path = workspace_root / relative_path
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise IndexingError(
+                    f"Workspace path could not be inspected: {relative_path}"
+                ) from exc
+            selected.append(relative_path)
+        return tuple(sorted(selected))
+
+    paths: list[str] = []
+    pending: list[tuple[str, Path]] = [("", workspace_root)]
+    while pending:
+        _require_scan_deadline(deadline)
+        relative, directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError as exc:
+            if relative:
+                continue
+            raise IndexingError("Workspace root could not be enumerated") from exc
+        for entry in entries:
+            _require_scan_deadline(deadline)
+            child_relative = entry.name if not relative else f"{relative}/{entry.name}"
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                if entry.name in _FILESYSTEM_DIR_EXCLUDES or _filesystem_relative_excluded(
+                    child_relative,
+                    is_dir=True,
+                    ignore_patterns=ignore_patterns,
+                ):
+                    continue
+                pending.append((child_relative, Path(entry.path)))
+                continue
+            if _filesystem_relative_excluded(
+                child_relative,
+                is_dir=False,
+                ignore_patterns=ignore_patterns,
+            ):
+                continue
+            paths.append(child_relative)
+    return tuple(sorted(paths))
+
+
+def _harnessignore_patterns(harnessignore_rules: bytes | None) -> tuple[str, ...]:
+    if harnessignore_rules is None:
+        return ()
+    try:
+        text = harnessignore_rules.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise IndexingError("Workspace .harnessignore is not valid UTF-8") from exc
+    patterns: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        patterns.append(line)
+    return tuple(patterns)
+
+
+def _filesystem_relative_excluded(
+    relative_path: str,
+    *,
+    is_dir: bool,
+    ignore_patterns: Sequence[str],
+) -> bool:
+    name = PurePosixPath(relative_path).name
+    for glob in _DEFAULT_EXCLUDES:
+        if glob.endswith("/"):
+            if is_dir and fnmatch.fnmatch(name, glob[:-1]):
+                return True
+            continue
+        if fnmatch.fnmatch(name, glob):
+            return True
+    for pattern in ignore_patterns:
+        directory_only = pattern.endswith("/")
+        matched_pattern = pattern[:-1] if directory_only else pattern
+        if directory_only and not is_dir:
+            continue
+        if fnmatch.fnmatch(relative_path, matched_pattern) or fnmatch.fnmatch(
+            name, matched_pattern
+        ):
+            return True
+    return False
 
 
 def _candidate_paths_from_git(

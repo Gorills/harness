@@ -8,13 +8,18 @@ from pathlib import Path
 from typing import Final
 
 from harness.cursor_adapter import find_isolated_development_root
-from harness.git_workspace import GitWorkspaceError, inspect_git_workspace_runtime_identity
+from harness.git_workspace import GitWorkspaceError, inspect_workspace_runtime_identity
 from harness.host_adapters import (
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
 from harness.host_integration_state import load_host_integration_state_for_database
-from harness.registry import WorkspaceRecord, get_workspace, list_workspaces
+from harness.registry import (
+    WorkspaceRecord,
+    get_workspace,
+    list_workspaces,
+    workspace_layout_compatible,
+)
 from harness.skill_policy import ProjectSkillPolicyError
 from harness.skills import (
     SkillDefinition,
@@ -241,13 +246,8 @@ def _validate_workspace_identity(
     workspace: WorkspaceRecord, *, deadline: float | None = None
 ) -> None:
     try:
-        identity = inspect_git_workspace_runtime_identity(
-            workspace.workspace_root, deadline=deadline
-        )
+        identity = inspect_workspace_runtime_identity(workspace.workspace_root, deadline=deadline)
     except GitWorkspaceError:
         raise
-    if (
-        identity.layout.workspace_root != workspace.workspace_root
-        or identity.layout.git_common_dir != workspace.git_common_dir
-    ):
-        raise SkillRuntimeError("registered Workspace Git identity changed")
+    if not workspace_layout_compatible(workspace, identity.layout):
+        raise SkillRuntimeError("registered Workspace identity changed")

@@ -268,6 +268,19 @@ def test_connect_database_enforces_foreign_keys(tmp_path: Path) -> None:
         connection.close()
 
 
+def test_connect_database_configures_bounded_writer_wait(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+
+    connection = connect_database(database)
+    try:
+        assert connection.execute("PRAGMA busy_timeout").fetchone() == (
+            int(storage._SQLITE_BUSY_TIMEOUT_SECONDS * 1000),
+        )
+    finally:
+        connection.close()
+
+
 def test_initialize_database_migrates_existing_version_zero_database(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     connection = sqlite3.connect(database)
@@ -699,6 +712,9 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
         connection.execute("DROP TABLE indexed_code_unit_files")
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
+        connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
         connection.execute("DROP TABLE workspace_search_index_dirty_paths")
         connection.execute("DROP TABLE workspace_search_index_state")

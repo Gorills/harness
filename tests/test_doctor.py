@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fake_hosts import path_without_agent
 
 import harness.doctor as doctor
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
@@ -559,6 +560,7 @@ def test_doctor_labels_skill_timeout_with_workspace_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment = _doctor_environment(tmp_path)
+    environment["PATH"] = path_without_agent()
     root = _git_repository(tmp_path / "repo")
     [workspace] = _register_doctor_workspaces(environment, [root])
     _write_host_profiles(environment, "cursor")
@@ -646,7 +648,7 @@ def test_doctor_identity_timeout_is_not_unavailable(
     [workspace] = _register_doctor_workspaces(environment, [root])
     monkeypatch.setattr(
         doctor,
-        "inspect_git_workspace_runtime_identity",
+        "inspect_workspace_runtime_identity",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             GitWorkspaceDeadlineExceededError("Git workspace inspection deadline exceeded")
         ),
@@ -773,7 +775,7 @@ def _write_cursor_project_mcp(root: Path) -> None:
                         "args": ["-m", "harness.mcp_process"],
                         "env": {
                             "HARNESS_HOST_PROFILE": "cursor",
-                            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+                            "HARNESS_WORKSPACE_ROOT": str(root),
                         },
                     }
                 }

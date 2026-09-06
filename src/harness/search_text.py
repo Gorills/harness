@@ -16,6 +16,7 @@ _SEARCH_STOP_WORDS = frozenset(
         "as",
         "at",
         "be",
+        "before",
         "by",
         "for",
         "from",
@@ -58,6 +59,8 @@ _SEARCH_STOP_WORDS = frozenset(
         "это",
     }
 )
+_LOCATION_QUERY_MARKERS = frozenset({"how", "test", "testing", "tests", "where", "who"})
+_LOCATION_INTENT_TERMS = frozenset({"enforced", "implemented", "verifies"})
 _DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 _GENERATED_TEXT_OUTPUT_EXTENSIONS = {".log", ".out"}
 _QUERY_TERM_LIMIT = 24
@@ -66,6 +69,7 @@ _ENGLISH_QUERY_SUFFIXES = (
     "edly",
     "ness",
     "ment",
+    "ation",
     "ions",
     "ion",
     "ing",
@@ -127,7 +131,10 @@ class AnalyzedSearchQuery:
 def analyze_search_query(query: str) -> AnalyzedSearchQuery:
     """Remove conversational filler while retaining a safe FTS5 prefix expression."""
     all_terms = _deduplicate(identifier_tokens(query))[:_QUERY_TERM_LIMIT]
-    meaningful = tuple(term for term in all_terms if term not in _SEARCH_STOP_WORDS)
+    ignored = _SEARCH_STOP_WORDS
+    if any(term in _LOCATION_QUERY_MARKERS for term in all_terms):
+        ignored = ignored | _LOCATION_INTENT_TERMS
+    meaningful = tuple(term for term in all_terms if term not in ignored)
     terms = meaningful or all_terms
     operands = tuple(_fts_term_operand(term) for term in terms)
     return AnalyzedSearchQuery(
@@ -172,15 +179,22 @@ def query_term_prefixes(term: str) -> tuple[str, ...]:
 
 def matching_term_count(terms: tuple[str, ...], *values: str) -> int:
     """Count query terms represented by exact or FTS-equivalent prefix tokens."""
+    return len(matching_terms(terms, *values))
+
+
+def matching_terms(terms: tuple[str, ...], *values: str) -> tuple[str, ...]:
+    """Match all query terms against one tokenization of the supplied text."""
     candidates = frozenset(token for value in values for token in identifier_tokens(value))
-    return sum(
-        any(
+    matched: list[str] = []
+    for term in terms:
+        prefixes = _query_prefixes(term)
+        if any(
             candidate == prefix or (len(prefix) >= 3 and candidate.startswith(prefix))
             for candidate in candidates
-            for prefix in _query_prefixes(term)
-        )
-        for term in terms
-    )
+            for prefix in prefixes
+        ):
+            matched.append(term)
+    return tuple(matched)
 
 
 def contains_term_phrase(terms: tuple[str, ...], value: str) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -13,9 +14,11 @@ from typing import cast
 
 import pytest
 
+import harness.daemon as daemon_module
 import harness.git_workspace as git_workspace_module
 import harness.ipc as ipc_module
 import harness.knowledge as knowledge_module
+import harness.storage as storage_module
 import harness.task_changes as task_changes_module
 from harness.daemon import serve_daemon
 from harness.index import scan_workspace
@@ -205,11 +208,67 @@ def test_default_task_ipc_timeout_exceeds_stacked_checkpoint_mechanical_budgets(
     # then Knowledge anchor capture. The client must remain connected beyond all
     # of them so a successful commit cannot become an ambiguous transport timeout.
     stacked_budget = (
-        3 * git_workspace_module._GIT_COMMAND_TIMEOUT_SECONDS
+        storage_module._SQLITE_BUSY_TIMEOUT_SECONDS
+        + 3 * git_workspace_module._GIT_COMMAND_TIMEOUT_SECONDS
         + task_changes_module._CHANGED_FILES_TIMEOUT_SECONDS
         + knowledge_module._KNOWLEDGE_ANCHOR_CAPTURE_TIMEOUT_SECONDS
     )
     assert ipc_module._TASK_REQUEST_TIMEOUT_SECONDS >= stacked_budget + 10.0
+
+
+def test_task_start_waits_for_concurrent_sqlite_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, _workspace_id = _registered_database(tmp_path)
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    task_start_entered = Event()
+    original_mutate_task_start = daemon_module.mutate_task_start
+    original_sqlite_connect = sqlite3.connect
+
+    def observed_mutate_task_start(
+        connection: sqlite3.Connection,
+        request: ipc_module.TaskStartRequestData,
+    ) -> TaskStartResult:
+        task_start_entered.set()
+        return original_mutate_task_start(connection, request)
+
+    def short_default_connect(
+        database_value: str | Path,
+        *,
+        uri: bool,
+        autocommit: bool,
+        timeout: float = 0.05,
+    ) -> sqlite3.Connection:
+        return original_sqlite_connect(
+            database_value,
+            uri=uri,
+            autocommit=autocommit,
+            timeout=timeout,
+        )
+
+    stop_event, executor, future = _start_server(database, socket_path)
+    monkeypatch.setattr(daemon_module, "mutate_task_start", observed_mutate_task_start)
+    monkeypatch.setattr(sqlite3, "connect", short_default_connect)
+    writer = connect_database(database)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        with ThreadPoolExecutor(max_workers=1) as client_executor:
+            start_future = client_executor.submit(
+                request_task_start,
+                socket_path,
+                [WorkspaceHint(root, "explicit-root")],
+                title="Wait for the current index writer",
+            )
+            assert task_start_entered.wait(timeout=1)
+            time.sleep(0.15)
+            writer.execute("COMMIT")
+            assert start_future.result(timeout=3).state is TaskState.WORKING
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
+        _stop_server(stop_event, executor, future)
 
 
 def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Path) -> None:

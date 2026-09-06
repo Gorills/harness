@@ -28,12 +28,14 @@ class ProjectSkillPolicyError(RuntimeError):
 
 class ProjectSkillFacetMode(StrEnum):
     AUTO = "auto"
+    INCLUDED = "included"
     EXCLUDED = "excluded"
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectSkillPolicy:
     project_id: str
+    included_facets: tuple[str, ...]
     excluded_facets: tuple[str, ...]
 
 
@@ -43,7 +45,16 @@ def get_project_skill_policy(
 ) -> ProjectSkillPolicy:
     """Load the durable Project skill-surface exclusions in stable display order."""
     get_project(connection, project_id)
-    rows = connection.execute(
+    included_rows = connection.execute(
+        """
+        SELECT facet
+        FROM project_skill_inclusions
+        WHERE project_id = ?
+        ORDER BY facet
+        """,
+        (project_id,),
+    ).fetchall()
+    excluded_rows = connection.execute(
         """
         SELECT facet
         FROM project_skill_exclusions
@@ -52,13 +63,26 @@ def get_project_skill_policy(
         """,
         (project_id,),
     ).fetchall()
+    included = _facets_from_policy_rows(included_rows)
+    excluded = _facets_from_policy_rows(excluded_rows)
+    overlap = set(included) & set(excluded)
+    if overlap:
+        raise ProjectSkillPolicyError("Project skill policy includes and excludes the same facet")
+    return ProjectSkillPolicy(
+        project_id=project_id,
+        included_facets=included,
+        excluded_facets=excluded,
+    )
+
+
+def _facets_from_policy_rows(rows: list[tuple[object, ...]]) -> tuple[str, ...]:
     facets: list[str] = []
     for row in rows:
         facet = row[0]
         if not isinstance(facet, str) or facet not in _MANAGED_PROJECT_SKILL_FACET_SET:
             raise ProjectSkillPolicyError("Project skill policy contains an unsupported facet")
         facets.append(facet)
-    return ProjectSkillPolicy(project_id=project_id, excluded_facets=tuple(facets))
+    return tuple(facets)
 
 
 def set_project_skill_facet_mode(
@@ -75,18 +99,28 @@ def set_project_skill_facet_mode(
     connection.execute("BEGIN IMMEDIATE")
     try:
         get_project(connection, project_id)
+        connection.execute(
+            "DELETE FROM project_skill_inclusions WHERE project_id = ? AND facet = ?",
+            (project_id, facet),
+        )
+        connection.execute(
+            "DELETE FROM project_skill_exclusions WHERE project_id = ? AND facet = ?",
+            (project_id, facet),
+        )
         if mode is ProjectSkillFacetMode.EXCLUDED:
             connection.execute(
                 """
                 INSERT INTO project_skill_exclusions(project_id, facet)
                 VALUES (?, ?)
-                ON CONFLICT(project_id, facet) DO NOTHING
                 """,
                 (project_id, facet),
             )
-        else:
+        elif mode is ProjectSkillFacetMode.INCLUDED:
             connection.execute(
-                "DELETE FROM project_skill_exclusions WHERE project_id = ? AND facet = ?",
+                """
+                INSERT INTO project_skill_inclusions(project_id, facet)
+                VALUES (?, ?)
+                """,
                 (project_id, facet),
             )
         connection.execute("COMMIT")

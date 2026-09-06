@@ -31,19 +31,25 @@ METRIC_INDEX = "Проиндексировано"
 METRICS_LABEL = "Сводка"
 SECTION_WORKSPACES = "Папки"
 EMPTY_WORKSPACES_TITLE = "Пока нет проектов"
-EMPTY_WORKSPACES_HINT = "Откройте Git-репозиторий и выполните harness scan."
+EMPTY_WORKSPACES_HINT = "В нужной папке выполните harness init. Git не обязателен."
 EMPTY_PROJECT_WORKSPACES_TITLE = "Пока нет папок"
 EMPTY_PROJECT_WORKSPACES_HINT = "У этого проекта ещё нет зарегистрированной папки."
 PROJECT_MANAGEMENT = "Управление проектом"
 SKILL_SCOPE = "Области разработки"
+MANAGE_SKILL_SCOPE = "Управление скиллами проекта"
+MANAGE_SKILL_SCOPE_HINT = "Включить или скрыть области разработки для всех папок проекта."
 SKILL_SCOPE_HINT = (
-    "Harness по-прежнему определяет стек автоматически. Здесь можно исключить области, "
-    "которыми вы не занимаетесь в этом проекте. Базовые quality skills остаются включены."
+    "Базовые quality skills всегда включены. Авто подхватывает область по файлам, "
+    "Включить — сразу, даже в пустой папке, Не использовать — скрывает область."
 )
 SKILL_SCOPE_AUTO = "Авто"
+SKILL_SCOPE_INCLUDED = "Включить"
 SKILL_SCOPE_EXCLUDED = "Не использовать"
 SKILL_SCOPE_AUTO_HINT = (
     "Skills этой области добавляются только когда Harness обнаруживает её в стеке."
+)
+SKILL_SCOPE_INCLUDED_HINT = (
+    "Skills этой области проецируются сразу, даже если файлов стека ещё нет."
 )
 SKILL_SCOPE_EXCLUDED_HINT = (
     "Skills этой области не проецируются в проект, даже если стек обнаружен."
@@ -66,7 +72,7 @@ DELETE_PROJECT_CONFIRM_LABEL = "Для подтверждения введите
 DELETE_PROJECT_CONFIRM_VALUE = "УДАЛИТЬ"
 WORKSPACE_RELOCATION = "Перенос папки"
 WORKSPACE_RELOCATION_SUMMARY = "Проект перенесён в другую папку"
-WORKSPACE_RELOCATION_HINT = "Укажите новый абсолютный путь к Git-репозиторию. Задачи и знания сохранятся, индекс будет пересобран. После переноса выполните harness scan в новой папке, чтобы обновить настройки интеграций."
+WORKSPACE_RELOCATION_HINT = "Укажите новый абсолютный путь к папке проекта. Задачи и знания сохранятся, индекс будет пересобран. После переноса выполните harness scan в новой папке, чтобы обновить настройки интеграций. Git не обязателен."
 WORKSPACE_RELOCATION_LABEL = "Новый путь"
 WORKSPACE_RELOCATION_PLACEHOLDER = "/новый/путь/к/проекту"
 WORKSPACE_RELOCATION_SUBMIT = "Обновить путь"

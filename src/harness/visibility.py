@@ -21,6 +21,7 @@ from harness.registry import (
     list_workspaces,
     register_workspace_for_scan,
     update_project_visibility,
+    workspace_has_git,
 )
 
 
@@ -57,6 +58,12 @@ def set_project_visibility(
             raise RegistryError(f"project has no registered Workspaces: {project_id}")
         workspace = workspaces[0]
     workspaces = list_workspaces(connection, project_id=project.project_id)
+    if mode is VisibilityMode.HIDDEN and any(
+        not workspace_has_git(workspace) for workspace in workspaces
+    ):
+        raise HiddenProjectionError(
+            "Hidden requires a Git Workspace; filesystem Workspaces stay Normal"
+        )
     roots = _projection_roots(workspaces, deadline=deadline)
     profiles = tuple(host_profiles)
     if mode is VisibilityMode.HIDDEN:

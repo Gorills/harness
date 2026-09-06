@@ -40,6 +40,8 @@ from harness.search_text import (
     is_document_path,
     is_generated_text_output_path,
     matching_term_count,
+    matching_terms,
+    query_term_prefixes,
 )
 from harness.symbol_navigation import (
     MAX_SYMBOL_PARSE_BYTES,
@@ -69,6 +71,9 @@ _CONTEXT_CHANGED_PATH_LIMIT = 16
 _CONTEXT_CHANGED_PATH_BYTES = 2048
 MAX_PROJECT_CONTEXT_REF_BYTES = 4096 + len("code:")
 _FILE_CANDIDATE_LIMIT = 96
+_MAX_HIGH_COVERAGE_QUERY_TERMS = 8
+_MIN_HIGH_COVERAGE_QUERY_TERMS = 3
+_DENSE_CONTENT_NEAR_TOKENS = 128
 MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 48
 MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 3072
 MAX_SEARCH_EVIDENCE_HITS = 3
@@ -93,12 +98,31 @@ _QUALITY_EXACT_PATH = 0
 _QUALITY_EXACT_FILENAME = 1
 _QUALITY_EXACT_FILENAME_STEM = 2
 _QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 3
-_QUALITY_ALL_TERMS = 4
-_QUALITY_PARTIAL = 5
+_QUALITY_DENSE_CONTENT = 4
+_QUALITY_ALL_TERMS = 5
+_QUALITY_PARTIAL = 6
 _QUALITY_STALE_OFFSET = 3
 
 _CODE_RELATION_INTENT_TERMS = {
-    "call": frozenset({"call", "calls", "caller", "callers", "called", "invoke", "invokes"}),
+    "call": frozenset(
+        {
+            "call",
+            "calls",
+            "caller",
+            "callers",
+            "called",
+            "invoke",
+            "invokes",
+            "persist",
+            "persists",
+            "save",
+            "saves",
+            "store",
+            "stores",
+            "write",
+            "writes",
+        }
+    ),
     "import": frozenset(
         {"import", "imports", "imported", "importer", "dependency", "dependencies"}
     ),
@@ -315,6 +339,7 @@ class ProjectSearchHit:
     path: str | None = None
     evidence: ProjectSearchEvidence | None = None
     evidence_reason: str | None = None
+    evidence_line: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,11 +379,16 @@ def search_project(
     project = get_project(connection, workspace.project_id)
     normalized = _normalize_query(query)
     analyzed = analyze_search_query(normalized)
-    if not analyzed.terms:
-        raise SearchError("project search query has no searchable tokens")
     _validate_limit(limit)
     if not isinstance(scope, ProjectSearchScope):
         raise SearchError("project search scope is unsupported")
+    if not analyzed.terms:
+        if scope in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS} and (
+            _exact_search_needle(normalized) is not None
+        ):
+            # Literal punctuation has exact source coverage but no lexical candidate channel.
+            return ()
+        raise SearchError("project search query has no searchable tokens")
 
     if scope is ProjectSearchScope.CODE:
         hits = _project_hits(
@@ -895,7 +925,7 @@ def _indexed_code_unit_hits(
         phrase_match = contains_term_phrase(query.terms, name) or contains_term_phrase(
             query.terms, qualified_name
         )
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if phrase_match else _QUALITY_ALL_TERMS
+        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if phrase_match else _QUALITY_DENSE_CONTENT
         reason = (
             "code unit definition phrase" if phrase_match else "code unit definition (all terms)"
         )
@@ -913,6 +943,7 @@ def _indexed_code_unit_hits(
                 match_reason=reason,
                 freshness="indexed_snapshot",
                 path=relative_path,
+                evidence_line=line,
             ),
             quality=quality,
             matched_terms=len(query.terms),
@@ -1053,6 +1084,7 @@ def _indexed_resolved_code_relation_hits(
                 match_reason="code resolved call relation",
                 freshness="indexed_snapshot",
                 path=relative_path,
+                evidence_line=line,
             ),
             quality=quality,
             matched_terms=len(query.terms),
@@ -1166,6 +1198,7 @@ def _indexed_code_relation_hits(
                 match_reason=f"code {relation_kind} relation",
                 freshness="indexed_snapshot",
                 path=relative_path,
+                evidence_line=line,
             ),
             quality=quality,
             matched_terms=len(query.terms),
@@ -1221,7 +1254,66 @@ def _indexed_content_hits(
         max(24, limit * 8, len(query.terms) * 16),
     )
     ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    rows = connection.execute(
+    full_rows = _indexed_content_rows(
+        connection,
+        workspace_id,
+        corpus,
+        query.all_fts_expression,
+        candidate_limit,
+    )
+    term_sets = _content_coverage_term_sets(query.terms)
+    partial_rows: list[tuple[object, ...]] = []
+    if len(term_sets) > 1:
+        partial_rows = _indexed_content_rows(
+            connection,
+            workspace_id,
+            corpus,
+            " OR ".join(
+                f"({analyze_search_query(' '.join(terms)).all_fts_expression})"
+                for terms in term_sets[1:]
+            ),
+            candidate_limit,
+        )
+    dense_paths = _dense_content_paths(
+        connection,
+        workspace_id,
+        corpus,
+        term_sets,
+        candidate_limit,
+    )
+    full_paths = {
+        relative_path for relative_path, *_rest in full_rows if isinstance(relative_path, str)
+    }
+    for row in [*full_rows, *partial_rows]:
+        relative_path = row[0] if row else None
+        matched_terms = (
+            len(query.terms)
+            if isinstance(relative_path, str) and relative_path in full_paths
+            else len(query.terms) - 1
+        )
+        candidate = _indexed_content_row(
+            row,
+            query,
+            corpus,
+            matched_terms=matched_terms,
+            dense_match=isinstance(relative_path, str) and relative_path in dense_paths,
+        )
+        if candidate is None:
+            continue
+        previous = ranked_by_ref.get(candidate.hit.ref)
+        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
+            ranked_by_ref[candidate.hit.ref] = candidate
+    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _indexed_content_rows(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    corpus: str,
+    expression: str,
+    limit: int,
+) -> list[tuple[object, ...]]:
+    return connection.execute(
         """
         SELECT
             documents.relative_path,
@@ -1247,22 +1339,67 @@ def _indexed_content_hits(
                  documents.relative_path
         LIMIT ?
         """,
-        (query.all_fts_expression, workspace_id, corpus, candidate_limit),
+        (expression, workspace_id, corpus, limit),
     ).fetchall()
+
+
+def _content_coverage_term_sets(terms: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    if not _MIN_HIGH_COVERAGE_QUERY_TERMS <= len(terms) <= _MAX_HIGH_COVERAGE_QUERY_TERMS:
+        return (terms,)
+    return (terms, *(terms[:index] + terms[index + 1 :] for index in range(len(terms))))
+
+
+def _dense_content_paths(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    corpus: str,
+    term_sets: tuple[tuple[str, ...], ...],
+    limit: int,
+) -> frozenset[str]:
+    if not term_sets or len(term_sets[0]) < 2:
+        return frozenset()
+    expression = " OR ".join(_fts_near_expression(terms) for terms in term_sets)
+    rows = connection.execute(
+        """
+        SELECT documents.relative_path
+        FROM indexed_content_search
+        JOIN indexed_search_documents AS documents
+            ON documents.id = indexed_content_search.rowid
+        WHERE indexed_content_search MATCH ?
+          AND documents.workspace_id = ?
+          AND documents.corpus = ?
+        ORDER BY bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
+                 documents.relative_path
+        LIMIT ?
+        """,
+        (expression, workspace_id, corpus, limit),
+    ).fetchall()
+    paths: set[str] = set()
     for row in rows:
-        candidate = _indexed_content_row(row, query, corpus)
-        if candidate is None:
-            continue
-        previous = ranked_by_ref.get(candidate.hit.ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[candidate.hit.ref] = candidate
-    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+        if len(row) != 1 or not isinstance(row[0], str):
+            raise ProjectRetrievalError("dense content search crossed authoritative index state")
+        paths.add(row[0])
+    return frozenset(paths)
+
+
+def _fts_near_expression(terms: tuple[str, ...]) -> str:
+    operands: list[str] = []
+    for term in terms:
+        prefix = query_term_prefixes(term)[-1]
+        operand = f'"{prefix}"'
+        if len(prefix) >= 3:
+            operand += "*"
+        operands.append(operand)
+    return f"NEAR({' '.join(operands)}, {_DENSE_CONTENT_NEAR_TOKENS})"
 
 
 def _indexed_content_row(
     row: tuple[object, ...],
     query: AnalyzedSearchQuery,
     corpus: str,
+    *,
+    matched_terms: int,
+    dense_match: bool,
 ) -> _RankedProjectHit | None:
     (
         relative_path,
@@ -1307,16 +1444,25 @@ def _indexed_content_row(
     phrase_match = contains_term_phrase(query.terms, title) or contains_term_phrase(
         query.terms, normalized_identifiers
     )
-    matched_terms = len(query.terms)
     if exact_filename_stem:
         quality = _QUALITY_EXACT_FILENAME_STEM
         reason = "exact filename stem"
     elif phrase_match:
         quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
         reason = "normalized identifier/title phrase"
-    else:
+    elif dense_match:
+        quality = _QUALITY_DENSE_CONTENT
+        reason = (
+            "dense lexical content (all terms)"
+            if matched_terms == len(query.terms)
+            else f"dense lexical content ({matched_terms}/{len(query.terms)} terms)"
+        )
+    elif matched_terms == len(query.terms):
         quality = _QUALITY_ALL_TERMS
         reason = "lexical content (all terms)"
+    else:
+        quality = _QUALITY_PARTIAL
+        reason = f"lexical content ({matched_terms}/{len(query.terms)} terms)"
     return _RankedProjectHit(
         hit=ProjectSearchHit(
             ref=f"{prefix}:{relative_path}",
@@ -1917,21 +2063,32 @@ def _attach_current_source_evidence(
     response_reserve_bytes: int = 0,
 ) -> tuple[ProjectSearchHit, ...]:
     annotated: list[ProjectSearchHit] = []
-    reread_budget = MAX_SEARCH_EVIDENCE_HITS
+    evidence_budget = MAX_SEARCH_EVIDENCE_HITS
     for hit in hits:
         if hit.kind not in {ProjectSearchKind.CODE, ProjectSearchKind.DOC} or hit.path is None:
             annotated.append(hit)
             continue
         indexed_sha = _indexed_content_sha256(connection, workspace.workspace_id, hit.path)
         if indexed_sha is None:
-            annotated.append(replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_PATH_ONLY))
-            continue
-        if reread_budget <= 0:
             annotated.append(
-                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET)
+                replace(
+                    hit,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_PATH_ONLY,
+                    evidence_line=None,
+                )
             )
             continue
-        reread_budget -= 1
+        if evidence_budget <= 0:
+            annotated.append(
+                replace(
+                    hit,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET,
+                    evidence_line=None,
+                )
+            )
+            continue
         read = read_current_search_text(
             workspace,
             hit.path,
@@ -1944,21 +2101,39 @@ def _attach_current_source_evidence(
                     short_summary=None,
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX,
+                    evidence_line=None,
                 )
             )
             continue
         if read.status is not SearchEvidenceReadStatus.OK or read.text is None:
             annotated.append(
-                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_NOT_RELOCATED)
+                replace(
+                    hit,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
+                    evidence_line=None,
+                )
             )
             continue
-        evidence = _relocate_search_evidence(read.text, query.terms)
+        evidence = (
+            _search_evidence_at_line(read.text, hit.evidence_line, query.terms)
+            if hit.evidence_line is not None
+            else None
+        )
+        if evidence is None:
+            evidence = _relocate_search_evidence(read.text, query.terms)
         if evidence is None:
             annotated.append(
-                replace(hit, evidence=None, evidence_reason=EVIDENCE_REASON_NOT_RELOCATED)
+                replace(
+                    hit,
+                    evidence=None,
+                    evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
+                    evidence_line=None,
+                )
             )
             continue
-        annotated.append(replace(hit, evidence=evidence, evidence_reason=None))
+        annotated.append(replace(hit, evidence=evidence, evidence_reason=None, evidence_line=None))
+        evidence_budget -= 1
     return _fit_search_hits_to_response_budget(
         annotated,
         query.normalized,
@@ -2004,41 +2179,84 @@ def _indexed_content_sha256(
 
 
 def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearchEvidence | None:
-    present_terms = tuple(term for term in terms if matching_term_count((term,), text) == 1)
-    if not present_terms:
-        return None
     lines = text.splitlines()
     if not lines:
         return None
 
-    line_terms = tuple(
-        frozenset(term for term in present_terms if matching_term_count((term,), line) == 1)
-        for line in lines
-    )
-    counts = {term: 0 for term in present_terms}
-    covered = 0
-    left = 0
-    best: tuple[int, int, int] | None = None
-    for right, matched in enumerate(line_terms):
-        for term in matched:
-            if counts[term] == 0:
-                covered += 1
-            counts[term] += 1
-        while covered == len(present_terms) and left <= right:
-            width = right - left + 1
-            if width <= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
-                candidate = (width, left, right)
-                if best is None or candidate < best:
-                    best = candidate
-            for term in line_terms[left]:
-                counts[term] -= 1
-                if counts[term] == 0:
-                    covered -= 1
-            left += 1
-    if best is None:
+    line_terms = tuple(frozenset(matching_terms(terms, line)) for line in lines)
+    present = frozenset(term for matched in line_terms for term in matched)
+    present_terms = tuple(term for term in terms if term in present)
+    if not present_terms:
+        return None
+    matches = [
+        (line_index, term)
+        for line_index, matched in enumerate(line_terms)
+        for term in sorted(matched)
+    ]
+    if not matches:
         return None
 
-    _, match_start, match_end = best
+    counts: dict[str, int] = {}
+    left = 0
+    best_key: tuple[int, int, int, int] | None = None
+    best: tuple[int, int] | None = None
+    for right, (right_line, term) in enumerate(matches):
+        counts[term] = counts.get(term, 0) + 1
+        while right_line - matches[left][0] + 1 > MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
+            _remove_search_evidence_match(counts, matches[left][1])
+            left += 1
+        while left < right and counts[matches[left][1]] > 1:
+            _remove_search_evidence_match(counts, matches[left][1])
+            left += 1
+        start_line = matches[left][0]
+        width = right_line - start_line + 1
+        candidate_key = (-len(counts), width, start_line, right_line)
+        if best_key is None or candidate_key < best_key:
+            best_key = candidate_key
+            best = (start_line, right_line)
+    if best is None:
+        return None
+    match_start, match_end = best
+    matched_terms = tuple(
+        term
+        for term in present_terms
+        if any(term in line_terms[index] for index in range(match_start, match_end + 1))
+    )
+    minimum_terms = 1 if len(present_terms) == 1 else 2
+    if len(matched_terms) < minimum_terms:
+        return None
+    return _search_evidence_from_line_range(lines, match_start, match_end, matched_terms)
+
+
+def _search_evidence_at_line(
+    text: str,
+    line: int,
+    terms: tuple[str, ...],
+) -> ProjectSearchEvidence | None:
+    lines = text.splitlines()
+    if line < 1 or line > len(lines):
+        return None
+    match_line = line - 1
+    matched_terms = matching_terms(terms, lines[match_line])
+    if not matched_terms:
+        return None
+    return _search_evidence_from_line_range(lines, match_line, match_line, matched_terms)
+
+
+def _remove_search_evidence_match(counts: dict[str, int], term: str) -> None:
+    remaining = counts[term] - 1
+    if remaining:
+        counts[term] = remaining
+    else:
+        del counts[term]
+
+
+def _search_evidence_from_line_range(
+    lines: list[str],
+    match_start: int,
+    match_end: int,
+    required_terms: tuple[str, ...],
+) -> ProjectSearchEvidence | None:
     start = match_start
     end = match_end
     while end - start + 1 < MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
@@ -2063,7 +2281,7 @@ def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearc
     if len(snippet.encode("utf-8")) > MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
         snippet = _truncate_utf8(snippet, MAX_SEARCH_EVIDENCE_SNIPPET_BYTES)
         truncated = True
-        if matching_term_count(present_terms, snippet) < len(present_terms):
+        if matching_term_count(required_terms, snippet) < len(required_terms):
             return None
     return ProjectSearchEvidence(
         start_line=start + 1,

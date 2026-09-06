@@ -1,8 +1,8 @@
 # ADR-0036: Source-checkout global dogfood is an explicit index-only route
 
 > **Amended by ADR-0037:** Codex now uses a locally generated ignored HTTP MCP config. References
-> below to its tracked `harness-dev` stdio overlay are superseded; tracked Cursor and Claude
-> overlays remain current.
+> below to its tracked `harness-dev` stdio overlay are superseded; the tracked Cursor overlay
+> remains current. ADR-0039 subsequently retired the Claude host and overlay.
 
 - **Status:** Accepted
 - **Date:** 2026-08-31

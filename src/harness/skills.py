@@ -20,7 +20,11 @@ from itertools import combinations
 from pathlib import Path, PurePosixPath
 from time import monotonic
 
-from harness.git_workspace import _git_environment
+from harness.git_workspace import (
+    _git_environment,
+    inspect_workspace_layout,
+    layout_has_git,
+)
 from harness.index import IndexedFileKind, IndexedFileRecord, list_indexed_files
 from harness.registry import WorkspaceRecord, get_workspace
 from harness.skill_policy import MANAGED_PROJECT_SKILL_FACETS, get_project_skill_policy
@@ -205,6 +209,7 @@ _SOFTWARE_MANIFEST_NAMES = frozenset(
         "build.gradle",
         "build.gradle.kts",
         "cargo.toml",
+        "cmakelists.txt",
         "composer.json",
         "gemfile",
         "gemfile.lock",
@@ -465,7 +470,11 @@ def detect_workspace_stack(
     *,
     deadline: float | None = None,
 ) -> DetectedProjectStack:
-    """Derive a bounded deterministic stack from the current Structural Index and manifests."""
+    """Derive a bounded deterministic stack from the current Structural Index and manifests.
+
+    A registered Workspace always includes ``software-project``. Specialized facets still
+    require indexed evidence unless the operator Included that surface.
+    """
     _require_resolution_deadline(deadline)
     workspace = get_workspace(connection, workspace_id)
     records = list_indexed_files(connection, workspace_id)
@@ -532,8 +541,7 @@ def detect_workspace_stack(
 
     if has_web_source and "mobile-app" not in facets:
         facets.add("web-frontend")
-    if languages:
-        facets.add("software-project")
+    facets.add("software-project")
 
     return DetectedProjectStack(
         languages=frozenset(languages),
@@ -564,6 +572,7 @@ def resolve_workspace_skills(
         explicit_include=explicit_include,
         explicit_exclude=explicit_exclude,
         excluded_facets=policy.excluded_facets,
+        included_facets=policy.included_facets,
     )
 
 
@@ -574,6 +583,7 @@ def resolve_skills(
     explicit_include: Iterable[str] = (),
     explicit_exclude: Iterable[str] = (),
     excluded_facets: Iterable[str] = (),
+    included_facets: Iterable[str] = (),
 ) -> tuple[ResolvedSkill, ...]:
     """Select every deterministic relevant Skill from the canonical registry.
 
@@ -597,13 +607,20 @@ def resolve_skills(
         raise SkillResolutionError(f"explicit skill ids are unknown: {', '.join(sorted(unknown))}")
     managed_facets = frozenset(MANAGED_PROJECT_SKILL_FACETS)
     excluded_project_facets = {_normalize_facet(value) for value in excluded_facets}
-    unsupported_facets = excluded_project_facets - managed_facets
+    included_project_facets = {_normalize_facet(value) for value in included_facets}
+    unsupported_facets = (excluded_project_facets | included_project_facets) - managed_facets
     if unsupported_facets:
         raise SkillResolutionError(
             "project skill policy contains unsupported facets: "
             + ", ".join(sorted(unsupported_facets))
         )
-    effective_facets = stack.facets - excluded_project_facets
+    overlap = included_project_facets & excluded_project_facets
+    if overlap:
+        raise SkillResolutionError(
+            "project skill policy includes and excludes the same facet: "
+            + ", ".join(sorted(overlap))
+        )
+    effective_facets = (stack.facets | included_project_facets) - excluded_project_facets
 
     matched: list[tuple[tuple[int, int, int, int, int], ResolvedSkill]] = []
     for definition in definitions:
@@ -804,19 +821,22 @@ def inspect_skill_projection(
     desired_paths = set(desired_by_path)
     stale_owned = len(existing_owned - desired_paths)
     _require_projection_deadline(deadline)
-    exclude_path = _git_info_exclude_path(workspace_root, deadline=deadline)
-    original_exclude = _read_optional_bytes(exclude_path)
-    updated_exclude = _reconcile_exclude_bytes(
-        original_exclude,
-        managed_roots=managed_roots,
-        desired_paths=desired_paths,
-    )
+    exclude_current = True
+    if _projection_has_git(workspace_root, deadline=deadline):
+        exclude_path = _git_info_exclude_path(workspace_root, deadline=deadline)
+        original_exclude = _read_optional_bytes(exclude_path)
+        updated_exclude = _reconcile_exclude_bytes(
+            original_exclude,
+            managed_roots=managed_roots,
+            desired_paths=desired_paths,
+        )
+        exclude_current = updated_exclude == original_exclude
     return SkillProjectionInspection(
         desired=len(desired_by_path),
         matching=matching,
         missing_or_changed=len(desired_by_path) - matching,
         stale_owned=stale_owned,
-        exclude_current=updated_exclude == original_exclude,
+        exclude_current=exclude_current,
     )
 
 
@@ -896,14 +916,19 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
         )
 
     desired_paths = set(desired_by_path)
-    exclude_path = _git_info_exclude_path(workspace_root)
-    original_exclude = _read_optional_bytes(exclude_path)
-    updated_exclude = _reconcile_exclude_bytes(
-        original_exclude,
-        managed_roots=managed_roots,
-        desired_paths=desired_paths,
-    )
-    exclude_changed = updated_exclude != original_exclude
+    exclude_path: Path | None = None
+    original_exclude = b""
+    updated_exclude = b""
+    exclude_changed = False
+    if _projection_has_git(workspace_root):
+        exclude_path = _git_info_exclude_path(workspace_root)
+        original_exclude = _read_optional_bytes(exclude_path)
+        updated_exclude = _reconcile_exclude_bytes(
+            original_exclude,
+            managed_roots=managed_roots,
+            desired_paths=desired_paths,
+        )
+        exclude_changed = updated_exclude != original_exclude
 
     try:
         _preflight_visible_skill_collisions(
@@ -915,6 +940,8 @@ def apply_skill_projection(plan: SkillProjectionPlan) -> SkillProjectionResult:
         )
         _commit_projection_changes(workspace_root, prepared)
         if exclude_changed:
+            if exclude_path is None:
+                raise SkillProjectionError("skill projection exclude path is missing")
             _replace_file_if_unchanged(exclude_path, original_exclude, updated_exclude)
     except Exception as exc:
         rollback_error = _rollback_projection_changes(workspace_root, prepared)
@@ -1303,7 +1330,7 @@ def _path_facets(path: PurePosixPath) -> set[str]:
         or suffix in {".csproj", ".fsproj", ".sln"}
     ):
         facets.add("software-project")
-    if name == "project.godot":
+    if name == "project.godot" or suffix in {".gd", ".gdshader", ".gdextension", ".tscn"}:
         facets.add("godot-project")
     if name in {
         "containerfile",
@@ -2368,6 +2395,10 @@ def _projected_files(target: Path) -> tuple[PurePosixPath, ...]:
     return tuple(sorted(files, key=str))
 
 
+def _projection_has_git(workspace_root: Path, *, deadline: float | None = None) -> bool:
+    return layout_has_git(inspect_workspace_layout(workspace_root, deadline=deadline))
+
+
 def _git_info_exclude_path(workspace_root: Path, *, deadline: float | None = None) -> Path:
     result = _run_git(
         workspace_root, ["rev-parse", "--git-path", "info/exclude"], deadline=deadline
@@ -2388,6 +2419,8 @@ def _git_info_exclude_path(workspace_root: Path, *, deadline: float | None = Non
 def _git_tracked_paths(
     workspace_root: Path, relative: PurePosixPath, *, deadline: float | None = None
 ) -> tuple[str, ...]:
+    if not _projection_has_git(workspace_root, deadline=deadline):
+        return ()
     result = _run_git(
         workspace_root,
         ["ls-files", "-z", "--", relative.as_posix(), f"{relative.as_posix()}/"],

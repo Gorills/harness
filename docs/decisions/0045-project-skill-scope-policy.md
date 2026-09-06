@@ -4,6 +4,8 @@
 - **Date:** 2026-09-02
 - **Deciders:** Repository architecture baseline
 - **Builds on:** [ADR-0044](0044-project-skill-projection-has-no-count-cap.md)
+- **Amended by:** [ADR-0064](0064-opt-in-workspace-init-and-skill-include.md) for the `Included`
+  Dashboard state.
 
 ## Context
 
@@ -21,8 +23,10 @@ would bypass an older Project preference until the user configured it again.
 1. Harness stores a durable Project-level exclusion policy for stable development surfaces represented
    by existing stack facets: backend, web frontend, mobile, database, Godot, containers,
    observability, CI/release, and deployment operations.
-2. Dashboard presents each managed surface with two states: `Auto` and `Excluded`. `Auto` keeps normal
-   stack-driven behavior. `Excluded` prevents Skills for that detected surface from being projected.
+2. Dashboard presents each managed surface with three states: `Auto`, `Included`, and `Excluded`.
+   `Auto` keeps normal stack-driven behavior. `Included` projects Skills for that surface even
+   without indexed evidence. `Excluded` prevents Skills for that detected surface from being
+   projected.
 3. `software-project` is not user-disableable. The shared quality baseline remains available even when
    one specialized development surface is excluded.
 4. Skill resolution applies Project surface exclusions after Workspace stack detection. A matching

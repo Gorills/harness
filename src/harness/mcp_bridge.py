@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import anyio
 from mcp.server import MCPServer
@@ -52,6 +52,7 @@ from harness.ipc import (
 )
 from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
 from harness.retrieval import (
+    EVIDENCE_REASON_RESPONSE_BUDGET,
     MAX_PROJECT_CONTEXT_REF_BYTES,
     PROJECT_SEARCH_MAX_BYTES,
     ProjectSearchScope,
@@ -60,6 +61,7 @@ from harness.retrieval import (
     project_symbol_navigation_payload,
 )
 from harness.runtime_paths import default_runtime_paths
+from harness.search import MAX_SEARCH_QUERY_BYTES
 from harness.tasks import TaskState, TaskWaitReason
 from harness.verification import VerificationDraft, VerificationStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -90,7 +92,9 @@ _PROJECT_SEARCH_DESCRIPTION = (
     "native rg/grep. Code/doc hits may "
     "include current-source evidence; use it directly. If evidence is absent or more source is "
     "needed, targeted native read is allowed. If exact coverage is incomplete, targeted native "
-    "search fallback is allowed. project_context is not required for those kinds. Use after "
+    "search fallback is allowed. Successful data is in structuredContent; results_truncated=true "
+    "means lower-priority hits were omitted to preserve the response budget. project_context is "
+    "not required for those kinds. Use after "
     "task_start or resume, before broad native exploration. Skip this search only when an exact "
     "path is already in hand; Task remains required."
 )
@@ -356,6 +360,16 @@ class HarnessMCPServer(MCPServer):
                 raise _unknown_tool_argument_error(name, allowed, unknown)
         result = await super().call_tool(name, arguments, context)
         if isinstance(result, CallToolResult):
+            if (
+                name == "project_search"
+                and result.structured_content is not None
+                and not result.is_error
+            ):
+                # The SDK serializes dict results into both TextContent and
+                # structuredContent for backwards compatibility. Harness targets
+                # the current structured-output protocol, so retaining both would
+                # spend roughly half of the search exposure budget on duplication.
+                result = result.model_copy(update={"content": []})
             return _bounded_call_result(name, result)
         return result
 
@@ -491,12 +505,24 @@ def build_mcp_server(
     @server.tool(description=_PROJECT_SEARCH_DESCRIPTION)
     def project_search(
         ctx: Context[Any, Any],
-        query: str,
+        query: Annotated[
+            str,
+            Field(
+                min_length=1,
+                description=(
+                    f"Non-empty text; at most {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes after trimming "
+                    "surrounding whitespace. NUL is not allowed. Quote exact literals."
+                ),
+            ),
+        ],
         scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
-        limit: StrictInt = _SEARCH_DEFAULT_LIMIT,
+        limit: Annotated[StrictInt, Field(ge=1, le=_SEARCH_HARD_LIMIT)] = _SEARCH_DEFAULT_LIMIT,
     ) -> dict[str, Any]:
         if not 1 <= limit <= _SEARCH_HARD_LIMIT:
             raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
+        # The domain query bound applies after trimming. Forward and expose that same
+        # spelling so accepted padding cannot consume the model response budget.
+        query = query.strip()
         result = request_project_search(
             _socket_path(),
             _workspace_hints(ctx, workspace_transport=workspace_transport),
@@ -505,7 +531,7 @@ def build_mcp_server(
             scope=ProjectSearchScope(scope),
         )
         hits = [project_search_hit_payload(hit) for hit in result.results[:limit]]
-        return _bounded(
+        return _fit_project_search_payload(
             {
                 "query": query,
                 "scope": scope,
@@ -520,10 +546,9 @@ def build_mcp_server(
                     if result.symbol_navigation is None
                     else project_symbol_navigation_payload(result.symbol_navigation)
                 ),
+                "results_truncated": False,
                 "results": hits,
-            },
-            _SEARCH_MAX_BYTES,
-            "project_search response exceeds model exposure budget",
+            }
         )
 
     @server.tool(description=_PROJECT_CONTEXT_DESCRIPTION)
@@ -739,6 +764,46 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
     if len(encoded) > limit:
         raise ValueError(message)
     return payload
+
+
+def _fit_project_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fit search disclosure against the real structured MCP result envelope."""
+    raw_results = payload.get("results")
+    if not isinstance(raw_results, list):
+        raise ValueError("project_search results must be a list")
+    fitted = {**payload, "results": [dict(hit) for hit in raw_results]}
+    while not _structured_search_result_fits(fitted):
+        results = fitted["results"]
+        evidence_index = next(
+            (
+                index
+                for index in range(len(results) - 1, -1, -1)
+                if results[index].get("evidence") is not None
+            ),
+            None,
+        )
+        if evidence_index is not None:
+            compact_hit = dict(results[evidence_index])
+            compact_hit["evidence"] = None
+            compact_hit["evidence_reason"] = EVIDENCE_REASON_RESPONSE_BUDGET
+            results[evidence_index] = compact_hit
+            continue
+        if results:
+            results.pop()
+            fitted["results_truncated"] = True
+            continue
+        raise ValueError("project_search response exceeds model exposure budget")
+    return fitted
+
+
+def _structured_search_result_fits(payload: dict[str, Any]) -> bool:
+    return _structured_search_result_size(payload) <= _SEARCH_MAX_BYTES
+
+
+def _structured_search_result_size(payload: dict[str, Any]) -> int:
+    result = CallToolResult(content=[], structured_content=payload)
+    encoded = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
+    return len(encoded) + _MCP_WIRE_OVERHEAD_BYTES
 
 
 def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:

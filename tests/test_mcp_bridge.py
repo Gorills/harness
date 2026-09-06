@@ -28,9 +28,12 @@ from harness.mcp_bridge import (
     _STATUS_MAX_BYTES,
     _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
+    _fit_project_search_payload,
+    _structured_search_result_size,
     _unknown_tool_argument_error,
 )
 from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
+from harness.search_currentness import SearchCurrentnessTimeoutError, SearchCurrentnessUnstableError
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
@@ -90,6 +93,8 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     assert "exact path" in description
     assert "targeted native read is allowed" in description
     assert "Python/JS/TS/TSX/Go/Rust/Java" in description
+    assert "structuredContent" in description
+    assert "results_truncated=true" in description
     assert "project_context is not required for those kinds" in description
     assert "after task_start or resume" in description
     assert "Skip this search only when an" in description
@@ -219,7 +224,9 @@ def _dashboard_post(url: str, fields: dict[str, str | int]) -> int:
 
 
 @pytest.mark.anyio
-async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -> None:
+async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root, database = _repo(tmp_path)
     state = tmp_path / "state"
     runtime = tmp_path / "runtime"
@@ -366,10 +373,49 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                     },
                 )
                 assert invalid_checkpoint.is_error is True
-            invalid_limit = await client.call_tool(
-                "project_search", {"query": "token", "limit": "1"}
+            for invalid_limit_value in ("1", True, 1.5, 0, 11):
+                invalid_limit = await client.call_tool(
+                    "project_search", {"query": "token", "limit": invalid_limit_value}
+                )
+                assert invalid_limit.is_error is True
+            for invalid_query in ("", " \t ", "token\x00", "x" * 257, "я" * 129):
+                invalid_search = await client.call_tool("project_search", {"query": invalid_query})
+                assert invalid_search.is_error is True
+            padded_query = " " * 6500 + "token" + " " * 6500
+            padded_search = await client.call_tool("project_search", {"query": padded_query})
+            assert padded_search.is_error is False
+            assert padded_search.structured_content is not None
+            assert padded_search.structured_content["query"] == "token"
+            assert len(json.dumps(padded_search.structured_content).encode("utf-8")) < 12 * 1024
+            punctuation_search = await client.call_tool(
+                "project_search", {"query": '"="', "scope": "code"}
             )
-            assert invalid_limit.is_error is True
+            assert punctuation_search.is_error is False
+            assert punctuation_search.structured_content is not None
+            assert punctuation_search.structured_content["exact_coverage"]["complete"] is True
+            assert (
+                punctuation_search.structured_content["exact_coverage"]["matched_occurrences"] > 0
+            )
+            for error_type, code in (
+                (SearchCurrentnessTimeoutError, "search_timeout"),
+                (SearchCurrentnessUnstableError, "search_workspace_changed"),
+            ):
+                with monkeypatch.context() as isolated_patch:
+
+                    def fail_search(
+                        *_args: object,
+                        _error_type: type[Exception] = error_type,
+                        **_kwargs: object,
+                    ) -> None:
+                        raise _error_type("private-source-detail")
+
+                    isolated_patch.setattr("harness.daemon.read_project_search", fail_search)
+                    failed = await client.call_tool("project_search", {"query": "token"})
+                    assert failed.is_error is True
+                    serialized_failure = failed.model_dump_json()
+                    assert code in serialized_failure
+                    assert "private-source-detail" not in serialized_failure
+                    assert len(serialized_failure.encode("utf-8")) < 4096
             checkpoint = await client.call_tool(
                 "task_checkpoint",
                 {
@@ -773,6 +819,13 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 for tool in tools:
                     assert tool["inputSchema"]["additionalProperties"] is False
                 by_name = {tool["name"]: tool for tool in tools}
+                search_properties = by_name["project_search"]["inputSchema"]["properties"]
+                assert search_properties["limit"]["type"] == "integer"
+                assert search_properties["limit"]["minimum"] == 1
+                assert search_properties["limit"]["maximum"] == 10
+                assert search_properties["limit"]["default"] == 5
+                assert search_properties["query"]["minLength"] == 1
+                assert "256 UTF-8 bytes after trimming" in search_properties["query"]["description"]
                 assert "Russian" in by_name["task_start"]["description"]
                 assert "not a Skill selector" in by_name["task_start"]["description"]
                 assert "before diagnosis" in by_name["task_start"]["description"]
@@ -1258,22 +1311,103 @@ def test_project_search_success_wire_stays_within_model_budget(tmp_path: Path) -
                 continue
             assert len(raw.encode("utf-8")) < 12 * 1024
             response = json.loads(raw)
-            if request["id"] == 2:
-                assert response["result"]["isError"] is False
-                assert response["result"]["content"]
-                assert len(response["result"]["structuredContent"]["results"]) == 3
-            else:
-                assert response["result"]["isError"] is True
-                assert (
-                    "response exceeds model exposure budget"
-                    in response["result"]["content"][0]["text"]
-                )
+            assert response["result"]["isError"] is False
+            assert response["result"]["content"] == []
+            structured = response["result"]["structuredContent"]
+            assert structured["results_truncated"] is False
+            expected_count = 3 if request["id"] == 2 else 10
+            assert len(structured["results"]) == expected_count
     finally:
         process.terminate()
         process.wait(timeout=3)
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+
+def _search_payload_hit(index: int, *, evidence: str | None) -> dict[str, object]:
+    return {
+        "ref": f"code:src/service_{index}.py",
+        "kind": "code",
+        "title": f"service_{index}.py",
+        "location": f"src/service_{index}.py",
+        "short_summary": None,
+        "match_reason": "lexical content (all terms)",
+        "freshness": "indexed_snapshot",
+        "evidence": (
+            None
+            if evidence is None
+            else {
+                "start_line": 1,
+                "end_line": 1,
+                "snippet": evidence,
+                "truncated": True,
+            }
+        ),
+        "evidence_reason": None,
+        "path": f"src/service_{index}.py",
+    }
+
+
+def _search_payload(results: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "query": "service token",
+        "scope": "code",
+        "workspace_state": "current",
+        "exact_coverage": None,
+        "symbol_navigation": None,
+        "results_truncated": False,
+        "results": results,
+    }
+
+
+def test_project_search_compaction_drops_tail_evidence_before_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _search_payload_hit(1, evidence="first token " + ("a" * 512))
+    second = _search_payload_hit(2, evidence="second token " + ("b" * 512))
+    payload = _search_payload([first, second])
+    without_tail_evidence = _search_payload(
+        [
+            first,
+            {
+                **second,
+                "evidence": None,
+                "evidence_reason": "response_budget",
+            },
+        ]
+    )
+    budget = _structured_search_result_size(without_tail_evidence)
+    assert _structured_search_result_size(payload) > budget
+    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
+
+    fitted = _fit_project_search_payload(payload)
+
+    assert fitted["results_truncated"] is False
+    assert len(fitted["results"]) == 2
+    assert fitted["results"][0]["evidence"] is not None
+    assert fitted["results"][1]["evidence"] is None
+    assert fitted["results"][1]["evidence_reason"] == "response_budget"
+
+
+def test_project_search_compaction_marks_tail_hit_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hits = [_search_payload_hit(index, evidence=None) for index in range(3)]
+    payload = _search_payload(hits)
+    two_hit_payload = _search_payload(hits[:2])
+    two_hit_payload["results_truncated"] = True
+    budget = _structured_search_result_size(two_hit_payload)
+    assert _structured_search_result_size(payload) > budget
+    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
+
+    fitted = _fit_project_search_payload(payload)
+
+    assert fitted["results_truncated"] is True
+    assert [hit["ref"] for hit in fitted["results"]] == [
+        "code:src/service_0.py",
+        "code:src/service_1.py",
+    ]
 
 
 @pytest.mark.anyio

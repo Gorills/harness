@@ -31,6 +31,14 @@ class SearchCurrentnessError(IndexingError):
     """Raised when Project search cannot prove that its Structural Index is current."""
 
 
+class SearchCurrentnessTimeoutError(SearchCurrentnessError):
+    """Currentness could not be proved within the search execution deadline."""
+
+
+class SearchCurrentnessUnstableError(SearchCurrentnessError):
+    """Source repeatedly changed while preparing or reading search results."""
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceSearchCurrentness:
     """One live Workspace/index state that Project search was reconciled against."""
@@ -61,9 +69,17 @@ def ensure_workspace_search_index_current(
     search never relies on watcher timing after an edit, revert, untracked-file change, ignore-rule
     change, or branch switch.
     """
-    remaining = deadline - monotonic()
-    if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
-        raise SearchCurrentnessError("Project search currentness deadline exceeded")
+    if connection.in_transaction:
+        raise SearchCurrentnessError("Project search currentness requires no active transaction")
+    if monotonic() >= deadline:
+        raise SearchCurrentnessTimeoutError("Project search currentness deadline exceeded")
+    if not scan_lock.acquire(blocking=False):
+        current = _read_currentness_without_reconciliation(connection, workspace, deadline=deadline)
+        if current is not None:
+            return current
+        remaining = deadline - monotonic()
+        if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
+            raise SearchCurrentnessTimeoutError("Project search currentness deadline exceeded")
     try:
         for _attempt in range(_SEARCH_CURRENTNESS_MAX_ATTEMPTS):
             before = _read_snapshot(workspace, deadline)
@@ -132,7 +148,42 @@ def ensure_workspace_search_index_current(
     finally:
         scan_lock.release()
 
-    raise SearchCurrentnessError("Workspace changed repeatedly while preparing Project search")
+    raise SearchCurrentnessUnstableError(
+        "Workspace changed repeatedly while preparing Project search"
+    )
+
+
+def _read_currentness_without_reconciliation(
+    connection: sqlite3.Connection,
+    workspace: WorkspaceRecord,
+    *,
+    deadline: float,
+) -> WorkspaceSearchCurrentness | None:
+    """Reuse a proven warm snapshot while another reconciliation owns the scan lock.
+
+    WAL permits this coherent read during an unrelated writer transaction. Release the read
+    transaction before retrieval's final live revision check or any subsequent lock wait.
+    """
+    connection.execute("BEGIN")
+    try:
+        persisted = _read_persisted_state(connection, workspace.workspace_id)
+        if persisted is None:
+            return None
+        before = _read_snapshot(workspace, deadline)
+        revision = _read_index_revision(connection, workspace.workspace_id)
+        if persisted.change_token != before.token or persisted.index_revision != revision:
+            return None
+        indexed_paths = {
+            record.relative_path
+            for record in list_indexed_files(connection, workspace.workspace_id)
+        }
+        candidates = set(list_workspace_candidate_paths(workspace, deadline=deadline))
+        if candidates != indexed_paths:
+            return None
+        return WorkspaceSearchCurrentness(before.token, _snapshot_head_text(before), revision)
+    finally:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
 
 
 def workspace_search_state_is_unchanged(
@@ -155,6 +206,10 @@ def _read_snapshot(workspace: WorkspaceRecord, deadline: float) -> WorkspaceGitS
     try:
         return read_workspace_change_snapshot(workspace, deadline=deadline)
     except WorkspaceWatchError as exc:
+        if monotonic() >= deadline:
+            raise SearchCurrentnessTimeoutError(
+                "Project search currentness deadline exceeded"
+            ) from exc
         raise SearchCurrentnessError(
             "Project search could not inspect current Workspace state"
         ) from exc
@@ -299,7 +354,7 @@ def _git_changed_paths(
         return None
     remaining = deadline - monotonic()
     if remaining <= 0:
-        raise SearchCurrentnessError("Project search currentness deadline exceeded")
+        raise SearchCurrentnessTimeoutError("Project search currentness deadline exceeded")
     environment = _git_environment()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     try:
@@ -321,7 +376,7 @@ def _git_changed_paths(
             timeout=remaining,
         )
     except subprocess.TimeoutExpired as exc:
-        raise SearchCurrentnessError("Project search branch-diff deadline exceeded") from exc
+        raise SearchCurrentnessTimeoutError("Project search branch-diff deadline exceeded") from exc
     except (FileNotFoundError, OSError) as exc:
         raise SearchCurrentnessError("Project search could not inspect branch delta") from exc
     if result.returncode != 0:

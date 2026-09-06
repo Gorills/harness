@@ -57,21 +57,37 @@ scripts/dev harness doctor --database .harness/state/harness/harness.db
 These commands autostart an isolated `harnessd` when the local socket is absent. That daemon inherits the wrapper environment, so it binds the repository socket and database.
 
 ```bash
-scripts/dev harness scan
+scripts/dev harness init
 scripts/dev harness status
 scripts/dev harness search indexed_files
 scripts/dev harness dashboard
 ```
 
-`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
+`init` / `scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
-The first isolated `scan` also reconciles the current built-in skill pack into the checkout-local
+The first isolated `init` also reconciles the current built-in skill pack into the checkout-local
 registry (the count is not an invariant; see
 [ADR-0029](../decisions/0029-quality-discipline-verification-and-response-economy.md))
 and projects only the relevant subset into `.agents/skills`. Codex and Cursor share that root, so
 the default development profile set is `codex,cursor`. Claude Code is not a supported host.
 Generated skills are Harness-owned and excluded through the
-checkout's Git-local `info/exclude`, not `.gitignore`.
+checkout's Git-local `info/exclude`, not `.gitignore`. `scripts/dev harness scan` reconciles an
+already-registered checkout without creating a new Project.
+
+### Parallel checkouts
+
+The default development listeners are stable ports 17374 (dashboard) and 17376 (Codex MCP),
+separate from the installed daemon's 17373/17375. This supports the installed daemon plus one
+default development daemon. Separate checkout XDG directories alone do **not** isolate these TCP
+ports: two default `scripts/dev harness` daemons would collide. Stable per-checkout TCP assignment
+is not implemented; changing a Codex endpoint also requires reconciling its generated config and
+restarting the host.
+
+Run parallel automated checks using their temporary fixtures and acceptance listeners. Use one
+installed daemon for concurrently registered working repositories/worktrees, with the explicit
+global-dogfood route when selected for source development. Keep current-checkout verification in
+`scripts/dev quality` and the temporary-wheel acceptance runners; those fixtures use their own
+listeners and can run alongside the installed daemon.
 
 Foreground daemon (optional; not required after autostart works):
 
@@ -95,19 +111,29 @@ scripts/dev stop
 scripts/dev quality
 ```
 
-Equivalent without the wrapper, once `uv 0.12.5` and the project environment exist:
+Equivalent after sourcing the isolation environment, once `uv 0.12.5` and the project
+environment exist:
 
 ```bash
+. scripts/dev-env.sh
 uv sync --locked --all-groups
 uv run --frozen python scripts/quality.py
 ```
 
 ## 5. Prove the system install was not touched
 
-1. If a system `harness` exists, record its database mtime (typically `~/.local/state/harness/harness.db`).
-2. Run the commands in sections 2–3.
-3. Confirm that mtime is unchanged and that `.harness/state/harness/harness.db` exists.
-4. Confirm `command -v harness` (system) is not the executable used by `scripts/dev harness --version`.
+Run the synthetic isolation regression, which creates its own canonical-state fixture and a
+checkout overlay:
+
+```bash
+scripts/dev pytest -q tests/test_isolated_development.py
+```
+
+It proves that isolated autostart leaves the fixture's canonical state unchanged. Check
+`scripts/dev env` and the existence of `.harness/state/harness/harness.db` after sections 2–3.
+Reading the real user's canonical database is unnecessary; its mtime could also change because
+of legitimate concurrent work in another host. Socket/HTTP tests require local bind permission;
+an `EPERM` from `socket.bind` in a restricted sandbox is an environment-blocked check, not a pass.
 
 `scripts/dev` must be used for current-code development. A system `harness` on `PATH` without this environment still uses canonical per-user paths; that is expected. `uv run --frozen harness` from this checkout without sourcing `scripts/dev-env.sh` is the forbidden mix of checkout code plus the global daemon. A plain system `harness scan` of this source checkout is refused because the tracked overlay marks it as source-development only. Overlay detection accepts the current `scripts/dogfood mcp` router and the legacy `scripts/dev harness mcp` launch with `HARNESS_WORKSPACE_ROOT=${workspaceFolder}` and no `HARNESS_HOST_PROFILE`; extra host JSON keys do not drop that classification.
 
@@ -170,7 +196,10 @@ make accept-global-codex
 
 This replaces only the user-global uv-tool package, then runs that installed executable with
 temporary XDG state/runtime, Harness skills, Codex home/trust, and Git Workspaces. Test Projects
-never enter the canonical database. Cleanup runs after success and failure, and the target verifies
+never enter the canonical database. Cleanup is attempted after success, verification failure, and
+partial install failure; it verifies daemon shutdown through the temporary runtime locks. If
+shutdown cannot be established, the run fails and preserves the named temporary directory for
+recovery. Uninstall failures remain visible alongside the original failure. The target verifies
 that the user Codex config is byte-unchanged. Agents may run this target outside the sandbox only
 after the user explicitly requests global installation or real-host acceptance.
 
@@ -179,12 +208,14 @@ authorized agent—runs:
 
 ```bash
 make install-global
+make install-global HOST=cursor
 make install-global HOST=codex
+make install-global HOST=cursor,codex
 make doctor-global
 ```
 
-`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required), then runs that tool-installed `harness install --host cursor` by default. `HOST=codex` and
-`HOST=cursor,codex` select those profiles; explicitly authorized agents must always name the
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, clears Python import overrides, host/workspace hints and acceptance listener overrides, then reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required). It then runs that tool-installed `harness install` once for Cursor and once for Codex by default. This differs from bare `harness install`, whose default is Cursor only. `HOST=cursor`, `HOST=codex` and
+`HOST=cursor,codex` select those profiles; `HOST=all` is not accepted by this Make helper. Explicitly authorized agents must always name the
 profile set. Codex reconciliation writes the daemon HTTP URL, private bearer capability, and exact
 Workspace root into the ignored project config. `scripts/install-global --package-only` is reserved for the acceptance target and never runs host lifecycle or doctor. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.
 
@@ -237,7 +268,7 @@ Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNES
 
 In the default mode the router inherits `scripts/dev` XDG paths, so agents in this repository talk
 to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated
-`scripts/dev harness scan` of this source tree indexes the checkout, seeds the local registry, and
+`scripts/dev harness init` of this source tree indexes the checkout, seeds the local registry, and
 reconciles only the configured development skill profiles. It still skips production
 host-configuration reconciliation, so it cannot project global skills or rewrite the overlay. A
 plain system `harness scan` of this tree is refused; only the installed

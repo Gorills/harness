@@ -269,7 +269,7 @@ def test_project_search_uses_content_for_natural_queries_and_compound_identifier
         )
 
         assert natural[0].ref == "code:src/refresh_token.py"
-        assert natural[0].match_reason == "lexical content (all terms)"
+        assert natural[0].match_reason == "dense lexical content (all terms)"
         assert compound[0].ref == "code:src/refresh_token.py"
         assert compound[0].match_reason == "code unit definition phrase"
         assert compound[0].short_summary == "function rotateRefreshToken"
@@ -300,6 +300,73 @@ def test_project_search_rejects_partial_identifier_matches_for_garbage_query(
         )
 
         assert results == ()
+    finally:
+        connection.close()
+
+
+def test_dense_high_coverage_result_beats_dispersed_all_term_file(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "tests").mkdir()
+        (root / "tests" / "test_model_budget.py").write_text(
+            "# test project search model budget\n",
+            encoding="utf-8",
+        )
+        (root / "src" / "dispersed.py").write_text(
+            ("test\n" + ("padding " * 160) + "\n")
+            + ("project\n" + ("padding " * 160) + "\n")
+            + ("search\n" + ("padding " * 160) + "\n")
+            + ("model\n" + ("padding " * 160) + "\n")
+            + ("exposure\n" + ("padding " * 160) + "\n")
+            + "budget\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "test verifies project search model exposure budget",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert results[0].ref == "code:tests/test_model_budget.py"
+        assert results[0].match_reason == "dense lexical content (5/6 terms)"
+        assert results[0].evidence is not None
+        assert "test project search model budget" in results[0].evidence.snippet
+        assert any(hit.ref == "code:src/dispersed.py" for hit in results)
+    finally:
+        connection.close()
+
+
+def test_installation_inflection_finds_install_identifier(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        _project_id, workspace_id = _workspace(connection, root)
+        (root / "Makefile").write_text(
+            "install-global-codex:\n\t@echo ready\n",
+            encoding="utf-8",
+        )
+        scan_workspace(connection, workspace_id)
+
+        results = search_project(
+            connection,
+            workspace_id,
+            "where global Codex installation is implemented",
+            scope=ProjectSearchScope.CODE,
+            limit=5,
+        )
+
+        assert results[0].ref == "code:Makefile"
+        assert results[0].match_reason == "dense lexical content (all terms)"
     finally:
         connection.close()
 
@@ -450,7 +517,7 @@ def test_project_search_matches_common_russian_inflections_in_docs(tmp_path: Pat
         )
 
         assert results[0].ref == "doc:docs/search-quality.md"
-        assert results[0].match_reason == "lexical content (all terms)"
+        assert results[0].match_reason == "dense lexical content (all terms)"
     finally:
         connection.close()
 

@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-22
+- **Amended:** 2026-09-06
 - **Deciders:** Repository architecture baseline
 
 ## Context
@@ -22,12 +23,19 @@ The bounded behavior is:
 2. if the final runtime directory already exists, validate that it is a real current-user-only directory before trusting any socket inside it;
 3. probe the canonical daemon with the bounded internal `status` request;
 4. launch a detached child from the same installed Python package with `python -m harness.daemon_process` only when the trusted endpoint is confirmed absent by `ENOENT` or `ECONNREFUSED`;
-5. wait for at most three seconds while the runtime directory/endpoint remains confirmed absent;
+5. wait for at most ten seconds while the runtime directory/endpoint remains confirmed absent;
 6. continue with the original Workspace request when the status probe succeeds or when a probe timeout shows that an endpoint is already occupied/busy enough that starting another daemon would be unsafe.
 
 If the canonical runtime directory does not yet exist, that absence is treated as a first-run state: the client launches the daemon and waits for the daemon to create and secure the directory. An existing insecure/symlinked/untrusted runtime directory still fails closed and is never repaired or replaced by the client.
 
-The child redirects stdin to the null device, closes unrelated inherited file descriptors, and starts a new POSIX session so it can outlive the short client process. Startup stdout/stderr share an anonymous temporary file. The client closes its handle as soon as readiness succeeds; when the child exits and the endpoint remains absent through the readiness deadline, the error includes only a bounded 2 KiB whitespace-normalized startup detail. No persistent log or project content is created. Daemon singleton and database locks from ADR-0008 remain the authority under concurrent autostart attempts: multiple clients may race to launch, but only one daemon may own the canonical endpoint/database.
+The child redirects stdin to the null device, closes unrelated inherited file descriptors, and starts a new POSIX session so it can outlive the short client process. Startup stdout/stderr share an anonymous temporary file. The client closes its handle as soon as readiness succeeds; when the child exits before readiness, the error includes only a bounded 2 KiB whitespace-normalized startup detail. No persistent log or project content is created. Daemon singleton and database locks from ADR-0008 remain the authority under concurrent autostart attempts: multiple clients may race to launch, but only one daemon may own the canonical endpoint/database.
+
+On unsuccessful readiness, including timeout, transport failure, or cancellation, the client
+terminates and reaps only the child created by that call. It allows two seconds after `terminate`,
+then uses `kill` and a further two-second wait if needed. An already-exited child is left reaped;
+an existing or concurrently winning daemon is never located or stopped through its socket/PID.
+This also covers a delayed child that has not yet acquired its singleton lock. Startup errors
+retain their diagnostic; a cleanup failure is reported alongside it. Output closes after cleanup.
 
 ### Explicit socket overrides
 
@@ -37,7 +45,13 @@ The child redirects stdin to the null device, closes unrelated inherited file de
 
 Autostart requires positive evidence that the canonical endpoint is absent. For the current POSIX Unix-socket transport, only `ENOENT` and `ECONNREFUSED` from the bounded IPC probe are treated as absence after the runtime directory has passed its trust check.
 
-A probe timeout is not evidence of absence. The daemon currently serves clients sequentially and a deterministic scan may occupy it for substantially longer than the short autostart probe; a timeout therefore means the endpoint may be live/busy and must not trigger a duplicate process. The original Workspace request then uses its command-specific IPC timeout (`status` remains a short bound; indexed/project search uses a longer bound than status). Other unclassified transport failures, protocol errors, and structured remote errors fail closed rather than starting another daemon.
+A probe timeout is not evidence of absence. The daemon serves bounded concurrent clients, and
+scheduling or a deterministic scan may delay a response beyond the short autostart probe; a
+timeout therefore means the endpoint may be live/busy and must not trigger a duplicate process.
+The original Workspace request then uses its command-specific IPC timeout (`status` remains a
+short bound; indexed/project search uses a longer bound than status). Other unclassified transport
+failures, protocol errors, and structured remote errors fail closed rather than starting another
+daemon.
 
 Autostart readiness is bounded. A spawn failure or an endpoint that remains positively absent through the deadline is returned as a bounded CLI failure; the client does not loop indefinitely.
 
@@ -54,7 +68,7 @@ Autostart readiness is bounded. A spawn failure or an endpoint that remains posi
 
 ### Costs and limits
 
-- The first canonical client call may spend up to three seconds waiting for a positively absent endpoint to appear before failing.
+- The first canonical client call may spend up to ten seconds waiting for a positively absent endpoint to appear, plus at most four seconds to terminate/reap its unsuccessful child.
 - A healthy canonical client performs one small `status` probe before its requested Workspace operation.
 - A busy daemon may cause the requested command itself to hit its existing command-specific IPC timeout; autostart does not add a second daemon to work around daemon serialization.
 - The daemon currently has no public stop command or OS service registration; it remains a lazily detached user process.
@@ -73,5 +87,7 @@ Automated tests must prove:
 - an existing insecure runtime directory fails closed without spawning;
 - process creation failures are reported as bounded autostart errors;
 - an exited child reports its bounded startup diagnostic instead of only the generic readiness timeout, while a still-running child retains the generic timeout;
+- failed readiness reaps a delayed child before singleton-lock acquisition, escalates a child that ignores termination to kill, and leaves unrelated/existing processes alive;
+- cleanup failures remain visible alongside the original readiness error;
 - canonical `status` and `scan` paths invoke the autostart boundary;
 - explicit `--socket` status/scan paths never invoke canonical autostart.

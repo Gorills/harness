@@ -93,7 +93,7 @@ def _write_skill(
 def test_schema_v16_project_skill_policy_is_bounded_and_cascades(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 20
+    assert status.schema_version == SCHEMA_VERSION == 21
     connection = connect_database(database)
     try:
         project = create_project(connection)
@@ -113,8 +113,25 @@ def test_schema_v16_project_skill_policy_is_bounded_and_cascades(tmp_path: Path)
                 "INSERT INTO project_skill_exclusions(project_id, facet) VALUES (?, ?)",
                 (project.project_id, "software-project"),
             )
+        set_project_skill_facet_mode(
+            connection,
+            project.project_id,
+            "godot-project",
+            ProjectSkillFacetMode.INCLUDED,
+        )
+        assert get_project_skill_policy(connection, project.project_id).included_facets == (
+            "godot-project",
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="included and excluded"):
+            connection.execute(
+                "INSERT INTO project_skill_exclusions(project_id, facet) VALUES (?, ?)",
+                (project.project_id, "godot-project"),
+            )
         delete_project(connection, project.project_id)
         assert connection.execute("SELECT COUNT(*) FROM project_skill_exclusions").fetchone() == (
+            0,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM project_skill_inclusions").fetchone() == (
             0,
         )
     finally:

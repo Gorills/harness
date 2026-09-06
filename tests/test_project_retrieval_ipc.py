@@ -18,6 +18,7 @@ from harness.ipc import (
 )
 from harness.registry import create_project, register_workspace
 from harness.retrieval import ProjectSearchKind, ProjectSearchScope
+from harness.search_currentness import SearchCurrentnessTimeoutError, SearchCurrentnessUnstableError
 from harness.storage import connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -74,6 +75,52 @@ def _start(database: Path, socket_path: Path) -> tuple[Event, ThreadPoolExecutor
             raise AssertionError("daemon did not start")
         time.sleep(0.01)
     return stop, executor, future
+
+
+@pytest.mark.parametrize(
+    ("error_type", "code", "message"),
+    [
+        (
+            SearchCurrentnessTimeoutError,
+            "search_timeout",
+            "Project search exceeded its execution deadline; retry after pending indexing settles",
+        ),
+        (
+            SearchCurrentnessUnstableError,
+            "search_workspace_changed",
+            "Workspace changed repeatedly during Project search; retry after edits settle",
+        ),
+    ],
+)
+def test_search_currentness_errors_have_bounded_actionable_ipc_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    code: str,
+    message: str,
+) -> None:
+    root, database, _project_id, _workspace_id = _seed(tmp_path)
+
+    def fail_search(*_args: object, **_kwargs: object) -> None:
+        raise error_type("private source path and index details must stay hidden")
+
+    monkeypatch.setattr("harness.daemon.read_project_search", fail_search)
+    socket_path = tmp_path / "runtime" / "harness.sock"
+    stop, executor, future = _start(database, socket_path)
+    try:
+        with pytest.raises(IpcRemoteError) as error:
+            request_project_search(
+                socket_path,
+                (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),),
+                "rotation",
+                scope=ProjectSearchScope.CODE,
+            )
+        assert error.value.code == code
+        assert str(error.value) == f"{code}: {message}"
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
 
 def test_project_retrieval_round_trips_through_strict_daemon_ipc(tmp_path: Path) -> None:

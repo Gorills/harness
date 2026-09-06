@@ -9,6 +9,10 @@
   mutation) and task-selected filesystem delivery in
   [ADR-0041](0041-task-skill-session-delivery.md). MCP still does not deliver skill bodies or
   treat `recommended_skills` as instruction delivery.
+- **Amended by:** [ADR-0063](0063-registered-workspace-baseline-and-godot-evidence.md) and
+  [ADR-0064](0064-opt-in-workspace-init-and-skill-include.md). A registered Workspace is
+  `software-project` evidence; specialized surfaces still require indexed files or Dashboard
+  Include; Task hints remain non-selectors.
 
 ## Context
 

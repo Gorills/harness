@@ -17,6 +17,8 @@ _DAEMON_PROBE_TIMEOUT_SECONDS = 0.2
 _DAEMON_START_TIMEOUT_SECONDS = 10.0
 _DAEMON_START_POLL_SECONDS = 0.05
 _DAEMON_START_DETAIL_MAX_BYTES = 2048
+_DAEMON_TERMINATE_TIMEOUT_SECONDS = 2.0
+_DAEMON_KILL_TIMEOUT_SECONDS = 2.0
 _DAEMON_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ECONNREFUSED})
 
 
@@ -43,10 +45,7 @@ def ensure_canonical_daemon(
         if not _runtime_directory_is_missing(runtime_directory):
             raise
         launch = _start_canonical_daemon(environment=environment)
-        try:
-            _wait_for_canonical_daemon(paths, launch)
-        finally:
-            launch.output.close()
+        _complete_daemon_start(paths, launch)
         return
 
     try:
@@ -57,10 +56,40 @@ def ensure_canonical_daemon(
         if not _transport_error_proves_daemon_absent(exc):
             raise
         launch = _start_canonical_daemon(environment=environment)
+        _complete_daemon_start(paths, launch)
+
+
+def _complete_daemon_start(paths: RuntimePaths, launch: _DaemonLaunch) -> None:
+    try:
+        _wait_for_canonical_daemon(paths, launch)
+    except BaseException as startup_error:
         try:
-            _wait_for_canonical_daemon(paths, launch)
-        finally:
-            launch.output.close()
+            _stop_failed_daemon_start(launch.process)
+        except (OSError, subprocess.TimeoutExpired) as cleanup_error:
+            raise DaemonAutostartError(
+                f"{startup_error}; spawned Harness daemon cleanup failed: {cleanup_error}"
+            ) from cleanup_error
+        raise
+    finally:
+        launch.output.close()
+
+
+def _stop_failed_daemon_start(process: subprocess.Popen[bytes]) -> None:
+    """Reap only our unsuccessful child, including one not yet holding daemon locks."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=_DAEMON_TERMINATE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=_DAEMON_KILL_TIMEOUT_SECONDS)
 
 
 def _runtime_directory_is_missing(directory: Path) -> bool:

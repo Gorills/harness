@@ -121,7 +121,16 @@ leave_isolated_overlay() {
     local venv_bin="$repo_root/.venv/bin"
     local restored
     unset HARNESS_DEV_ROOT
+    unset HARNESS_DEV_SKILL_PROFILES
     unset HARNESS_SKILL_REGISTRY
+    # The installed console script must import its own package and start its
+    # daemon on production listeners, even when invoked from a test/dev shell.
+    unset PYTHONPATH
+    unset PYTHONHOME
+    unset HARNESS_HOST_PROFILE
+    unset HARNESS_WORKSPACE_ROOT
+    unset HARNESS_ACCEPTANCE_DASHBOARD_PORT
+    unset HARNESS_ACCEPTANCE_MCP_HTTP_PORT
     restored="$(restore_canonical_xdg "${XDG_STATE_HOME:-}" "$overlay" "${HARNESS_DEV_SAVED_XDG_STATE_HOME-}")"
     if [[ -n "$restored" ]]; then
         export XDG_STATE_HOME="$restored"

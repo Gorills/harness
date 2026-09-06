@@ -53,14 +53,14 @@ def _repo(path: Path) -> Path:
     return path.resolve()
 
 
-def _project_entry(command: Path) -> dict[str, object]:
+def _project_entry(command: Path, root: Path | None = None) -> dict[str, object]:
     return {
         "type": "stdio",
         "command": str(command),
         "args": ["-m", "harness.mcp_process"],
         "env": {
             "HARNESS_HOST_PROFILE": "cursor",
-            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}",
+            "HARNESS_WORKSPACE_ROOT": "${workspaceFolder}" if root is None else str(root),
         },
     }
 
@@ -76,8 +76,8 @@ def _global_entry(command: Path) -> dict[str, object]:
     }
 
 
-def _entry(command: Path) -> dict[str, object]:
-    return _project_entry(command)
+def _entry(command: Path, root: Path | None = None) -> dict[str, object]:
+    return _project_entry(command, root)
 
 
 def test_cursor_global_registration_preserves_user_config_and_file_on_uninstall(
@@ -200,7 +200,9 @@ def test_cursor_refuses_foreign_same_name_registration(tmp_path: Path) -> None:
         adapter.unregister_mcp()
 
 
-def test_cursor_project_override_uses_workspace_folder_and_is_git_ignored(tmp_path: Path) -> None:
+def test_cursor_project_override_uses_absolute_workspace_root_and_is_git_ignored(
+    tmp_path: Path,
+) -> None:
     root = _repo(tmp_path / "repo")
     home = tmp_path / "home"
     home.mkdir()
@@ -209,7 +211,7 @@ def test_cursor_project_override_uses_workspace_folder_and_is_git_ignored(tmp_pa
     assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
     config = root / ".cursor" / "mcp.json"
     value = json.loads(config.read_text(encoding="utf-8"))
-    assert value == {"mcpServers": {"harness": _entry(Path("/venv/bin/python"))}}
+    assert value == {"mcpServers": {"harness": _entry(Path("/venv/bin/python"), root)}}
     assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
     ignored = _git(root, "check-ignore", "-q", ".cursor/mcp.json")
     assert ignored.returncode == 0
@@ -219,6 +221,22 @@ def test_cursor_project_override_uses_workspace_folder_and_is_git_ignored(tmp_pa
     assert not config.exists()
     assert not (root / ".cursor" / ".harness-mcp-owner.json").exists()
     assert _git(root, "status", "--porcelain").stdout == ""
+
+
+def test_cursor_project_override_binds_a_directory_without_git(tmp_path: Path) -> None:
+    root = tmp_path / "trial"
+    root.mkdir()
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/venv/bin/python"))
+
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    config = root / ".cursor" / "mcp.json"
+    assert json.loads(config.read_text(encoding="utf-8")) == {
+        "mcpServers": {"harness": _entry(Path("/venv/bin/python"), root)}
+    }
+    assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert adapter.remove_project(root) is IntegrationChange.CHANGED
+    assert not config.exists()
 
 
 def test_cursor_existing_untracked_project_config_preserves_other_servers(tmp_path: Path) -> None:
@@ -237,6 +255,40 @@ def test_cursor_existing_untracked_project_config_preserves_other_servers(tmp_pa
     assert json.loads(config.read_text(encoding="utf-8")) == {
         "mcpServers": {"other": {"url": "https://example.invalid"}}
     }
+
+
+@pytest.mark.parametrize("tracked", [False, True])
+def test_cursor_migrates_legacy_workspace_interpolation_only_when_untracked(
+    tmp_path: Path, tracked: bool
+) -> None:
+    root = _repo(tmp_path / "repo")
+    config = root / ".cursor" / "mcp.json"
+    config.parent.mkdir()
+    previous = {
+        "mcpServers": {
+            "harness": _entry(Path("/python")),
+            "other": {"url": "https://example.invalid"},
+        }
+    }
+    config.write_text(json.dumps(previous), encoding="utf-8")
+    if tracked:
+        _git(root, "add", ".cursor/mcp.json")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    assert adapter.project_registration_state(root) is HostRegistrationState.STALE_OWNED
+
+    if tracked:
+        with pytest.raises(HostIntegrationError, match="manual adoption"):
+            adapter.reconcile_project(root)
+        assert json.loads(config.read_text()) == previous
+    else:
+        assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+        assert json.loads(config.read_text()) == {
+            "mcpServers": {
+                "harness": _entry(Path("/python"), root),
+                "other": {"url": "https://example.invalid"},
+            }
+        }
+        assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
 
 
 def test_cursor_tracked_project_config_requires_manual_adoption(tmp_path: Path) -> None:
@@ -338,7 +390,7 @@ def test_cursor_tracked_exact_project_config_is_accepted_but_uninstall_is_manual
     config = root / ".cursor" / "mcp.json"
     config.parent.mkdir()
     config.write_text(
-        json.dumps({"mcpServers": {"harness": _entry(Path("/python"))}}),
+        json.dumps({"mcpServers": {"harness": _entry(Path("/python"), root)}}),
         encoding="utf-8",
     )
     _git(root, "add", ".cursor/mcp.json")
@@ -373,6 +425,9 @@ def test_cursor_linked_worktrees_keep_distinct_project_configs_with_shared_exclu
     assert adapter.reconcile_project(linked) is IntegrationChange.CHANGED
     assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
     assert adapter.project_registration_state(linked) is HostRegistrationState.CURRENT
+    for workspace in (root, linked):
+        config = json.loads((workspace / ".cursor" / "mcp.json").read_text())
+        assert config["mcpServers"]["harness"]["env"]["HARNESS_WORKSPACE_ROOT"] == str(workspace)
     assert _git(root, "check-ignore", "-q", ".cursor/mcp.json").returncode == 0
     assert _git(linked, "check-ignore", "-q", ".cursor/mcp.json").returncode == 0
 
@@ -731,7 +786,7 @@ def test_cursor_project_enable_fails_when_installed_agent_cannot_enable(
         adapter.enable_and_verify_project_mcp(root)
 
 
-def test_cursor_project_verify_falls_back_to_owned_launch_probe(
+def test_cursor_project_verification_cannot_replace_failed_host_with_direct_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _repo(tmp_path / "repo")
@@ -746,9 +801,12 @@ def test_cursor_project_verify_falls_back_to_owned_launch_probe(
     adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path(sys.executable))
     assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
 
-    result = adapter.enable_and_verify_project_mcp(root)
-    assert result.status is CursorProjectRuntimeStatus.VERIFIED
-    assert result.tools == CURSOR_PROJECT_MCP_TOOLS
+    inspected = adapter.inspect_project_mcp_tools(root)
+    assert inspected.status is CursorProjectRuntimeStatus.UNAVAILABLE
+    assert inspected.tools == ()
+    assert "No tools available" in inspected.detail
+    with pytest.raises(HostIntegrationError, match="tool catalog is not"):
+        adapter.enable_and_verify_project_mcp(root)
 
 
 def test_cursor_project_inspect_fails_when_tools_are_missing(
@@ -770,35 +828,26 @@ def test_cursor_project_inspect_fails_when_tools_are_missing(
         adapter.enable_and_verify_project_mcp(root)
 
 
-def test_cursor_project_inspect_shares_one_timeout_with_owned_fallback(
+def test_cursor_project_inspect_uses_only_the_host_probe_with_its_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _repo(tmp_path / "repo")
-    observed: list[tuple[str, float | None]] = []
-    times = iter((100.0, 106.0))
-    monkeypatch.setattr(cursor_module, "monotonic", lambda: next(times))
+    observed: list[float | None] = []
     monkeypatch.setattr(
-        cursor_module,
-        "discover_cursor_agent",
-        lambda **_kwargs: Path("/usr/bin/agent"),
+        cursor_module, "discover_cursor_agent", lambda **_kwargs: Path("/usr/bin/agent")
     )
 
     def fake_agent(*_args: object, timeout_seconds: float | None, **_kwargs: object) -> object:
-        observed.append(("agent", timeout_seconds))
-        return subprocess.CompletedProcess([], 1, stdout="no tools")
-
-    def fake_owned(*_args: object, timeout_seconds: float | None, **_kwargs: object) -> tuple[()]:
-        observed.append(("owned", timeout_seconds))
-        return ()
+        observed.append(timeout_seconds)
+        return subprocess.CompletedProcess([], 1, stdout="host connection refused")
 
     monkeypatch.setattr(cursor_module, "_run_cursor_agent", fake_agent)
-    monkeypatch.setattr(cursor_module, "_probe_owned_project_mcp_tools", fake_owned)
     adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
-
-    result = adapter.inspect_project_mcp_tools(root, timeout_seconds=10.0)
+    result = adapter.inspect_project_mcp_tools(root, timeout_seconds=4.0)
 
     assert result.status is CursorProjectRuntimeStatus.UNAVAILABLE
-    assert observed == [("agent", 10.0), ("owned", 4.0)]
+    assert result.detail == "host connection refused"
+    assert observed == [4.0]
 
 
 def test_cursor_isolated_overlay_is_not_enabled_as_production_harness(

@@ -23,7 +23,7 @@ from harness.cursor_adapter import (
 from harness.git_workspace import (
     GitWorkspaceDeadlineExceededError,
     GitWorkspaceError,
-    inspect_git_workspace_runtime_identity,
+    inspect_workspace_runtime_identity,
 )
 from harness.hidden_projection import HiddenProjectionError, inspect_hidden_workspace
 from harness.host_adapters import HostIntegrationError, HostRegistrationState
@@ -45,6 +45,7 @@ from harness.registry import (
     WorkspaceRecord,
     get_project,
     list_workspaces,
+    workspace_layout_compatible,
 )
 from harness.runtime_identity import RuntimeIdentityError, current_runtime_identity
 from harness.runtime_paths import (
@@ -879,7 +880,7 @@ def _inspect_projects_and_workspaces(
         codex_project_isolated = False
         cursor_project_isolated = False
         try:
-            identity = inspect_git_workspace_runtime_identity(
+            identity = inspect_workspace_runtime_identity(
                 workspace.workspace_root,
                 deadline=workspace_deadline,
             )
@@ -891,10 +892,7 @@ def _inspect_projects_and_workspaces(
                 unavailable_workspaces.append(workspace)
                 stale_notes.append(f"unavailable Workspace {_workspace_ref(workspace)}")
             continue
-        if (
-            identity.layout.workspace_root != workspace.workspace_root
-            or identity.layout.git_common_dir != workspace.git_common_dir
-        ):
+        if not workspace_layout_compatible(workspace, identity.layout):
             mismatched += 1
             stale_notes.append(f"changed Workspace identity {_workspace_ref(workspace)}")
             continue
@@ -1071,7 +1069,7 @@ def _inspect_projects_and_workspaces(
                             f"current at {cursor_project.path}; configured Python: "
                             f"{configured_python}; expected Python: "
                             f"{cursor_project.expected_python}; "
-                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                            f"HARNESS_WORKSPACE_ROOT={workspace.workspace_root}",
                         )
                     )
                 else:
@@ -1083,7 +1081,7 @@ def _inspect_projects_and_workspaces(
                             f"{cursor_project.path}: {cursor_project.state.value}; expected Python: "
                             f"{cursor_project.expected_python}; configured Python: "
                             f"{configured_python}; expected "
-                            "HARNESS_WORKSPACE_ROOT=${workspaceFolder}; configured "
+                            f"HARNESS_WORKSPACE_ROOT={workspace.workspace_root}; configured "
                             f"HARNESS_WORKSPACE_ROOT={configured_root}; remediation: "
                             "harness install --host cursor",
                         )
@@ -1318,7 +1316,7 @@ def _inspect_projects_and_workspaces(
                 cursor_severity,
                 f"{cursor_projects_current} current, {cursor_projects_isolated} "
                 "isolated-development, 0 missing/stale/foreign; required root contract "
-                "is HARNESS_WORKSPACE_ROOT=${workspaceFolder}",
+                "is the exact absolute Workspace root in HARNESS_WORKSPACE_ROOT",
             )
         )
     elif cursor_projects_isolated:
