@@ -338,6 +338,8 @@ def attach_workspace_git_if_present(
 ) -> WorkspaceRecord:
     """Attach a real Git common directory when a filesystem Workspace later becomes a Git worktree."""
     workspace = get_workspace(connection, workspace_id)
+    if workspace.git_common_dir != workspace.workspace_root:
+        return workspace
     layout = inspect_workspace_layout(workspace.workspace_root)
     if not workspace_layout_compatible(workspace, layout):
         raise WorkspaceRegistrationConflictError(

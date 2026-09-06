@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from time import monotonic
 
-from harness.git_workspace import _git_environment, inspect_workspace_layout, layout_has_git
+from harness.git_workspace import _git_environment, inspect_workspace_layout
 from harness.knowledge import (
     reconcile_knowledge_staleness,
     snapshot_fresh_anchored_knowledge_ids,
@@ -1744,12 +1744,7 @@ def _candidate_paths(
     deadline: float | None,
     pathspecs: Sequence[str] = (),
 ) -> tuple[str, ...]:
-    layout = inspect_workspace_layout(workspace.workspace_root, deadline=deadline)
-    if not workspace_layout_compatible(workspace, layout):
-        raise WorkspaceIndexMismatchError(
-            f"registered workspace identity changed: {workspace.workspace_root}"
-        )
-    if not layout_has_git(layout):
+    if workspace.git_common_dir == workspace.workspace_root:
         return _candidate_paths_from_filesystem(
             workspace.workspace_root,
             harnessignore_rules,
