@@ -648,7 +648,7 @@ def test_doctor_identity_timeout_is_not_unavailable(
     [workspace] = _register_doctor_workspaces(environment, [root])
     monkeypatch.setattr(
         doctor,
-        "inspect_git_workspace_runtime_identity",
+        "inspect_workspace_runtime_identity",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             GitWorkspaceDeadlineExceededError("Git workspace inspection deadline exceeded")
         ),
