@@ -507,9 +507,7 @@ def _filesystem_change_snapshot(
     digest = hashlib.sha256()
     digest.update(b"harness-workspace-watch-filesystem-v1\0")
     _digest_entry_identity(digest, workspace.workspace_root, ".harnessignore")
-    directories = list_workspace_metadata_directories(
-        workspace.workspace_root, deadline=deadline
-    )
+    directories = list_workspace_metadata_directories(workspace.workspace_root, deadline=deadline)
     _digest_workspace_directories(
         digest,
         workspace.workspace_root,

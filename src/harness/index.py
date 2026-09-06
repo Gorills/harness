@@ -1830,13 +1830,10 @@ def _candidate_paths_from_filesystem(
             except OSError:
                 continue
             if is_dir:
-                if (
-                    entry.name in _FILESYSTEM_DIR_EXCLUDES
-                    or _filesystem_relative_excluded(
-                        child_relative,
-                        is_dir=True,
-                        ignore_patterns=ignore_patterns,
-                    )
+                if entry.name in _FILESYSTEM_DIR_EXCLUDES or _filesystem_relative_excluded(
+                    child_relative,
+                    is_dir=True,
+                    ignore_patterns=ignore_patterns,
                 ):
                     continue
                 pending.append((child_relative, Path(entry.path)))
@@ -1886,7 +1883,9 @@ def _filesystem_relative_excluded(
         matched_pattern = pattern[:-1] if directory_only else pattern
         if directory_only and not is_dir:
             continue
-        if fnmatch.fnmatch(relative_path, matched_pattern) or fnmatch.fnmatch(name, matched_pattern):
+        if fnmatch.fnmatch(relative_path, matched_pattern) or fnmatch.fnmatch(
+            name, matched_pattern
+        ):
             return True
     return False
 

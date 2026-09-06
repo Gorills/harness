@@ -246,9 +246,7 @@ def _validate_workspace_identity(
     workspace: WorkspaceRecord, *, deadline: float | None = None
 ) -> None:
     try:
-        identity = inspect_workspace_runtime_identity(
-            workspace.workspace_root, deadline=deadline
-        )
+        identity = inspect_workspace_runtime_identity(workspace.workspace_root, deadline=deadline)
     except GitWorkspaceError:
         raise
     if not workspace_layout_compatible(workspace, identity.layout):

@@ -525,11 +525,7 @@ def _run_scan(
         except (RuntimePathError, IpcError) as exc:
             return _scan_failure(str(exc))
 
-    request = (
-        request_workspace_init
-        if allow_create or global_dogfood
-        else request_workspace_scan
-    )
+    request = request_workspace_init if allow_create or global_dogfood else request_workspace_scan
     try:
         result = request(socket_path, location)
     except IpcError as exc:
