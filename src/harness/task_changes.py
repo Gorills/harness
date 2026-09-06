@@ -12,9 +12,7 @@ from harness.git_workspace import (
     GitWorkspaceError,
     GitWorkspaceRuntimeIdentity,
     _git_environment,
-    inspect_workspace_layout,
     inspect_workspace_runtime_identity,
-    layout_has_git,
 )
 from harness.registry import WorkspaceRecord, get_workspace, workspace_layout_compatible
 from harness.task_baseline import (
