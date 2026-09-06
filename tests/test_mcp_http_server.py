@@ -17,7 +17,7 @@ from mcp.shared.exceptions import MCPError
 
 from harness.daemon import serve_daemon
 from harness.dashboard import read_dashboard_access_token
-from harness.ipc import IpcError, request_shutdown, request_workspace_scan, request_workspace_status
+from harness.ipc import IpcError, request_shutdown, request_workspace_init, request_workspace_status
 from harness.mcp_http_server import (
     MCP_HTTP_AUTHORIZATION_HEADER,
     MCP_HTTP_WORKSPACE_ROOT_HEADER,
@@ -61,7 +61,7 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
     root = _repository(tmp_path / "repo")
     executor, future = _start_daemon(paths.database, paths.socket)
     try:
-        scan = request_workspace_scan(paths.socket, root)
+        scan = request_workspace_init(paths.socket, root)
         token = read_dashboard_access_token(paths.database)
         assert token is not None
         url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
@@ -157,7 +157,7 @@ async def test_daemon_http_mcp_rejects_invalid_capability_and_unknown_workspace(
     unknown = _repository(tmp_path / "unknown")
     executor, future = _start_daemon(paths.database, paths.socket)
     try:
-        request_workspace_scan(paths.socket, root)
+        request_workspace_init(paths.socket, root)
         token = read_dashboard_access_token(paths.database)
         assert token is not None
         url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
@@ -195,7 +195,7 @@ async def test_daemon_http_mcp_is_unreachable_after_shutdown(
     executor, future = _start_daemon(paths.database, paths.socket)
     url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
     try:
-        request_workspace_scan(paths.socket, root)
+        request_workspace_init(paths.socket, root)
         async with httpx2.AsyncClient() as raw:
             probe = await raw.post(url, content=b"{}")
         assert probe.status_code == 401

@@ -12,9 +12,11 @@ from harness.git_workspace import (
     GitWorkspaceError,
     GitWorkspaceRuntimeIdentity,
     _git_environment,
-    inspect_git_workspace_runtime_identity,
+    inspect_workspace_layout,
+    inspect_workspace_runtime_identity,
+    layout_has_git,
 )
-from harness.registry import WorkspaceRecord, get_workspace
+from harness.registry import WorkspaceRecord, get_workspace, workspace_layout_compatible
 from harness.task_baseline import (
     TaskBaselineChangedError,
     TaskBaselineDirtyPath,
@@ -144,7 +146,7 @@ def _inspect_runtime_identity(
     deadline: float,
 ) -> GitWorkspaceRuntimeIdentity:
     try:
-        identity = inspect_git_workspace_runtime_identity(workspace_root, deadline=deadline)
+        identity = inspect_workspace_runtime_identity(workspace_root, deadline=deadline)
     except GitWorkspaceDeadlineExceededError as exc:
         raise TaskChangedFilesTimeoutError(
             "Task changed-file Git identity inspection timed out"
@@ -159,12 +161,9 @@ def _require_registered_identity(
     workspace: WorkspaceRecord,
     identity: GitWorkspaceRuntimeIdentity,
 ) -> None:
-    if (
-        identity.layout.workspace_root != workspace.workspace_root
-        or identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    if not workspace_layout_compatible(workspace, identity.layout):
         raise TaskChangedFilesError(
-            "registered Workspace Git identity changed before Task changed-file calculation"
+            "registered Workspace identity changed before Task changed-file calculation"
         )
 
 

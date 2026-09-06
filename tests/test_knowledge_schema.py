@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 20
+        assert SCHEMA_VERSION == 21
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -133,6 +133,9 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
         connection.execute("DROP TABLE indexed_code_unit_files")
         connection.execute("DROP TABLE indexed_content_search")
         connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
+        connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
+        connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
         connection.execute("DROP TABLE workspace_search_index_dirty_paths")
         connection.execute("DROP TABLE workspace_search_index_state")
@@ -147,7 +150,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 20
+    assert status.schema_version == SCHEMA_VERSION == 21
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id, revision FROM tasks").fetchall() == [("task", 2)]

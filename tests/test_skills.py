@@ -12,6 +12,7 @@ from time import monotonic
 import pytest
 
 import harness.skills as skills_module
+from harness.builtin_skills import sync_builtin_skills
 from harness.host_adapters import (
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
@@ -72,6 +73,32 @@ def _make_repo(path: Path, files: dict[str, str]) -> None:
         "-m",
         "init",
     )
+
+
+def _empty_registered_workspace(tmp_path: Path) -> tuple[Path, sqlite3.Connection, str]:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(
+        root,
+        "-c",
+        "user.name=Harness Test",
+        "-c",
+        "user.email=h@example.invalid",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+    )
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    project = create_project(connection)
+    workspace = register_workspace(connection, project_id=project.project_id, path=root)
+    scan_workspace(connection, workspace.workspace_id)
+    return root, connection, workspace.workspace_id
 
 
 def _registered_workspace(
@@ -821,6 +848,106 @@ def test_stack_detection_recognizes_godot_shell_ci_and_deployment_facets(
     } <= stack.facets
 
 
+def test_empty_git_workspace_is_software_project(tmp_path: Path) -> None:
+    _, connection, workspace_id = _empty_registered_workspace(tmp_path)
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert stack.languages == frozenset()
+    assert stack.dependencies == frozenset()
+    assert stack.facets == frozenset({"software-project"})
+
+
+def test_empty_git_workspace_resolves_core_builtins_not_godot(tmp_path: Path) -> None:
+    _, connection, workspace_id = _empty_registered_workspace(tmp_path)
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    try:
+        resolved = resolve_workspace_skills(connection, workspace_id, load_skill_registry(registry))
+    finally:
+        connection.close()
+
+    assert set(_ids(resolved)) == {
+        "complex-change-planning",
+        "language-engineering",
+        "legacy-preservation",
+        "project-architecture",
+        "secure-by-design",
+        "testing-strategy",
+    }
+
+
+def test_nested_godot_layout_detects_godot_project(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "CMakeLists.txt": "cmake_minimum_required(VERSION 3.20)\nproject(world)\n",
+            "godot/project.godot": '[application]\nconfig/name="Game"\n',
+            "godot/worldsim.gdextension": '[configuration]\nentry_symbol = "worldsim"\n',
+            "godot/scripts/player.gd": "extends Node\n",
+            "godot/scenes/main.tscn": "[gd_scene format=3]\n",
+        },
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "gdscript" in stack.languages
+    assert "cmakelists.txt" in stack.manifests
+    assert {"godot-project", "software-project"} <= stack.facets
+
+
+def test_nested_godot_layout_resolves_godot_development(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {
+            "CMakeLists.txt": "cmake_minimum_required(VERSION 3.20)\nproject(world)\n",
+            "godot/project.godot": '[application]\nconfig/name="Game"\n',
+            "godot/scripts/player.gd": "extends Node\n",
+        },
+    )
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    try:
+        resolved = resolve_workspace_skills(connection, workspace_id, load_skill_registry(registry))
+    finally:
+        connection.close()
+
+    assert "godot-development" in set(_ids(resolved))
+    assert "testing-strategy" in set(_ids(resolved))
+
+
+def test_gdscript_without_project_godot_detects_godot_project(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"src/player.gd": "extends Node\n"},
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert stack.languages == frozenset({"gdscript"})
+    assert {"godot-project", "software-project"} <= stack.facets
+
+
+def test_cmakelists_alone_is_software_project(tmp_path: Path) -> None:
+    _, connection, workspace_id = _registered_workspace(
+        tmp_path,
+        {"CMakeLists.txt": "cmake_minimum_required(VERSION 3.20)\nproject(app)\n"},
+    )
+    try:
+        stack = detect_workspace_stack(connection, workspace_id)
+    finally:
+        connection.close()
+
+    assert "cmakelists.txt" in stack.manifests
+    assert stack.facets == frozenset({"software-project"})
+
+
 def test_task_stack_hints_do_not_activate_skills_before_manifest_exists(tmp_path: Path) -> None:
     _, connection, workspace_id = _registered_workspace(tmp_path, {"README.md": "greenfield\n"})
     registry = tmp_path / "registry"
@@ -963,6 +1090,24 @@ def test_resolver_returns_every_match_deterministically_and_explicit_wins(tmp_pa
             explicit_include=("alpha",),
             explicit_exclude=("alpha",),
         )
+
+
+def test_included_managed_facet_projects_without_stack_evidence(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    _write_skill(registry, "godot", facets=("godot-project",))
+    _write_skill(registry, "quality", facets=("software-project",))
+    definitions = load_skill_registry(registry)
+    stack = DetectedProjectStack(
+        languages=frozenset(),
+        dependencies=frozenset(),
+        manifests=frozenset(),
+        facets=frozenset({"software-project"}),
+    )
+    assert _ids(resolve_skills(definitions, stack)) == ("quality",)
+    assert _ids(resolve_skills(definitions, stack, included_facets=("godot-project",))) == (
+        "godot",
+        "quality",
+    )
 
 
 def test_projection_planner_shares_agents_root_for_codex_and_cursor(tmp_path: Path) -> None:

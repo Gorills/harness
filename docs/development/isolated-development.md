@@ -57,21 +57,22 @@ scripts/dev harness doctor --database .harness/state/harness/harness.db
 These commands autostart an isolated `harnessd` when the local socket is absent. That daemon inherits the wrapper environment, so it binds the repository socket and database.
 
 ```bash
-scripts/dev harness scan
+scripts/dev harness init
 scripts/dev harness status
 scripts/dev harness search indexed_files
 scripts/dev harness dashboard
 ```
 
-`scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
+`init` / `scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
-The first isolated `scan` also reconciles the current built-in skill pack into the checkout-local
+The first isolated `init` also reconciles the current built-in skill pack into the checkout-local
 registry (the count is not an invariant; see
 [ADR-0029](../decisions/0029-quality-discipline-verification-and-response-economy.md))
 and projects only the relevant subset into `.agents/skills`. Codex and Cursor share that root, so
 the default development profile set is `codex,cursor`. Claude Code is not a supported host.
 Generated skills are Harness-owned and excluded through the
-checkout's Git-local `info/exclude`, not `.gitignore`.
+checkout's Git-local `info/exclude`, not `.gitignore`. `scripts/dev harness scan` reconciles an
+already-registered checkout without creating a new Project.
 
 ### Parallel checkouts
 
@@ -267,7 +268,7 @@ Global Cursor leftover `user-harness` is profile-scoped and does not set `HARNES
 
 In the default mode the router inherits `scripts/dev` XDG paths, so agents in this repository talk
 to the checkout daemon under `.harness/`, not `~/.local/state/harness`. Isolated
-`scripts/dev harness scan` of this source tree indexes the checkout, seeds the local registry, and
+`scripts/dev harness init` of this source tree indexes the checkout, seeds the local registry, and
 reconciles only the configured development skill profiles. It still skips production
 host-configuration reconciliation, so it cannot project global skills or rewrite the overlay. A
 plain system `harness scan` of this tree is refused; only the installed

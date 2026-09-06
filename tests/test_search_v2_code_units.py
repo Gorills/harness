@@ -330,7 +330,7 @@ def test_schema_20_migrates_existing_18_database_in_place(
 ) -> None:
     database = tmp_path / "harness.db"
     current = storage.SCHEMA_VERSION
-    assert current == 20
+    assert current == 21
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 18)
     initialize_database(database)
     connection = sqlite3.connect(database)
@@ -343,7 +343,7 @@ def test_schema_20_migrates_existing_18_database_in_place(
     monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
     status = initialize_database(database)
 
-    assert status.schema_version == 20
+    assert status.schema_version == 21
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [("preserved-project",)]
@@ -358,6 +358,6 @@ def test_schema_20_migrates_existing_18_database_in_place(
             ).fetchone() == (table,)
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone() == (20,)
+        ).fetchone() == (21,)
     finally:
         connection.close()

@@ -149,7 +149,7 @@ def test_isolated_development_doc_describes_the_working_workflow() -> None:
     for needle in (
         "scripts/dev sync",
         "scripts/dev harness doctor",
-        "scripts/dev harness scan",
+        "scripts/dev harness init",
         "scripts/dev harness status",
         "scripts/dev stop",
         "XDG_STATE_HOME",
@@ -329,7 +329,7 @@ def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Pa
         assert "FTS5: OK" in doctor.stdout
         assert not paths.database.exists()
 
-        scan = _run([str(harness), "scan", str(workspace)], cwd=tmp_path, env=env, timeout=60)
+        scan = _run([str(harness), "init", str(workspace)], cwd=tmp_path, env=env, timeout=60)
         assert scan.returncode == 0, scan.stdout + scan.stderr
         assert "created" in scan.stdout
         assert "Indexed files:" in scan.stdout
@@ -638,7 +638,7 @@ def test_canonical_scan_refuses_isolated_development_checkout_before_daemon(
     def request_scan(_socket: Path, _path: Path) -> WorkspaceScanResult:
         raise AssertionError("canonical scan must not contact the daemon")
 
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(
         entrypoints,
         "_canonical_socket",
@@ -701,9 +701,9 @@ def test_isolated_scan_projects_local_skills_without_reconciling_host_config(
     monkeypatch.setattr(
         sys,
         "argv",
-        ["harness", "scan", str(root), "--socket", str(socket_path)],
+        ["harness", "init", str(root), "--socket", str(socket_path)],
     )
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(entrypoints, "request_workspace_skills_reconcile", skills_reconcile)
 
     assert harness_main() == 0
@@ -758,7 +758,7 @@ def test_global_dogfood_scan_indexes_overlay_without_reconciling_integrations(
             str(socket_path),
         ],
     )
-    monkeypatch.setattr(entrypoints, "request_workspace_scan", request_scan)
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_scan)
     monkeypatch.setattr(
         entrypoints,
         "request_workspace_skills_reconcile",
@@ -798,7 +798,7 @@ def test_global_dogfood_scan_refuses_checkout_interpreter(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
     )
 
@@ -817,7 +817,7 @@ def test_global_dogfood_scan_refuses_ordinary_repository(
     monkeypatch.setattr(sys, "argv", ["harness", "scan", "--global-dogfood", str(root)])
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda *_args: (_ for _ in ()).throw(AssertionError("scan must fail before daemon IPC")),
     )
 
@@ -852,7 +852,7 @@ def test_global_dogfood_scan_refuses_hidden_project(
     )
     monkeypatch.setattr(
         entrypoints,
-        "request_workspace_scan",
+        "request_workspace_init",
         lambda _socket, _path: WorkspaceScanResult(
             schema_version=SCHEMA_VERSION,
             workspace_id="workspace-hidden",

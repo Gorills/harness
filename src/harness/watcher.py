@@ -23,7 +23,7 @@ from harness.index import (
     scan_workspace,
     scan_workspace_paths,
 )
-from harness.registry import RegistryError, WorkspaceRecord, list_workspaces
+from harness.registry import RegistryError, WorkspaceRecord, list_workspaces, workspace_has_git
 from harness.skill_runtime import (
     SkillRuntimeError,
     active_skill_profiles_for_runtime,
@@ -478,6 +478,8 @@ def read_workspace_change_snapshot(
 ) -> WorkspaceGitSnapshot:
     """Return Git confirmation state after a cheap Workspace metadata invalidation."""
     _require_watch_deadline(deadline)
+    if not workspace_has_git(workspace):
+        return _filesystem_change_snapshot(workspace, deadline=deadline)
     status = _git_status_bytes(workspace.workspace_root, deadline=deadline)
     head = _git_head_bytes(workspace.workspace_root, deadline=deadline)
     dirty_paths = _dirty_paths_from_status(status)
@@ -496,6 +498,29 @@ def read_workspace_change_snapshot(
         token=digest.hexdigest(),
         head=head,
         dirty_paths=tuple(sorted(dirty_paths, key=os.fsencode)),
+    )
+
+
+def _filesystem_change_snapshot(
+    workspace: WorkspaceRecord, *, deadline: float
+) -> WorkspaceGitSnapshot:
+    digest = hashlib.sha256()
+    digest.update(b"harness-workspace-watch-filesystem-v1\0")
+    _digest_entry_identity(digest, workspace.workspace_root, ".harnessignore")
+    directories = list_workspace_metadata_directories(
+        workspace.workspace_root, deadline=deadline
+    )
+    _digest_workspace_directories(
+        digest,
+        workspace.workspace_root,
+        directories,
+        deadline=deadline,
+    )
+    token = digest.hexdigest()
+    return WorkspaceGitSnapshot(
+        token=token,
+        head=token.encode("ascii"),
+        dirty_paths=(),
     )
 
 
@@ -602,7 +627,10 @@ def _directory_metadata_token(
 def _git_control_token(workspace: WorkspaceRecord, *, deadline: float) -> str:
     digest = hashlib.sha256()
     digest.update(b"harness-workspace-metadata-git-v1\0")
-    _digest_git_control_state(digest, workspace, deadline=deadline)
+    if workspace_has_git(workspace):
+        _digest_git_control_state(digest, workspace, deadline=deadline)
+    else:
+        digest.update(b"filesystem\0")
     return digest.hexdigest()
 
 
@@ -667,6 +695,18 @@ _WATCH_DIRECTORY_EXCLUDES = frozenset(
 )
 
 
+def _is_excluded_watch_directory(name: str, path: Path) -> bool:
+    if name in _WATCH_DIRECTORY_EXCLUDES:
+        return True
+    folded = name.casefold()
+    if not (folded.startswith("build-") or folded.startswith("cmake-build-")):
+        return False
+    try:
+        return (path / "CMakeCache.txt").is_file() or (path / "CMakeFiles").is_dir()
+    except OSError:
+        return False
+
+
 def list_workspace_metadata_directories(
     workspace_root: Path,
     *,
@@ -691,10 +731,10 @@ def list_workspace_metadata_directories(
             raise WorkspaceWatchError("Workspace watcher could not enumerate directories") from exc
         for entry in entries:
             _require_watch_deadline(deadline)
-            if entry.name in _WATCH_DIRECTORY_EXCLUDES:
-                continue
             child_relative = entry.name if not relative else f"{relative}/{entry.name}"
             child_path = Path(entry.path)
+            if _is_excluded_watch_directory(entry.name, child_path):
+                continue
             try:
                 is_directory = entry.is_dir(follow_symlinks=False)
             except OSError as exc:

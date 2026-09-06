@@ -62,6 +62,8 @@ from harness.dashboard_i18n import (
     JIRA_SAVE,
     LIVE_CONNECTING,
     LIVE_REFRESH,
+    MANAGE_SKILL_SCOPE,
+    MANAGE_SKILL_SCOPE_HINT,
     METRIC_ACTIVE,
     METRIC_INDEX,
     METRIC_PROJECTS,
@@ -111,6 +113,8 @@ from harness.dashboard_i18n import (
     SKILL_SCOPE_FRONTEND,
     SKILL_SCOPE_GODOT,
     SKILL_SCOPE_HINT,
+    SKILL_SCOPE_INCLUDED,
+    SKILL_SCOPE_INCLUDED_HINT,
     SKILL_SCOPE_MOBILE,
     SKILL_SCOPE_OBSERVABILITY,
     SKIP_TO_CONTENT,
@@ -158,7 +162,8 @@ from harness.dashboard_i18n import (
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
-    inspect_git_workspace_runtime_identity,
+    inspect_workspace_runtime_identity,
+    layout_has_git,
 )
 from harness.hidden_projection import HiddenProjectionCollisionError, HiddenProjectionError
 from harness.host_integration_state import (
@@ -176,6 +181,7 @@ from harness.registry import (
     get_workspace,
     list_workspaces,
     relocate_workspace,
+    workspace_layout_compatible,
 )
 from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
@@ -706,19 +712,30 @@ def _with_live_workspace_status(row: DashboardWorkspaceRow) -> DashboardWorkspac
     dirty_path_count: int | None = None
     live_error: str | None = None
     try:
-        before = inspect_git_workspace_runtime_identity(row.workspace_root)
-        workspace = before.layout
-        if (
-            workspace.workspace_root != row.workspace_root
-            or workspace.git_common_dir != row.git_common_dir
+        before = inspect_workspace_runtime_identity(row.workspace_root)
+        if not workspace_layout_compatible(
+            WorkspaceRecord(
+                workspace_id=row.workspace_id,
+                project_id=row.project_id,
+                workspace_root=row.workspace_root,
+                git_common_dir=row.git_common_dir,
+            ),
+            before.layout,
         ):
-            raise GitWorkspaceError("registered Workspace Git identity changed")
-        status = inspect_git_working_tree_status(row.workspace_root)
-        after = inspect_git_workspace_runtime_identity(row.workspace_root)
-        if after != before:
-            raise GitWorkspaceError("Workspace Git identity changed during dashboard read")
-        branch = status.branch
-        dirty_path_count = status.dirty_path_count
+            raise GitWorkspaceError("registered Workspace identity changed")
+        if layout_has_git(before.layout):
+            status = inspect_git_working_tree_status(row.workspace_root)
+            after = inspect_workspace_runtime_identity(row.workspace_root)
+            if after != before:
+                raise GitWorkspaceError("Workspace Git identity changed during dashboard read")
+            branch = status.branch
+            dirty_path_count = status.dirty_path_count
+        else:
+            after = inspect_workspace_runtime_identity(row.workspace_root)
+            if after != before:
+                raise GitWorkspaceError("Workspace identity changed during dashboard read")
+            branch = None
+            dirty_path_count = 0
     except GitWorkspaceError:
         live_error = "Git status unavailable"
     return replace(
@@ -1024,6 +1041,7 @@ def _parse_dashboard_action_form(
             or mode_text
             not in {
                 ProjectSkillFacetMode.AUTO.value,
+                ProjectSkillFacetMode.INCLUDED.value,
                 ProjectSkillFacetMode.EXCLUDED.value,
             }
         ):
@@ -1210,37 +1228,58 @@ def _render_skill_policy(
     *,
     action: str,
 ) -> str:
+    included = set(policy.included_facets)
     excluded = set(policy.excluded_facets)
     rows: list[str] = []
     for facet in MANAGED_PROJECT_SKILL_FACETS:
-        is_excluded = facet in excluded
-        target_mode = ProjectSkillFacetMode.AUTO if is_excluded else ProjectSkillFacetMode.EXCLUDED
-        state_label = SKILL_SCOPE_EXCLUDED if is_excluded else SKILL_SCOPE_AUTO
-        state_hint = SKILL_SCOPE_EXCLUDED_HINT if is_excluded else SKILL_SCOPE_AUTO_HINT
-        button_label = SKILL_SCOPE_AUTO if is_excluded else SKILL_SCOPE_EXCLUDED
+        if facet in excluded:
+            current = ProjectSkillFacetMode.EXCLUDED
+            state_label = SKILL_SCOPE_EXCLUDED
+            state_hint = SKILL_SCOPE_EXCLUDED_HINT
+        elif facet in included:
+            current = ProjectSkillFacetMode.INCLUDED
+            state_label = SKILL_SCOPE_INCLUDED
+            state_hint = SKILL_SCOPE_INCLUDED_HINT
+        else:
+            current = ProjectSkillFacetMode.AUTO
+            state_label = SKILL_SCOPE_AUTO
+            state_hint = SKILL_SCOPE_AUTO_HINT
+        buttons: list[str] = []
+        for mode, label in (
+            (ProjectSkillFacetMode.AUTO, SKILL_SCOPE_AUTO),
+            (ProjectSkillFacetMode.INCLUDED, SKILL_SCOPE_INCLUDED),
+            (ProjectSkillFacetMode.EXCLUDED, SKILL_SCOPE_EXCLUDED),
+        ):
+            if mode is current:
+                buttons.append(
+                    '<span class="skill-scope-current" aria-current="true">'
+                    + escape(label)
+                    + "</span>"
+                )
+                continue
+            buttons.append(
+                f'<form method="post" action="{escape(action, quote=True)}">'
+                + _hidden_input("action", "set_skill_scope")
+                + _hidden_input("project_id", project_id)
+                + _hidden_input("facet", facet)
+                + _hidden_input("mode", mode.value)
+                + '<button class="btn" type="submit" aria-label="'
+                + escape(f"{label}: {_SKILL_SCOPE_LABELS[facet]}", quote=True)
+                + f'">{escape(label)}</button>'
+                + "</form>"
+            )
         rows.append(
             '<div class="skill-scope-row" data-mode="'
-            + escape(
-                ProjectSkillFacetMode.EXCLUDED.value
-                if is_excluded
-                else ProjectSkillFacetMode.AUTO.value,
-                quote=True,
-            )
+            + escape(current.value, quote=True)
             + '"><div class="skill-scope-copy">'
             + f"<strong>{escape(_SKILL_SCOPE_LABELS[facet])}</strong>"
             + f"<span>{escape(state_label)} · {escape(state_hint)}</span></div>"
-            + f'<form method="post" action="{escape(action, quote=True)}">'
-            + _hidden_input("action", "set_skill_scope")
-            + _hidden_input("project_id", project_id)
-            + _hidden_input("facet", facet)
-            + _hidden_input("mode", target_mode.value)
-            + '<button class="btn" type="submit" aria-label="'
-            + escape(f"{button_label}: {_SKILL_SCOPE_LABELS[facet]}", quote=True)
-            + f'">{escape(button_label)}</button>'
-            + "</form></div>"
+            + '<div class="skill-scope-actions">'
+            + "".join(buttons)
+            + "</div></div>"
         )
     return (
-        '<section class="panel skill-scope-panel"><div class="panel-head"><div>'
+        '<section class="panel skill-scope-panel" id="skill-scope"><div class="panel-head"><div>'
         + f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
         + f"<h2>{escape(SKILL_SCOPE)}</h2></div></div>"
         + '<div class="panel-body">'
@@ -1248,6 +1287,18 @@ def _render_skill_policy(
         + '<div class="skill-scope-list">'
         + "".join(rows)
         + "</div></div></section>"
+    )
+
+
+def _render_skill_scope_entry(project_url: str, *, primary: bool) -> str:
+    classes = "btn btn-primary skill-scope-entry" if primary else "btn skill-scope-entry"
+    return (
+        f'<a class="{classes}" href="'
+        + escape(f"{project_url}#skill-scope", quote=True)
+        + '">'
+        + escape(MANAGE_SKILL_SCOPE)
+        + ' <span aria-hidden="true">→</span></a>'
+        + f'<p class="management-hint">{escape(MANAGE_SKILL_SCOPE_HINT)}</p>'
     )
 
 
@@ -1972,7 +2023,11 @@ def render_workspace_page(
         '<section class="page-intro compact"><div>'
         f'<p class="eyebrow">{escape(WORKSPACE_OVERVIEW)}</p>'
         f"<h1>{escape(workspace_name)}</h1>"
-        f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div></section>'
+        f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div>'
+        '<div class="page-intro-actions">'
+        f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
+        + _render_skill_scope_entry(project_url, primary=True)
+        + "</div></section>"
         '<section class="panel search-panel"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(SEARCH_LABEL)}</h2>'
         '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
@@ -2008,6 +2063,7 @@ def render_workspace_page(
         + _render_workspace_relocation_form(row.workspace_id, action=workspace_url)
         + '<div class="settings-divider"></div>'
         + f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
+        + _render_skill_scope_entry(project_url, primary=False)
         + _render_project_delete_form(row.project_id, action=project_url)
         + "</div></section></aside></section>"
     )

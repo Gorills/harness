@@ -223,6 +223,22 @@ def test_cursor_project_override_uses_absolute_workspace_root_and_is_git_ignored
     assert _git(root, "status", "--porcelain").stdout == ""
 
 
+def test_cursor_project_override_binds_a_directory_without_git(tmp_path: Path) -> None:
+    root = tmp_path / "trial"
+    root.mkdir()
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/venv/bin/python"))
+
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    config = root / ".cursor" / "mcp.json"
+    assert json.loads(config.read_text(encoding="utf-8")) == {
+        "mcpServers": {"harness": _entry(Path("/venv/bin/python"), root)}
+    }
+    assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert adapter.remove_project(root) is IntegrationChange.CHANGED
+    assert not config.exists()
+
+
 def test_cursor_existing_untracked_project_config_preserves_other_servers(tmp_path: Path) -> None:
     root = _repo(tmp_path / "repo")
     config = root / ".cursor" / "mcp.json"

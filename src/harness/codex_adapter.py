@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from harness.dashboard import load_or_create_dashboard_access_token, read_dashboard_access_token
+from harness.git_workspace import inspect_workspace_layout
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
 from harness.host_adapters import (
     HostIntegrationError,
@@ -899,16 +900,9 @@ def _workspace_root(path: Path) -> Path:
         location = path.expanduser().resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise HostIntegrationError(f"Codex Workspace path cannot be resolved: {path}") from exc
-    completed = _git(location, "rev-parse", "--show-toplevel")
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise HostIntegrationError(f"Codex Workspace is not a Git worktree: {location}")
-    try:
-        root = Path(completed.stdout.strip()).resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise HostIntegrationError("Git returned an invalid Codex Workspace root") from exc
-    if not root.is_dir():
-        raise HostIntegrationError("Git returned a non-directory Codex Workspace root")
-    return root
+    if not location.is_dir():
+        raise HostIntegrationError(f"Codex Workspace path is not a directory: {location}")
+    return inspect_workspace_layout(location).workspace_root
 
 
 def _absolute_executable_path(value: str | Path) -> Path:
@@ -930,7 +924,14 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         raise HostIntegrationError("Git could not inspect Codex project configuration") from exc
 
 
+def _is_git_worktree(root: Path) -> bool:
+    completed = _git(root, "rev-parse", "--is-inside-work-tree")
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
 def _git_is_tracked(root: Path, relative: Path) -> bool:
+    if not _is_git_worktree(root):
+        return False
     completed = _git(root, "ls-files", "--error-unmatch", "--", relative.as_posix())
     if completed.returncode == 0:
         return True
@@ -954,6 +955,8 @@ def _exclude_block() -> bytes:
 
 
 def _ensure_codex_exclude(root: Path) -> bool:
+    if not _is_git_worktree(root):
+        return False
     path = _git_info_exclude(root)
     raw = _read_optional_regular_file(path, label="Git info/exclude")
     block = _exclude_block()
@@ -975,6 +978,8 @@ def _ensure_codex_exclude(root: Path) -> bool:
 
 
 def _remove_codex_exclude(root: Path) -> None:
+    if not _is_git_worktree(root):
+        return
     path = _git_info_exclude(root)
     raw = _read_optional_regular_file(path, label="Git info/exclude")
     if raw is None:
@@ -992,6 +997,8 @@ def _remove_codex_exclude(root: Path) -> None:
 
 
 def _another_owned_worktree(root: Path) -> bool:
+    if not _is_git_worktree(root):
+        return False
     completed = _git(root, "worktree", "list", "--porcelain")
     if completed.returncode != 0:
         raise HostIntegrationError("Git linked worktrees could not be inspected")

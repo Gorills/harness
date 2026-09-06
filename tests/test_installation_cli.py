@@ -106,7 +106,7 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert harness_main() == 0
     assert "MCP registration: unchanged" in capsys.readouterr().out
 
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
     projected_skill_count = 7
@@ -497,7 +497,7 @@ def test_cursor_scan_reports_restart_when_project_override_is_created(
     assert harness_main() == 0
     capsys.readouterr()
 
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     output = capsys.readouterr().out
 
@@ -539,7 +539,7 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     )["profiles"] == ["codex"]
     assert not (home / ".codex" / "config.toml").exists()
 
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     scan_output = capsys.readouterr().out
     assert "Codex restart required" in scan_output
@@ -888,7 +888,7 @@ def test_multi_host_codex_cursor_install_scan_uninstall_preserves_codex(
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
     assert harness_main() == 0
     capsys.readouterr()
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     capsys.readouterr()
 
@@ -915,7 +915,7 @@ def test_multi_host_codex_cursor_install_scan_uninstall_preserves_codex(
     )
     assert host_state["profiles"] == ["codex", "cursor"]
 
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     capsys.readouterr()
     assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
@@ -1028,7 +1028,7 @@ def test_cursor_install_enables_independent_workspaces_and_linked_worktree(
     assert harness_main() == 0
     capsys.readouterr()
     for root in (repo_a, repo_c, worktree):
-        monkeypatch.setattr(sys, "argv", ["harness", "scan", str(root)])
+        monkeypatch.setattr(sys, "argv", ["harness", "init", str(root)])
         assert harness_main() == 0
         capsys.readouterr()
         project = json.loads((root / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
@@ -1080,7 +1080,7 @@ def test_cursor_install_skips_deleted_registered_workspace(
     capsys.readouterr()
     gone_workspace_id = ""
     for root in (kept, gone):
-        monkeypatch.setattr(sys, "argv", ["harness", "scan", str(root)])
+        monkeypatch.setattr(sys, "argv", ["harness", "init", str(root)])
         assert harness_main() == 0
         scan_output = capsys.readouterr().out
         if root == gone:
@@ -1132,7 +1132,7 @@ def test_uninstall_codex_reprojects_skills_for_remaining_cursor(
     monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
     assert harness_main() == 0
     capsys.readouterr()
-    monkeypatch.setattr(sys, "argv", ["harness", "scan", str(repo)])
+    monkeypatch.setattr(sys, "argv", ["harness", "init", str(repo)])
     assert harness_main() == 0
     capsys.readouterr()
     assert (repo / ".agents" / "skills" / "python-helper").is_dir()

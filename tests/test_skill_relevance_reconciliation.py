@@ -398,7 +398,9 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
         assert 'data-mode="excluded"' in html
         assert 'name="facet" value="web-frontend"' in html
         assert 'name="mode" value="auto"' in html
+        assert 'name="mode" value="included"' in html
         assert 'aria-label="Авто: Frontend"' in html
+        assert 'aria-label="Включить: Frontend"' in html
     finally:
         manager.close()
 

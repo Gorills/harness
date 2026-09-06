@@ -239,7 +239,7 @@ def test_daemon_starts_dashboard_with_runtime_and_reuses_url_over_user_ipc(tmp_p
             body = response.read().decode("utf-8")
             assert response.status == 200
         assert "Пока нет проектов" in body
-        assert "harness scan" in body
+        assert "harness init" in body
         assert 'lang="ru"' in body
     finally:
         _stop_server(stop_event, executor, future)
@@ -506,6 +506,29 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
     )
     assert "Удаление проекта" in workspace_html
     assert f'action="/projects/{project_id}/"' in workspace_html
+
+
+def test_dashboard_workspace_exposes_project_skill_scope_entry(tmp_path: Path) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    rows = read_dashboard_workspace_rows(database)
+    project_id = rows[0].project_id
+    workspace_html = render_workspace_page(
+        read_dashboard_workspace_detail(database, workspace_id),
+        base_path="/",
+    )
+    skill_scope_href = f'href="/projects/{project_id}/#skill-scope"'
+    assert "Управление скиллами проекта" in workspace_html
+    assert workspace_html.count(skill_scope_href) == 2
+    assert 'class="btn btn-primary skill-scope-entry"' in workspace_html
+    assert 'class="btn skill-scope-entry"' in workspace_html
+    assert f'class="nav-project-link" href="/workspaces/{workspace_id}/"' in workspace_html
+    project_html = render_project_page(
+        read_dashboard_project_detail(database, project_id),
+        base_path="/",
+    )
+    assert 'id="skill-scope"' in project_html
+    assert 'class="skill-scope-current" aria-current="true"' in project_html
+    assert "Управление скиллами проекта" not in project_html
 
 
 def test_dashboard_home_pins_live_tasks_ahead_of_newer_completed(

@@ -107,9 +107,13 @@ Logical software project. Stable across multiple physical checkouts.
 
 ### Workspace
 
-Physical checkout/worktree of a Project. Filesystem state, current branch/HEAD, dirty state, watcher, and active Task constraint are Workspace-scoped.
+Physical checkout of a Project: a Git worktree when Git is present, otherwise a bound
+filesystem directory. Filesystem state, current branch/HEAD when Git exists, dirty state,
+watcher, and active Task constraint are Workspace-scoped.
 
-Canonical identity should be based on normalized filesystem identity plus repository identity, not only display path. Symlink/case behavior must be normalized per platform.
+Canonical identity is the normalized directory plus Git common directory when attached.
+A filesystem Workspace stores `git_common_dir == workspace_root` until Git appears, then
+keeps the same `workspace_id`. Hidden remains Git-only.
 
 ### Task
 
@@ -428,19 +432,24 @@ Stale knowledge is retained as a historical clue, receives ranking penalty, and 
 
 ## 14. Skills architecture
 
-Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects every relevant Skill using deterministic project stack and explicit include/exclude configuration. Project-level skill scope can additionally exclude stable detected development facets that the operator does not work on; this durable policy applies across Project Workspaces and future pack updates, while `software-project` remains non-disableable. Harness ships a compact built-in quality pack of 16 skills into that registry through ownership-aware reconciliation. Six cores apply to every detected software project: `testing-strategy`, `secure-by-design`, `project-architecture`, `complex-change-planning`, `language-engineering`, and `legacy-preservation`. The built-ins are intent-oriented, composed through stack applicability, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. All stack-matching Skills are projected; deterministic match strength may order them but never drops a relevant Skill because of a count cap. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
+Canonical Harness skill registry lives outside repositories. Runtime load, built-in sync, doctor, and purge preflight share one fail-closed local filesystem-trust check: an existing registry root must be a real current-user directory without group or other write; missing roots stay empty or skip, unsafe existing roots are refused rather than chmod'd, and prepare also requires the immediate parent to meet that same owner/write contract (custom `HARNESS_SKILL_REGISTRY` ancestor replacement is out of v1). The resolver selects every relevant Skill using deterministic project stack and explicit include/exclude configuration. Project-level skill scope can Auto-detect, Include, or Exclude stable development facets; this durable policy applies across Project Workspaces and future pack updates, while `software-project` remains non-disableable. Harness ships a compact built-in quality pack of 16 skills into that registry through ownership-aware reconciliation. Six cores apply to every detected software project: `testing-strategy`, `secure-by-design`, `project-architecture`, `complex-change-planning`, `language-engineering`, and `legacy-preservation`. The built-ins are intent-oriented, composed through stack applicability, and validated against supported host surfaces; no second workflow/composition DSL is introduced. Detailed Docker, frontend discoverability, language-native, mobile, server, game, operations, and security guidance uses portable nested `references/` that the selected skill routes to only when relevant. All stack-matching Skills are projected; deterministic match strength may order them but never drops a relevant Skill because of a count cap. Same-id unknown or user-modified canonical content, including nested reference content, is never overwritten. When an ID leaves `BUILTIN_SKILLS`, exact-owned stale trees are removed through the same replacement-backup path as updates; user-modified stale trees stay as user-owned skills and leave the ownership manifest. Successful restore returns exact pre-sync trees, including retirements. If restore fails, remaining replacements still roll back, surviving backups are preserved, and sync raises an explicit recovery failure that includes the surviving backup path rather than re-raising only the original error.
 
 The quality baseline includes explicit local/test/production container operations, Google/Yandex
 public-route discoverability and web performance, project architecture, change quality (including
-legacy compatibility), language-native correctness/tooling, and durable data integrity. Stack-derived
-applicability keeps language and domain guidance automatic after manifests/source appear. Task
+legacy compatibility), language-native correctness/tooling, and durable data integrity. A registered Workspace is `software-project` evidence even with an empty index, so the six cores
+project after `harness init` of a Git worktree or ordinary folder
+([ADR-0063](docs/decisions/0063-registered-workspace-baseline-and-godot-evidence.md),
+[ADR-0064](docs/decisions/0064-opt-in-workspace-init-and-skill-include.md)).
+Specialized language and domain Skills still wait for indexed manifests or source. Task
 `stack_hints` remain
 optional Task metadata and are not a Skill selector. Dependency matching retains the
 existing portable exact-token contract, while deterministic derived facets capture cross-signal
 project roles such as `web-frontend`, `mobile-app`, `backend-service`, `godot-project`, and
 `deployment-ops`. Facets are calculated with manifest locality where needed: an Expo/React Native
 package is mobile even when its compatibility dependencies include React DOM, and it does not make
-`public-frontend` relevant unless independent web evidence exists. Stack detection also parses Dart
+`public-frontend` relevant unless independent web evidence exists. `godot-project` matches nested
+`project.godot` plus `.gdextension`, `.gd`, `.tscn`, and `.gdshader`. Stack detection also parses
+`CMakeLists.txt`, Dart
 `pubspec.yaml`, Ruby `Gemfile.lock` (`Gemfile` only when that directory has no sibling lockfile), Maven
 `pom.xml`, conservative Gradle/version-catalog text, and `.csproj` PackageReference/web SDK. Gradle
 Groovy/KTS uses quoted coordinates and plugin ids only; TOML `module=`/`id=`/`group=`/`name=` applies
@@ -536,7 +545,7 @@ Adapters must be idempotent and preserve unknown user configuration.
 
 The implemented Linux/POSIX installation slice supports local Codex CLI/IDE/desktop project config and local Cursor IDE/CLI. `harness install --host cursor|codex|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` selects Cursor. `--host all` installs the Codex+Cursor pair. Claude Code is no longer a supported Harness host ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md)). Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with an authenticated daemon-owned Streamable HTTP URL and exact absolute `X-Harness-Workspace-Root`; required initialization validates daemon connectivity, capability, and Workspace before Codex starts. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with the canonical absolute Workspace root, official enable/tool verification, and owned JSON cleanup. Historical untracked interpolation configs migrate; tracked configs require manual adoption. Direct subprocess probes never replace a failing Cursor host verification. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Generated configs and markers use Git-local exclusions. The Harness source checkout keeps a tracked Cursor overlay; Codex uses the same locally generated private HTTP config as production Workspaces.
 
-`harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Cursor → Codex continuity; real Codex acceptance exercises the configured HTTP path.
+`harness init` binds one folder (Git optional). `harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation for an already-registered Workspace. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Cursor → Codex continuity; real Codex acceptance exercises the configured HTTP path.
 
 ADR-0036 defines source-checkout global dogfood. Its `scan --global-dogfood` path is accepted only
 from an external tool-installed interpreter and returns after registration/indexing, before host or
@@ -544,7 +553,7 @@ skill reconciliation. A versioned ignored marker selects the route atomically; i
 state fails closed, and disabling preserves canonical Project Intelligence.
 
 The isolated source checkout seeds built-ins into `.harness/skills` during `scripts/dev harness
-scan` and projects the relevant subset for the compatible development profile graph. The default
+init` and projects the relevant subset for the compatible development profile graph. The default
 is Codex + Cursor through shared `.agents/skills`; `HARNESS_DEV_SKILL_PROFILES` can select another
 compatible graph without reading or mutating user-global host state.
 
@@ -575,6 +584,7 @@ Dashboard rules:
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
 - show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and a bounded Task list that pins live (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies or a second dashboard;
+- Workspace detail exposes an explicit control that opens Project skill-scope management on `/projects/{id}/#skill-scope`; sidebar and breadcrumbs still use `/workspaces/{id}/` ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;

@@ -115,6 +115,23 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
     assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == ""
 
 
+def test_codex_project_reconcile_binds_a_directory_without_git(tmp_path: Path) -> None:
+    root = (tmp_path / "trial").resolve()
+    root.mkdir()
+    adapter = _adapter()
+
+    assert adapter.project_registration_state(root) is HostRegistrationState.ABSENT
+    assert adapter.reconcile_project(root) is IntegrationChange.CHANGED
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    value = tomllib.loads(_config(root).read_text(encoding="utf-8"))
+    assert value["mcp_servers"]["harness"]["http_headers"]["X-Harness-Workspace-Root"] == str(root)
+    assert json.loads(_marker(root).read_text(encoding="utf-8")) == {
+        "version": 1,
+        "workspace_root": str(root),
+    }
+    assert not (root / ".git").exists()
+
+
 def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> None:
     assert len(CODEX_BOOTSTRAP_INSTRUCTION_BODY.encode("utf-8")) < 1024
     first_512 = CODEX_BOOTSTRAP_INSTRUCTION_BODY[:512]

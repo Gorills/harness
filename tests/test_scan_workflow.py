@@ -21,11 +21,14 @@ from harness.ipc import (
     StatusResult,
     WorkspaceScanResult,
     request_status,
+    request_workspace_init,
     request_workspace_scan,
 )
 from harness.registry import (
+    WorkspaceNotFoundError,
     create_project,
     register_workspace,
+    register_workspace_for_init,
     register_workspace_for_scan,
 )
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
@@ -96,14 +99,14 @@ def _raw_request(socket_path: Path, payload: dict[str, object]) -> dict[str, obj
     return cast(dict[str, object], value)
 
 
-def test_scan_registration_creates_then_reuses_project_and_workspace(tmp_path: Path) -> None:
+def test_init_registration_creates_then_reuses_project_and_workspace(tmp_path: Path) -> None:
     root = _repository(tmp_path / "repo")
     database = tmp_path / "harness.db"
     initialize_database(database)
     connection = connect_database(database)
     try:
-        first = register_workspace_for_scan(connection, path=root)
-        second = register_workspace_for_scan(connection, path=root / ".")
+        first = register_workspace_for_init(connection, path=root)
+        second = register_workspace_for_init(connection, path=root / ".")
 
         assert first.project_created is True
         assert first.workspace_created is True
@@ -117,6 +120,20 @@ def test_scan_registration_creates_then_reuses_project_and_workspace(tmp_path: P
         connection.close()
 
 
+def test_scan_registration_does_not_create_an_unregistered_workspace(tmp_path: Path) -> None:
+    root = _repository(tmp_path / "repo")
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        with pytest.raises(WorkspaceNotFoundError, match="harness init"):
+            register_workspace_for_scan(connection, path=root)
+        assert connection.execute("SELECT COUNT(*) FROM projects").fetchone() == (0,)
+        assert connection.execute("SELECT COUNT(*) FROM workspaces").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
 def test_scan_registration_reuses_project_for_linked_worktree(tmp_path: Path) -> None:
     root = _repository(tmp_path / "repo")
     linked = tmp_path / "linked"
@@ -125,8 +142,8 @@ def test_scan_registration_reuses_project_for_linked_worktree(tmp_path: Path) ->
     initialize_database(database)
     connection = connect_database(database)
     try:
-        primary = register_workspace_for_scan(connection, path=root)
-        secondary = register_workspace_for_scan(connection, path=linked)
+        primary = register_workspace_for_init(connection, path=root)
+        secondary = register_workspace_for_init(connection, path=linked)
 
         assert primary.project_created is True
         assert secondary.project_created is False
@@ -161,7 +178,7 @@ def test_daemon_scan_registers_indexes_and_returns_exact_wire_contract(tmp_path:
     socket_path = tmp_path / "ipc" / "harness.sock"
     stop_event, executor, future = _start_server(database, socket_path)
     try:
-        result = request_workspace_scan(socket_path, root)
+        result = request_workspace_init(socket_path, root)
         assert isinstance(result, WorkspaceScanResult)
         assert result.schema_version == SCHEMA_VERSION
         assert result.workspace_root == root.resolve()
@@ -172,6 +189,11 @@ def test_daemon_scan_registers_indexes_and_returns_exact_wire_contract(tmp_path:
         assert result.added == 1
         assert result.updated == 0
         assert result.removed == 0
+
+        reused = request_workspace_scan(socket_path, root)
+        assert reused.project_created is False
+        assert reused.workspace_created is False
+        assert reused.workspace_id == result.workspace_id
 
         response = _raw_request(
             socket_path,
@@ -239,7 +261,8 @@ def test_daemon_scan_reports_git_failure_without_stopping_daemon(tmp_path: Path)
     try:
         with pytest.raises(IpcRemoteError) as exc_info:
             request_workspace_scan(socket_path, not_a_repository)
-        assert exc_info.value.code == "workspace_git_error"
+        assert exc_info.value.code == "registry_error"
+        assert "harness init" in exc_info.value.message
         assert request_status(socket_path) == StatusResult(SCHEMA_VERSION, 0, 0)
     finally:
         _stop_server(stop_event, executor, future)

@@ -38,6 +38,7 @@ from harness.ipc import (
     request_dashboard_url,
     request_set_visibility,
     request_shutdown,
+    request_workspace_init,
     request_workspace_scan,
     request_workspace_search,
     request_workspace_skills_reconcile,
@@ -491,7 +492,7 @@ def _isolated_development_canonical_scan_error(
             pass
     return (
         "this Harness source checkout is reserved for isolated development; "
-        "use scripts/dev harness scan instead of a system Harness install"
+        "use scripts/dev harness init instead of a system Harness install"
     )
 
 
@@ -500,6 +501,7 @@ def _run_scan(
     socket_path: Path | None,
     *,
     global_dogfood: bool = False,
+    allow_create: bool = False,
 ) -> int:
     try:
         location = workspace_location.expanduser().resolve(strict=True)
@@ -523,8 +525,13 @@ def _run_scan(
         except (RuntimePathError, IpcError) as exc:
             return _scan_failure(str(exc))
 
+    request = (
+        request_workspace_init
+        if allow_create or global_dogfood
+        else request_workspace_scan
+    )
     try:
-        result = request_workspace_scan(socket_path, location)
+        result = request(socket_path, location)
     except IpcError as exc:
         return _scan_failure(str(exc))
 
@@ -1022,10 +1029,11 @@ def harness_main() -> int:
     )
     scan_parser = subparsers.add_parser(
         "scan",
-        help="register and deterministically scan one Git Workspace",
+        help="reconcile one already-registered Workspace",
         description=(
-            "Register or reuse the Git Workspace containing PATH and reconcile its deterministic "
-            "local Structural Index through the per-user Harness daemon."
+            "Reuse the registered Workspace containing PATH and reconcile its deterministic "
+            "local Structural Index through the per-user Harness daemon. Unregistered folders "
+            "require harness init. --global-dogfood may register the Harness source checkout."
         ),
     )
     scan_parser.add_argument(
@@ -1034,7 +1042,7 @@ def harness_main() -> int:
         nargs="?",
         default=Path("."),
         metavar="PATH",
-        help="location inside the Git Workspace (default: current directory)",
+        help="location inside the registered Workspace (default: current directory)",
     )
     scan_parser.add_argument(
         "--socket",
@@ -1043,6 +1051,36 @@ def harness_main() -> int:
         help="override the canonical per-user Unix-domain socket path",
     )
     scan_parser.add_argument(
+        "--global-dogfood",
+        action="store_true",
+        help=(
+            "register the Harness source checkout with a tool-installed runtime while skipping "
+            "checkout host and skill reconciliation"
+        ),
+    )
+    init_parser = subparsers.add_parser(
+        "init",
+        help="bind one folder as a Harness Workspace",
+        description=(
+            "Register the current directory (Git worktree or ordinary folder) as a Workspace, "
+            "then reconcile its deterministic local Structural Index and host/skill projection."
+        ),
+    )
+    init_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        metavar="PATH",
+        help="folder to bind as the Workspace (default: current directory)",
+    )
+    init_parser.add_argument(
+        "--socket",
+        type=Path,
+        metavar="PATH",
+        help="override the canonical per-user Unix-domain socket path",
+    )
+    init_parser.add_argument(
         "--global-dogfood",
         action="store_true",
         help=(
@@ -1176,6 +1214,13 @@ def harness_main() -> int:
         return _run_status(args.path, args.socket)
     if args.command == "scan":
         return _run_scan(args.path, args.socket, global_dogfood=args.global_dogfood)
+    if args.command == "init":
+        return _run_scan(
+            args.path,
+            args.socket,
+            global_dogfood=args.global_dogfood,
+            allow_create=True,
+        )
     if args.command == "visibility":
         return _run_visibility(args.mode, args.path, args.socket)
     if args.command == "search":

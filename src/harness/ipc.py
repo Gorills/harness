@@ -497,7 +497,37 @@ def request_workspace_scan(
     *,
     timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
 ) -> WorkspaceScanResult:
-    """Register/reuse one Git Workspace and request deterministic index reconciliation."""
+    """Reuse one registered Workspace and request deterministic index reconciliation."""
+    return _request_workspace_bind(
+        socket_path,
+        path,
+        method="scan_workspace",
+        timeout=timeout,
+    )
+
+
+def request_workspace_init(
+    socket_path: Path,
+    path: Path,
+    *,
+    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+) -> WorkspaceScanResult:
+    """Register or reuse one Workspace and request deterministic index reconciliation."""
+    return _request_workspace_bind(
+        socket_path,
+        path,
+        method="init_workspace",
+        timeout=timeout,
+    )
+
+
+def _request_workspace_bind(
+    socket_path: Path,
+    path: Path,
+    *,
+    method: str,
+    timeout: float,
+) -> WorkspaceScanResult:
     scan_path = str(path)
     _validate_scan_path(scan_path)
     request_id = uuid4().hex
@@ -506,7 +536,7 @@ def request_workspace_scan(
         {
             "version": PROTOCOL_VERSION,
             "request_id": request_id,
-            "method": "scan_workspace",
+            "method": method,
             "params": {"path": scan_path},
         },
         timeout=timeout,
@@ -849,7 +879,7 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             workspace_hints=_workspace_hints_from_params(payload["params"]),
         )
 
-    if method == "scan_workspace":
+    if method in {"scan_workspace", "init_workspace"}:
         if set(payload) != {"version", "request_id", "method", "params"}:
             raise IpcProtocolError("workspace scan request fields do not match the IPC schema")
         return IpcRequest(

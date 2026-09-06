@@ -370,6 +370,16 @@ class CursorAdapter:
         path = self._project_config(root)
         state = self._registration_state(path, self._project_desired(root))
         if state is HostRegistrationState.CURRENT:
+            marker = self._read_owner_marker(root)
+            if marker is None:
+                return IntegrationChange.UNCHANGED
+            if _ensure_cursor_exclude(root):
+                if not marker.exclude_owned:
+                    self._write_owner_marker(
+                        root,
+                        _OwnerMarker(workspace_root=str(root), exclude_owned=True),
+                    )
+                return IntegrationChange.CHANGED
             return IntegrationChange.UNCHANGED
 
         marker = self._read_owner_marker(root)
@@ -1070,7 +1080,14 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         raise HostIntegrationError("Git could not inspect Cursor project configuration") from exc
 
 
+def _is_git_worktree(root: Path) -> bool:
+    completed = _git(root, "rev-parse", "--is-inside-work-tree")
+    return completed.returncode == 0 and completed.stdout.strip() == "true"
+
+
 def _linked_worktree_roots(workspace_root: Path) -> tuple[Path, ...]:
+    if not _is_git_worktree(workspace_root):
+        return ()
     completed = _git(workspace_root, "worktree", "list", "--porcelain")
     if completed.returncode != 0:
         raise HostIntegrationError("Git linked worktrees could not be inspected")
@@ -1089,6 +1106,8 @@ def _linked_worktree_roots(workspace_root: Path) -> tuple[Path, ...]:
 
 
 def _git_is_tracked(workspace_root: Path, relative: Path) -> bool:
+    if not _is_git_worktree(workspace_root):
+        return False
     completed = _git(workspace_root, "ls-files", "--error-unmatch", "--", relative.as_posix())
     if completed.returncode == 0:
         return True
@@ -1115,6 +1134,8 @@ def _exclude_block() -> bytes:
 
 
 def _ensure_cursor_exclude(workspace_root: Path) -> bool:
+    if not _is_git_worktree(workspace_root):
+        return False
     path = _git_info_exclude(workspace_root)
     raw = _read_config_bytes(path)
     if raw is None:
@@ -1135,6 +1156,8 @@ def _ensure_cursor_exclude(workspace_root: Path) -> bool:
 
 
 def _remove_cursor_exclude(workspace_root: Path) -> None:
+    if not _is_git_worktree(workspace_root):
+        return
     path = _git_info_exclude(workspace_root)
     raw = _read_config_bytes(path)
     if raw is None:

@@ -23,7 +23,7 @@ from harness.index import (
     scan_workspace,
     scan_workspace_paths,
 )
-from harness.ipc import IpcError, StatusResult, request_status, request_workspace_scan
+from harness.ipc import IpcError, StatusResult, request_status, request_workspace_init
 from harness.registry import (
     WorkspaceRecord,
     create_project,
@@ -398,6 +398,27 @@ def test_directory_listing_skips_unreadable_subdirectory(tmp_path: Path) -> None
         os.chmod(blocked, 0o700)
     assert "" in directories
     assert "blocked" in directories
+
+
+def test_directory_listing_skips_cmake_build_prefix_trees(tmp_path: Path) -> None:
+    root, _database, _workspace_id = _registered(tmp_path)
+    (root / "build-godot" / "CMakeFiles").mkdir(parents=True)
+    (root / "build-godot" / "CMakeFiles" / "rules.ninja").write_text("build\n", encoding="utf-8")
+    (root / "cmake-build-debug" / "CMakeCache.txt").parent.mkdir(parents=True, exist_ok=True)
+    (root / "cmake-build-debug" / "CMakeCache.txt").write_text("cache\n", encoding="utf-8")
+    (root / "build-scripts").mkdir()
+    (root / "src").mkdir()
+    (root / "src" / "player.gd").write_text("extends Node\n", encoding="utf-8")
+    directories = watcher_module.list_workspace_metadata_directories(
+        root, deadline=time.monotonic() + 2.0
+    )
+    assert "" in directories
+    assert "src" in directories
+    assert "build-scripts" in directories
+    assert "build-godot" not in directories
+    assert "cmake-build-debug" not in directories
+    assert not any(path.startswith("build-godot/") for path in directories)
+    assert not any(path.startswith("cmake-build-debug/") for path in directories)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory mode bits")
@@ -1073,7 +1094,7 @@ def test_daemon_watcher_reconciles_create_modify_delete_without_explicit_scan(
     socket_path = tmp_path / "ipc" / "harness.sock"
     stop_event, executor, future = _start_server(database, socket_path)
     try:
-        initial = request_workspace_scan(socket_path, root)
+        initial = request_workspace_init(socket_path, root)
         workspace_id = initial.workspace_id
         tracked = root / "tracked.txt"
         added = root / "added.txt"

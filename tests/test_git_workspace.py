@@ -11,6 +11,8 @@ from harness.git_workspace import (
     NotGitWorkspaceError,
     inspect_git_working_tree_status,
     inspect_git_workspace,
+    inspect_workspace_layout,
+    layout_has_git,
 )
 
 
@@ -168,6 +170,10 @@ def test_inspect_git_workspace_rejects_non_git_directory(tmp_path: Path) -> None
 
     with pytest.raises(NotGitWorkspaceError, match="not inside an inspectable Git worktree"):
         inspect_git_workspace(outside)
+    layout = inspect_workspace_layout(outside)
+    assert layout.workspace_root == outside.resolve()
+    assert layout.git_common_dir == layout.workspace_root
+    assert layout_has_git(layout) is False
 
 
 def test_inspect_git_workspace_rejects_missing_path(tmp_path: Path) -> None:

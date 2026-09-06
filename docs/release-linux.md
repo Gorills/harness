@@ -22,11 +22,12 @@ harness doctor
 
 Omitted `--host` installs Cursor. Codex is `harness install --host codex`. `--host all` installs both. Claude Code is not a supported host ([ADR-0039](decisions/0039-retire-claude-code-host.md)).
 
-Register and index each Git worktree explicitly:
+Register and index each project folder explicitly (`harness init`). Git is optional.
+Reconcile an already-registered Workspace with `harness scan`.
 
 ```bash
-cd /path/to/repository
-harness scan
+cd /path/to/project
+harness init
 # After Harness changes Cursor MCP config, fully quit and reopen Cursor.
 agent mcp list
 harness status
@@ -219,7 +220,8 @@ Failed daemon autostart also terminates and reaps its own child before returning
 child delayed before its singleton lock exists. This cleanup never stops an existing or
 concurrently winning daemon; termination and kill waits are bounded.
 
-1. Run `make install-global HOST=codex`, then `harness scan` in each Workspace.
+1. Run `make install-global HOST=codex`, then `harness init` in each new project folder
+   (or `harness scan` to reconcile a folder that is already registered).
 2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,
    and create a new Task; an existing Task keeps its original instruction snapshot.
 3. From each Workspace root, require `codex mcp get harness --json` to show the loopback

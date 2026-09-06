@@ -15,9 +15,12 @@ from typing import Any
 from harness.git_workspace import (
     GitWorkspaceDeadlineExceededError,
     GitWorkspaceError,
+    GitWorkspaceLayout,
     GitWorkspaceRuntimeIdentity,
     _git_environment,
-    inspect_git_workspace_runtime_identity,
+    inspect_workspace_layout,
+    inspect_workspace_runtime_identity,
+    layout_has_git,
 )
 from harness.index import (
     IndexedFileRecord,
@@ -26,7 +29,7 @@ from harness.index import (
     _build_snapshot,
     _record_from_row,
 )
-from harness.registry import WorkspaceRecord, get_workspace
+from harness.registry import WorkspaceRecord, get_workspace, workspace_layout_compatible
 
 _BASELINE_TIMEOUT_SECONDS = 30.0
 _HASH_CHUNK_BYTES = 128 * 1024
@@ -96,11 +99,7 @@ def capture_workspace_task_baseline(
     deadline = monotonic() + _BASELINE_TIMEOUT_SECONDS
     workspace = get_workspace(connection, workspace_id)
     identity_before = _inspect_git_runtime_identity(workspace.workspace_root, deadline=deadline)
-    _require_registered_identity(
-        workspace,
-        identity_before.layout.workspace_root,
-        identity_before.layout.git_common_dir,
-    )
+    _require_registered_identity(workspace, identity_before.layout)
 
     indexed_files = _persisted_index_snapshot(connection, workspace_id, deadline=deadline)
     index_snapshot_sha256 = _index_snapshot_sha256(indexed_files, deadline=deadline)
@@ -280,7 +279,7 @@ def _inspect_git_runtime_identity(
     deadline: float,
 ) -> GitWorkspaceRuntimeIdentity:
     try:
-        identity = inspect_git_workspace_runtime_identity(workspace_root, deadline=deadline)
+        identity = inspect_workspace_runtime_identity(workspace_root, deadline=deadline)
     except GitWorkspaceDeadlineExceededError as exc:
         raise TaskBaselineTimeoutError("Task baseline Git identity inspection timed out") from exc
     except GitWorkspaceError as exc:
@@ -333,6 +332,9 @@ def _capture_live_index_snapshot(
 
 
 def capture_task_git_state(workspace_root: Path, *, deadline: float) -> TaskGitState:
+    layout = inspect_workspace_layout(workspace_root, deadline=deadline)
+    if not layout_has_git(layout):
+        return TaskGitState(head=None, branch=None, dirty_paths=())
     head = _git_head(workspace_root, deadline=deadline)
     branch = _git_branch(workspace_root, deadline=deadline)
     status = _git_status(workspace_root, deadline=deadline)
@@ -719,11 +721,10 @@ def _is_sha256(value: str) -> bool:
 
 def _require_registered_identity(
     workspace: WorkspaceRecord,
-    workspace_root: Path,
-    git_common_dir: Path,
+    layout: GitWorkspaceLayout,
 ) -> None:
-    if workspace.workspace_root != workspace_root or workspace.git_common_dir != git_common_dir:
-        raise TaskBaselineError("registered Workspace Git identity changed before baseline capture")
+    if not workspace_layout_compatible(workspace, layout):
+        raise TaskBaselineError("registered Workspace identity changed before baseline capture")
 
 
 def _utc_timestamp(now: datetime | None) -> str:

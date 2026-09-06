@@ -58,6 +58,46 @@ def test_harness_scan_resolves_location_and_prints_result(
     ]
 
 
+def test_harness_init_requests_workspace_init(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    workspace_root = tmp_path / "trial"
+    workspace_root.mkdir()
+    socket_path = tmp_path / "ipc" / "harness.sock"
+    seen: list[tuple[Path, Path]] = []
+
+    def request_init(ipc_socket: Path, path: Path) -> WorkspaceScanResult:
+        seen.append((ipc_socket, path))
+        return WorkspaceScanResult(
+            schema_version=3,
+            workspace_id="workspace-1",
+            project_id="project-1",
+            visibility_mode="normal",
+            workspace_root=workspace_root.resolve(),
+            project_created=True,
+            workspace_created=True,
+            file_count=0,
+            added=0,
+            updated=0,
+            removed=0,
+        )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["harness", "init", str(workspace_root), "--socket", str(socket_path)],
+    )
+    monkeypatch.setattr(entrypoints, "request_workspace_init", request_init)
+
+    assert harness_main() == 0
+    assert seen == [(socket_path, workspace_root.resolve())]
+    output = capsys.readouterr().out.splitlines()
+    assert "Project: project-1 (created)" in output
+    assert "Workspace: workspace-1 (created)" in output
+
+
 def test_harness_scan_uses_canonical_socket_without_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

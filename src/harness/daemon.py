@@ -16,9 +16,11 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from harness.git_workspace import (
+    GitWorkingTreeStatus,
     GitWorkspaceError,
     inspect_git_working_tree_status,
-    inspect_git_workspace_runtime_identity,
+    inspect_workspace_runtime_identity,
+    layout_has_git,
 )
 from harness.hidden_projection import HiddenProjectionError
 from harness.host_integration_state import (
@@ -84,7 +86,9 @@ from harness.registry import (
     get_project,
     get_workspace,
     list_workspaces,
+    register_workspace_for_init,
     register_workspace_for_scan,
+    workspace_layout_compatible,
 )
 from harness.retrieval import (
     ProjectRetrievalError,
@@ -260,16 +264,16 @@ def read_workspace_status(
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
 
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
+            f"registered workspace identity changed: {workspace.workspace_root}"
         )
-    git_status = inspect_git_working_tree_status(workspace.workspace_root)
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+    if layout_has_git(runtime_identity.layout):
+        git_status = inspect_git_working_tree_status(workspace.workspace_root)
+    else:
+        git_status = GitWorkingTreeStatus(head=None, branch=None, dirty_path_count=0)
+    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
         raise WorkspaceResolutionError("workspace Git identity changed during status read")
 
     connection.execute("BEGIN")
@@ -321,11 +325,8 @@ def read_workspace_task_status(
         ]
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
@@ -357,7 +358,7 @@ def read_workspace_task_status(
             connection.execute("ROLLBACK")
         raise
 
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
         raise WorkspaceResolutionError("workspace Git identity changed during Task status")
 
     task_summary = (
@@ -411,11 +412,8 @@ def read_workspace_search(
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
 
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
@@ -439,7 +437,7 @@ def read_workspace_search(
             connection.execute("ROLLBACK")
         raise
 
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
         raise WorkspaceResolutionError("workspace Git identity changed during search")
 
     return WorkspaceSearchResult(
@@ -516,7 +514,7 @@ def read_project_search(
             currentness,
             deadline=deadline,
         ):
-            if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+            if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
                 raise WorkspaceResolutionError(
                     "workspace Git identity changed during Project search"
                 )
@@ -553,7 +551,7 @@ def read_project_context_result(
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
         raise WorkspaceResolutionError("workspace Git identity changed during Project context")
     return ProjectContextResult(
         schema_version=SCHEMA_VERSION,
@@ -574,11 +572,8 @@ def _resolve_retrieval_workspace(
         ]
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
@@ -600,11 +595,8 @@ def read_workspace_index_entry(
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
 
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
@@ -626,7 +618,7 @@ def read_workspace_index_entry(
             connection.execute("ROLLBACK")
         raise
 
-    if inspect_git_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
+    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
         raise WorkspaceResolutionError("workspace Git identity changed during index entry read")
 
     return _workspace_index_entry_result(workspace, project.project_id, entry)
@@ -723,11 +715,8 @@ def _resolve_task_workspace(
         ]
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_git_workspace_runtime_identity(workspace.workspace_root)
-    if (
-        runtime_identity.layout.workspace_root != workspace.workspace_root
-        or runtime_identity.layout.git_common_dir != workspace.git_common_dir
-    ):
+    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
+    if not workspace_layout_compatible(workspace, runtime_identity.layout):
         raise WorkspaceResolutionError(
             f"registered workspace Git identity changed: {workspace.workspace_root}"
         )
@@ -739,10 +728,15 @@ def scan_workspace_path(
     path: Path,
     *,
     deadline: float | None = None,
+    allow_create: bool = False,
 ) -> WorkspaceScanResult:
-    """Register/reuse one Git Workspace and run a bounded deterministic reconciliation."""
+    """Bind or reuse one Workspace and run a bounded deterministic reconciliation."""
     effective_deadline = monotonic() + _SCAN_DEADLINE_SECONDS if deadline is None else deadline
-    registration = register_workspace_for_scan(connection, path=path)
+    registration = (
+        register_workspace_for_init(connection, path=path)
+        if allow_create
+        else register_workspace_for_scan(connection, path=path)
+    )
     scan = scan_workspace(
         connection,
         registration.workspace.workspace_id,
@@ -1111,7 +1105,7 @@ def _serve_client(
             watcher_invalidations,
         )
         return
-    if request.method == "scan_workspace" and request.scan_path is not None:
+    if request.method in {"scan_workspace", "init_workspace"} and request.scan_path is not None:
         _serve_workspace_scan(
             client,
             database,
@@ -1119,6 +1113,7 @@ def _serve_client(
             request.scan_path,
             scan_lock,
             watcher_invalidations,
+            allow_create=request.method == "init_workspace",
         )
         return
     if (
@@ -1737,6 +1732,8 @@ def _serve_workspace_scan(
     path: Path,
     scan_lock: Lock,
     watcher_invalidations: SimpleQueue[str],
+    *,
+    allow_create: bool = False,
 ) -> None:
     deadline = monotonic() + _SCAN_DEADLINE_SECONDS
     try:
@@ -1744,7 +1741,9 @@ def _serve_workspace_scan(
         if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
             raise ScanDeadlineExceededError("Workspace scan deadline exceeded")
         try:
-            result = scan_workspace_path(database, path, deadline=deadline)
+            result = scan_workspace_path(
+                database, path, deadline=deadline, allow_create=allow_create
+            )
         finally:
             scan_lock.release()
         watcher_invalidations.put(result.workspace_id)

@@ -107,6 +107,40 @@ def inspect_git_workspace_runtime_identity(
     return identity
 
 
+def layout_has_git(layout: GitWorkspaceLayout) -> bool:
+    """Return whether ``layout`` refers to a real Git common directory, not a filesystem sentinel."""
+    return layout.git_common_dir != layout.workspace_root
+
+
+def inspect_workspace_layout(path: Path, *, deadline: float | None = None) -> GitWorkspaceLayout:
+    """Return Git worktree identity when present, otherwise the canonical directory itself."""
+    try:
+        return inspect_git_workspace(path, deadline=deadline)
+    except (NotGitWorkspaceError, GitExecutableUnavailableError):
+        root = _normalize_existing_path(_existing_directory(path))
+        return GitWorkspaceLayout(workspace_root=root, git_common_dir=root)
+
+
+def inspect_workspace_runtime_identity(
+    path: Path,
+    *,
+    deadline: float | None = None,
+) -> GitWorkspaceRuntimeIdentity:
+    """Return Git inode identity when present, otherwise the canonical directory inode triple."""
+    try:
+        return inspect_git_workspace_runtime_identity(path, deadline=deadline)
+    except (NotGitWorkspaceError, GitExecutableUnavailableError):
+        layout = inspect_workspace_layout(path, deadline=deadline)
+        identity = _filesystem_identity(layout.workspace_root)
+        return GitWorkspaceRuntimeIdentity(
+            layout=layout,
+            git_dir=layout.workspace_root,
+            workspace_root_identity=identity,
+            git_dir_identity=identity,
+            git_common_dir_identity=identity,
+        )
+
+
 def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
     """Return branch/HEAD and a bounded dirty-path count from stable Git porcelain output."""
     invocation_dir = _existing_directory(path)

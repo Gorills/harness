@@ -416,6 +416,7 @@ def main() -> int:
             "backup",
             "restore",
             "status",
+            "init",
             "scan",
             "search",
             "skills",
@@ -435,11 +436,19 @@ def main() -> int:
                 )
 
         scan_help = _run((str(harness), "scan", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--socket", "deterministic", "Git Workspace"):
+        for expected in ("--socket", "deterministic", "registered Workspace"):
             if expected not in scan_help.stdout:
                 raise RuntimeError(
                     f"installed harness scan --help did not contain {expected!r}: "
                     f"{scan_help.stdout!r}"
+                )
+
+        init_help = _run((str(harness), "init", "--help"), cwd=workspace, env=isolated_env)
+        for expected in ("--socket", "ordinary folder", "Git worktree"):
+            if expected not in init_help.stdout:
+                raise RuntimeError(
+                    f"installed harness init --help did not contain {expected!r}: "
+                    f"{init_help.stdout!r}"
                 )
 
         search_help = _run((str(harness), "search", "--help"), cwd=workspace, env=isolated_env)

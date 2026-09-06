@@ -407,8 +407,25 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .skill-scope-copy strong { font-size: 13px; font-weight: 660; }
 .skill-scope-copy span { color: var(--text-muted); font-size: 11px; line-height: 1.45; }
 .skill-scope-row[data-mode="excluded"] .skill-scope-copy strong { color: var(--text-muted); }
+.skill-scope-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
 .skill-scope-row form { margin: 0; }
 .skill-scope-row .btn { min-width: 124px; }
+.skill-scope-current {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 124px;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #c5c9d4;
+  border-radius: 8px;
+  background: #e8ebf2;
+  color: #161922;
+  font-size: 13px;
+  font-weight: 700;
+}
+.skill-scope-entry { width: 100%; }
+.page-intro-actions .management-hint { margin-top: 8px; }
 .action-row { display: flex; flex-wrap: wrap; gap: 9px; }
 .action-row form { margin: 0; }
 .btn {
@@ -423,6 +440,13 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
   font-weight: 650;
   cursor: pointer;
   transition: transform .14s ease, border-color .14s ease, background .14s ease, color .14s ease;
+}
+a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
 }
 .btn:hover { transform: translateY(-1px); border-color: #4a5365; background: var(--panel-hover); color: var(--text); }
 .btn-primary { border-color: #7187ef; background: #667cee; color: #fff; }
@@ -687,7 +711,8 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
   .search-hit { grid-template-columns: 1fr; gap: 6px; }
   .search-hit-meta { text-align: left; }
   .skill-scope-row { grid-template-columns: 1fr; gap: 10px; }
-  .skill-scope-row .btn { width: 100%; }
+  .skill-scope-actions { justify-content: stretch; }
+  .skill-scope-row .btn, .skill-scope-current { width: 100%; }
 }
 
 @media (prefers-color-scheme: light) {

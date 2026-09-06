@@ -30,7 +30,7 @@ For checkout-local CLI/daemon work that must not share state, MCP, or host confi
 ```text
 scripts/dev sync
 scripts/dev harness doctor
-scripts/dev harness scan
+scripts/dev harness init
 scripts/dev stop
 ```
 

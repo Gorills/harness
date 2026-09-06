@@ -35,7 +35,7 @@ from harness.ipc import (
     _status_from_response,
     request_runtime_diagnostics,
     request_status,
-    request_workspace_scan,
+    request_workspace_init,
     request_workspace_status,
 )
 from harness.registry import create_project, register_workspace
@@ -539,18 +539,24 @@ def test_slow_scan_does_not_block_status_request(
     original_scan_workspace_path = daemon_module.scan_workspace_path
 
     def blocking_scan_workspace_path(
-        connection: sqlite3.Connection, path: Path, *, deadline: float | None = None
+        connection: sqlite3.Connection,
+        path: Path,
+        *,
+        deadline: float | None = None,
+        allow_create: bool = False,
     ) -> WorkspaceScanResult:
         scan_started.set()
         if not release_scan.wait(timeout=2):
             raise AssertionError("slow Workspace scan was not released")
-        return original_scan_workspace_path(connection, path, deadline=deadline)
+        return original_scan_workspace_path(
+            connection, path, deadline=deadline, allow_create=allow_create
+        )
 
     monkeypatch.setattr(daemon_module, "scan_workspace_path", blocking_scan_workspace_path)
     stop_event, executor, future = _start_server(database, socket_path)
     try:
         with ThreadPoolExecutor(max_workers=2) as client_executor:
-            scan_future = client_executor.submit(request_workspace_scan, socket_path, root)
+            scan_future = client_executor.submit(request_workspace_init, socket_path, root)
             assert scan_started.wait(timeout=1)
 
             status_future = client_executor.submit(request_status, socket_path)
