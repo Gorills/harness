@@ -80,6 +80,7 @@ _SERVER_INSTRUCTIONS = (
     "path may be read natively; project_context is not required for those kinds. Checkpoint each "
     "stage. New request/implement-after-diagnosis: complete/wait then new Task. Keep "
     "task_id+expected_revision. Hidden mode forbids durable SCM mutations."
+)
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search current Project Intelligence across local code/doc text and identifiers, durable "
     "Knowledge, and Task history. Harness reconciles watcher lag before retrieval. Explicit "
