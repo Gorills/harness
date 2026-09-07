@@ -191,10 +191,16 @@ Normal workflow remains low-ritual:
 ```text
 project_status
 → task_start/resume
-→ project_search
+→ project_search when exact/durable retrieval helps, otherwise native discovery
 → native work
 → task_checkpoint
 ```
+
+`project_search` is required before broad native discovery only for explicit identifiers/quoted
+literals and for Knowledge/Task retrieval. Natural-language code/doc discovery may start with
+native repository search. Ordinary lexical code/doc hits are localization candidates, not proof
+that broader native fallback is redundant. Only complete, untruncated `exact_coverage` suppresses
+repeating native search for the same needle.
 
 `project_context` is not a mandatory step after every search hit. Knowledge and Task refs use it
 for selected semantic context. Code and doc hits that already include an exact path may be read
