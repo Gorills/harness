@@ -11,9 +11,12 @@ These rules apply to every coding agent and human contributor in this repository
   pre-status action; initial omission is not unavailability.
 - After status, start or resume a Harness Task before diagnosis or edits, including
   read-only investigation. A failed Harness call is a blocker: read the tool schema and retry;
-  do not continue without a Task. Then use `project_search` before broad native repository
-  exploration. Skip search only when an exact path is already in hand (operator message, open
-  file, git status, or a prior search hit); skipping search does not skip Task.
+  do not continue without a Task. Use `project_search` before broad native repository
+  exploration when the query has an explicit identifier or quoted literal, or when retrieving
+  Knowledge/Task history. Natural-language code/doc discovery may use native repository search
+  directly. Ordinary lexical code/doc hits are candidate localization only and never forbid a
+  broader native fallback. Skip `project_search` when an exact path is already in hand (operator
+  message, open file, git status, or a prior search hit); skipping search does not skip Task.
   `project_context` is only for selected refs when it adds semantic information;
   if a code or doc search hit already has an exact path, targeted native read/search is allowed
   immediately. Checkpoint each logical stage. A new operator work request (diagnosis, edits, or
