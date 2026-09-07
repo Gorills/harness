@@ -76,7 +76,7 @@ _SERVER_INSTRUCTIONS = (
     "diagnosis/edits; schema error: retry, never skip. Do not skip Task because work looks small "
     "or the path is known. IDs/literals/Knowledge/Tasks: project_search before broad native work; "
     "natural-language code/doc discovery may use native search directly; lexical hits do not block "
-    "broad fallback. Exact path may skip search, not Task. Complete untruncated exact_coverage "
+    "broad fallback. Path may skip search, not Task. Complete untruncated exact_coverage "
     "replaces native search. A code/doc "
     "path may be read natively; project_context is not required for those kinds. Checkpoint each "
     "stage. New request/implement-after-diagnosis: complete/wait; new Task. Keep "
