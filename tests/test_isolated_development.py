@@ -441,7 +441,8 @@ def test_checkout_agent_instructions_require_harness_before_native_tools() -> No
     assert "deferred or omitted from the initial visible tool list" in bootstrap
     assert "only allowed\n  pre-status action" in bootstrap
     assert "After status, start or resume a Harness Task" in bootstrap
-    assert "Then use `project_search`" in bootstrap
+    assert "Natural-language code/doc discovery may use native repository search" in bootstrap
+    assert "Ordinary lexical code/doc hits are candidate localization only" in bootstrap
     assert "before diagnosis or edits" in bootstrap
     assert "read the tool schema and retry" in bootstrap
     assert "Checkpoint each logical stage" in bootstrap
