@@ -130,7 +130,7 @@ _TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
 )
 
 _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
-    "Harness required. `project_status` must be the first repository action in each Codex task. "
+    "Harness required. `project_status` must be the first repository action per Codex task. "
     "Before running any shell command, reading/searching files, browser inspection, or changes, "
     "find Harness MCP tools if deferred/omitted from the initial visible tool list; call "
     "`project_status`. Tool discovery is the only action allowed before `project_status`; omission "
