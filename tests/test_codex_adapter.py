@@ -148,6 +148,13 @@ def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> N
         CODEX_BOOTSTRAP_INSTRUCTION_BODY
     )
     assert "may skip search, not Task" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "Natural-language code/doc discovery may use native search directly" in (
+        CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    )
+    assert "lexical hits do not block broad fallback" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    assert "Complete untruncated exact_coverage replaces native search" in (
+        CODEX_BOOTSTRAP_INSTRUCTION_BODY
+    )
     assert "discussion only" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "waiver" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
     assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
@@ -164,6 +171,8 @@ def test_codex_bootstrap_matches_canonical_workflow() -> None:
     assert "expand selected refs with" not in text
     assert "then use native tools. Start or resume a Harness Task" not in text
     assert "a code/doc path may be read natively" in text
+    assert "Natural-language code/doc discovery may use native search directly" in text
+    assert "lexical hits do not block broad fallback" in text
     assert len(text.encode("utf-8")) < 1024
 
 
@@ -258,6 +267,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
         codex_module._TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])
