@@ -147,11 +147,10 @@ _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
 
 CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness required. `project_status` must be the first repository action per Codex task. "
-    "Before running any shell command, reading/searching files, browser inspection, or changes, "
-    "find Harness MCP tools if deferred/omitted from the initial visible tool list; call "
-    "`project_status`. Tool discovery is the only action allowed before `project_status`; omission "
-    "is not unavailability. After Harness config changes restart Codex with a new task; snapshots "
-    "do not refresh.\n\n"
+    "Before running any shell command/read/search/browser inspection/change, find Harness tools if "
+    "deferred/omitted from initial visible tool list; call `project_status`. Tool discovery is the "
+    "only action allowed before `project_status`; omission is not unavailability. After Harness "
+    "config changes restart Codex/new task; existing instruction snapshots do not refresh.\n\n"
     "After successful `project_status`, start or resume a Harness Task before diagnosis or edits; "
     "schema error: retry, never skip. Do not skip Task because work looks small or the path is known. "
     "Identifiers/literals or Knowledge/Tasks: use `project_search` before broad native work. "
