@@ -438,23 +438,6 @@ def _has_current_source_evidence(hit: Mapping[str, Any]) -> bool:
     return isinstance(snippet, str) and bool(snippet.strip())
 
 
-def _exact_needle_requiring_native_fallback(item: Mapping[str, Any] | None) -> str | None:
-    if item is None:
-        return None
-    payload = _search_result_payload(item)
-    if payload is None:
-        return None
-    coverage = payload.get("exact_coverage")
-    if not isinstance(coverage, Mapping):
-        return None
-    if coverage.get("complete") is True and coverage.get("locations_truncated") is False:
-        return None
-    needle = coverage.get("needle")
-    if not isinstance(needle, str) or not needle.strip():
-        return None
-    return needle
-
-
 def _complete_exact_needle(item: Mapping[str, Any] | None) -> str | None:
     if item is None:
         return None
