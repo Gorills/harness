@@ -290,14 +290,8 @@ def evaluate_search_behavior(
     followup = (
         native_commands[0].command_class if native_commands else CommandClass.UNRELATED_COMMAND
     )
-    fallback_exact_needle = _exact_needle_requiring_native_fallback(search_item)
-    duplicate = _duplicate_broad_search(
-        quality,
-        query,
-        native_commands,
-        allowed_exact_fallback=fallback_exact_needle,
-    )
     exact_needle = _complete_exact_needle(search_item)
+    duplicate = _duplicate_broad_search(exact_needle, native_commands)
     complete_exact_to_native_search = exact_needle is not None and any(
         command.command_class in {CommandClass.TARGETED_SEARCH, CommandClass.BROAD_SEARCH}
         and command.search_pattern is not None
@@ -715,22 +709,15 @@ def _read_paths(argv: tuple[str, ...]) -> tuple[str, ...] | None:
 
 
 def _duplicate_broad_search(
-    quality: SearchHitQuality,
-    query: str | None,
+    complete_exact_needle: str | None,
     native_commands: Sequence[NativeCommandEvidence],
-    *,
-    allowed_exact_fallback: str | None = None,
 ) -> bool:
-    if quality is not SearchHitQuality.STRONG or not query:
+    if complete_exact_needle is None:
         return False
     return any(
         command.command_class is CommandClass.BROAD_SEARCH
         and command.search_pattern is not None
-        and not (
-            allowed_exact_fallback is not None
-            and _substantially_repeats(command.search_pattern, allowed_exact_fallback)
-        )
-        and _substantially_repeats(command.search_pattern, query)
+        and _substantially_repeats(command.search_pattern, complete_exact_needle)
         for command in native_commands
     )
 
