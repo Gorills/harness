@@ -85,6 +85,8 @@ def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
     assert "project_search, project_context, then native tools" not in text
     assert "code/doc path may be read natively" in text
     assert "project_context is not required for those kinds" in text
+    assert "natural-language code/doc discovery may use native search directly" in text
+    assert "Ordinary lexical code/doc hits do not block broader native fallback" in text
     assert "project_context only for selected semantic refs." not in text
 
 
@@ -97,7 +99,9 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     assert "results_truncated=true" in description
     assert "project_context is not required for those kinds" in description
     assert "after task_start or resume" in description
-    assert "Skip this search only when an" in description
+    assert "Natural-language code/doc discovery may use native broad search directly" in description
+    assert "ordinary lexical hits do not suppress broader native fallback" in description
+    assert "Skip this search when an exact path" in description
     assert "Task remains required" in description
     assert "use project_context only for selected refs" not in description
 
