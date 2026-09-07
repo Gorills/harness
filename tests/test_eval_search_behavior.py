@@ -118,15 +118,15 @@ def test_strong_hit_targeted_read_is_not_duplicate() -> None:
     assert report.search_before_broad_native is True
 
 
-def test_strong_hit_repo_root_rg_of_same_query_is_duplicate() -> None:
+def test_strong_lexical_hit_allows_repo_root_rg_fallback() -> None:
     report = evaluate_search_behavior(
         _canonical(_command("bash -lc 'rg authenticate user .'")),
     )
 
     assert report.search_hit_quality is SearchHitQuality.STRONG
     assert report.native_followup is CommandClass.BROAD_SEARCH
-    assert report.duplicate_broad_search is True
-    assert report.good_hit_to_duplicate_broad_search is True
+    assert report.duplicate_broad_search is False
+    assert report.good_hit_to_duplicate_broad_search is False
     assert report.good_hit_to_targeted_read is False
 
 
@@ -404,6 +404,39 @@ def test_complete_exact_coverage_flags_repeated_native_search() -> None:
 
     assert report.complete_exact_to_native_search is True
     assert sanitized_search_behavior_metrics(events)["complete_exact_to_native_search"] is True
+
+
+def test_complete_exact_coverage_flags_repo_root_repeat_as_duplicate() -> None:
+    events = [
+        _status(),
+        _task_start(),
+        _search(
+            "authenticate",
+            [{"kind": "code", "path": CANDIDATE, "title": "auth"}],
+            exact_coverage={
+                "needle": "authenticate",
+                "needle_kind": "single_term",
+                "case_sensitive": True,
+                "matched_files": 1,
+                "matched_occurrences": 2,
+                "matched_lines": 2,
+                "scanned_files": 5,
+                "scanned_bytes": 1024,
+                "non_text_files": 1,
+                "unavailable_files": 0,
+                "complete": True,
+                "locations_truncated": False,
+                "locations": [],
+            },
+        ),
+        _command("rg authenticate ."),
+    ]
+
+    report = evaluate_search_behavior(events)
+
+    assert report.duplicate_broad_search is True
+    assert report.good_hit_to_duplicate_broad_search is True
+    assert report.complete_exact_to_native_search is True
 
 
 def test_exact_coverage_without_fts_hits_is_strong_and_supplies_candidate_path() -> None:
