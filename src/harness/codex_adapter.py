@@ -143,6 +143,7 @@ _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "hits do not block broad fallback. Exact path may skip search, not Task; a code/doc path may be "
     "read natively. Complete untruncated exact_coverage replaces native search. Checkpoint each "
     "logical stage.\n"
+)
 
 _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
