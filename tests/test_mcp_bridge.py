@@ -86,7 +86,7 @@ def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
     assert "code/doc path may be read natively" in text
     assert "project_context is not required for those kinds" in text
     assert "natural-language code/doc discovery may use native search directly" in text
-    assert "Ordinary lexical code/doc hits do not block broader native fallback" in text
+    assert "lexical hits do not block broad fallback" in text
     assert "project_context only for selected semantic refs." not in text
 
 
