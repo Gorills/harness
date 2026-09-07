@@ -129,7 +129,7 @@ _TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "read natively. Checkpoint each logical stage. Phase shift: complete/wait then new Task.\n"
 )
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness is required for repository work. `project_status` must be the first repository "
     "action at the start of every Codex task. Before running any shell command, reading or "
     "searching repository files, inspecting with a browser, or making changes, locate the "
@@ -145,12 +145,31 @@ CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Checkpoint each logical stage.\n"
 )
 
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness is required for repository work. `project_status` must be the first repository "
+    "action at the start of every Codex task. Before running any shell command, reading or "
+    "searching repository files, inspecting with a browser, or making changes, locate the "
+    "configured Harness MCP tools—even when they are deferred or omitted from the initial visible "
+    "tool list—and call `project_status`. Tool discovery is the only action allowed before "
+    "`project_status`; do not treat initial omission as unavailability. "
+    "After Harness config changes, use a fully restarted Codex client and new task; existing "
+    "instruction snapshots do not refresh.\n\n"
+    "After successful `project_status`, start or resume a Harness Task before diagnosis or "
+    "edits; on schema error retry, never skip. Do not skip Task because work looks small or "
+    "the path is known. Use `project_search` before broad native work for explicit identifiers/"
+    "quoted literals and Knowledge/Task retrieval. Natural-language code/doc discovery may use "
+    "native search directly; lexical hits do not block broad fallback. An exact path may skip "
+    "search, not Task. Complete untruncated exact_coverage replaces native search for that needle. "
+    "A code/doc path may be read natively. Checkpoint each logical stage.\n"
+)
+
 _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _TASK_BEFORE_CHANGES_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(
