@@ -76,7 +76,7 @@ def _knowledge(title: str, body: str) -> KnowledgeDraft:
     )
 
 
-def _seed_project_intelligence(tmp_path: Path) -> tuple[Path, Path, str, str, str, str]:
+def _seed_project_intelligence(tmp_path: Path) -> tuple[Path, Path, str, str, str, str, str, str]:
     active_root = tmp_path / "active"
     other_root = tmp_path / "other"
     _init_repo(active_root)
@@ -126,14 +126,20 @@ def rotateRefreshToken(repository, previous_credential):
             expected_revision=legacy.task.revision,
             state=TaskState.WORKING,
             summary="Transactional replacement now enforced",
+            next_step="Проверить управление задачами.",
             knowledge=(
                 _knowledge(
                     "Refresh rotation current invariant",
                     "Current replacement invalidates the previous token transactionally.",
                 ),
+                _knowledge(
+                    "Управление задачами",
+                    "Состояние работы сохраняется между сессиями.",
+                ),
             ),
         )
         current_checkpoint_id = current.checkpoint.checkpoint_id
+        russian_knowledge_id = current.knowledge_cards[1].knowledge_id
 
         other_project = create_project(connection)
         other_workspace = register_workspace(
@@ -148,11 +154,13 @@ def rotateRefreshToken(repository, previous_credential):
             expected_revision=other_task.revision,
             state=TaskState.WORKING,
             summary="Transactional replacement SECRET_OTHER_PROJECT",
+            next_step="Проверить управление задачами SECRET_OTHER_PROJECT.",
             knowledge=(
                 _knowledge(
                     "Refresh rotation invariant SECRET_OTHER_PROJECT",
                     "SECRET_OTHER_PROJECT must never cross Project retrieval boundaries.",
                 ),
+                _knowledge("Управление задачами", "SECRET_OTHER_PROJECT не должен раскрываться."),
             ),
         )
         other_knowledge_id = other.knowledge_cards[0].knowledge_id
@@ -163,6 +171,8 @@ def rotateRefreshToken(repository, previous_credential):
             legacy_knowledge_id,
             current_checkpoint_id,
             other_knowledge_id,
+            other_task.task_id,
+            russian_knowledge_id,
         )
     finally:
         connection.close()
@@ -179,6 +189,8 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
         legacy_knowledge_id,
         current_checkpoint_id,
         other_knowledge_id,
+        other_task_id,
+        russian_knowledge_id,
     ) = _seed_project_intelligence(tmp_path)
     runtime = tmp_path / "runtime"
     socket_path = runtime / "harness" / "harness.sock"
@@ -215,6 +227,34 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
                 knowledge.structured_content, sort_keys=True
             )
 
+            for scope, expected_ref, match_reason in (
+                (
+                    "knowledge",
+                    f"knowledge:{russian_knowledge_id}",
+                    "Knowledge Russian case-form title phrase",
+                ),
+                (
+                    "tasks",
+                    f"task:{task_id}#checkpoint:{current_checkpoint_id}",
+                    "Task checkpoint summary/next step/branch",
+                ),
+            ):
+                russian = await client.call_tool(
+                    "project_search", {"query": "задачей", "scope": scope, "limit": 3}
+                )
+                assert russian.is_error is False
+                assert russian.structured_content is not None
+                russian_results = russian.structured_content["results"]
+                assert [item["ref"] for item in russian_results] == [expected_ref]
+                assert russian_results[0]["match_reason"] == match_reason
+                assert russian_results[0]["evidence"] is None
+                assert "path" not in russian_results[0]
+                assert russian.structured_content["exact_coverage"] is None
+                assert russian.structured_content["symbol_navigation"] is None
+                serialized = json.dumps(russian.structured_content, ensure_ascii=False)
+                assert "SECRET_OTHER_PROJECT" not in serialized
+                assert "replace_and_invalidate" not in serialized
+
             tasks = await client.call_tool(
                 "project_search",
                 {
@@ -231,6 +271,43 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert "SECRET_OTHER_PROJECT" not in json.dumps(
                 tasks.structured_content, sort_keys=True
             )
+
+            for query, match_reason in (
+                (task_id, "Task ID"),
+                (task_id[:10], "Task ID prefix"),
+            ):
+                by_id = await client.call_tool(
+                    "project_search", {"query": query, "scope": "tasks", "limit": 3}
+                )
+                assert by_id.is_error is False
+                assert by_id.structured_content is not None
+                assert by_id.structured_content["results"] == [
+                    {
+                        "ref": f"task:{task_id}",
+                        "kind": "task",
+                        "title": "Token hardening",
+                        "location": f"task:{task_id}",
+                        "short_summary": "Transactional replacement now enforced",
+                        "match_reason": match_reason,
+                        "freshness": "durable_history",
+                        "evidence": None,
+                        "evidence_reason": None,
+                    }
+                ]
+                assert by_id.structured_content["results_truncated"] is False
+                assert by_id.structured_content["exact_coverage"] is None
+                assert by_id.structured_content["symbol_navigation"] is None
+
+            for query in (other_task_id, other_task_id[:10]):
+                outside_project = await client.call_tool(
+                    "project_search", {"query": query, "scope": "tasks", "limit": 3}
+                )
+                assert outside_project.is_error is False
+                assert outside_project.structured_content is not None
+                assert outside_project.structured_content["results"] == []
+                assert "SECRET_OTHER_PROJECT" not in json.dumps(
+                    outside_project.structured_content, sort_keys=True
+                )
 
             code = await client.call_tool(
                 "project_search",

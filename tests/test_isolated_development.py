@@ -446,6 +446,13 @@ def test_checkout_agent_instructions_require_harness_before_native_tools() -> No
     assert "before diagnosis or edits" in bootstrap
     assert "read the tool schema and retry" in bootstrap
     assert "Checkpoint each logical stage" in bootstrap
+    assert "One requested outcome uses one Harness Task" in bootstrap
+    assert "diagnosis, implementation, verification, clarifications, and continuation" in bootstrap
+    assert "Messages, tool calls, and subagents do not each need a new Task" in bootstrap
+    assert "new Task only for a distinct requested outcome" in bootstrap
+    assert "fresh host\n  conversation" in bootstrap
+    assert "same unfinished Harness\n  Task" in bootstrap
+    assert "shift from diagnosis to implementation requires" not in bootstrap
     assert "targeted native read/search is allowed" in bootstrap
     assert "already has an exact path" in bootstrap
     assert "skipping search does not skip Task" in bootstrap
@@ -471,9 +478,12 @@ def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     assert "After status use project_search" not in text
     assert "After status, use project_search" not in text
     assert "project_search, project_context, then native tools" not in text
-    assert "code/doc path may be read natively" in text
-    assert "project_context is not required for those kinds" in text
-    assert "Do not skip Task because work looks small or the path is known" in text
+    assert "code/doc paths may be read natively" in text
+    assert "project_context optional" in text
+    assert "Small work or known paths still need a Task" in text
+    assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in text
+    assert "New Task only for a distinct outcome" in text
+    assert "implement-after-diagnosis" not in text
     assert "may skip search, not Task" in text
     assert "discussion only" not in text
     assert "waiver" not in text

@@ -53,9 +53,11 @@ from accept_codex import (
     write_synthetic_acceptance_skills,
 )
 
+from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
 from harness.builtin_skills import BUILTIN_SKILLS, sync_builtin_skills
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY
 from harness.daemon import _acquire_daemon_lock, serve_daemon
+from harness.mcp_bridge import _SERVER_INSTRUCTIONS
 from harness.runtime_paths import default_runtime_paths
 from harness.skills import DetectedProjectStack, load_skill_registry, resolve_skills
 
@@ -497,12 +499,14 @@ def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
     instructions = (
         "project_status must be the first repository action. Before any shell command, locate "
         "Harness. Tool discovery is the only allowed pre-status action. After status, "
-        "start/resume a Task before diagnosis or edits. Do not skip Task because work looks "
-        "small or the path is known. Then project_search before broad native "
+        "start/resume a Task before diagnosis or edits. "
+        + TASK_CONTINUITY_INSTRUCTIONS
+        + "Small work or known paths still need a Task. Then project_search before broad native "
         "exploration."
     )
 
     _validate_wire_instructions(instructions)
+    _validate_wire_instructions(_SERVER_INSTRUCTIONS)
     with pytest.raises(CodexAcceptanceError, match="strict bootstrap phrase"):
         _validate_wire_instructions("Use project_status before broad work")
     with pytest.raises(CodexAcceptanceError, match="ambiguous broad-work wording"):
@@ -526,6 +530,12 @@ def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
         )
     with pytest.raises(CodexAcceptanceError, match="discussion-waiver license"):
         _validate_wire_instructions(instructions + " discussion only")
+    with pytest.raises(CodexAcceptanceError, match="outcome-based Task continuity"):
+        _validate_wire_instructions(instructions.replace(TASK_CONTINUITY_INSTRUCTIONS, ""))
+    with pytest.raises(CodexAcceptanceError, match="phase-based Task splitting"):
+        _validate_wire_instructions(
+            instructions + " New request/implement-after-diagnosis: complete/wait; new Task."
+        )
 
 
 def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints() -> None:

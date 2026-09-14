@@ -27,6 +27,7 @@ from mcp_types import (
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
 from harness.codex_adapter import (
     CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
     codex_profile_missing_workspace_root,
@@ -69,18 +70,18 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
     "Harness required. project_status must be the first repository action. Before any shell "
-    "command/read/search/change, locate Harness tools if deferred/omitted from initial visible tool "
-    "list; tool discovery is the only allowed pre-status action. Russian Task title/summary/next_step; "
-    "Knowledge title/body; "
-    "stack_hints are optional Task metadata. After status, start/resume a Task before "
-    "diagnosis/edits; schema error: retry, never skip. Do not skip Task because work looks small "
-    "or the path is known. IDs/literals/Knowledge/Tasks: project_search before broad native work; "
-    "natural-language code/doc discovery may use native search directly; lexical hits do not block "
-    "broad fallback. Path may skip search, not Task. Complete untruncated exact_coverage "
-    "replaces native search. A code/doc "
-    "path may be read natively; project_context is not required for those kinds. Checkpoint each "
-    "stage. New request/implement-after-diagnosis: complete/wait; new Task. Keep "
-    "task_id+expected_revision. Hidden mode forbids durable SCM mutations."
+    "command/read/search/browser/change, find deferred/omitted Harness tools; discovery is the "
+    "only allowed pre-status action. Russian Task title/summary/next_step, Knowledge title/body. "
+    "stack_hints: optional Task metadata. After status, start/resume a Task before "
+    "diagnosis/edits; schema error: retry, never skip. "
+    + TASK_CONTINUITY_INSTRUCTIONS
+    + "Small work or known paths still need a Task. "
+    "IDs/literals/Knowledge/Tasks: project_search before broad native work; "
+    "natural-language code/doc discovery may use native search directly; lexical hits allow "
+    "broad fallback. Exact paths may skip search, not Task; code/doc paths may be read natively, "
+    "project_context optional. Complete untruncated exact_coverage replaces native search. "
+    "Checkpoint each stage with task_id+expected_revision; complete only when outcome is done. "
+    "Hidden forbids durable SCM mutations."
 )
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search current Project Intelligence across local code/doc text and identifiers, durable "
@@ -115,6 +116,12 @@ _TASK_START_DESCRIPTION = (
     "durable Task metadata, not a Skill selector. Omit them when they add no useful Task "
     "metadata. Host-native selection chooses which projected project Skill to use. Do not "
     "treat mid-session task_start as live skill injection."
+    " For the same requested outcome, resume the relevant working/waiting Task from project_status "
+    "by ID. Diagnosis, implementation, verification, clarifications, continuation and host restarts "
+    "reuse that Task; messages, tool calls and subagents do not each need a new Task. Create only "
+    "for a distinct requested outcome, after completing or waiting existing work. An audit-only request "
+    "may finish as an audit; never extend its scope without authorization. task_start cannot reopen "
+    "completed/cancelled Tasks; operator reopening is separate."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
     "Production Harness MCP is refused against the Harness source checkout overlay. "
@@ -622,6 +629,9 @@ def build_mcp_server(
         description=(
             "Persist progress for one explicit working Harness task after each logical stage, "
             "including diagnosis with no code change. Requires task_id and expected_revision. "
+            "Use working while the requested outcome still has authorized work; intermediate "
+            "diagnosis or a turn ending is not completion. Use waiting only for a real dependency "
+            "with the required wait_reason; completed only when the requested outcome is done. "
             f"Write summary, next_step, and Knowledge title/body in {_OPERATOR_LANGUAGE}. Add "
             "Knowledge only for verified reusable findings that avoid future re-investigation; "
             "prefer precise code/document anchors and do not summarize every file or persist "

@@ -1,6 +1,8 @@
 # ADR-0043: Dashboard realtime replaces HTML in place, not via full navigation
 
 - **Status:** Accepted
+- **Amended by:** [ADR-0065](0065-dashboard-evidence-history-and-draft-recovery.md), which
+  replaces explicit-refresh draft discard with preservation of compatible drafts and interaction state.
 - **Date:** 2026-09-02
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0020](0020-dashboard-drilldown-realtime-design.md)

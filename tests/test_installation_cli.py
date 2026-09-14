@@ -544,8 +544,9 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     scan_output = capsys.readouterr().out
     assert "Codex restart required" in scan_output
     assert "fully quit and reopen" in scan_output
-    assert "create a new task" in scan_output
-    assert "existing tasks keep their original instruction snapshot" in scan_output
+    assert "open a new conversation" in scan_output
+    assert "existing conversations keep their original instruction snapshot" in scan_output
+    assert "Resume the same unfinished Harness Task by ID" in scan_output
     assert "Codex trust" in scan_output
     assert "`project_status` must be the first project action" in scan_output
     config = tomllib.loads((repo / ".codex" / "config.toml").read_text(encoding="utf-8"))

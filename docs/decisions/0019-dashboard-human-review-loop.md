@@ -3,7 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-08-25
 - **Amended:** 2026-08-27, 2026-09-01
-- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md)
+- **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md),
+  [ADR-0065](0065-dashboard-evidence-history-and-draft-recovery.md)
 - **Deciders:** Repository architecture baseline
 
 ## Context

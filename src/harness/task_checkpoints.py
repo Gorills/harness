@@ -378,13 +378,18 @@ def list_task_events(
     task_id: str,
     *,
     limit: int | None = None,
+    offset: int = 0,
 ) -> tuple[TaskEventRecord, ...]:
-    """Load durable Task events in database order, optionally bounded to the latest rows."""
+    """Load events chronologically, optionally a bounded page counted from the latest rows."""
     get_task(connection, task_id)
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
         raise TaskCheckpointError("Task event list limit must be a positive integer")
-    order = "ORDER BY id" if limit is None else "ORDER BY id DESC LIMIT ?"
-    parameters: tuple[object, ...] = (task_id,) if limit is None else (task_id, limit)
+    if isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 2**63 - 1:
+        raise TaskCheckpointError("Task event list offset must be a non-negative integer")
+    if offset and limit is None:
+        raise TaskCheckpointError("Task event list offset requires a bounded limit")
+    order = "ORDER BY id" if limit is None else "ORDER BY id DESC LIMIT ? OFFSET ?"
+    parameters: tuple[object, ...] = (task_id,) if limit is None else (task_id, limit, offset)
     rows = connection.execute(
         f"""
         SELECT

@@ -158,6 +158,21 @@ def test_natural_location_intent_does_not_overconstrain_search_terms() -> None:
     assert analyze_search_query("enforced policy").terms == ("enforced", "policy")
 
 
+@pytest.mark.parametrize("intent", ["реализован", "реализована", "реализовано", "реализованы"])
+def test_russian_location_intent_preserves_identifiers_and_standalone_words(intent: str) -> None:
+    query = f"где {intent} healthcheck"
+    analyzed = analyze_search_query(query)
+    assert analyzed.terms == ("healthcheck",)
+    assert analyzed.normalized == query
+    assert analyze_search_query(f"{intent} healthcheck").terms == (intent, "healthcheck")
+
+
+@pytest.mark.parametrize("intent", ["находится", "находятся"])
+def test_russian_location_question_filler_requires_a_question_marker(intent: str) -> None:
+    assert analyze_search_query(f"где {intent} проверка").terms == ("проверка",)
+    assert analyze_search_query(f"{intent} проверка").terms == (intent, "проверка")
+
+
 def test_search_uses_deterministic_substring_fallback(tmp_path: Path) -> None:
     connection, workspace_id = _registered(tmp_path)
     try:

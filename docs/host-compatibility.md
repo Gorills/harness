@@ -121,9 +121,13 @@ and unchanged user Codex config. This did not run a model or verify GUI/native S
 Reproduce with the preflight command in [release acceptance](release-linux.md).
 
 When Harness changes a Codex project config, its CLI guidance requires fully quitting and reopening
-the client and then creating a new Task. Existing Tasks retain their original instruction snapshot.
-The acceptance check for that new Task is behavioral: `project_status` is the first project
-action; diagnosis and `project_search` occur only after `task_start` or resume. Compact
+the client and starting a fresh host conversation so its instruction snapshot includes the change.
+The durable Harness Task survives that restart: for the same unfinished user outcome, resume its
+explicit `task_id` with the current revision. A host restart alone does not create a new Harness
+Task or reopen a completed/cancelled Task. Editing checkout source or documentation does not
+activate a generated host config; the restart boundary follows actual config reconciliation.
+The acceptance check for the fresh conversation is behavioral: `project_status` is the first
+project action; diagnosis and `project_search` occur only after `task_start` or resume. Compact
 `project_status.index` remains a snapshot (`indexed_file_count`,
 `content_search_document_count` for code/docs content FTS coverage, and last-known
 reconcile provenance) and is not a live

@@ -35,13 +35,16 @@ from harness.mcp_bridge import (
 from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
 from harness.search_currentness import SearchCurrentnessTimeoutError, SearchCurrentnessUnstableError
 from harness.storage import connect_database, initialize_database
+from harness.task_baseline import get_task_baseline
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
     MAX_OPERATOR_FEEDBACK_BYTES,
     TaskEventType,
+    list_task_checkpoints,
     list_task_events,
 )
 from harness.tasks import TaskState, get_task, get_task_stack_hints
+from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
@@ -60,12 +63,16 @@ def test_server_instructions_require_task_before_diagnosis_within_budget() -> No
     assert "optional Task metadata" in first_512
     assert "before diagnosis" in _SERVER_INSTRUCTIONS
     assert "never skip" in _SERVER_INSTRUCTIONS
-    assert "Do not skip Task because work looks small or the path is known" in _SERVER_INSTRUCTIONS
+    assert "Small work or known paths still need a Task" in _SERVER_INSTRUCTIONS
     assert "may skip search, not Task" in _SERVER_INSTRUCTIONS
     assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
-    assert "implement-after-diagnosis" in _SERVER_INSTRUCTIONS
-    assert "code/doc path may be read natively" in _SERVER_INSTRUCTIONS
-    assert "project_context is not required for those kinds" in _SERVER_INSTRUCTIONS
+    assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in (
+        _SERVER_INSTRUCTIONS
+    )
+    assert "New Task only for a distinct outcome" in _SERVER_INSTRUCTIONS
+    assert "complete only when outcome is done" in _SERVER_INSTRUCTIONS
+    assert "implement-after-diagnosis" not in _SERVER_INSTRUCTIONS
+    assert "code/doc paths may be read natively, project_context optional" in _SERVER_INSTRUCTIONS
     assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
     assert "discussion only" not in _SERVER_INSTRUCTIONS
     assert "waiver" not in _SERVER_INSTRUCTIONS
@@ -83,10 +90,9 @@ def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
     assert "After status use project_search" not in text
     assert "After status, use project_search" not in text
     assert "project_search, project_context, then native tools" not in text
-    assert "code/doc path may be read natively" in text
-    assert "project_context is not required for those kinds" in text
+    assert "code/doc paths may be read natively, project_context optional" in text
     assert "natural-language code/doc discovery may use native search directly" in text
-    assert "lexical hits do not block broad fallback" in text
+    assert "lexical hits allow broad fallback" in text
     assert "project_context only for selected semantic refs." not in text
 
 
@@ -119,6 +125,15 @@ def test_task_start_description_states_stack_hints_are_not_skill_selectors() -> 
     assert "optional durable Task metadata" in _TASK_START_DESCRIPTION
     assert "live skill injection" in _TASK_START_DESCRIPTION
     assert "Do not skip because work looks small or the path is known" in _TASK_START_DESCRIPTION
+    assert "resume the relevant working/waiting Task from project_status by ID" in (
+        _TASK_START_DESCRIPTION
+    )
+    assert (
+        "messages, tool calls and subagents do not each need a new Task" in _TASK_START_DESCRIPTION
+    )
+    assert "audit-only request may finish as an audit" in _TASK_START_DESCRIPTION
+    assert "after completing or waiting existing work" in _TASK_START_DESCRIPTION
+    assert "task_start cannot reopen completed/cancelled Tasks" in _TASK_START_DESCRIPTION
 
 
 def test_server_instruction_budget_remains_bounded() -> None:
@@ -261,7 +276,8 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
             assert "Before any shell command" in first_512
             assert "project_status" in first_512
             assert "deferred" in first_512
-            assert "initial visible tool list" in first_512
+            assert "deferred/omitted Harness tools" in first_512
+            assert "discovery is the only allowed pre-status action" in first_512
             listed = await client.list_tools()
             assert listed.tools[0].description is not None
             assert "Required first repository action" in listed.tools[0].description
@@ -801,12 +817,18 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "stack_hints" in instructions[:512]
                 assert "optional Task metadata" in instructions[:512]
                 assert "durable SCM mutations" in instructions
-                assert "code/doc path may be read natively" in instructions
-                assert "project_context is not required for those kinds" in instructions
+                assert "code/doc paths may be read natively" in instructions
+                assert "project_context optional" in instructions
                 assert "project_context only for selected semantic refs." not in instructions
                 assert "before diagnosis" in instructions
                 assert "never skip" in instructions
                 assert "After status, start/resume a Task" in instructions
+                assert (
+                    "Same outcome: one Task across diagnosis, implementation, checks and follow-ups"
+                    in instructions
+                )
+                assert "New Task only for a distinct outcome" in instructions
+                assert "implement-after-diagnosis" not in instructions
                 assert "After status use project_search" not in instructions
                 assert "Start/resume a Task before changes." not in instructions
                 assert "scm_write" not in instructions
@@ -843,6 +865,13 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "Not mandatory for code or doc" in by_name["project_context"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
                 assert "each logical stage" in by_name["task_checkpoint"]["description"]
+                assert (
+                    "a turn ending is not completion" in by_name["task_checkpoint"]["description"]
+                )
+                assert (
+                    "completed only when the requested outcome is done"
+                    in by_name["task_checkpoint"]["description"]
+                )
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
                 checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
@@ -1435,19 +1464,50 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
         env=env,
         cwd=str(root),
     )
+    stages = (
+        "Diagnosed the token service defect",
+        "Implemented the token service fix",
+        "Applied the first clarification to the same fix",
+        "Applied the second clarification to the same fix",
+    )
     try:
         async with Client(stdio_client(params)) as first_client:
             started = await first_client.call_tool("task_start", {"title": "Durable continuity"})
             assert started.is_error is False
             assert started.structured_content is not None
             task_id = started.structured_content["task_id"]
-            checkpoint = await first_client.call_tool(
+            connection = connect_database(database)
+            try:
+                baseline = get_task_baseline(connection, task_id)
+                assert baseline.snapshot.dirty_paths == ()
+            finally:
+                connection.close()
+
+            for revision, summary in enumerate(stages, start=1):
+                if revision == 2:
+                    (root / "src" / "token_service.py").write_text("TOKEN = 2\n", encoding="utf-8")
+                checkpoint = await first_client.call_tool(
+                    "task_checkpoint",
+                    {
+                        "task_id": task_id,
+                        "expected_revision": revision,
+                        "state": "working",
+                        "summary": summary,
+                    },
+                )
+                assert checkpoint.is_error is False
+                assert checkpoint.structured_content is not None
+                assert checkpoint.structured_content["task_id"] == task_id
+                assert checkpoint.structured_content["revision"] == revision + 1
+
+            waiting = await first_client.call_tool(
                 "task_checkpoint",
                 {
                     "task_id": task_id,
-                    "expected_revision": 1,
-                    "state": "working",
-                    "summary": "Persisted before bridge restart",
+                    "expected_revision": 5,
+                    "state": "waiting",
+                    "wait_reason": "external",
+                    "summary": "Verification passed; waiting for an external dependency",
                     "next_step": "Resume from this exact checkpoint",
                     "verification": [
                         {
@@ -1458,36 +1518,86 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
                     ],
                 },
             )
-            assert checkpoint.is_error is False
-            assert checkpoint.structured_content is not None
-            assert checkpoint.structured_content["revision"] == 2
-            assert checkpoint.structured_content["verification_count"] == 1
+            assert waiting.is_error is False
+            assert waiting.structured_content is not None
+            assert waiting.structured_content["task_id"] == task_id
+            assert waiting.structured_content["revision"] == 6
+            assert waiting.structured_content["verification_count"] == 1
 
         async with Client(stdio_client(params)) as second_client:
             status = await second_client.call_tool("project_status")
             assert status.is_error is False
             assert status.structured_content is not None
-            current = status.structured_content["current_task"]
-            assert current == {
+            assert status.structured_content["current_task"] is None
+            assert status.structured_content["relevant_waiting_task"] == {
                 "task_id": task_id,
                 "title": "Durable continuity",
-                "state": "working",
-                "wait_reason": None,
-                "revision": 2,
+                "state": "waiting",
+                "wait_reason": "external",
+                "revision": 6,
             }
-            assert status.structured_content["relevant_waiting_task"] is None
             assert status.structured_content["next_step"] == "Resume from this exact checkpoint"
             assert status.structured_content["last_checkpoint"]["verification"] == [
                 {"name": "focused tests", "status": "passed"}
             ]
-            resumed = await second_client.call_tool("task_start", {"task_id": task_id})
+            resumed = await second_client.call_tool(
+                "task_start", {"task_id": task_id, "expected_revision": 6}
+            )
             assert resumed.is_error is False
             assert resumed.structured_content is not None
-            assert resumed.structured_content["revision"] == 2
+            assert resumed.structured_content["task_id"] == task_id
+            assert resumed.structured_content["state"] == "working"
+            assert resumed.structured_content["revision"] == 7
+            completed = await second_client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 7,
+                    "state": "completed",
+                    "summary": "Completed the same fix after the dependency became available",
+                },
+            )
+            assert completed.is_error is False
+            assert completed.structured_content is not None
+            assert completed.structured_content["task_id"] == task_id
+            assert completed.structured_content["state"] == "completed"
+            assert completed.structured_content["revision"] == 8
     finally:
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+    connection = connect_database(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (1,)
+        assert get_task_baseline(connection, task_id) == baseline
+        task = get_task(connection, task_id)
+        assert task.state is TaskState.COMPLETED
+        assert task.revision == 8
+        checkpoints = list_task_checkpoints(connection, task_id)
+        assert tuple(checkpoint.task_revision for checkpoint in checkpoints) == (2, 3, 4, 5, 6, 8)
+        assert tuple(checkpoint.summary for checkpoint in checkpoints[:4]) == stages
+        assert all(checkpoint.task_id == task_id for checkpoint in checkpoints)
+        assert checkpoints[0].changed_paths == ()
+        assert all(
+            checkpoint.changed_paths == ("src/token_service.py",) for checkpoint in checkpoints[1:]
+        )
+        verification = list_checkpoint_verification(connection, checkpoints[4].checkpoint_id)
+        assert len(verification) == 1
+        assert verification[0].name == "focused tests"
+        assert verification[0].status.value == "passed"
+        assert verification[0].evidence == "pytest target: passed"
+        events = list_task_events(connection, task_id)
+        assert tuple(event.task_revision for event in events) == tuple(range(1, 9))
+        assert tuple(event.event_type for event in events) == (
+            TaskEventType.CREATED,
+            *(TaskEventType.CHECKPOINT for _ in range(5)),
+            TaskEventType.RESUMED,
+            TaskEventType.CHECKPOINT,
+        )
+    finally:
+        connection.close()
 
 
 @pytest.mark.anyio

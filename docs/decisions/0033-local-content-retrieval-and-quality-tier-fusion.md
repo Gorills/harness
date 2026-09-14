@@ -78,6 +78,37 @@ MCP instructions also state the Knowledge quality rule: checkpoint only verified
 prefer precise anchors, and do not summarize files broadly or persist speculation. Knowledge remains
 agent-authored through real Task work; Harness does not fabricate cards from indexed source.
 
+## Russian case-form amendment (2026-09-11)
+
+Extend the existing query suffix table with missing Russian case endings, including `-ей`, `-ом`,
+`-его`, and `-ией`. Preserve the minimum five-character remainder, at most one extra prefix per
+term, and the existing fallback to a shorter suffix when a longer suffix leaves too little text.
+The same alternatives drive FTS, path candidates, term coverage, and live evidence relocation.
+No index migration, additional dependency, translation dictionary, or source embedding is needed.
+
+Add a Russian case-form title/identifier phrase tier below exact normalized phrases and above dense
+content. Task and Knowledge titles and code/doc title/identifier metadata can use it. Matching is
+consecutive and uses a separate restricted case-ending table on fully Russian tokens; English tokens
+in mixed phrases still require equality. Do not reuse the broader retrieval derivations here:
+`операция/опера` and `приложение/приложить` must not become phrase equivalents. A Task named
+`Управление задачами` therefore outranks `Задачник` for `задачей`, while an exact `Задачей` title
+retains precedence. Prefix-only candidates may still appear at their lower lexical tier.
+The existing current-Task preference remains subordinate to quality/coverage, and the stale offset
+preserves the prior ordering of fresh and stale evidence after insertion of the new tier.
+
+Extend ADR-0060's conditional location-intent handling to `где`/`как` and the finite forms
+`реализован`, `реализована`, `реализовано`, `реализованы`, `находится`, and `находятся`.
+These words remain searchable outside a location-question shape. Original query text, literal
+coverage, identifier case sensitivity, and Task ID lookup stay unchanged.
+
+This remains a bounded lexical heuristic, not complete Russian morphology. Short roots,
+consonant alternations, lexical ambiguity, and Russian questions about English-only code remain
+limitations. The fixed bilingual/mixed synthetic corpus and its measured before/after results are
+recorded in [the Russian-search corpus report](../audits/2026-09-11-russian-search-corpus.md).
+Real MCP tests additionally prove Russian Knowledge/Task retrieval and Project isolation; focused
+regressions protect exact-title precedence, derivational counterexamples, existing inflection
+fallbacks, and agreement between FTS, phrase matching, and current-source evidence.
+
 ## Consequences
 
 - Natural code/docs queries no longer depend on filenames containing every query word.

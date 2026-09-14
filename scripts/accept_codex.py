@@ -24,6 +24,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
+from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
 from harness.codex_adapter import (
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
@@ -774,8 +775,12 @@ def _validate_wire_instructions(instructions: str | None) -> None:
         raise CodexAcceptanceError(
             "installed MCP instructions do not require Task before project_search"
         )
-    if "Do not skip Task because work looks small or the path is known" not in instructions:
+    if "Small work or known paths still need a Task" not in instructions:
         raise CodexAcceptanceError("installed MCP instructions omit Task-skip prohibition")
+    if "New request/implement-after-diagnosis:" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions retain phase-based Task splitting")
+    if TASK_CONTINUITY_INSTRUCTIONS.strip() not in instructions:
+        raise CodexAcceptanceError("installed MCP instructions omit outcome-based Task continuity")
     if "discussion only" in instructions or "waiver" in instructions:
         raise CodexAcceptanceError("installed MCP instructions contain discussion-waiver license")
 

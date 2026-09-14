@@ -5,6 +5,7 @@ import re
 import secrets
 import sqlite3
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from html import escape
@@ -50,6 +51,13 @@ from harness.dashboard_i18n import (
     FEEDBACK_PLACEHOLDER,
     FEEDBACK_SUBMIT,
     FEEDBACK_SUMMARY,
+    FORM_DRAFT_LABEL,
+    FORM_DRAFT_SAVED,
+    FORM_DRAFT_UNAVAILABLE,
+    FORM_ERROR_BACK,
+    FORM_ERROR_CONFLICT,
+    FORM_ERROR_INVALID,
+    FORM_ERROR_TITLE,
     GIT_UNAVAILABLE,
     HOME_SEARCH_LABEL,
     HOME_SEARCH_PLACEHOLDER,
@@ -61,6 +69,7 @@ from harness.dashboard_i18n import (
     JIRA_PLACEHOLDER,
     JIRA_SAVE,
     LIVE_CONNECTING,
+    LIVE_MANUAL,
     LIVE_REFRESH,
     MANAGE_SKILL_SCOPE,
     MANAGE_SKILL_SCOPE_HINT,
@@ -71,6 +80,7 @@ from harness.dashboard_i18n import (
     METRICS_LABEL,
     MODE,
     NAVIGATION,
+    NAVIGATION_UNAVAILABLE,
     NEXT,
     NEXT_STEP,
     NO_ACTIONS,
@@ -128,6 +138,10 @@ from harness.dashboard_i18n import (
     UNAVAILABLE_HEADING,
     UNAVAILABLE_TITLE,
     UPDATED,
+    VERIFICATION_EMPTY,
+    VERIFICATION_NO_REPORT,
+    VERIFICATION_OLDER,
+    VERIFICATION_TITLE,
     VISIBILITY,
     VISIBILITY_HINT_HIDDEN,
     VISIBILITY_HINT_NORMAL,
@@ -150,11 +164,13 @@ from harness.dashboard_i18n import (
     event_label,
     match_kind_label,
     more_paths_label,
-    omitted_events_label,
     operator_status_label,
     project_crumb,
     task_crumb,
     task_state_label,
+    verification_report_label,
+    verification_source_label,
+    verification_status_label,
     visibility_label,
     wait_reason_label,
     workspace_count_label,
@@ -202,6 +218,7 @@ from harness.task_checkpoints import (
     TaskEventRecord,
     TaskEventType,
     get_latest_task_checkpoint_status,
+    get_task_checkpoint,
     list_task_checkpoints,
     list_task_events,
 )
@@ -231,6 +248,7 @@ from harness.tasks import (
     get_task,
     get_task_stack_hints,
 )
+from harness.verification import VerificationError, VerificationRecord, list_checkpoint_verification
 from harness.visibility import set_project_visibility
 
 _DASHBOARD_URL_FILENAME = "dashboard.url"
@@ -248,6 +266,7 @@ _DASHBOARD_RECENT_TASK_ORDER_SQL = (
     "tasks.updated_at DESC, tasks.id DESC"
 )
 _DASHBOARD_TIMELINE_EVENT_LIMIT = 60
+_DASHBOARD_MAX_HISTORY_PAGE = 2**31 - 1
 _DASHBOARD_CHANGED_PATH_LIMIT = 24
 _DASHBOARD_SSE_POLL_SECONDS = 1.0
 _DASHBOARD_SSE_HEARTBEAT_SECONDS = 10.0
@@ -323,6 +342,8 @@ class DashboardWorkspaceRow:
     dirty_path_count: int | None
     indexed_file_count: int
     live_error: str | None
+    active_task_count: int = 0
+    review_task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +363,8 @@ class DashboardHomePage:
     recent_tasks: tuple[DashboardTaskRow, ...]
     search_query: str | None
     task_search_results: tuple[ProjectSearchHit, ...]
+    page: int = 1
+    task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,6 +385,8 @@ class DashboardWorkspaceDetail:
     search_query: str | None
     search_results: tuple[IndexedPathSearchResult, ...]
     task_search_results: tuple[ProjectSearchHit, ...]
+    page: int = 1
+    task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +401,9 @@ class DashboardTaskDetail:
     checkpoints: tuple[TaskCheckpointRecord, ...]
     events: tuple[TaskEventRecord, ...]
     event_count: int
+    latest_checkpoint: TaskCheckpointRecord | None = None
+    page: int = 1
+    checkpoint_verification: tuple[VerificationRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,6 +458,7 @@ class _DashboardPageRequest:
     identity: str | None
     search_query: str | None
     redirect_target: str
+    page: int = 1
 
 
 def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
@@ -454,6 +483,7 @@ def _load_recent_dashboard_tasks(
     connection: sqlite3.Connection,
     *,
     workspace_id: str | None = None,
+    page: int = 1,
 ) -> tuple[DashboardTaskRow, ...]:
     if workspace_id is None:
         rows = connection.execute(
@@ -462,9 +492,9 @@ def _load_recent_dashboard_tasks(
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (_DASHBOARD_RECENT_TASK_LIMIT,),
+            (_DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
         ).fetchall()
     else:
         rows = connection.execute(
@@ -474,9 +504,9 @@ def _load_recent_dashboard_tasks(
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             WHERE tasks.workspace_id = ?
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
+            (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
         ).fetchall()
     loaded = tuple((get_task(connection, task_id), project_id) for task_id, project_id in rows)
     recorded_branches = _read_recorded_git_branches(
@@ -493,10 +523,30 @@ def _load_recent_dashboard_tasks(
     )
 
 
+def _history_page(page: int, total: int, page_size: int) -> int:
+    if (
+        isinstance(page, bool)
+        or not isinstance(page, int)
+        or not 1 <= page <= _DASHBOARD_MAX_HISTORY_PAGE
+    ):
+        raise SearchError("dashboard history page must be a positive bounded integer")
+    return min(page, max(1, (total + page_size - 1) // page_size))
+
+
+def _dashboard_task_count(connection: sqlite3.Connection, workspace_id: str | None = None) -> int:
+    where = "" if workspace_id is None else " WHERE workspace_id = ?"
+    params = () if workspace_id is None else (workspace_id,)
+    row = connection.execute("SELECT COUNT(*) FROM tasks" + where, params).fetchone()
+    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
+        raise sqlite3.DatabaseError("invalid dashboard Task count")
+    return row[0]
+
+
 def read_dashboard_home(
     database_path: Path,
     *,
     search_query: str | None = None,
+    page: int = 1,
 ) -> DashboardHomePage:
     """Read the loopback home page: Projects, recent Tasks, and optional Task search."""
     connection = connect_database(database_path)
@@ -507,7 +557,9 @@ def read_dashboard_home(
             persisted = tuple(
                 _read_workspace_row_persisted(connection, item) for item in workspaces
             )
-            recent_tasks = _load_recent_dashboard_tasks(connection)
+            task_count = _dashboard_task_count(connection)
+            page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
+            recent_tasks = _load_recent_dashboard_tasks(connection, page=page)
             results = (
                 ()
                 if search_query is None
@@ -525,6 +577,8 @@ def read_dashboard_home(
         recent_tasks=recent_tasks,
         search_query=search_query,
         task_search_results=results,
+        page=page,
+        task_count=task_count,
     )
 
 
@@ -560,6 +614,7 @@ def read_dashboard_workspace_detail(
     workspace_id: str,
     *,
     search_query: str | None = None,
+    page: int = 1,
 ) -> DashboardWorkspaceDetail:
     """Read one Workspace detail page with bounded Task history and optional path search."""
     connection = connect_database(database_path)
@@ -568,7 +623,11 @@ def read_dashboard_workspace_detail(
         try:
             workspace = get_workspace(connection, workspace_id)
             row = _read_workspace_row_persisted(connection, workspace)
-            recent_tasks = _load_recent_dashboard_tasks(connection, workspace_id=workspace_id)
+            task_count = _dashboard_task_count(connection, workspace_id)
+            page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
+            recent_tasks = _load_recent_dashboard_tasks(
+                connection, workspace_id=workspace_id, page=page
+            )
             results = (
                 ()
                 if search_query is None
@@ -603,10 +662,14 @@ def read_dashboard_workspace_detail(
         search_query=search_query,
         search_results=results,
         task_search_results=task_results,
+        page=page,
+        task_count=task_count,
     )
 
 
-def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTaskDetail:
+def read_dashboard_task_detail(
+    database_path: Path, task_id: str, *, page: int = 1
+) -> DashboardTaskDetail:
     """Read one Task's immutable timeline and the live summary for its owning Workspace."""
     connection = connect_database(database_path)
     try:
@@ -617,16 +680,6 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
             row = _read_workspace_row_persisted(connection, workspace)
             stack_hints = get_task_stack_hints(connection, task_id)
             baseline_git_branch = _read_task_baseline_branch(connection, task_id)
-            checkpoints = list_task_checkpoints(
-                connection,
-                task_id,
-                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
-            )
-            events = list_task_events(
-                connection,
-                task_id,
-                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
-            )
             count_row = connection.execute(
                 "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
                 (task_id,),
@@ -635,13 +688,44 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
                 count_row is None
                 or isinstance(count_row[0], bool)
                 or not isinstance(count_row[0], int)
-                or count_row[0] < len(events)
+                or count_row[0] < 0
             ):
                 raise sqlite3.DatabaseError("invalid dashboard Task event count")
             event_count = count_row[0]
+            page = _history_page(page, event_count, _DASHBOARD_TIMELINE_EVENT_LIMIT)
+            events = list_task_events(
+                connection,
+                task_id,
+                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
+                offset=(page - 1) * _DASHBOARD_TIMELINE_EVENT_LIMIT,
+            )
+            checkpoints = tuple(
+                get_task_checkpoint(connection, event.checkpoint_id)
+                for event in events
+                if event.checkpoint_id is not None
+            )
+            if any(checkpoint.task_id != task_id for checkpoint in checkpoints):
+                raise TaskCheckpointError("dashboard checkpoint crossed Task ownership")
+            latest = list_task_checkpoints(connection, task_id, limit=1)
+            latest_checkpoint = latest[0] if latest else None
+            verification_checkpoint_ids = dict.fromkeys(
+                checkpoint.checkpoint_id
+                for checkpoint in (
+                    *checkpoints,
+                    *((latest_checkpoint,) if latest_checkpoint is not None else ()),
+                )
+            )
+            try:
+                checkpoint_verification = tuple(
+                    record
+                    for checkpoint_id in verification_checkpoint_ids
+                    for record in list_checkpoint_verification(connection, checkpoint_id)
+                )
+            except VerificationError as exc:
+                raise sqlite3.DatabaseError("invalid dashboard checkpoint verification") from exc
             git_branch = (
-                DashboardGitBranch(captured=True, name=checkpoints[-1].current_branch)
-                if checkpoints
+                DashboardGitBranch(captured=True, name=latest_checkpoint.current_branch)
+                if latest_checkpoint is not None
                 else baseline_git_branch
             )
             connection.execute("COMMIT")
@@ -660,6 +744,9 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
         checkpoints=checkpoints,
         events=events,
         event_count=event_count,
+        latest_checkpoint=latest_checkpoint,
+        page=page,
+        checkpoint_verification=checkpoint_verification,
     )
 
 
@@ -676,6 +763,18 @@ def _read_workspace_row_persisted(
     checkpoint = (
         get_latest_task_checkpoint_status(connection, task.task_id) if task is not None else None
     )
+    counts = connection.execute(
+        """
+        SELECT COALESCE(SUM(state IN ('working', 'waiting')), 0),
+               COALESCE(SUM(state = 'waiting' AND wait_reason = 'operator_review'), 0)
+        FROM tasks WHERE workspace_id = ?
+        """,
+        (workspace.workspace_id,),
+    ).fetchone()
+    if counts is None or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
+    ):
+        raise sqlite3.DatabaseError("invalid dashboard Workspace Task counts")
     return DashboardWorkspaceRow(
         project_id=workspace.project_id,
         workspace_id=workspace.workspace_id,
@@ -704,6 +803,8 @@ def _read_workspace_row_persisted(
         dirty_path_count=None,
         indexed_file_count=_indexed_file_count(connection, workspace.workspace_id),
         live_error=None,
+        active_task_count=counts[0],
+        review_task_count=counts[1],
     )
 
 
@@ -962,15 +1063,7 @@ def mutate_dashboard_registry(
         connection.close()
 
 
-def _parse_dashboard_action_form(
-    payload: bytes,
-) -> (
-    DashboardActionRequest
-    | DashboardVisibilityRequest
-    | DashboardSkillPolicyRequest
-    | DashboardProjectDeleteRequest
-    | DashboardWorkspaceRelocationRequest
-):
+def _parse_dashboard_form_fields(payload: bytes) -> dict[str, str]:
     try:
         encoded = payload.decode("ascii")
         parsed = parse_qs(
@@ -985,7 +1078,19 @@ def _parse_dashboard_action_form(
         raise TaskValidationError("dashboard action form is malformed") from exc
     if any(len(values) != 1 for values in parsed.values()):
         raise TaskValidationError("dashboard action form fields must be singular")
-    fields = {name: values[0] for name, values in parsed.items()}
+    return {name: values[0] for name, values in parsed.items()}
+
+
+def _parse_dashboard_action_form(
+    payload: bytes,
+) -> (
+    DashboardActionRequest
+    | DashboardVisibilityRequest
+    | DashboardSkillPolicyRequest
+    | DashboardProjectDeleteRequest
+    | DashboardWorkspaceRelocationRequest
+):
+    fields = _parse_dashboard_form_fields(payload)
     action = fields.get("action")
     if action == "delete_project":
         expected = {"action", "project_id", "confirmation"}
@@ -1107,7 +1212,10 @@ def _parse_dashboard_action_form(
         or not revision_text.isdigit()
     ):
         raise TaskValidationError("dashboard action identity fields are invalid")
-    expected_revision = int(revision_text)
+    try:
+        expected_revision = int(revision_text)
+    except ValueError as exc:
+        raise TaskValidationError("dashboard action expected_revision is invalid") from exc
     if expected_revision <= 0:
         raise TaskValidationError("dashboard action expected_revision must be positive")
     operator_status_text = fields.get("operator_status")
@@ -1302,9 +1410,22 @@ def _render_skill_scope_entry(project_url: str, *, primary: bool) -> str:
     )
 
 
-def _render_project_delete_form(project_id: str, *, action: str) -> str:
+def _draft_marker(form_values: Mapping[str, str], name: str) -> str:
+    return ' data-recovered-draft="true"' if name in form_values else ""
+
+
+def _textarea_value(value: str) -> str:
+    # Character references preserve an initial newline and CR across HTML parsing.
+    return escape(value).replace("\r", "&#13;").replace("\n", "&#10;")
+
+
+def _render_project_delete_form(
+    project_id: str, *, action: str, form_values: Mapping[str, str] | None = None
+) -> str:
+    form_values = {} if form_values is None else form_values
+    opened = " open" if "confirmation" in form_values else ""
     return (
-        '<details class="management-disclosure danger-zone">'
+        f'<details class="management-disclosure danger-zone"{opened}>'
         f"<summary>{escape(DELETE_PROJECT_SUMMARY)}</summary>"
         f'<p class="management-hint">{escape(DELETE_PROJECT_HINT)}</p>'
         f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
@@ -1315,15 +1436,22 @@ def _render_project_delete_form(project_id: str, *, action: str) -> str:
         + "</label>"
         + f'<input id="delete-confirm-{escape(project_id, quote=True)}" '
         f'name="confirmation" type="text" required autocomplete="off" '
+        + f'value="{escape(form_values.get("confirmation", ""), quote=True)}"'
+        + _draft_marker(form_values, "confirmation")
+        + " "
         f'placeholder="{escape(DELETE_PROJECT_CONFIRM_VALUE, quote=True)}">'
         + f'<button class="btn btn-danger" type="submit">{escape(DELETE_PROJECT)}</button>'
         + "</form></details>"
     )
 
 
-def _render_workspace_relocation_form(workspace_id: str, *, action: str) -> str:
+def _render_workspace_relocation_form(
+    workspace_id: str, *, action: str, form_values: Mapping[str, str] | None = None
+) -> str:
+    form_values = {} if form_values is None else form_values
+    opened = " open" if "new_path" in form_values else ""
     return (
-        '<details class="management-disclosure">'
+        f'<details class="management-disclosure"{opened}>'
         f"<summary>{escape(WORKSPACE_RELOCATION_SUMMARY)}</summary>"
         f'<p class="management-hint">{escape(WORKSPACE_RELOCATION_HINT)}</p>'
         f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
@@ -1334,6 +1462,9 @@ def _render_workspace_relocation_form(workspace_id: str, *, action: str) -> str:
         + "</label>"
         + f'<input id="relocate-{escape(workspace_id, quote=True)}" name="new_path" '
         f'type="text" required maxlength="2048" autocomplete="off" '
+        + f'value="{escape(form_values.get("new_path", ""), quote=True)}"'
+        + _draft_marker(form_values, "new_path")
+        + " "
         f'placeholder="{escape(WORKSPACE_RELOCATION_PLACEHOLDER, quote=True)}">'
         + f'<button class="btn" type="submit">{escape(WORKSPACE_RELOCATION_SUBMIT)}</button>'
         + "</form></details>"
@@ -1364,7 +1495,12 @@ def _render_task_actions(
     jira_url: str | None = None,
     operator_status: str | None = None,
     detailed: bool = False,
+    form_values: Mapping[str, str] | None = None,
 ) -> str:
+    form_values = {} if form_values is None else form_values
+    feedback_open = " open" if "feedback" in form_values else ""
+    comment_open = " open" if "comment" in form_values else ""
+    jira_open = " open" if "jira_url" in form_values else ""
     forms: list[str] = []
     if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.OPERATOR_REVIEW.value:
         forms.append(
@@ -1374,12 +1510,14 @@ def _render_task_actions(
             '<form method="post" action="">'
             + _task_action_fields(workspace_id, task_id, revision, "cancel")
             + f'<button class="btn btn-danger" type="submit">{escape(CANCEL)}</button></form></div>'
-            f'<details class="feedback-disclosure"><summary>{escape(FEEDBACK_SUMMARY)}</summary>'
+            f'<details class="feedback-disclosure"{feedback_open}><summary>{escape(FEEDBACK_SUMMARY)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "feedback")
             + f'<label for="feedback-{escape(task_id, quote=True)}">{escape(FEEDBACK_LABEL)}</label>'
             f'<textarea id="feedback-{escape(task_id, quote=True)}" name="feedback" rows="4" maxlength="1024" '
-            f'required placeholder="{escape(FEEDBACK_PLACEHOLDER, quote=True)}"></textarea>'
+            f'required placeholder="{escape(FEEDBACK_PLACEHOLDER, quote=True)}"'
+            + _draft_marker(form_values, "feedback")
+            + f">{_textarea_value(form_values.get('feedback', ''))}</textarea>"
             f'<button class="btn" type="submit">{escape(FEEDBACK_SUBMIT)}</button></form></details>'
         )
     elif state in {TaskState.WORKING.value, TaskState.WAITING.value}:
@@ -1402,26 +1540,34 @@ def _render_task_actions(
             (TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
             (TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
         ):
-            selected = " selected" if (operator_status or "") == value else ""
+            selected = (
+                " selected"
+                if form_values.get("operator_status", operator_status or "") == value
+                else ""
+            )
             status_options.append(
                 f'<option value="{escape(value, quote=True)}"{selected}>{escape(label)}</option>'
             )
         forms.append(
-            f'<details class="feedback-disclosure"><summary>{escape(COMMENT_SUMMARY)}</summary>'
+            f'<details class="feedback-disclosure"{comment_open}><summary>{escape(COMMENT_SUMMARY)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "comment")
             + f'<label for="comment-{escape(task_id, quote=True)}">{escape(COMMENT_LABEL)}</label>'
             f'<textarea id="comment-{escape(task_id, quote=True)}" name="comment" rows="4" '
-            f'maxlength="2048" required placeholder="{escape(COMMENT_PLACEHOLDER, quote=True)}"></textarea>'
+            f'maxlength="2048" required placeholder="{escape(COMMENT_PLACEHOLDER, quote=True)}"'
+            + _draft_marker(form_values, "comment")
+            + f">{_textarea_value(form_values.get('comment', ''))}</textarea>"
             f'<button class="btn" type="submit">{escape(COMMENT_SUBMIT)}</button></form></details>'
         )
         forms.append(
-            f'<details class="feedback-disclosure"><summary>{escape(JIRA)}</summary>'
+            f'<details class="feedback-disclosure"{jira_open}><summary>{escape(JIRA)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "set_jira")
             + f'<label for="jira-{escape(task_id, quote=True)}">{escape(JIRA_LABEL)}</label>'
             f'<input id="jira-{escape(task_id, quote=True)}" name="jira_url" type="url" '
-            f'maxlength="2048" value="{escape(jira_url or "", quote=True)}" '
+            f'maxlength="2048" value="{escape(form_values.get("jira_url", jira_url or ""), quote=True)}" '
+            + _draft_marker(form_values, "jira_url")
+            + " "
             f'placeholder="{escape(JIRA_PLACEHOLDER, quote=True)}">'
             f'<button class="btn" type="submit">{escape(JIRA_SAVE)}</button></form>'
             + (
@@ -1440,12 +1586,242 @@ def _render_task_actions(
             + f'<label for="operator-status-{escape(task_id, quote=True)}">'
             + escape(OPERATOR_STATUS)
             + "</label>"
-            + f'<select id="operator-status-{escape(task_id, quote=True)}" name="operator_status">'
+            + f'<select id="operator-status-{escape(task_id, quote=True)}" name="operator_status"'
+            + _draft_marker(form_values, "operator_status")
+            + ">"
             + "".join(status_options)
             + "</select>"
             + f'<button class="btn" type="submit">{escape(OPERATOR_STATUS_SAVE)}</button></form>'
         )
     return '<div class="action-panel">' + "".join(forms) + "</div>" if forms else ""
+
+
+_RECOVERABLE_TASK_FIELDS = {
+    "accept": None,
+    "feedback": "feedback",
+    "cancel": None,
+    "reopen": None,
+    "comment": "comment",
+    "set_jira": "jira_url",
+    "set_operator_status": "operator_status",
+}
+
+
+def _recoverable_form_fields(payload: bytes) -> dict[str, str]:
+    """Recover only singular, known form schemas, never arbitrary failed request fields."""
+    try:
+        fields = _parse_dashboard_form_fields(payload)
+    except TaskValidationError:
+        return {}
+    action = fields.get("action", "")
+    if action in _RECOVERABLE_TASK_FIELDS:
+        expected = {"action", "workspace_id", "task_id", "expected_revision"}
+        editable = _RECOVERABLE_TASK_FIELDS[action]
+        if editable is not None:
+            expected.add(editable)
+        revision = fields.get("expected_revision", "")
+        if not revision.isascii() or not revision.isdigit() or not revision.strip("0"):
+            return {}
+    else:
+        expected = {
+            "relocate_workspace": {"action", "workspace_id", "new_path"},
+            "delete_project": {"action", "project_id", "confirmation"},
+            "set_visibility": {"action", "project_id", "visibility_mode"},
+            "set_skill_scope": {"action", "project_id", "facet", "mode"},
+        }.get(action, set())
+    if set(fields) != expected:
+        return {}
+    if any(
+        not value or len(value) > 128 or "\x00" in value
+        for name, value in fields.items()
+        if name in {"task_id", "workspace_id", "project_id"}
+    ):
+        return {}
+    return fields
+
+
+def _recovery_target_on_page(
+    page: _DashboardPageRequest, *, workspace_id: str, project_id: str, task_id: str | None = None
+) -> bool:
+    return (
+        page.kind == "projects"
+        or (page.kind == "task" and page.identity == task_id)
+        or (page.kind == "workspace" and page.identity == workspace_id)
+        or (page.kind == "project" and page.identity == project_id)
+    )
+
+
+def _render_recovery_controls(
+    database_path: Path, page: _DashboardPageRequest, fields: dict[str, str]
+) -> str:
+    action = fields.get("action", "")
+    if action in _RECOVERABLE_TASK_FIELDS:
+        if page.kind == "task" and page.identity != fields["task_id"]:
+            return ""
+        detail = read_dashboard_task_detail(database_path, fields["task_id"])
+        task = detail.task
+        if fields["workspace_id"] != task.workspace_id or not _recovery_target_on_page(
+            page,
+            workspace_id=task.workspace_id,
+            project_id=detail.workspace.project_id,
+            task_id=task.task_id,
+        ):
+            return ""
+        reviewing = (
+            task.state is TaskState.WAITING and task.wait_reason is TaskWaitReason.OPERATOR_REVIEW
+        )
+        terminal = task.state in {TaskState.COMPLETED, TaskState.CANCELLED}
+        if (
+            (action in {"accept", "feedback"} and not reviewing)
+            or (action == "cancel" and terminal)
+            or (action == "reopen" and not terminal)
+            or (
+                action == "set_operator_status"
+                and fields["operator_status"]
+                not in {
+                    "",
+                    TaskOperatorStatus.DEPLOY_TEST.value,
+                    TaskOperatorStatus.DEPLOY_PROD.value,
+                }
+            )
+        ):
+            return ""
+        last_summary = "" if detail.latest_checkpoint is None else detail.latest_checkpoint.summary
+        return (
+            f"<h2>{escape(task.title)}</h2><p>{_state_pill(task.state.value, None if task.wait_reason is None else task.wait_reason.value)} "
+            f"{escape(REVISION)} {task.revision}</p><p>{escape(last_summary)}</p>"
+            + _render_latest_verification(detail)
+            + _render_task_actions(
+                workspace_id=task.workspace_id,
+                task_id=task.task_id,
+                state=task.state.value,
+                wait_reason=None if task.wait_reason is None else task.wait_reason.value,
+                revision=task.revision,
+                jira_url=task.jira_url,
+                operator_status=None
+                if task.operator_status is None
+                else task.operator_status.value,
+                detailed=True,
+                form_values=fields,
+            )
+        )
+    if action == "relocate_workspace":
+        if page.kind != "workspace" or page.identity != fields["workspace_id"]:
+            return ""
+        connection = connect_database(database_path)
+        try:
+            workspace = get_workspace(connection, fields["workspace_id"])
+        finally:
+            connection.close()
+        return _render_workspace_relocation_form(
+            workspace.workspace_id, action=page.redirect_target, form_values=fields
+        )
+    if action in {"delete_project", "set_skill_scope", "set_visibility"}:
+        connection = connect_database(database_path)
+        try:
+            project = get_project(connection, fields["project_id"])
+            if page.kind == "workspace" and action == "set_visibility":
+                if (
+                    page.identity is None
+                    or get_workspace(connection, page.identity).project_id != project.project_id
+                ):
+                    return ""
+            elif page.kind != "project" or page.identity != project.project_id:
+                return ""
+        finally:
+            connection.close()
+        if action == "delete_project":
+            return _render_project_delete_form(
+                project.project_id, action=page.redirect_target, form_values=fields
+            )
+        if action == "set_visibility":
+            return _render_visibility_form(
+                project.project_id, project.visibility_mode, action=page.redirect_target
+            )
+        project_detail = read_dashboard_project_detail(database_path, project.project_id)
+        return _render_skill_policy(
+            project.project_id, project_detail.skill_policy, action=page.redirect_target
+        )
+    return ""
+
+
+def _render_dashboard_form_error(
+    database_path: Path,
+    base_path: str,
+    page: _DashboardPageRequest,
+    *,
+    status: int,
+    payload: bytes = b"",
+) -> str:
+    fields = _recoverable_form_fields(payload) if payload else {}
+    controls = ""
+    if fields:
+        try:
+            controls = _render_recovery_controls(database_path, page, fields)
+        except (
+            OSError,
+            sqlite3.DatabaseError,
+            DatabaseError,
+            TaskError,
+            RegistryError,
+            ProjectSkillPolicyError,
+            DashboardError,
+            TaskCheckpointError,
+            VerificationError,
+        ):
+            # The original status and a copyable draft remain useful even if the target disappeared.
+            pass
+    values = [
+        fields[name]
+        for name in (
+            "feedback",
+            "comment",
+            "jira_url",
+            "operator_status",
+            "new_path",
+            "confirmation",
+        )
+        if name in fields
+    ]
+    message = FORM_ERROR_CONFLICT if status == 409 else FORM_ERROR_INVALID
+    content = (
+        '<section class="panel form-recovery"><div class="panel-body">'
+        f'<div class="form-error" role="alert"><h1>{escape(FORM_ERROR_TITLE)}</h1>'
+        f"<p>{escape(message)}</p></div>"
+    )
+    if values:
+        content += f"<p>{escape(FORM_DRAFT_SAVED if controls else FORM_DRAFT_UNAVAILABLE)}</p>"
+    content += controls
+    if values and not controls:
+        content += (
+            f'<label for="recovery-draft">{escape(FORM_DRAFT_LABEL)}</label>'
+            '<textarea id="recovery-draft" class="recovery-draft" rows="6" readonly '
+            'data-recovered-draft="true">' + _textarea_value("\n".join(values)) + "</textarea>"
+        )
+    content += (
+        f'<p><a class="btn" href="{escape(page.redirect_target, quote=True)}">'
+        f"{escape(FORM_ERROR_BACK)}</a></p></div></section>"
+    )
+    navigation_rows = None
+    try:
+        navigation_rows = read_dashboard_workspace_rows(database_path)
+    except (
+        OSError,
+        sqlite3.DatabaseError,
+        DatabaseError,
+        TaskError,
+        RegistryError,
+        DashboardError,
+    ):
+        pass
+    return _render_shell(
+        base_path=base_path,
+        page_title=document_title(FORM_ERROR_TITLE),
+        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (FORM_ERROR_TITLE, None)),
+        events_url="",
+        content=content,
+        navigation_rows=navigation_rows,
+    )
 
 
 def _state_pill(state: str | None, wait_reason: str | None = None) -> str:
@@ -1479,12 +1855,15 @@ def _events_url(
     snapshot: str,
     identity: str | None = None,
     search_query: str | None = None,
+    page: int = 1,
 ) -> str:
     params: list[tuple[str, str]] = [("view", view), ("snapshot", snapshot)]
     if identity is not None:
         params.append((f"{view}_id", identity))
     if search_query is not None:
         params.append(("q", search_query))
+    if page != 1:
+        params.append(("page", str(page)))
     return f"{base_path}events?{urlencode(params)}"
 
 
@@ -1527,7 +1906,7 @@ def _group_navigation_rows(
 
 
 def _render_project_navigation(
-    rows: tuple[DashboardWorkspaceRow, ...],
+    rows: tuple[DashboardWorkspaceRow, ...] | None,
     *,
     base_path: str,
     current_project_id: str | None,
@@ -1543,6 +1922,9 @@ def _render_project_navigation(
         + f'><span class="nav-overview-icon" aria-hidden="true">⌂</span><span>{escape(ALL_PROJECTS)}</span></a>',
         f'<p class="nav-label">{escape(PROJECTS_NAV)}</p>',
     ]
+    if rows is None:
+        parts.append(f'<p class="nav-empty">{escape(NAVIGATION_UNAVAILABLE)}</p></nav>')
+        return "".join(parts)
     for project_id, project_rows in _group_navigation_rows(rows):
         project_current = project_id == current_project_id or (
             current_workspace_id is not None
@@ -1575,7 +1957,7 @@ def _render_shell(
     breadcrumbs: tuple[tuple[str, str | None], ...],
     events_url: str,
     content: str,
-    navigation_rows: tuple[DashboardWorkspaceRow, ...] = (),
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = (),
     current_project_id: str | None = None,
     current_workspace_id: str | None = None,
     current_task_id: str | None = None,
@@ -1597,6 +1979,8 @@ def _render_shell(
     )
     css_url = f"{base_path}assets/dashboard.css"
     js_url = f"{base_path}assets/dashboard.js"
+    live_state = "reconnecting" if events_url else "manual"
+    live_copy = LIVE_CONNECTING if events_url else LIVE_MANUAL
     return (
         '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1611,9 +1995,9 @@ def _render_shell(
         f"<strong>{escape(BRAND)}</strong><small>{escape(WORKSPACE_HOME)}</small></span></a>"
         f"{navigation}"
         '<div class="sidebar-footer">'
-        '<span class="live-indicator" data-live-indicator data-state="reconnecting">'
+        f'<span class="live-indicator" data-live-indicator data-state="{live_state}">'
         '<span class="live-dot" aria-hidden="true"></span>'
-        f'<span class="live-copy" data-live-copy>{escape(LIVE_CONNECTING)}</span>'
+        f'<span class="live-copy" data-live-copy>{escape(live_copy)}</span>'
         f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button>'
         '</span></div></aside><div class="app-stage"><header class="context-header">'
         '<details class="mobile-navigation"><summary>'
@@ -1623,8 +2007,8 @@ def _render_shell(
         f'<nav class="breadcrumbs" aria-label="{escape(NAVIGATION, quote=True)}"><ol>'
         f"{''.join(breadcrumb_html)}</ol></nav>"
         '<span class="header-live-indicator live-indicator" data-header-live-indicator '
-        'data-state="reconnecting"><span class="live-dot" aria-hidden="true"></span>'
-        f'<span class="live-copy">{escape(LIVE_CONNECTING)}</span>'
+        f'data-state="{live_state}"><span class="live-dot" aria-hidden="true"></span>'
+        f'<span class="live-copy">{escape(live_copy)}</span>'
         f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button></span>'
         '</header><main id="main"><div class="content-frame">'
         f"{content}</div></main></div></div>"
@@ -1635,14 +2019,8 @@ def _render_shell(
 
 def _render_metrics(rows: tuple[DashboardWorkspaceRow, ...]) -> str:
     project_count = len({row.project_id for row in rows})
-    active_count = sum(
-        row.task_state in {TaskState.WORKING.value, TaskState.WAITING.value} for row in rows
-    )
-    review_count = sum(
-        row.task_state == TaskState.WAITING.value
-        and row.task_wait_reason == TaskWaitReason.OPERATOR_REVIEW.value
-        for row in rows
-    )
+    active_count = sum(row.active_task_count for row in rows)
+    review_count = sum(row.review_task_count for row in rows)
     indexed_count = sum(row.indexed_file_count for row in rows)
     metrics = (
         (METRIC_PROJECTS, project_count),
@@ -1753,7 +2131,7 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             action=base_path,
             base_path=base_path,
         )
-        + '</div></section><section class="panel"><div class="panel-head"><div>'
+        + '</div></section><section class="panel" id="history"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(RECENT_TASKS_HOME)}</p>'
         f"<h2>{escape(RECENT_TASKS_HOME)}</h2></div></div>"
         '<div class="panel-body">'
@@ -1768,6 +2146,13 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
                 show_project=True,
             )
         )
+        + _render_history_pagination(
+            base_path,
+            page=home.page,
+            total=home.task_count,
+            page_size=_DASHBOARD_RECENT_TASK_LIMIT,
+            search_query=home.search_query,
+        )
         + "</div></section>"
     )
     return _render_shell(
@@ -1778,6 +2163,7 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             base_path,
             view="projects",
             search_query=home.search_query,
+            page=home.page,
             snapshot=_snapshot_fingerprint(home),
         ),
         content=content,
@@ -1897,6 +2283,38 @@ def _render_recent_tasks(
         )
     parts.append("</div>")
     return "".join(parts)
+
+
+def _render_history_pagination(
+    url: str,
+    *,
+    page: int,
+    total: int,
+    page_size: int,
+    search_query: str | None = None,
+    anchor: str = "history",
+) -> str:
+    pages = max(1, (total + page_size - 1) // page_size)
+    if pages == 1:
+        return ""
+
+    def link(target: int, label: str, relation: str) -> str:
+        params = [] if search_query is None else [("q", search_query)]
+        params.append(("page", str(target)))
+        href = f"{url}?{urlencode(params)}#{anchor}"
+        return (
+            f'<a class="btn" rel="{relation}" href="{escape(href, quote=True)}">{escape(label)}</a>'
+        )
+
+    previous = link(page - 1, "Предыдущая", "prev") if page > 1 else ""
+    following = link(page + 1, "Следующая", "next") if page < pages else ""
+    return (
+        '<nav class="action-row" aria-label="Страницы истории">'
+        + previous
+        + f'<span class="section-note">Страница {page} из {pages} · Записей: {total}</span>'
+        + following
+        + "</nav>"
+    )
 
 
 def _render_search(
@@ -2042,10 +2460,17 @@ def render_workspace_page(
         )
         + '</div></section><section class="workspace-layout"><div class="workspace-main">'
         + _render_workspace_current_task(row, base_path=base_path, actions=actions)
-        + '<section class="panel"><div class="panel-head"><div>'
+        + '<section class="panel" id="history"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(RECENT_TASKS)}</p><h2>{escape(RECENT_TASKS)}</h2></div></div>'
         '<div class="panel-body">'
         + _render_recent_tasks(detail.recent_tasks, base_path)
+        + _render_history_pagination(
+            workspace_url,
+            page=detail.page,
+            total=detail.task_count,
+            page_size=_DASHBOARD_RECENT_TASK_LIMIT,
+            search_query=detail.search_query,
+        )
         + '</div></section></div><aside class="workspace-aside"><section class="panel sticky-panel">'
         f'<div class="panel-head"><div><p class="panel-kicker">{escape(WORKSPACE_STATE)}</p>'
         f'<h2>{escape(WORKSPACE_OVERVIEW)}</h2></div></div><div class="panel-body">'
@@ -2079,6 +2504,7 @@ def render_workspace_page(
             view="workspace",
             identity=row.workspace_id,
             search_query=detail.search_query,
+            page=detail.page,
             snapshot=_snapshot_fingerprint(
                 detail if navigation_rows is None else (detail, navigation_rows)
             ),
@@ -2094,10 +2520,50 @@ def _timeline_event_label(event: TaskEventRecord) -> str:
     return event_label(event.event_type)
 
 
-def _render_timeline(detail: DashboardTaskDetail) -> str:
+def _render_verification(records: tuple[VerificationRecord, ...]) -> str:
+    items = []
+    for record in records:
+        items.append(
+            '<li class="verification-item"><div class="verification-head">'
+            f"<strong>{escape(record.name)}</strong>"
+            f'<span class="verification-status" data-status="{record.status.value}">'
+            f"{escape(verification_status_label(record.status))}</span></div>"
+            f'<p class="section-note">{escape(verification_source_label(record.source))}</p>'
+            f'<pre class="verification-evidence">{escape(record.evidence)}</pre></li>'
+        )
+    return '<ul class="verification-list">' + "".join(items) + "</ul>" if items else ""
+
+
+def _render_latest_verification(detail: DashboardTaskDetail) -> str:
+    checkpoint = detail.latest_checkpoint
+    if checkpoint is None:
+        body = f'<p class="section-note">{escape(VERIFICATION_NO_REPORT)}</p>'
+    else:
+        body = (
+            '<p class="section-note">'
+            + escape(verification_report_label(checkpoint.task_revision, checkpoint.created_at))
+            + "</p>"
+        )
+        if checkpoint.task_revision < detail.task.revision:
+            body += f'<p class="section-note">{escape(VERIFICATION_OLDER)}</p>'
+        records = tuple(
+            record
+            for record in detail.checkpoint_verification
+            if record.checkpoint_id == checkpoint.checkpoint_id
+        )
+        body += _render_verification(records) or (
+            f'<p class="section-note">{escape(VERIFICATION_EMPTY)}</p>'
+        )
+    return (
+        '<section class="panel verification-panel"><div class="panel-head">'
+        f"<h2>{escape(VERIFICATION_TITLE)}</h2></div>"
+        f'<div class="panel-body">{body}</div></section>'
+    )
+
+
+def _render_timeline(detail: DashboardTaskDetail, *, base_path: str = "/") -> str:
     checkpoints = {item.checkpoint_id: item for item in detail.checkpoints}
     visible_events = detail.events
-    truncated_count = detail.event_count - len(visible_events)
     items: list[str] = ['<div class="timeline">']
     for event in reversed(visible_events):
         content: list[str] = []
@@ -2113,6 +2579,15 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
                 )
             )
             content.append(f'<div class="timeline-summary">{escape(checkpoint.summary)}</div>')
+            content.append(
+                _render_verification(
+                    tuple(
+                        record
+                        for record in detail.checkpoint_verification
+                        if record.checkpoint_id == checkpoint.checkpoint_id
+                    )
+                )
+            )
             if checkpoint.next_step is not None:
                 content.append(
                     f"<div><strong>{escape(NEXT)}:</strong> {escape(checkpoint.next_step)}</div>"
@@ -2159,13 +2634,16 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
             f'<span class="timeline-time">r{event.task_revision} · {escape(event.created_at)}</span>'
             f"</div>{content_html}</article>"
         )
-    if truncated_count:
-        items.append(
-            '<div class="timeline-item"><div class="timeline-content">'
-            f"{escape(omitted_events_label(truncated_count))}"
-            "</div></div>"
-        )
     items.append("</div>")
+    items.append(
+        _render_history_pagination(
+            _url(base_path, "tasks", detail.task.task_id),
+            page=detail.page,
+            total=detail.event_count,
+            page_size=_DASHBOARD_TIMELINE_EVENT_LIMIT,
+            anchor="timeline",
+        )
+    )
     return "".join(items)
 
 
@@ -2199,7 +2677,7 @@ def render_task_page(
         if not detail.stack_hints
         else " · ".join(escape(item) for item in detail.stack_hints)
     )
-    latest_checkpoint = detail.checkpoints[-1] if detail.checkpoints else None
+    latest_checkpoint = detail.latest_checkpoint
     latest_update = ""
     if latest_checkpoint is not None:
         next_step = (
@@ -2225,11 +2703,12 @@ def render_task_page(
         f'<span>{escape(BRANCH)} <strong class="mono">{escape(_display_recorded_branch(detail.git_branch))}</strong></span>'
         '</div></div></section><section class="task-layout"><div class="task-main">'
         + latest_update
-        + '<section class="panel timeline-panel"><div class="panel-head"><div>'
+        + _render_latest_verification(detail)
+        + '<section class="panel timeline-panel" id="timeline"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(TIMELINE)}</p><h2>{escape(TIMELINE)}</h2></div>'
         f'<p class="section-note">{escape(event_count_label(detail.event_count))}</p></div>'
         '<div class="panel-body">'
-        + _render_timeline(detail)
+        + _render_timeline(detail, base_path=base_path)
         + '</div></section></div><aside class="task-aside">'
         f'<section class="panel action-card"><div class="panel-head"><div><p class="panel-kicker">{escape(ACTIONS)}</p>'
         f'<h2>{escape(ACTIONS)}</h2></div></div><div class="panel-body">{actions if actions else no_actions}</div></section>'
@@ -2273,6 +2752,7 @@ def render_task_page(
             base_path,
             view="task",
             identity=task.task_id,
+            page=detail.page,
             snapshot=_snapshot_fingerprint(
                 detail if navigation_rows is None else (detail, navigation_rows)
             ),
@@ -2329,11 +2809,42 @@ def _parse_search_query(query: str) -> str | None:
     return value
 
 
+def _parse_history_query(query: str, *, allow_search: bool) -> tuple[str | None, int]:
+    if not query:
+        return None, 1
+    try:
+        parsed = parse_qs(
+            query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=2,
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise SearchError("dashboard history query is malformed") from exc
+    allowed = {"q", "page"} if allow_search else {"page"}
+    if set(parsed) - allowed:
+        if not allow_search:
+            raise DashboardError("dashboard Task history accepts only a page field")
+        raise SearchError("dashboard history query has unexpected fields")
+    if any(len(values) != 1 for values in parsed.values()):
+        raise SearchError("dashboard history query fields must be singular")
+    page = 1
+    if "page" in parsed:
+        raw_page = parsed["page"][0]
+        if not raw_page.isascii() or not raw_page.isdecimal() or len(raw_page) > 10:
+            raise SearchError("dashboard history page is invalid")
+        page = _history_page(int(raw_page), _DASHBOARD_MAX_HISTORY_PAGE, 1)
+    search_query = _parse_search_query(urlencode({"q": parsed["q"][0]})) if "q" in parsed else None
+    return search_query, page
+
+
 def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPageRequest:
     if path == base_path:
-        search_query = _parse_search_query(query)
+        search_query, page = _parse_history_query(query, allow_search=True)
         redirect = path + (f"?{query}" if query else "")
-        return _DashboardPageRequest("projects", None, search_query, redirect)
+        return _DashboardPageRequest("projects", None, search_query, redirect, page)
     if not path.startswith(base_path):
         raise DashboardError("dashboard path is outside the dashboard route")
     relative = path[len(base_path) :]
@@ -2351,20 +2862,25 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
         raise DashboardError("dashboard page route is not recognized")
     identity = _decode_identity_component(parts[1])
     if parts[0] == "workspaces":
-        search_query = _parse_search_query(query)
+        search_query, page = _parse_history_query(query, allow_search=True)
+    elif parts[0] == "tasks":
+        search_query, page = _parse_history_query(query, allow_search=False)
     else:
         if query:
             raise DashboardError("dashboard detail route does not accept query fields")
         search_query = None
+        page = 1
     redirect = path + (f"?{query}" if query else "")
     kind = {"projects": "project", "workspaces": "workspace", "tasks": "task"}[parts[0]]
-    return _DashboardPageRequest(kind, identity, search_query, redirect)
+    return _DashboardPageRequest(kind, identity, search_query, redirect, page)
 
 
 def _render_page(database_path: Path, base_path: str, request: _DashboardPageRequest) -> str:
     if request.kind == "projects":
         return render_projects_page(
-            read_dashboard_home(database_path, search_query=request.search_query),
+            read_dashboard_home(
+                database_path, search_query=request.search_query, page=request.page
+            ),
             base_path=base_path,
         )
     navigation_rows = read_dashboard_workspace_rows(database_path)
@@ -2381,20 +2897,21 @@ def _render_page(database_path: Path, base_path: str, request: _DashboardPageReq
                 database_path,
                 request.identity,
                 search_query=request.search_query,
+                page=request.page,
             ),
             base_path=base_path,
             navigation_rows=navigation_rows,
         )
     if request.kind == "task":
         return render_task_page(
-            read_dashboard_task_detail(database_path, request.identity),
+            read_dashboard_task_detail(database_path, request.identity, page=request.page),
             base_path=base_path,
             navigation_rows=navigation_rows,
         )
     raise DashboardError("dashboard page kind is unsupported")
 
 
-def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
+def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str, int]:
     try:
         parsed = parse_qs(
             query,
@@ -2402,7 +2919,7 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
             strict_parsing=True,
             encoding="utf-8",
             errors="strict",
-            max_num_fields=4,
+            max_num_fields=5,
         )
     except (UnicodeError, ValueError) as exc:
         raise DashboardError("dashboard event query is malformed") from exc
@@ -2414,8 +2931,19 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
     if len(snapshot) != 64 or any(character not in "0123456789abcdef" for character in snapshot):
         raise DashboardError("dashboard event snapshot is invalid")
     view = parsed["view"][0]
+    page = 1
+    if "page" in parsed:
+        if len(parsed["page"]) != 1:
+            raise DashboardError("dashboard event history page must be singular")
+        try:
+            _search_query, page = _parse_history_query(
+                urlencode({"page": parsed["page"][0]}),
+                allow_search=False,
+            )
+        except SearchError as exc:
+            raise DashboardError("dashboard event history page is invalid") from exc
     if view == "projects":
-        if set(parsed) - {"view", "snapshot", "q"}:
+        if set(parsed) - {"view", "snapshot", "q", "page"}:
             raise DashboardError("Projects event query has unexpected fields")
         search_query: str | None = None
         if "q" in parsed:
@@ -2426,13 +2954,15 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
                 "\x00" in search_query or len(search_query.encode("utf-8")) > 256
             ):
                 raise DashboardError("dashboard event search query is invalid")
-        return view, None, search_query, snapshot
+        return view, None, search_query, snapshot, page
     if view not in {"project", "workspace", "task"}:
         raise DashboardError("dashboard event view is unsupported")
     identity_key = f"{view}_id"
     allowed = {"view", "snapshot", identity_key}
     if view == "workspace":
         allowed.add("q")
+    if view in {"workspace", "task"}:
+        allowed.add("page")
     if set(parsed) - allowed or identity_key not in parsed or len(parsed[identity_key]) != 1:
         raise DashboardError("dashboard event query does not match the expected schema")
     identity = parsed[identity_key][0]
@@ -2447,7 +2977,7 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
             "\x00" in search_query or len(search_query.encode("utf-8")) > 256
         ):
             raise DashboardError("dashboard event search query is invalid")
-    return view, identity, search_query, snapshot
+    return view, identity, search_query, snapshot, page
 
 
 def _view_fingerprint(
@@ -2455,9 +2985,10 @@ def _view_fingerprint(
     view: str,
     identity: str | None,
     search_query: str | None,
+    page: int = 1,
 ) -> str:
     if view == "projects":
-        value: object = read_dashboard_home(database_path, search_query=search_query)
+        value: object = read_dashboard_home(database_path, search_query=search_query, page=page)
     elif view == "project":
         assert identity is not None
         value = read_dashboard_project_detail(database_path, identity)
@@ -2467,10 +2998,11 @@ def _view_fingerprint(
             database_path,
             identity,
             search_query=search_query,
+            page=page,
         )
     elif view == "task":
         assert identity is not None
-        value = read_dashboard_task_detail(database_path, identity)
+        value = read_dashboard_task_detail(database_path, identity, page=page)
     else:
         raise DashboardError("unsupported dashboard fingerprint view")
     if view != "projects":
@@ -2518,11 +3050,11 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == f"{self.route_path}events":
             try:
-                view, identity, search_query, snapshot = _parse_sse_view(parsed.query)
+                view, identity, search_query, snapshot, history_page = _parse_sse_view(parsed.query)
             except DashboardError:
                 self._send_html(400, "")
                 return
-            self._serve_events(view, identity, search_query, snapshot)
+            self._serve_events(view, identity, search_query, snapshot, history_page)
             return
         try:
             page = _parse_page_request(self.route_path, path, parsed.query)
@@ -2570,7 +3102,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_html(403, _action_rejected_html())
             return
         if self.headers.get("Transfer-Encoding") is not None:
-            self._send_html(400, "")
+            self._send_form_error(400, page)
             return
         content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
         if content_type != "application/x-www-form-urlencoded":
@@ -2586,7 +3118,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         payload = self.rfile.read(content_length)
         if len(payload) != content_length:
-            self._send_html(400, "")
+            self._send_form_error(400, page)
             return
         try:
             request = _parse_dashboard_action_form(payload)
@@ -2628,7 +3160,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             ):
                 redirect_target = page.redirect_target
         except TaskValidationError:
-            self._send_html(400, "")
+            self._send_form_error(400, page, payload)
             return
         except (
             TaskNotFoundError,
@@ -2644,12 +3176,22 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             HostIntegrationStateError,
             ProjectSkillPolicyError,
         ):
-            self._send_html(409, "")
+            self._send_form_error(409, page, payload)
             return
         except (OSError, sqlite3.DatabaseError, DatabaseError):
             self._send_html(503, "")
             return
         self._send_redirect(redirect_target)
+
+    def _send_form_error(
+        self, status: int, page: _DashboardPageRequest, payload: bytes = b""
+    ) -> None:
+        self._send_html(
+            status,
+            _render_dashboard_form_error(
+                self.database_path, self.route_path, page, status=status, payload=payload
+            ),
+        )
 
     def _serve_events(
         self,
@@ -2657,6 +3199,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         identity: str | None,
         search_query: str | None,
         expected_snapshot: str,
+        page: int = 1,
     ) -> None:
         if not self.sse_slots.acquire(blocking=False):
             self._send_html(503, "")
@@ -2671,6 +3214,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     view,
                     identity,
                     search_query,
+                    page,
                 )
             except (
                 OSError,

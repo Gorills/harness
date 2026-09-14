@@ -137,3 +137,19 @@ Automated/acceptance coverage must prove:
 - malformed polyglot source keeps exact coverage while precise parsing fails closed;
 - mixed supported/unsupported exact matches set `precise_classification_complete=false`;
 - strict IPC/MCP, relation budgets, repository quality gates, and exact-head CI remain green.
+
+## 2026-09-11 clarification: preserve the accepted contract across IPC
+
+The producer's polyglot and later Python-resolution contracts also apply to the strict IPC decoder.
+A stale Python-only decoder rejected valid search results even after current-source retrieval had
+succeeded. IPC accepts the sorted unique set of attempted providers, from zero (unsupported-only
+matches) through all seven supported languages. It preserves the optional call-binding pair and
+complete imported-definition proof defined by ADR-0051–0053 and the receiver kinds of
+ADR-0056–0057. Unresolved relations keep their existing wire shape; `resolution_module` remains
+internal and is never accepted as a wire field.
+
+Regression coverage exercises every supported language, all seven together, unsupported-only
+matches, and Python imported-target resolution through real daemon IPC and a subprocess MCP bridge.
+Separate decoder checks reject partial/null proofs, unknown fields/enums, invalid coordinates,
+receiver bindings claiming imported-definition proof, and responses beyond the existing budgets.
+This restores the accepted search behavior without changing the database or adding MCP fields.

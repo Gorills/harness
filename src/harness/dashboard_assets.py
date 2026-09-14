@@ -215,9 +215,11 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .live-indicator { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
 .live-indicator[data-state="reconnecting"] .live-dot { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
+.live-indicator[data-state="manual"] .live-dot { background: var(--text-muted); box-shadow: none; }
 .live-indicator[data-state="update"] .live-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: live-pulse 1.4s ease-in-out infinite; }
 .update-link { display: none; border: 0; background: transparent; color: var(--accent-hover); padding: 0; font-size: inherit; font-weight: 700; cursor: pointer; }
-.live-indicator[data-state="update"] .update-link { display: inline; }
+.live-indicator[data-state="update"] .update-link,
+.live-indicator[data-state="manual"] .update-link { display: inline; }
 
 .content-frame {
   width: 100%;
@@ -459,6 +461,11 @@ a.btn {
 .feedback-disclosure summary::before { content: "+ "; color: var(--accent-hover); }
 .feedback-disclosure[open] summary::before { content: "− "; }
 .feedback-form { display: grid; gap: 9px; margin-top: 11px; }
+.form-recovery { max-width: 760px; }
+.form-error { border-left: 3px solid var(--warning); padding-left: 16px; margin-bottom: 20px; }
+.form-error h1 { font-size: 23px; }
+.form-recovery .action-panel { margin: 20px 0; }
+.recovery-draft { width: 100%; padding: 12px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; resize: vertical; }
 .feedback-form label { color: var(--text-muted); font-size: 11px; }
 .feedback-form textarea,
 .feedback-form input,
@@ -616,6 +623,16 @@ a.btn {
 .timeline-time { color: var(--text-muted); font-family: var(--font-mono); font-size: 10px; }
 .timeline-content { margin-top: 9px; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
 .timeline-summary { color: var(--text); font-size: 13px; }
+.verification-list { list-style: none; margin: 0; padding: 0; }
+.verification-item { min-width: 0; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.verification-item:last-child { border-bottom: 0; }
+.verification-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; }
+.verification-head strong { overflow-wrap: anywhere; }
+.verification-status { font-size: 12px; font-weight: 650; }
+.verification-status[data-status="passed"] { color: var(--success); }
+.verification-status[data-status="failed"] { color: var(--danger); }
+.verification-status[data-status="not_run"] { color: var(--text-secondary); }
+.verification-evidence { max-width: 100%; margin: 8px 0 0; padding: 10px; border-radius: var(--radius-sm); background: var(--panel-subtle); color: var(--text-secondary); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline-branch { margin-bottom: 7px; color: var(--text-muted); font-size: 11px; }
 .timeline-branch strong { margin-right: 8px; font-weight: 600; }
 .feedback-quote { margin: 11px 0 0; padding: 12px 14px; border-left: 3px solid var(--accent); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; background: var(--accent-soft); color: #cbd3ff; white-space: pre-wrap; }
@@ -770,6 +787,12 @@ DASHBOARD_JS = r"""
   let queuedForce = false;
 
   const fieldHasChanged = (field) => {
+    if (field.dataset.recoveredDraft === 'true') {
+      return true;
+    }
+    if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+      return field.checked !== field.defaultChecked;
+    }
     if (field instanceof HTMLSelectElement) {
       return Array.from(field.options).some((option) => option.selected !== option.defaultSelected);
     }
@@ -823,7 +846,86 @@ DASHBOARD_JS = r"""
     if (!(currentLayout instanceof HTMLElement) || !(nextLayout instanceof HTMLElement)) {
       return false;
     }
+    const editableFields = (root) => Array.from(
+      root.querySelectorAll('textarea, input:not([type="hidden"]), select')
+    );
+    const formIdentity = (form) => form === null ? '' : JSON.stringify([
+      form.getAttribute('method'), form.getAttribute('action') || '',
+      ...['action', 'task_id', 'workspace_id', 'project_id', 'facet'].map(
+        (name) => form.elements.namedItem(name)?.value || ''
+      ),
+    ]);
+    const fieldIdentity = (field) => JSON.stringify([
+      field.id, field.name, field.type, formIdentity(field.form),
+      ['checkbox', 'radio'].includes(field.type) ? field.value : '',
+    ]);
+    const currentFields = editableFields(currentLayout);
+    const nextFields = editableFields(nextLayout);
+    const matchingField = (field) => {
+      const matches = nextFields.filter((candidate) => fieldIdentity(candidate) === fieldIdentity(field));
+      return matches.length === 1 ? matches[0] : null;
+    };
+    const drafts = currentFields.filter(fieldHasChanged);
+    // Capture after the fetch: edits made while the response arrived are still operator-owned.
+    const replacements = drafts.map((field) => [field, matchingField(field)]);
+    if (replacements.some(([field, target]) => target === null || (
+      field instanceof HTMLSelectElement && Array.from(field.options).some(
+        (option) => option.selected && !Array.from(target.options).some(
+          (candidate) => candidate.value === option.value
+        )
+      )
+    ))) {
+      throw new Error('dashboard draft target changed');
+    }
+    const focused = currentFields.includes(document.activeElement) ? document.activeElement : null;
+    const focusTarget = focused === null ? null : matchingField(focused);
+    const selection = focused !== null && typeof focused.selectionStart === 'number' ? [
+      focused.selectionStart, focused.selectionEnd, focused.selectionDirection,
+    ] : null;
+    for (const [field, target] of replacements) {
+      if (field instanceof HTMLSelectElement) {
+        const selected = new Set(Array.from(field.options).filter((option) => option.selected).map(
+          (option) => option.value
+        ));
+        Array.from(target.options).forEach((option) => { option.selected = selected.has(option.value); });
+      } else if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+        target.checked = field.checked;
+      } else {
+        target.value = field.value;
+      }
+      if (field.dataset.recoveredDraft === 'true') {
+        target.dataset.recoveredDraft = 'true';
+      }
+    }
+    const disclosureIdentity = (disclosure) => disclosure.id || JSON.stringify([
+      disclosure.className,
+      Array.from(disclosure.querySelectorAll('form')).map(formIdentity),
+      disclosure.querySelector('summary')?.textContent || '',
+    ]);
+    const currentDisclosures = Array.from(currentLayout.querySelectorAll('details'));
+    nextLayout.querySelectorAll('details').forEach((disclosure) => {
+      const matches = currentDisclosures.filter(
+        (candidate) => disclosureIdentity(candidate) === disclosureIdentity(disclosure)
+      );
+      if (matches.length === 1) {
+        disclosure.open = matches[0].open;
+      }
+    });
+    const fieldScroll = replacements.map(([field, target]) => [target, field.scrollTop]);
+    const sidebar = currentLayout.querySelector('.app-sidebar');
+    const nextSidebar = nextLayout.querySelector('.app-sidebar');
+    const sidebarScroll = sidebar instanceof HTMLElement ? sidebar.scrollTop : 0;
     currentLayout.replaceWith(nextLayout);
+    if (focusTarget !== null) {
+      focusTarget.focus({ preventScroll: true });
+      if (selection !== null) {
+        focusTarget.setSelectionRange(...selection);
+      }
+    }
+    fieldScroll.forEach(([field, scrollTop]) => { field.scrollTop = scrollTop; });
+    if (nextSidebar instanceof HTMLElement) {
+      nextSidebar.scrollTop = sidebarScroll;
+    }
     const nextTitle = nextDocument.querySelector('title');
     if (nextTitle && nextTitle.textContent) {
       document.title = nextTitle.textContent;
@@ -903,8 +1005,12 @@ DASHBOARD_JS = r"""
         connectEvents();
         setState('live', 'Онлайн');
       }
-    } catch {
-      setState('update', 'Есть обновление');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'dashboard draft target changed') {
+        setState('update', 'Форма изменилась · черновик сохранён');
+      } else {
+        setState('update', 'Есть обновление');
+      }
     } finally {
       inFlight = false;
       if (queued) {

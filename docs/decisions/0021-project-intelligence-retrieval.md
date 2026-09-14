@@ -27,6 +27,40 @@ Preserve the existing model-facing code context shape. `code:` and new `doc:` co
 
 For `scope=all`, combine bounded per-channel rankings with deterministic interleaving rather than pretending heterogeneous path BM25/freshness/current-Task signals share one calibrated global score. More sophisticated RRF/Working-Set/graph ranking can replace this internal fusion later without changing refs or tool shapes.
 
+## Task recall amendment (2026-09-11)
+
+Apply the Task candidate cap to distinct Tasks after choosing each Task's best matching fragment.
+The previous fragment-first cap could let one Task with hundreds of matching checkpoints or
+comments hide all other matching Tasks. A query-local SQLite function computes the existing shared
+title-phrase/term-coverage rank. A materialized CTE retains only identity/rank fields and FTS BM25;
+a window selects one fragment per Task before the cap. Project filtering precedes this selection,
+and current-Task preference remains subordinate to match quality and coverage. The function is
+removed after each query, including failures. Matching-fragment work still grows with matching
+history; this bounds candidate transfer and authoritative rereads, not total SQLite work.
+
+Before lexical Task retrieval, look up a full Task ID or a generated hexadecimal ID prefix of
+10–31 characters, optionally prefixed with `task:`. Generated hex IDs are case-insensitive; existing
+opaque IDs with searchable text retain exact equality, with the raw ID checked before reference
+normalization. Exact IDs win over prefixes. Ambiguous prefixes return a deterministic list up to
+the requested limit rather than selecting a unique Task. A direct match suppresses incidental
+lexical mentions within the Task channel; an unknown ID falls back to normal lexical search.
+Direct results use `task:<id>` and the latest checkpoint summary. Lexical results keep the selected
+checkpoint/event ref and its existing context expansion. All reads retain their existing Project
+scope; only the home dashboard's global Task search spans registered Projects. This requires no
+schema migration, FTS rebuild, or model-visible field additions.
+
+Regression coverage includes 400 matching checkpoints/comments beside a weaker matching Task,
+best-fragment selection and context verification, repeated queries and recovery after a ranking
+failure, full/prefix/opaque IDs and prefix collisions, and real stdio MCP cross-Project isolation.
+
+A local synthetic cost probe on 2026-09-11 kept both matching Tasks visible with 400 and 4000
+matching checkpoints in the first Task. With 2016-byte summaries, the median of three subsequent
+`search_tasks` calls was approximately 122 ms and 1153 ms respectively; six-byte summaries took
+approximately 6 ms and 64 ms. These are informational local measurements excluding fixture setup,
+IPC, and currentness reconciliation, not a service latency guarantee. A separate large-history
+performance gate is needed before claiming scalable latency; restoring the fragment-first cap
+would reintroduce the demonstrated recall defect.
+
 ## Consequences
 
 - MCP no longer contains Knowledge/Task search stubs; the public scopes correspond to real local retrieval channels.

@@ -36,6 +36,7 @@ from harness.search import (
 from harness.search_text import (
     AnalyzedSearchQuery,
     analyze_search_query,
+    contains_russian_case_phrase,
     contains_term_phrase,
     is_document_path,
     is_generated_text_output_path,
@@ -98,10 +99,13 @@ _QUALITY_EXACT_PATH = 0
 _QUALITY_EXACT_FILENAME = 1
 _QUALITY_EXACT_FILENAME_STEM = 2
 _QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 3
-_QUALITY_DENSE_CONTENT = 4
-_QUALITY_ALL_TERMS = 5
-_QUALITY_PARTIAL = 6
-_QUALITY_STALE_OFFSET = 3
+_QUALITY_RUSSIAN_CASE_PHRASE = 4
+_QUALITY_DENSE_CONTENT = 5
+_QUALITY_ALL_TERMS = 6
+_QUALITY_PARTIAL = 7
+_QUALITY_STALE_OFFSET = 4
+_QUALITY_EXACT_TASK_ID = 0
+_QUALITY_TASK_ID_PREFIX = 1
 
 _CODE_RELATION_INTENT_TERMS = {
     "call": frozenset(
@@ -1450,6 +1454,11 @@ def _indexed_content_row(
     elif phrase_match:
         quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
         reason = "normalized identifier/title phrase"
+    elif contains_russian_case_phrase(query.terms, title) or contains_russian_case_phrase(
+        query.terms, normalized_identifiers
+    ):
+        quality = _QUALITY_RUSSIAN_CASE_PHRASE
+        reason = "Russian case-form identifier/title phrase"
     elif dense_match:
         quality = _QUALITY_DENSE_CONTENT
         reason = (
@@ -1528,6 +1537,9 @@ def _knowledge_hits(
         if contains_term_phrase(query.terms, card.title):
             quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
             match_reason = "Knowledge title phrase"
+        elif contains_russian_case_phrase(query.terms, card.title):
+            quality = _QUALITY_RUSSIAN_CASE_PHRASE
+            match_reason = "Knowledge Russian case-form title phrase"
         elif matched_terms == len(query.terms):
             quality = _QUALITY_ALL_TERMS
             match_reason = "Knowledge title/body (all terms)"
@@ -1592,36 +1604,80 @@ def _task_hits(
     project_id: str | None = None,
     active_workspace_id: str | None = None,
 ) -> tuple[_RankedProjectHit, ...]:
+    current = (
+        None if active_workspace_id is None else get_relevant_task(connection, active_workspace_id)
+    )
+    current_task_id = None if current is None else current.task_id
+    identifier_hits = _task_identifier_hits(
+        connection,
+        query,
+        limit,
+        project_id=project_id,
+        current_task_id=current_task_id,
+    )
+    if identifier_hits:
+        return identifier_hits
+
+    rank_width = len(query.terms) + 1
+
+    def match_rank(title: object, body: object) -> int:
+        if not isinstance(title, str) or not isinstance(body, str):
+            raise ProjectRetrievalError("Task search index returned invalid persisted types")
+        matched_terms = matching_term_count(query.terms, title, body)
+        if contains_term_phrase(query.terms, title):
+            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+        elif contains_russian_case_phrase(query.terms, title):
+            quality = _QUALITY_RUSSIAN_CASE_PHRASE
+        elif matched_terms == len(query.terms):
+            quality = _QUALITY_ALL_TERMS
+        else:
+            quality = _QUALITY_PARTIAL
+        return quality * rank_width + len(query.terms) - matched_terms
+
+    # Materialize only compact rank/identity data: FTS auxiliary functions must run in the
+    # MATCH query, before windowing. The candidate cap applies to Tasks, not history fragments.
     sql = """
-        SELECT
-            fragment_ref,
-            task_id,
-            workspace_id,
-            project_id,
-            title,
-            body,
-            bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
-        FROM task_search
-        WHERE task_search MATCH ?
+        WITH matched AS MATERIALIZED (
+            SELECT fragment_ref, task_id, workspace_id, project_id,
+                   harness_task_match_rank(title, body) AS match_rank,
+                   bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
+            FROM task_search
+            WHERE task_search MATCH ?
     """
     params: list[object] = [query.fts_expression]
     if project_id is not None:
         sql += " AND project_id = ?"
         params.append(project_id)
-    sql += " ORDER BY score, rowid LIMIT ?"
-    params.append(_candidate_limit(limit))
-    rows = connection.execute(sql, params).fetchall()
-    current = (
-        None if active_workspace_id is None else get_relevant_task(connection, active_workspace_id)
-    )
-    best: dict[str, tuple[str, str, str, float, int, int]] = {}
+    sql += """
+        ), per_task AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY task_id ORDER BY match_rank, score, fragment_ref
+            ) AS fragment_position
+            FROM matched
+        )
+        SELECT fragment_ref, task_id, workspace_id, project_id, match_rank, score
+        FROM per_task
+        WHERE fragment_position = 1
+        ORDER BY match_rank, CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                 score, task_id, fragment_ref
+        LIMIT ?
+    """
+    params.extend((current_task_id, _candidate_limit(limit)))
+    connection.create_function("harness_task_match_rank", 2, match_rank, deterministic=True)
+    try:
+        rows = connection.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ProjectRetrievalError("Task search candidate ranking failed") from exc
+    finally:
+        connection.create_function("harness_task_match_rank", 2, None)
+
+    ranked: list[_RankedProjectHit] = []
     for (
         fragment_ref,
         task_id,
         workspace_id,
         indexed_project_id,
-        title,
-        body,
+        raw_match_rank,
         raw_score,
     ) in rows:
         if (
@@ -1629,40 +1685,12 @@ def _task_hits(
             or not isinstance(task_id, str)
             or not isinstance(workspace_id, str)
             or not isinstance(indexed_project_id, str)
-            or not isinstance(title, str)
-            or not isinstance(body, str)
+            or not isinstance(raw_match_rank, int)
             or not isinstance(raw_score, (int, float))
         ):
             raise ProjectRetrievalError("Task search index returned invalid persisted types")
-        matched_terms = matching_term_count(query.terms, title, body)
-        if contains_term_phrase(query.terms, title):
-            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
-        elif matched_terms == len(query.terms):
-            quality = _QUALITY_ALL_TERMS
-        else:
-            quality = _QUALITY_PARTIAL
-        candidate = (
-            fragment_ref,
-            workspace_id,
-            indexed_project_id,
-            float(raw_score),
-            quality,
-            matched_terms,
-        )
-        previous = best.get(task_id)
-        if previous is None or (quality, -matched_terms, float(raw_score), fragment_ref) < (
-            previous[4],
-            -previous[5],
-            previous[3],
-            previous[0],
-        ):
-            best[task_id] = candidate
-
-    ranked: list[_RankedProjectHit] = []
-    for (
-        task_id,
-        (fragment_ref, workspace_id, indexed_project_id, score, quality, matched_terms),
-    ) in best.items():
+        quality, unmatched_terms = divmod(raw_match_rank, rank_width)
+        matched_terms = len(query.terms) - unmatched_terms
         task = get_task(connection, task_id)
         owner = get_workspace(connection, task.workspace_id)
         if owner.project_id != indexed_project_id or workspace_id != task.workspace_id:
@@ -1685,12 +1713,89 @@ def _task_hits(
                 ),
                 quality=quality,
                 matched_terms=matched_terms,
-                lexical_score=score,
-                relevance_boost=(0 if current is not None and current.task_id == task_id else 1),
+                lexical_score=float(raw_score),
+                relevance_boost=(0 if current_task_id == task_id else 1),
             )
         )
     ranked.sort(key=_ranked_hit_key)
     return tuple(ranked[:limit])
+
+
+def _task_identifier_hits(
+    connection: sqlite3.Connection,
+    query: AnalyzedSearchQuery,
+    limit: int,
+    *,
+    project_id: str | None,
+    current_task_id: str | None,
+) -> tuple[_RankedProjectHit, ...]:
+    identifier = query.normalized.removeprefix("task:")
+    canonical = (
+        identifier.lower() if re.fullmatch(r"[0-9a-fA-F]{10,32}", identifier) else identifier
+    )
+    scope_sql = " AND workspaces.project_id = ?" if project_id is not None else ""
+    owner_sql = "FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id"
+    params: list[object] = [query.normalized, identifier, canonical]
+    if project_id is not None:
+        params.append(project_id)
+    params.extend((query.normalized, identifier))
+    rows = connection.execute(
+        "SELECT tasks.id "
+        + owner_sql
+        + " WHERE tasks.id IN (?, ?, ?)"
+        + scope_sql
+        + " ORDER BY CASE WHEN tasks.id = ? THEN 0 WHEN tasks.id = ? THEN 1 ELSE 2 END LIMIT 1",
+        params,
+    ).fetchall()
+    quality = _QUALITY_EXACT_TASK_ID
+    reason = "Task ID"
+    if not rows and re.fullmatch(r"[0-9a-f]{10,31}", canonical):
+        params = [canonical + "*"]
+        if project_id is not None:
+            params.append(project_id)
+        params.extend((current_task_id, limit))
+        rows = connection.execute(
+            "SELECT tasks.id "
+            + owner_sql
+            + " WHERE tasks.id GLOB ? AND length(tasks.id) = 32"
+            + " AND tasks.id NOT GLOB '*[^0-9a-f]*'"
+            + scope_sql
+            + " ORDER BY CASE WHEN tasks.id = ? THEN 0 ELSE 1 END, tasks.id LIMIT ?",
+            params,
+        ).fetchall()
+        quality = _QUALITY_TASK_ID_PREFIX
+        reason = "Task ID prefix"
+
+    ranked: list[_RankedProjectHit] = []
+    for (raw_task_id,) in rows:
+        task_id = _require_text(raw_task_id, "Task identifier")
+        task = get_task(connection, task_id)
+        if (
+            project_id is not None
+            and get_workspace(connection, task.workspace_id).project_id != project_id
+        ):
+            raise ProjectRetrievalError("Task identifier lookup crossed Project ownership")
+        result_ref, _reason, summary, location = _task_fragment_projection(
+            connection, task_id, f"task:{task_id}"
+        )
+        ranked.append(
+            _RankedProjectHit(
+                hit=ProjectSearchHit(
+                    ref=result_ref,
+                    kind=ProjectSearchKind.TASK,
+                    title=task.title,
+                    location=location,
+                    short_summary=summary,
+                    match_reason=reason,
+                    freshness="durable_history",
+                ),
+                quality=quality,
+                matched_terms=len(query.terms),
+                lexical_score=0.0,
+                relevance_boost=(0 if current_task_id == task_id else 1),
+            )
+        )
+    return tuple(ranked)
 
 
 def _task_fragment_projection(

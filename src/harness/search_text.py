@@ -59,8 +59,22 @@ _SEARCH_STOP_WORDS = frozenset(
         "это",
     }
 )
-_LOCATION_QUERY_MARKERS = frozenset({"how", "test", "testing", "tests", "where", "who"})
-_LOCATION_INTENT_TERMS = frozenset({"enforced", "implemented", "verifies"})
+_LOCATION_QUERY_MARKERS = frozenset(
+    {"how", "test", "testing", "tests", "where", "who", "где", "как"}
+)
+_LOCATION_INTENT_TERMS = frozenset(
+    {
+        "enforced",
+        "implemented",
+        "verifies",
+        "реализован",
+        "реализована",
+        "реализовано",
+        "реализованы",
+        "находится",
+        "находятся",
+    }
+)
 _DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
 _GENERATED_TEXT_OUTPUT_EXTENSIONS = {".log", ".out"}
 _QUERY_TERM_LIMIT = 24
@@ -80,6 +94,10 @@ _ENGLISH_QUERY_SUFFIXES = (
 )
 _RUSSIAN_QUERY_SUFFIXES = (
     "иями",
+    "ией",
+    "ием",
+    "иях",
+    "иям",
     "ями",
     "ами",
     "ности",
@@ -89,6 +107,7 @@ _RUSSIAN_QUERY_SUFFIXES = (
     "ания",
     "ание",
     "ого",
+    "его",
     "ему",
     "ому",
     "ыми",
@@ -107,6 +126,19 @@ _RUSSIAN_QUERY_SUFFIXES = (
     "ать",
     "ять",
     "ить",
+    "ей",
+    "ах",
+    "ях",
+    "ам",
+    "ям",
+    "ов",
+    "ев",
+    "ом",
+    "ем",
+    "ию",
+    "ия",
+    "ии",
+    "ью",
     "а",
     "я",
     "ы",
@@ -115,6 +147,55 @@ _RUSSIAN_QUERY_SUFFIXES = (
     "ю",
     "е",
     "о",
+    "ь",
+)
+# Phrase ranking uses case endings only. The broader retrieval suffixes above also contain
+# derivations such as -ение/-ить; those must not equate different words at the phrase tier.
+_RUSSIAN_CASE_SUFFIXES = (
+    "иями",
+    "ией",
+    "ием",
+    "иях",
+    "иям",
+    "ями",
+    "ами",
+    "ого",
+    "его",
+    "ему",
+    "ому",
+    "ыми",
+    "ими",
+    "ий",
+    "ый",
+    "ой",
+    "ая",
+    "яя",
+    "ое",
+    "ее",
+    "ые",
+    "ие",
+    "ей",
+    "ах",
+    "ях",
+    "ам",
+    "ям",
+    "ов",
+    "ев",
+    "ом",
+    "ем",
+    "ию",
+    "ия",
+    "ии",
+    "ью",
+    "а",
+    "я",
+    "ы",
+    "и",
+    "у",
+    "ю",
+    "е",
+    "о",
+    "ь",
 )
 
 
@@ -204,6 +285,35 @@ def contains_term_phrase(terms: tuple[str, ...], value: str) -> bool:
     tokens = identifier_tokens(value)
     width = len(terms)
     return any(tokens[index : index + width] == terms for index in range(len(tokens) - width + 1))
+
+
+def contains_russian_case_phrase(terms: tuple[str, ...], value: str) -> bool:
+    """Recognize consecutive Russian case forms without promoting arbitrary prefix matches."""
+    if not terms or not any(_is_russian_word(term) for term in terms):
+        return False
+    tokens = identifier_tokens(value)
+    alternatives = tuple(_russian_case_forms(term) for term in terms)
+    candidate_forms = {token: _russian_case_forms(token) for token in set(tokens)}
+    width = len(terms)
+    return any(
+        all(
+            forms.intersection(candidate_forms[token])
+            for forms, token in zip(alternatives, tokens[index : index + width], strict=True)
+        )
+        for index in range(len(tokens) - width + 1)
+    )
+
+
+def _russian_case_forms(term: str) -> frozenset[str]:
+    if _is_russian_word(term):
+        for suffix in _RUSSIAN_CASE_SUFFIXES:
+            if term.endswith(suffix) and len(term) - len(suffix) >= 5:
+                return frozenset((term, term[: -len(suffix)]))
+    return frozenset((term,))
+
+
+def _is_russian_word(value: str) -> bool:
+    return bool(value) and all("а" <= character <= "я" or character == "ё" for character in value)
 
 
 def is_document_path(path: str) -> bool:

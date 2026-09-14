@@ -19,9 +19,14 @@ These rules apply to every coding agent and human contributor in this repository
   message, open file, git status, or a prior search hit); skipping search does not skip Task.
   `project_context` is only for selected refs when it adds semantic information;
   if a code or doc search hit already has an exact path, targeted native read/search is allowed
-  immediately. Checkpoint each logical stage. A new operator work request (diagnosis, edits, or
-  implementation) or a shift from diagnosis to implementation requires completing or waiting the
-  current Task, then a new `task_start`.
+  immediately. Checkpoint each logical stage. One requested outcome uses one Harness Task:
+  diagnosis, implementation, verification, clarifications, and continuation reuse its `task_id`.
+  Messages, tool calls, and subagents do not each need a new Task. Resume the relevant working or
+  waiting Task for that outcome; start a new Task only for a distinct requested outcome after
+  completing or waiting the existing work. Do not infer a write target or merge Tasks by title.
+  Use `working` while authorized work remains, `waiting` for a real dependency with its required
+  reason, and `completed` only when the requested outcome is done. A turn ending or finishing
+  diagnosis is not completion of an authorized fix. An audit-only request can finish as an audit.
 - Do not skip a Task because the work looks small, the path is already known, search was
   unhelpful, the operator seemed annoyed by ceremony, the previous message was discussion, or
   you plan to create a Task after finishing. Complexity is not a Task gate.
@@ -30,8 +35,10 @@ These rules apply to every coding agent and human contributor in this repository
   exploration. A later implement, fix, or investigate request ends the waiver and requires
   `task_start` before that work. If discussion needs investigation, say so and wait; do not
   stretch the waiver and do not start a Task against it.
-- After Harness project configuration changes, fully restart the host and begin a new Task; an
-  existing Task retains its startup instruction snapshot.
+- After Harness project configuration changes, fully restart the host and begin a fresh host
+  conversation; existing instruction snapshots do not refresh. Resume the same unfinished Harness
+  Task for the same outcome after `project_status`. A new host conversation is not a new durable
+  Task. Terminal Tasks require the existing separate operator-reopen flow.
 
 ## Isolated development
 

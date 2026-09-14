@@ -4,6 +4,34 @@ from harness.registry import VisibilityMode
 from harness.search import SearchMatchKind
 from harness.task_checkpoints import TaskEventType
 from harness.tasks import TaskOperatorStatus, TaskState, TaskWaitReason
+from harness.verification import VerificationSource, VerificationStatus
+
+VERIFICATION_TITLE = "Проверки последнего отчёта"
+VERIFICATION_EMPTY = "В последнем отчёте проверки не указаны."
+VERIFICATION_NO_REPORT = "Отчётов с результатами пока нет."
+VERIFICATION_OLDER = (
+    "После этого отчёта задача обновлялась. Результаты относятся к указанному отчёту."
+)
+
+
+def verification_status_label(status: VerificationStatus) -> str:
+    return {
+        VerificationStatus.PASSED: "Пройдена",
+        VerificationStatus.FAILED: "Ошибка",
+        VerificationStatus.NOT_RUN: "Не запускалась",
+    }[status]
+
+
+def verification_source_label(source: VerificationSource) -> str:
+    return {
+        VerificationSource.AGENT_REPORTED: "Сообщено агентом",
+        VerificationSource.OBSERVED: "Наблюдение",
+    }[source]
+
+
+def verification_report_label(revision: int, created_at: str) -> str:
+    return f"Отчёт r{revision} · {created_at}"
+
 
 SKIP_TO_CONTENT = "К содержимому"
 BRAND = "Harness"
@@ -16,8 +44,10 @@ PROJECT_OVERVIEW = "Обзор проекта"
 WORKSPACE_OVERVIEW = "Папка"
 TASK_OVERVIEW = "Карточка задачи"
 LIVE_CONNECTING = "Подключаемся"
+LIVE_MANUAL = "Обновление вручную"
 LIVE_REFRESH = "Обновить"
 NAVIGATION = "Навигация"
+NAVIGATION_UNAVAILABLE = "Навигация временно недоступна"
 BREADCRUMB_PROJECTS = "Все проекты"
 PAGE_PROJECTS = "Проекты"
 PAGE_PROJECTS_LEAD = "Поиск по всем задачам и последние обновления."
@@ -208,6 +238,18 @@ _OPERATOR_STATUS_LABELS = {
     TaskOperatorStatus.DEPLOY_TEST.value: OPERATOR_STATUS_DEPLOY_TEST,
     TaskOperatorStatus.DEPLOY_PROD.value: OPERATOR_STATUS_DEPLOY_PROD,
 }
+
+
+FORM_ERROR_TITLE = "Не удалось сохранить изменения"
+FORM_ERROR_INVALID = "Проверьте введённые значения и отправьте форму ещё раз."
+FORM_ERROR_CONFLICT = (
+    "Данные изменились или действие сейчас недоступно. "
+    "Проверьте актуальное состояние перед повторной отправкой."
+)
+FORM_ERROR_BACK = "Вернуться к странице"
+FORM_DRAFT_SAVED = "Введённые данные сохранены в форме."
+FORM_DRAFT_UNAVAILABLE = "Форма больше недоступна. Ваш текст сохранён ниже — его можно скопировать."
+FORM_DRAFT_LABEL = "Сохранённый ввод"
 
 
 def ru_plural(count: int, one: str, few: str, many: str) -> str:

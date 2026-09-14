@@ -87,6 +87,9 @@ _PROJECT_CONTEXT_REF_MAX_BYTES = MAX_PROJECT_CONTEXT_REF_BYTES
 _PROJECT_CONTEXT_MAX_REFS = 10
 _HOST_PROFILE_MAX_BYTES = 64
 _HOST_PROFILE_MAX_ITEMS = 8
+_SYMBOL_NAVIGATION_LANGUAGES = frozenset(
+    {"python", "javascript", "typescript", "tsx", "go", "rust", "java"}
+)
 
 
 class IpcError(RuntimeError):
@@ -3000,7 +3003,7 @@ def _project_symbol_navigation_from_wire(
     raw_languages = value["precise_languages"]
     if (
         not isinstance(raw_languages, list)
-        or not 1 <= len(raw_languages) <= 4
+        or len(raw_languages) > len(_SYMBOL_NAVIGATION_LANGUAGES)
         or any(not isinstance(item, str) for item in raw_languages)
     ):
         raise IpcProtocolError("daemon symbol navigation precise languages are invalid")
@@ -3008,8 +3011,10 @@ def _project_symbol_navigation_from_wire(
         _bounded_response_string(item, "symbol_navigation.precise_language", 32)
         for item in raw_languages
     )
-    if languages != ("python",):
+    if not set(languages) <= _SYMBOL_NAVIGATION_LANGUAGES:
         raise IpcProtocolError("daemon symbol navigation precise language is unsupported")
+    if languages != tuple(sorted(set(languages))):
+        raise IpcProtocolError("daemon symbol navigation precise languages are not canonical")
     count_names = (
         "candidate_precise_files",
         "parsed_precise_files",
@@ -3052,8 +3057,24 @@ def _project_symbol_navigation_from_wire(
         "in_test",
         "evidence",
     }
+    binding_fields = {"resolved_target", "resolution_kind"}
+    definition_fields = {
+        "resolved_definition_path",
+        "resolved_definition_line",
+        "resolved_definition_column",
+        "resolved_definition_kind",
+        "resolution_validation_kind",
+    }
+    allowed_relation_fields = relation_fields | binding_fields | definition_fields
+    import_resolution_kinds = {"python_import_binding", "python_from_import_binding"}
+    resolution_kinds = import_resolution_kinds | {
+        "python_self_method_binding",
+        "python_cls_method_binding",
+        "python_self_inherited_method_binding",
+        "python_cls_inherited_method_binding",
+    }
     for raw in raw_relations:
-        if not isinstance(raw, dict) or set(raw) != relation_fields:
+        if not isinstance(raw, dict) or not relation_fields <= set(raw) <= allowed_relation_fields:
             raise IpcProtocolError("daemon symbol relation does not match the IPC schema")
         kind = _bounded_response_string(raw["kind"], "symbol_navigation.kind", 32)
         if kind not in {"definition", "call", "import", "inheritance"}:
@@ -3079,6 +3100,58 @@ def _project_symbol_navigation_from_wire(
         in_test = raw["in_test"]
         if not isinstance(in_test, bool):
             raise IpcProtocolError("daemon symbol relation test flag is invalid")
+        resolved_target: str | None = None
+        resolution_kind: str | None = None
+        resolved_definition_path: str | None = None
+        resolved_definition_line: int | None = None
+        resolved_definition_column: int | None = None
+        resolved_definition_kind: str | None = None
+        resolution_validation_kind: str | None = None
+        if binding_fields & raw.keys():
+            if not binding_fields <= raw.keys() or kind != "call":
+                raise IpcProtocolError("daemon symbol relation binding proof is invalid")
+            resolved_target = _bounded_response_string(
+                raw["resolved_target"],
+                "symbol_navigation.resolved_target",
+                MAX_SYMBOL_RELATION_TEXT_BYTES + 8,
+            )
+            resolution_kind = _bounded_response_string(
+                raw["resolution_kind"], "symbol_navigation.resolution_kind", 64
+            )
+            if resolution_kind not in resolution_kinds:
+                raise IpcProtocolError("daemon symbol relation resolution kind is unsupported")
+        if definition_fields & raw.keys():
+            if (
+                not definition_fields <= raw.keys()
+                or resolution_kind not in import_resolution_kinds
+            ):
+                raise IpcProtocolError("daemon symbol relation definition proof is invalid")
+            resolved_definition_path = _bounded_response_string(
+                raw["resolved_definition_path"], "symbol_navigation.resolved_definition_path", 4096
+            )
+            resolved_definition_line = _bounded_nonnegative_int(
+                raw["resolved_definition_line"], "symbol_navigation.resolved_definition_line"
+            )
+            resolved_definition_column = _bounded_nonnegative_int(
+                raw["resolved_definition_column"], "symbol_navigation.resolved_definition_column"
+            )
+            if resolved_definition_line < 1 or resolved_definition_column < 1:
+                raise IpcProtocolError("daemon symbol relation definition coordinates are invalid")
+            resolved_definition_kind = _bounded_response_string(
+                raw["resolved_definition_kind"], "symbol_navigation.resolved_definition_kind", 32
+            )
+            if resolved_definition_kind not in {"class", "function", "variable"}:
+                raise IpcProtocolError("daemon symbol relation definition kind is unsupported")
+            resolution_validation_kind = _bounded_response_string(
+                raw["resolution_validation_kind"],
+                "symbol_navigation.resolution_validation_kind",
+                64,
+            )
+            if resolution_validation_kind not in {
+                "python_workspace_direct_export",
+                "python_workspace_reexport_chain",
+            }:
+                raise IpcProtocolError("daemon symbol relation validation kind is unsupported")
         relations.append(
             ProjectSymbolRelation(
                 kind=kind,
@@ -3090,6 +3163,13 @@ def _project_symbol_navigation_from_wire(
                 symbol_kind=cast(str | None, symbol_kind),
                 in_test=in_test,
                 evidence=_project_search_evidence_from_wire(raw["evidence"]),
+                resolved_target=resolved_target,
+                resolution_kind=resolution_kind,
+                resolved_definition_path=resolved_definition_path,
+                resolved_definition_line=resolved_definition_line,
+                resolved_definition_column=resolved_definition_column,
+                resolved_definition_kind=resolved_definition_kind,
+                resolution_validation_kind=resolution_validation_kind,
             )
         )
     navigation = ProjectSymbolNavigation(

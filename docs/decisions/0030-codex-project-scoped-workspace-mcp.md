@@ -75,11 +75,12 @@ slice.
 6. Codex project trust is not written by Harness. Install/scan/doctor must give bounded actionable
    guidance when a project config exists but is not loaded because the operator has not trusted or
    restarted the Codex client. After changing project config, guidance requires a full client
-   restart and a new Task because an existing Task retains its startup instruction snapshot; the
-   first project action in that fresh Task must be `project_status`. Before that call, only host
-   tool discovery needed to locate and invoke Harness is permitted: no shell command, repository
-   file read/search, browser inspection, or change. Native targeted search is permitted after the
-   initial status call, not as an alternative bootstrap path.
+   restart and a fresh host conversation to load the updated instruction snapshot; the same
+   unfinished Harness Task resumes by explicit identity, as clarified in the 2026-09-11 amendment
+   below. The first project action in that fresh conversation must be `project_status`. Before
+   that call, only host tool discovery needed to locate and invoke Harness is permitted: no shell
+   command, repository file read/search, browser inspection, or change. Native targeted search is
+   permitted after the initial status call, not as an alternative bootstrap path.
 7. This ADR defines the local CLI/IDE/ChatGPT-desktop configuration profile only. Codex cloud and
    hosted ChatGPT plugin delivery are separate profiles and cannot inherit its Workspace or Hidden
    guarantees.
@@ -216,3 +217,24 @@ This amendment changes the development/acceptance authority boundary, not Codex 
 identity: production MCP remains project-scoped with explicit `cwd` and
 `HARNESS_WORKSPACE_ROOT`, plus the bounded local environment forwarding required to reach the
 canonical user daemon and state.
+
+## 2026-09-11 amendment: host instruction refresh preserves Harness Task continuity
+
+Earlier restart guidance used "new Task" for a fresh Codex conversation. That wording could
+cause agents to create another durable Harness Task solely to refresh host instructions, contrary
+to the Task continuity contract in specification §40 and ADR-0015.
+
+After actual project host-config reconciliation, fully restart the affected host and start a
+fresh host conversation. Its first repository action is `project_status`, followed by start or
+explicit resume before diagnosis or edits. For the same unfinished user outcome, resume the same
+Harness `task_id` using its current revision; host restart does not complete the Task or authorize
+automatic reopening of a completed/cancelled Task. A separate user outcome follows the Task
+creation rules in ADR-0038. Existing identity, revision CAS, and one-working-Task invariants remain
+unchanged.
+
+Editing checkout source or documentation does not itself reconcile or activate project host
+configuration. Source verification and live activation remain separate stages; a source-only
+change does not require interrupting the current conversation to refresh an unchanged host config.
+Real-host acceptance must still verify that the fresh conversation receives the updated bootstrap
+and preserves the existing unfinished Task across restart. Core instruction and ownership tests
+do not prove that host behavior.
