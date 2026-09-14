@@ -1,6 +1,7 @@
 import os
 import subprocess
 from pathlib import Path
+from time import monotonic
 from typing import NoReturn
 
 import pytest
@@ -11,6 +12,7 @@ from harness.git_workspace import (
     NotGitWorkspaceError,
     inspect_git_working_tree_status,
     inspect_git_workspace,
+    inspect_git_workspace_runtime_identity,
     inspect_workspace_layout,
     layout_has_git,
 )
@@ -233,3 +235,25 @@ def test_inspect_working_tree_status_bounds_git_runtime(
 
     with pytest.raises(GitWorkspaceError, match="Git status inspection timed out"):
         inspect_git_working_tree_status(repository)
+
+
+def test_working_tree_status_respects_shared_short_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def timed_out_git(*args: object, **kwargs: object) -> NoReturn:
+        timeout = kwargs.get("timeout")
+        assert isinstance(timeout, float) and 0 < timeout <= 0.05
+        raise subprocess.TimeoutExpired(["git"], timeout)
+
+    monkeypatch.setattr(subprocess, "run", timed_out_git)
+    with pytest.raises(GitWorkspaceError):
+        inspect_git_working_tree_status(tmp_path, deadline=monotonic() + 0.05)
+
+
+def test_combined_identity_preserves_newlines_in_workspace_paths(tmp_path: Path) -> None:
+    repository = tmp_path / "line\nbreak"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    identity = inspect_git_workspace_runtime_identity(repository)
+    assert identity.layout == inspect_git_workspace(repository)
+    assert identity.git_dir == repository / ".git"

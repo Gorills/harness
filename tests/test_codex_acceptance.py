@@ -496,45 +496,29 @@ def test_codex_acceptance_locks_mcp_does_not_deliver_skill_bodies() -> None:
 
 
 def test_codex_acceptance_requires_unambiguous_server_bootstrap() -> None:
-    instructions = (
-        "project_status must be the first repository action. Before any shell command, locate "
-        "Harness. Tool discovery is the only allowed pre-status action. After status, "
-        "start/resume a Task before diagnosis or edits. "
-        + TASK_CONTINUITY_INSTRUCTIONS
-        + "Small work or known paths still need a Task. Then project_search before broad native "
-        "exploration."
-    )
-
-    _validate_wire_instructions(instructions)
     _validate_wire_instructions(_SERVER_INSTRUCTIONS)
     with pytest.raises(CodexAcceptanceError, match="strict bootstrap phrase"):
         _validate_wire_instructions("Use project_status before broad work")
     with pytest.raises(CodexAcceptanceError, match="ambiguous broad-work wording"):
         _validate_wire_instructions(
-            instructions + " Before broad repository exploration, use project_status."
+            _SERVER_INSTRUCTIONS + " Before broad repository exploration, use project_status."
         )
-    with pytest.raises(CodexAcceptanceError, match="search-before-task wording"):
-        _validate_wire_instructions(instructions + " After status use project_search extra.")
-    with pytest.raises(CodexAcceptanceError, match="Task before project_search"):
+    with pytest.raises(CodexAcceptanceError, match="mandatory Task ceremony"):
         _validate_wire_instructions(
-            "project_status must be the first repository action. Before any shell command, "
-            "locate Harness. Tool discovery is the only allowed pre-status action. After status, "
-            "then project_search, then start/resume a Task."
+            _SERVER_INSTRUCTIONS + " Small work or known paths still need a Task."
         )
-    with pytest.raises(CodexAcceptanceError, match="Task-skip prohibition"):
+    with pytest.raises(CodexAcceptanceError, match="proportionate Task creation"):
+        _validate_wire_instructions(_SERVER_INSTRUCTIONS.replace("substantial changes", "all work"))
+    with pytest.raises(CodexAcceptanceError, match="operator-only completion"):
         _validate_wire_instructions(
-            "project_status must be the first repository action. Before any shell command, "
-            "locate Harness. Tool discovery is the only allowed pre-status action. After status, "
-            "start/resume a Task before diagnosis or edits. Then project_search before broad "
-            "native exploration."
+            _SERVER_INSTRUCTIONS.replace("Only the operator completes Tasks.", "Agents complete.")
         )
-    with pytest.raises(CodexAcceptanceError, match="discussion-waiver license"):
-        _validate_wire_instructions(instructions + " discussion only")
     with pytest.raises(CodexAcceptanceError, match="outcome-based Task continuity"):
-        _validate_wire_instructions(instructions.replace(TASK_CONTINUITY_INSTRUCTIONS, ""))
+        _validate_wire_instructions(_SERVER_INSTRUCTIONS.replace(TASK_CONTINUITY_INSTRUCTIONS, ""))
     with pytest.raises(CodexAcceptanceError, match="phase-based Task splitting"):
         _validate_wire_instructions(
-            instructions + " New request/implement-after-diagnosis: complete/wait; new Task."
+            _SERVER_INSTRUCTIONS
+            + " New request/implement-after-diagnosis: complete/wait; new Task."
         )
 
 

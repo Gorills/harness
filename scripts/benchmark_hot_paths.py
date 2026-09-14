@@ -41,7 +41,7 @@ from harness.watcher import (
 )
 from harness.workspace_resolution import WorkspaceHint
 
-_PROJECT_STATUS_GIT_BUDGET = 13
+_PROJECT_STATUS_GIT_BUDGET = 7
 _PROJECT_STATUS_IPC_BUDGET = 2
 _WATCH_TOKEN_GIT_BUDGET = 0
 _INCREMENTAL_SCAN_GIT_BUDGET = 6

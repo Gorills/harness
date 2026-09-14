@@ -9,32 +9,27 @@ These rules apply to every coding agent and human contributor in this repository
   Harness MCP tools even when they are deferred or omitted from the initial visible tool list and
   call `project_status`. Tool discovery needed to locate and call Harness is the only allowed
   pre-status action; initial omission is not unavailability.
-- After status, start or resume a Harness Task before diagnosis or edits, including
-  read-only investigation. A failed Harness call is a blocker: read the tool schema and retry;
-  do not continue without a Task. Use `project_search` before broad native repository
-  exploration when the query has an explicit identifier or quoted literal, or when retrieving
-  Knowledge/Task history. Natural-language code/doc discovery may use native repository search
-  directly. Ordinary lexical code/doc hits are candidate localization only and never forbid a
-  broader native fallback. Skip `project_search` when an exact path is already in hand (operator
-  message, open file, git status, or a prior search hit); skipping search does not skip Task.
-  `project_context` is only for selected refs when it adds semantic information;
-  if a code or doc search hit already has an exact path, targeted native read/search is allowed
-  immediately. Checkpoint each logical stage. One requested outcome uses one Harness Task:
-  diagnosis, implementation, verification, clarifications, and continuation reuse its `task_id`.
-  Messages, tool calls, and subagents do not each need a new Task. Resume the relevant working or
-  waiting Task for that outcome; start a new Task only for a distinct requested outcome after
-  completing or waiting the existing work. Do not infer a write target or merge Tasks by title.
-  Use `working` while authorized work remains, `waiting` for a real dependency with its required
-  reason, and `completed` only when the requested outcome is done. A turn ending or finishing
-  diagnosis is not completion of an authorized fix. An audit-only request can finish as an audit.
-- Do not skip a Task because the work looks small, the path is already known, search was
-  unhelpful, the operator seemed annoyed by ceremony, the previous message was discussion, or
-  you plan to create a Task after finishing. Complexity is not a Task gate.
-- An explicit operator waiver ("don't create a task", "не создавай таску", "discussion only",
-  "это обсуждение") applies only to that discussion phase: no diagnosis, no edits, no broad
-  exploration. A later implement, fix, or investigate request ends the waiver and requires
-  `task_start` before that work. If discussion needs investigation, say so and wait; do not
-  stretch the waiver and do not start a Task against it.
+- After status, start or resume a Harness Task for substantial changes, multi-step work,
+  work needing durable continuity, or an explicit operator request for a Task. Quick questions,
+  read-only inspection, and small local edits may proceed without a Task when durable tracking
+  adds no useful continuity. If work grows beyond that scope, start a Task before continuing.
+  Do not add a justification field or ask permission merely to decide whether tracking is useful.
+  A failed Harness call requires reading the schema and retrying, not bypassing the failure.
+- Use `project_search` before broad native repository exploration for explicit identifiers,
+  quoted literals, or Knowledge/Task history. Natural-language code/doc discovery may use native
+  search directly. Lexical hits are localization candidates and allow broader fallback. An exact
+  path may be read natively; `project_context` is optional for code/doc paths. Complete,
+  untruncated `exact_coverage` replaces native search for the same needle. Search does not itself
+  require a Task.
+- Reuse one Task for one requested outcome across diagnosis, implementation, checks,
+  clarifications, continuation, subagents, and host restarts. Resume by explicit `task_id`; do not
+  infer write targets or merge Tasks by title. Every existing-Task mutation carries its current
+  `expected_revision`. Checkpoint each logical stage of tracked work. Keep authorized unfinished
+  work `working`; use `waiting` with its reason for a dependency. When the result is ready, use
+  `waiting` with `operator_review`. Only the operator accepts/completes or cancels a Task; agents
+  must not automatically close it. A ready audit also awaits operator acceptance.
+- Respect an explicit operator request not to create a Task. Do not turn discussion into
+  implementation without authorization or create placeholder Tasks for messages/tool calls.
 - After Harness project configuration changes, fully restart the host and begin a fresh host
   conversation; existing instruction snapshots do not refresh. Resume the same unfinished Harness
   Task for the same outcome after `project_status`. A new host conversation is not a new durable

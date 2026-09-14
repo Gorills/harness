@@ -43,7 +43,7 @@ from harness.ipc import (
 from harness.registry import create_project, get_workspace, register_workspace
 from harness.storage import SCHEMA_VERSION, connect_database, initialize_database
 from harness.task_checkpoints import checkpoint_task
-from harness.task_workflow import task_start
+from harness.task_workflow import task_accept, task_start
 from harness.tasks import TaskState, TaskWaitReason, create_task_record
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="dashboard daemon discovery uses POSIX IPC")
@@ -186,14 +186,7 @@ def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
     connection = connect_database(database)
     try:
         task = create_task_record(connection, workspace_id, "Completed task")
-        checkpoint_task(
-            connection,
-            task.task_id,
-            expected_revision=task.revision,
-            expected_workspace_id=workspace_id,
-            state=TaskState.COMPLETED,
-            summary="Done",
-        )
+        task_accept(connection, workspace_id, task.task_id, expected_revision=task.revision)
     finally:
         connection.close()
 
@@ -385,11 +378,9 @@ def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Pat
     assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in project_html
 
     workspace = read_dashboard_workspace_detail(database, workspace_id)
-    assert workspace.recent_tasks[0].git_branch == DashboardGitBranch(
-        captured=True, name="feature/dashboard-branch"
-    )
+    assert workspace.recent_tasks == ()
     workspace_html = render_workspace_page(workspace, base_path="/cap/")
-    assert 'Ветка <strong class="mono">feature/dashboard-branch</strong>' in workspace_html
+    assert "feature/dashboard-branch" not in workspace_html
 
     assert row.task_id is not None
     detail = read_dashboard_task_detail(database, row.task_id)
@@ -549,13 +540,8 @@ def test_dashboard_home_pins_live_tasks_ahead_of_newer_completed(
             next_step="Accept or reject",
         )
         completed = create_task_record(connection, workspace_id, "Newer completed task")
-        checkpoint_task(
-            connection,
-            completed.task_id,
-            expected_revision=completed.revision,
-            expected_workspace_id=workspace_id,
-            state=TaskState.COMPLETED,
-            summary="Finished later",
+        task_accept(
+            connection, workspace_id, completed.task_id, expected_revision=completed.revision
         )
         create_task_record(connection, workspace_id, "Newest working task")
     finally:

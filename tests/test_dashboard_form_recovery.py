@@ -12,7 +12,7 @@ from harness import dashboard as dashboard_module
 from harness.dashboard import DashboardServerManager
 from harness.storage import connect_database
 from harness.task_checkpoints import list_task_events
-from harness.task_workflow import task_checkpoint, task_resume
+from harness.task_workflow import task_accept, task_checkpoint, task_resume
 from harness.tasks import TaskState, TaskWaitReason, get_task
 from harness.verification import VerificationDraft, VerificationStatus
 
@@ -183,14 +183,7 @@ def test_unavailable_feedback_returns_readonly_draft_without_retargeting_action(
         resumed = task_resume(
             connection, workspace_id, task.task_id, expected_revision=task.revision
         )
-        task_checkpoint(
-            connection,
-            workspace_id,
-            task.task_id,
-            expected_revision=resumed.revision,
-            state=TaskState.COMPLETED,
-            summary="Completed in another tab",
-        )
+        task_accept(connection, workspace_id, task.task_id, expected_revision=resumed.revision)
     finally:
         connection.close()
     manager = DashboardServerManager(database)
@@ -461,5 +454,46 @@ def test_stale_accept_recovery_shows_failed_verification_before_fresh_action(
             assert get_task(connection, task.task_id) == fresh
         finally:
             connection.close()
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("action", ["set_state", "set_deployment"])
+def test_stale_state_and_deployment_preserve_recovered_draft_markers(
+    tmp_path: Path, action: str
+) -> None:
+    _root, database, workspace_id = _database(tmp_path)
+    task = _review_task(database, workspace_id)
+    connection = connect_database(database)
+    try:
+        task_resume(connection, workspace_id, task.task_id, expected_revision=task.revision)
+    finally:
+        connection.close()
+    manager = DashboardServerManager(database)
+    try:
+        url = manager.get_url() + "tasks/" + task.task_id + "/"
+        origin = f"http://{urlsplit(url).netloc}"
+        fields: dict[str, str | int] = {
+            "action": action,
+            "workspace_id": workspace_id,
+            "task_id": task.task_id,
+            "expected_revision": task.revision,
+        }
+        if action == "set_state":
+            fields.update(state="waiting", wait_reason="operator_input")
+            expected = {"state", "wait_reason"}
+        else:
+            fields.update(deploy_prod="1")
+            expected = {"deploy_test", "deploy_prod"}
+        status, _headers, body = _post(url, fields, origin=origin)
+        assert status == 409
+        html = body.decode()
+        assert expected <= _RecoveryForms(html).recovered
+        if action == "set_deployment":
+            assert 'name="deploy_test" value="1" data-recovered-draft="true"' in html
+            assert 'name="deploy_prod" value="1" checked data-recovered-draft="true"' in html
+        else:
+            assert 'value="waiting" selected' in html
+            assert 'value="operator_input" selected' in html
     finally:
         manager.close()

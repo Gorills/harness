@@ -209,6 +209,8 @@ class WorkspaceTaskStatusResult:
     task: WorkspaceTaskSummary | None
     last_checkpoint: WorkspaceTaskCheckpointSummary | None
     pending_operator_feedback: str | None
+    head: str | None = None
+    branch: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1141,6 +1143,8 @@ def send_workspace_task_status_response(
                         }
                     ),
                     "pending_operator_feedback": status.pending_operator_feedback,
+                    "head": status.head,
+                    "branch": status.branch,
                 },
             }
         )
@@ -1737,8 +1741,10 @@ def _task_checkpoint_params_to_wire(
 ) -> dict[str, object]:
     _validate_task_id(task_id)
     _validate_expected_revision(expected_revision)
-    if not isinstance(state, TaskState):
-        raise IpcProtocolError("task checkpoint state must be a TaskState")
+    if not isinstance(state, TaskState) or state not in {TaskState.WORKING, TaskState.WAITING}:
+        raise IpcProtocolError(
+            "task checkpoint state must be working or waiting; operator completes"
+        )
     if wait_reason is not None and not isinstance(wait_reason, TaskWaitReason):
         raise IpcProtocolError("task checkpoint wait_reason must be a TaskWaitReason")
     _validate_task_text(summary, "checkpoint summary", MAX_CHECKPOINT_SUMMARY_BYTES, required=True)
@@ -1790,6 +1796,8 @@ def _task_checkpoint_from_params(value: object) -> TaskCheckpointRequestData:
         state = TaskState(raw_state)
     except ValueError as exc:
         raise IpcProtocolError("task checkpoint state is unsupported") from exc
+    if state not in {TaskState.WORKING, TaskState.WAITING}:
+        raise IpcProtocolError("only the operator may complete or cancel a Task")
     _validate_task_text(summary, "checkpoint summary", MAX_CHECKPOINT_SUMMARY_BYTES, required=True)
     _validate_task_text(
         next_step,
@@ -2406,6 +2414,8 @@ def _workspace_task_status_from_response(
         "task",
         "last_checkpoint",
         "pending_operator_feedback",
+        "head",
+        "branch",
     }:
         raise IpcProtocolError("daemon workspace task status result does not match the IPC schema")
     schema_version = result["schema_version"]
@@ -2416,6 +2426,15 @@ def _workspace_task_status_from_response(
     ):
         raise IpcProtocolError("daemon workspace task status schema version has invalid type")
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
+
+    head = result["head"]
+    if head is not None:
+        head = _bounded_response_string(head, "head", 64)
+        if len(head) not in {40, 64} or any(char not in "0123456789abcdef" for char in head):
+            raise IpcProtocolError("daemon workspace task status has invalid HEAD identity")
+    branch = result["branch"]
+    if branch is not None:
+        branch = _bounded_response_string(branch, "branch", MAX_MESSAGE_BYTES)
 
     raw_task = result["task"]
     task: WorkspaceTaskSummary | None
@@ -2529,6 +2548,8 @@ def _workspace_task_status_from_response(
         task,
         checkpoint,
         cast(str | None, pending_operator_feedback),
+        head,
+        branch,
     )
 
 

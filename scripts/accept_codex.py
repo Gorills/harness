@@ -24,7 +24,11 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
 
-from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
+from harness.agent_instructions import (
+    TASK_CONTINUITY_INSTRUCTIONS,
+    TASK_CREATION_INSTRUCTIONS,
+    TASK_REVIEW_INSTRUCTIONS,
+)
 from harness.codex_adapter import (
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
@@ -763,20 +767,12 @@ def _validate_wire_instructions(instructions: str | None) -> None:
             )
     if "Before broad repository exploration" in instructions:
         raise CodexAcceptanceError("installed MCP instructions retain ambiguous broad-work wording")
-    if "After status use project_search" in instructions:
-        raise CodexAcceptanceError("installed MCP instructions retain search-before-task wording")
-    after_status = instructions.split("After status", maxsplit=1)
-    if len(after_status) != 2:
-        raise CodexAcceptanceError("installed MCP instructions omit after-status workflow")
-    remainder = after_status[1]
-    task_at = remainder.find("start/resume a Task")
-    search_at = remainder.find("project_search")
-    if not (0 <= task_at < search_at):
-        raise CodexAcceptanceError(
-            "installed MCP instructions do not require Task before project_search"
-        )
-    if "Small work or known paths still need a Task" not in instructions:
-        raise CodexAcceptanceError("installed MCP instructions omit Task-skip prohibition")
+    if TASK_CREATION_INSTRUCTIONS.strip() not in instructions:
+        raise CodexAcceptanceError("installed MCP instructions omit proportionate Task creation")
+    if "Small work or known paths still need a Task" in instructions:
+        raise CodexAcceptanceError("installed MCP instructions retain mandatory Task ceremony")
+    if TASK_REVIEW_INSTRUCTIONS.strip() not in instructions:
+        raise CodexAcceptanceError("installed MCP instructions omit operator-only completion")
     if "New request/implement-after-diagnosis:" in instructions:
         raise CodexAcceptanceError("installed MCP instructions retain phase-based Task splitting")
     if TASK_CONTINUITY_INSTRUCTIONS.strip() not in instructions:
@@ -875,9 +871,10 @@ async def _verify_mcp_wire_async(
                     {
                         "task_id": task_id,
                         "expected_revision": revision,
-                        "state": "completed",
+                        "state": "waiting",
+                        "wait_reason": "operator_review",
                         "summary": "Пять MCP-инструментов проверены локальным wire-клиентом",
-                        "next_step": None,
+                        "next_step": "Оператор принимает результаты проверки",
                         "verification": [
                             {
                                 "name": "Installed MCP wire acceptance",
@@ -890,7 +887,7 @@ async def _verify_mcp_wire_async(
             )
             if (
                 checkpoint.get("task_id") != task_id
-                or checkpoint.get("state") != "completed"
+                or checkpoint.get("state") != "waiting"
                 or checkpoint.get("revision") != revision + 1
             ):
                 raise CodexAcceptanceError(

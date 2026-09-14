@@ -217,12 +217,16 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert knowledge.is_error is False
             assert knowledge.structured_content is not None
             knowledge_results = knowledge.structured_content["results"]
-            assert [item["kind"] for item in knowledge_results] == ["knowledge", "knowledge"]
+            assert [item["kind"] for item in knowledge_results] == ["knowledge"]
             assert knowledge_results[0]["freshness"] == "fresh"
-            assert knowledge_results[1]["freshness"] == "needs_revalidation"
-            assert {item["ref"] for item in knowledge_results} >= {
-                f"knowledge:{legacy_knowledge_id}"
+            assert f"knowledge:{legacy_knowledge_id}" not in {
+                item["ref"] for item in knowledge_results
             }
+            unavailable = await client.call_tool(
+                "project_context", {"refs": [f"knowledge:{legacy_knowledge_id}"]}
+            )
+            assert unavailable.is_error is True
+            assert "Legacy rotation invalidates" not in str(unavailable.content)
             assert "SECRET_OTHER_PROJECT" not in json.dumps(
                 knowledge.structured_content, sort_keys=True
             )
@@ -333,6 +337,10 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert exact.is_error is False
             assert exact.structured_content is not None
             assert exact.structured_content["workspace_state"] == "current"
+            # Definition hints are consumed before the real daemon IPC and MCP round trip.
+            for hit in exact.structured_content["results"]:
+                assert "evidence_line" not in hit
+                assert "evidence_scope" not in hit
             exact_coverage = exact.structured_content["exact_coverage"]
             assert exact_coverage is not None
             assert exact_coverage["needle"] == "rotateRefreshToken"
@@ -363,6 +371,21 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
             assert docs.structured_content is not None
             assert docs.structured_content["results"][0]["ref"] == "doc:docs/rotation.md"
             assert docs.structured_content["results"][0]["kind"] == "doc"
+
+            # Matching source makes the old card applicable again, while its durable
+            # needs_revalidation label remains unchanged rather than being auto-refreshed.
+            _git(root, "restore", "--", "src/token_service.py")
+            restored = await client.call_tool(
+                "project_search",
+                {"query": "refresh rotation invariant", "scope": "knowledge", "limit": 5},
+            )
+            assert restored.is_error is False
+            assert restored.structured_content is not None
+            restored_results = restored.structured_content["results"]
+            assert [item["ref"] for item in restored_results] == [
+                f"knowledge:{legacy_knowledge_id}"
+            ]
+            assert restored_results[0]["freshness"] == "needs_revalidation"
 
             context = await client.call_tool(
                 "project_context",

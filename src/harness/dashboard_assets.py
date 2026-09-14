@@ -480,6 +480,8 @@ a.btn {
   font: inherit;
   font-size: 13px;
 }
+.feedback-form .checkbox-row { display: flex; align-items: center; gap: 9px; font-size: 13px; line-height: 1.5; }
+.feedback-form .checkbox-row input[type="checkbox"] { flex: 0 0 auto; width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--accent); }
 .feedback-form textarea { min-height: 96px; resize: vertical; line-height: 1.5; }
 .feedback-form textarea:focus,
 .feedback-form input:focus,

@@ -551,3 +551,91 @@ def test_path_only_hit_returns_no_evidence_with_reason(tmp_path: Path) -> None:
         assert results[0].evidence_reason == EVIDENCE_REASON_PATH_ONLY
     finally:
         connection.close()
+
+
+def test_structural_evidence_starts_at_definition_and_keeps_implementation(tmp_path: Path) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        workspace_id = _indexed_repo(connection, root)
+        (root / "service.py").write_text(
+            "def unrelated():\n"
+            + "    preceding_private_detail = 1\n" * 60
+            + "\n\ndef project_search():\n"
+            + "    useful_step = 1\n" * 30
+            + "    return 'actual implementation'\n",
+            encoding="utf-8",
+        )
+        _commit(root)
+        scan_workspace(connection, workspace_id)
+        hit = _search_code(connection, workspace_id, "where project search happens", limit=1)[0]
+        assert hit.evidence is not None
+        assert hit.evidence.snippet.startswith("def project_search():")
+        assert "actual implementation" in hit.evidence.snippet
+        assert "preceding_private_detail" not in hit.evidence.snippet
+        assert hit.evidence.end_line - hit.evidence.start_line + 1 <= 48
+        assert len(hit.evidence.snippet.encode()) <= 3072
+    finally:
+        connection.close()
+
+
+def test_lexical_evidence_keeps_covering_terms_without_unrelated_padding() -> None:
+    text = "\n".join(
+        ["earlier unrelated detail"] * 60
+        + ["rotate refresh token", "local consequence", "invalidate credentials"]
+        + ["later unrelated detail"] * 60
+    )
+    evidence = retrieval_module._relocate_search_evidence(
+        text, ("rotate", "refresh", "token", "invalidate", "credentials")
+    )
+    assert evidence is not None
+    assert evidence.start_line == 58
+    assert evidence.end_line == 66
+    assert "rotate refresh token\nlocal consequence\ninvalidate credentials" in evidence.snippet
+    assert len(evidence.snippet.splitlines()) == 9
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_short_definition_stops_before_peer_or_ancestor_declaration(
+    tmp_path: Path, nested: bool
+) -> None:
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        root = tmp_path / "repo"
+        workspace_id = _indexed_repo(connection, root)
+        source = (
+            "class Handler:\n    def project_search(self):\n        return 'wanted'\n\n"
+            if nested
+            else "def project_search():\n    return 'wanted'\n\n"
+        )
+        (root / "service.py").write_text(
+            source + "def unrelated():\n" + "    unrelated_tail_marker = 1\n" * 60,
+            encoding="utf-8",
+        )
+        _commit(root)
+        scan_workspace(connection, workspace_id)
+        hit = _search_code(connection, workspace_id, "where project search happens", limit=1)[0]
+        assert hit.evidence is not None
+        assert "wanted" in hit.evidence.snippet
+        assert "unrelated" not in hit.evidence.snippet
+        assert len(hit.evidence.snippet.splitlines()) <= 3
+        assert hit.evidence_scope is None
+        assert "evidence_scope" not in project_search_hit_payload(hit)
+    finally:
+        connection.close()
+
+
+def test_relation_anchor_retains_compact_local_context() -> None:
+    text = "\n".join(
+        ["old unrelated context"] * 60
+        + ["prepare_request()", "perform_call()", "handle_result()"]
+        + ["later unrelated context"] * 60
+    )
+    evidence = retrieval_module._search_evidence_at_line(text, 62, ("perform", "call"))
+    assert evidence is not None
+    assert "prepare_request()\nperform_call()\nhandle_result()" in evidence.snippet
+    assert len(evidence.snippet.splitlines()) == 7

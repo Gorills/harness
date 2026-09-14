@@ -90,11 +90,10 @@ from harness.dashboard_i18n import (
     OPEN_NAVIGATION,
     OPEN_TASK,
     OPEN_WORKSPACE,
+    OPERATOR_STATE_WORKING,
     OPERATOR_STATUS,
     OPERATOR_STATUS_DEPLOY_PROD,
     OPERATOR_STATUS_DEPLOY_TEST,
-    OPERATOR_STATUS_NONE,
-    OPERATOR_STATUS_SAVE,
     PAGE_PROJECTS,
     PAGE_PROJECTS_LEAD,
     PROJECT,
@@ -175,6 +174,7 @@ from harness.dashboard_i18n import (
     wait_reason_label,
     workspace_count_label,
 )
+from harness.git_applicability import WorkspaceApplicability
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
@@ -226,10 +226,13 @@ from harness.task_workflow import (
     task_accept,
     task_cancel,
     task_comment,
+    task_delete,
     task_feedback,
     task_reopen,
+    task_set_deployment,
     task_set_jira_url,
     task_set_operator_status,
+    task_set_state,
 )
 from harness.tasks import (
     TaskConflictError,
@@ -257,7 +260,7 @@ _DASHBOARD_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 _DASHBOARD_START_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_STOP_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_FORM_MAX_BYTES = 8192
-_DASHBOARD_FORM_MAX_FIELDS = 5
+_DASHBOARD_FORM_MAX_FIELDS = 6
 _DASHBOARD_SEARCH_LIMIT = 24
 _DASHBOARD_RECENT_TASK_LIMIT = 24
 # Pin live Tasks so review/waiting/working stay visible at the top of the bounded list.
@@ -418,6 +421,10 @@ class DashboardActionRequest:
     comment: str | None = None
     jira_url: str | None = None
     operator_status: TaskOperatorStatus | None = None
+    state: TaskState | None = None
+    wait_reason: TaskWaitReason | None = None
+    deploy_test: bool = False
+    deploy_prod: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,6 +491,7 @@ def _load_recent_dashboard_tasks(
     *,
     workspace_id: str | None = None,
     page: int = 1,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[DashboardTaskRow, ...]:
     if workspace_id is None:
         rows = connection.execute(
@@ -497,17 +505,30 @@ def _load_recent_dashboard_tasks(
             (_DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
         ).fetchall()
     else:
-        rows = connection.execute(
-            f"""
+        query = f"""
             SELECT tasks.id, workspaces.project_id
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             WHERE tasks.workspace_id = ?
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-            LIMIT ? OFFSET ?
-            """,
-            (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
-        ).fetchall()
+        """
+        if applicability is None:
+            rows = connection.execute(
+                query + " LIMIT ? OFFSET ?",
+                (
+                    workspace_id,
+                    _DASHBOARD_RECENT_TASK_LIMIT,
+                    (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT,
+                ),
+            ).fetchall()
+        else:
+            visible = [
+                row
+                for row in connection.execute(query, (workspace_id,))
+                if applicability.task_visible(row[0])
+            ]
+            offset = (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT
+            rows = visible[offset : offset + _DASHBOARD_RECENT_TASK_LIMIT]
     loaded = tuple((get_task(connection, task_id), project_id) for task_id, project_id in rows)
     recorded_branches = _read_recorded_git_branches(
         connection,
@@ -533,7 +554,19 @@ def _history_page(page: int, total: int, page_size: int) -> int:
     return min(page, max(1, (total + page_size - 1) // page_size))
 
 
-def _dashboard_task_count(connection: sqlite3.Connection, workspace_id: str | None = None) -> int:
+def _dashboard_task_count(
+    connection: sqlite3.Connection,
+    workspace_id: str | None = None,
+    *,
+    applicability: WorkspaceApplicability | None = None,
+) -> int:
+    if applicability is not None:
+        return sum(
+            applicability.task_visible(row[0])
+            for row in connection.execute(
+                "SELECT id FROM tasks WHERE workspace_id = ?", (workspace_id,)
+            )
+        )
     where = "" if workspace_id is None else " WHERE workspace_id = ?"
     params = () if workspace_id is None else (workspace_id,)
     row = connection.execute("SELECT COUNT(*) FROM tasks" + where, params).fetchone()
@@ -594,7 +627,23 @@ def read_dashboard_project_detail(
             project = get_project(connection, project_id)
             skill_policy = get_project_skill_policy(connection, project_id)
             workspaces = list_workspaces(connection, project_id=project_id)
-            rows = tuple(_read_workspace_row_persisted(connection, item) for item in workspaces)
+            rows = []
+            for item in workspaces:
+                try:
+                    applicability = WorkspaceApplicability(connection, item.workspace_id)
+                except GitWorkspaceError:
+                    row = _read_workspace_row_persisted(connection, item, tasks_available=False)
+                    rows.append(
+                        replace(
+                            _with_live_workspace_status(row),
+                            live_error="Workspace applicability unavailable",
+                        )
+                    )
+                    continue
+                row = _read_workspace_row_persisted(connection, item, applicability=applicability)
+                row = _with_live_workspace_status(row)
+                applicability.validate()
+                rows.append(row)
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -604,7 +653,7 @@ def read_dashboard_project_detail(
         connection.close()
     return DashboardProjectDetail(
         project=project,
-        workspaces=tuple(_with_live_workspace_status(row) for row in rows),
+        workspaces=tuple(rows),
         skill_policy=skill_policy,
     )
 
@@ -619,18 +668,37 @@ def read_dashboard_workspace_detail(
     """Read one Workspace detail page with bounded Task history and optional path search."""
     connection = connect_database(database_path)
     try:
+        try:
+            applicability: WorkspaceApplicability | None = WorkspaceApplicability(
+                connection, workspace_id
+            )
+        except GitWorkspaceError:
+            applicability = None
         connection.execute("BEGIN")
         try:
             workspace = get_workspace(connection, workspace_id)
-            row = _read_workspace_row_persisted(connection, workspace)
-            task_count = _dashboard_task_count(connection, workspace_id)
+            row = _read_workspace_row_persisted(
+                connection,
+                workspace,
+                applicability=applicability,
+                tasks_available=applicability is not None,
+            )
+            task_count = (
+                _dashboard_task_count(connection, workspace_id, applicability=applicability)
+                if applicability is not None
+                else 0
+            )
             page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
-            recent_tasks = _load_recent_dashboard_tasks(
-                connection, workspace_id=workspace_id, page=page
+            recent_tasks = (
+                ()
+                if applicability is None
+                else _load_recent_dashboard_tasks(
+                    connection, workspace_id=workspace_id, page=page, applicability=applicability
+                )
             )
             results = (
                 ()
-                if search_query is None
+                if search_query is None or applicability is None
                 else search_indexed_paths(
                     connection,
                     workspace_id,
@@ -640,15 +708,21 @@ def read_dashboard_workspace_detail(
             )
             task_results = (
                 ()
-                if search_query is None
+                if search_query is None or applicability is None
                 else search_project(
                     connection,
                     workspace_id,
                     search_query,
                     scope=ProjectSearchScope.TASKS,
+                    applicability=applicability,
                     limit=_DASHBOARD_SEARCH_LIMIT,
                 )
             )
+            row = _with_live_workspace_status(row)
+            if applicability is None:
+                row = replace(row, live_error="Workspace applicability unavailable")
+            if applicability is not None:
+                applicability.validate()
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -657,7 +731,7 @@ def read_dashboard_workspace_detail(
     finally:
         connection.close()
     return DashboardWorkspaceDetail(
-        workspace=_with_live_workspace_status(row),
+        workspace=row,
         recent_tasks=recent_tasks,
         search_query=search_query,
         search_results=results,
@@ -753,16 +827,29 @@ def read_dashboard_task_detail(
 def _read_workspace_row_persisted(
     connection: sqlite3.Connection,
     workspace: WorkspaceRecord,
+    *,
+    applicability: WorkspaceApplicability | None = None,
+    tasks_available: bool = True,
 ) -> DashboardWorkspaceRow:
     if get_workspace(connection, workspace.workspace_id) != workspace:
         raise sqlite3.DatabaseError("workspace registry changed during dashboard read")
     project = get_project(connection, workspace.project_id)
-    task = get_relevant_task(connection, workspace.workspace_id)
-    if task is None:
-        task = get_latest_task(connection, workspace.workspace_id)
+    task = (
+        get_relevant_task(connection, workspace.workspace_id, applicability=applicability)
+        if tasks_available
+        else None
+    )
+    if task is None and tasks_available:
+        task = get_latest_task(connection, workspace.workspace_id, applicability=applicability)
     checkpoint = (
         get_latest_task_checkpoint_status(connection, task.task_id) if task is not None else None
     )
+    if (
+        checkpoint is not None
+        and applicability is not None
+        and not applicability.checkpoint_visible(checkpoint.checkpoint_id)
+    ):
+        checkpoint = None
     counts = connection.execute(
         """
         SELECT COALESCE(SUM(state IN ('working', 'waiting')), 0),
@@ -771,6 +858,24 @@ def _read_workspace_row_persisted(
         """,
         (workspace.workspace_id,),
     ).fetchone()
+    if applicability is not None:
+        visible_states = [
+            (state, reason)
+            for task_id, state, reason in connection.execute(
+                "SELECT id, state, wait_reason FROM tasks WHERE workspace_id = ?",
+                (workspace.workspace_id,),
+            )
+            if applicability.task_visible(task_id)
+        ]
+        counts = (
+            sum(state in {"working", "waiting"} for state, _reason in visible_states),
+            sum(
+                state == "waiting" and reason == "operator_review"
+                for state, reason in visible_states
+            ),
+        )
+    if not tasks_available:
+        counts = (0, 0)
     if counts is None or any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
     ):
@@ -940,7 +1045,33 @@ def mutate_dashboard_task(
     """Delegate one dashboard action to the authoritative Task domain workflow."""
     connection = connect_database(database_path)
     try:
-        if request.action == "accept":
+        if request.action == "delete_task":
+            task_delete(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+            )
+        elif request.action == "set_state":
+            assert request.state is not None
+            task_set_state(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                state=request.state,
+                wait_reason=request.wait_reason,
+            )
+        elif request.action == "set_deployment":
+            task_set_deployment(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                deploy_test=request.deploy_test,
+                deploy_prod=request.deploy_prod,
+            )
+        elif request.action == "accept":
             task_accept(
                 connection,
                 request.workspace_id,
@@ -1184,10 +1315,21 @@ def _parse_dashboard_action_form(
         expected.add("jira_url")
     elif action == "set_operator_status":
         expected.add("operator_status")
+    elif action == "set_state":
+        expected.update(("state", "wait_reason"))
+    elif action == "delete_task":
+        expected.add("confirmation")
+    elif action == "set_deployment":
+        expected.update(("deploy_test", "deploy_prod"))
+        fields.setdefault("deploy_test", "0")
+        fields.setdefault("deploy_prod", "0")
     if (
         action
         not in {
             "accept",
+            "set_state",
+            "delete_task",
+            "set_deployment",
             "feedback",
             "cancel",
             "reopen",
@@ -1224,8 +1366,27 @@ def _parse_dashboard_action_form(
         "",
         TaskOperatorStatus.DEPLOY_TEST.value,
         TaskOperatorStatus.DEPLOY_PROD.value,
+        TaskOperatorStatus.DEPLOY_BOTH.value,
     }:
         raise TaskValidationError("dashboard operator status is unsupported")
+    state = None
+    wait_reason = None
+    if action == "set_state":
+        try:
+            state = TaskState(fields["state"])
+            wait_reason = TaskWaitReason(fields["wait_reason"]) if fields["wait_reason"] else None
+        except ValueError as exc:
+            raise TaskValidationError("dashboard Task state is unsupported") from exc
+        if state is TaskState.WAITING and wait_reason is None:
+            raise TaskValidationError("waiting requires a reason")
+        if state is not TaskState.WAITING:
+            wait_reason = None
+    if action == "delete_task" and fields["confirmation"] != task_id:
+        raise TaskValidationError("Task deletion requires exact Task confirmation")
+    if action == "set_deployment" and any(
+        fields[name] not in {"0", "1"} for name in ("deploy_test", "deploy_prod")
+    ):
+        raise TaskValidationError("dashboard deployment flag is invalid")
     return DashboardActionRequest(
         action=action,
         workspace_id=workspace_id,
@@ -1237,6 +1398,10 @@ def _parse_dashboard_action_form(
         operator_status=(
             None if not operator_status_text else TaskOperatorStatus(operator_status_text)
         ),
+        state=state,
+        wait_reason=wait_reason,
+        deploy_test=fields.get("deploy_test") == "1",
+        deploy_prod=fields.get("deploy_prod") == "1",
     )
 
 
@@ -1534,20 +1699,44 @@ def _render_task_actions(
             "</form></div>"
         )
     if detailed:
-        status_options = []
-        for value, label in (
-            ("", OPERATOR_STATUS_NONE),
-            (TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
-            (TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
-        ):
-            selected = (
-                " selected"
-                if form_values.get("operator_status", operator_status or "") == value
-                else ""
+        selected_state = form_values.get("state", state)
+        selected_reason = form_values.get("wait_reason", wait_reason or "operator_input")
+        options = "".join(
+            f'<option value="{value}"'
+            + (" selected" if selected_state == value else "")
+            + f">{escape(label)}</option>"
+            for value, label in (
+                ("working", OPERATOR_STATE_WORKING),
+                ("waiting", "Отложить"),
+                ("completed", "Принять и завершить"),
+                ("cancelled", "Отменить"),
             )
-            status_options.append(
-                f'<option value="{escape(value, quote=True)}"{selected}>{escape(label)}</option>'
+        )
+        reasons = "".join(
+            f'<option value="{value}"'
+            + (" selected" if selected_reason == value else "")
+            + f">{escape(label)}</option>"
+            for value, label in (
+                ("operator_input", "Решение оператора"),
+                ("operator_review", "Приёмка оператором"),
+                ("external", "Внешняя зависимость"),
             )
+        )
+        forms.append(
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "set_state")
+            + '<label>Состояние задачи<select name="state"'
+            + _draft_marker(form_values, "state")
+            + ">"
+            + options
+            + "</select></label>"
+            + '<label>Причина ожидания (для отложенной задачи)<select name="wait_reason"'
+            + _draft_marker(form_values, "wait_reason")
+            + ">"
+            + reasons
+            + "</select></label>"
+            + '<button class="btn" type="submit">Сохранить состояние</button></form>'
+        )
         forms.append(
             f'<details class="feedback-disclosure"{comment_open}><summary>{escape(COMMENT_SUMMARY)}</summary>'
             '<form method="post" action="" class="feedback-form">'
@@ -1580,18 +1769,38 @@ def _render_task_actions(
             )
             + "</details>"
         )
+        checkboxes = []
+        for name, marker, label in (
+            ("deploy_test", TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
+            ("deploy_prod", TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
+        ):
+            checked = (
+                form_values[name] == "1"
+                if name in form_values
+                else operator_status in {marker, TaskOperatorStatus.DEPLOY_BOTH.value}
+            )
+            checkboxes.append(
+                f'<label class="checkbox-row"><input type="checkbox" name="{name}" value="1"'
+                + (" checked" if checked else "")
+                + _draft_marker(form_values, name)
+                + f"> {escape(label)}</label>"
+            )
         forms.append(
             '<form method="post" action="" class="feedback-form">'
-            + _task_action_fields(workspace_id, task_id, revision, "set_operator_status")
-            + f'<label for="operator-status-{escape(task_id, quote=True)}">'
-            + escape(OPERATOR_STATUS)
-            + "</label>"
-            + f'<select id="operator-status-{escape(task_id, quote=True)}" name="operator_status"'
-            + _draft_marker(form_values, "operator_status")
-            + ">"
-            + "".join(status_options)
-            + "</select>"
-            + f'<button class="btn" type="submit">{escape(OPERATOR_STATUS_SAVE)}</button></form>'
+            + _task_action_fields(workspace_id, task_id, revision, "set_deployment")
+            + "".join(checkboxes)
+            + '<button class="btn" type="submit">Сохранить отметки</button></form>'
+        )
+        forms.append(
+            '<details class="feedback-disclosure"><summary>Удалить задачу</summary>'
+            "<p>Задача, её история и созданные в ней знания будут удалены навсегда. "
+            "Файлы репозитория сохранятся.</p>"
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "delete_task")
+            + '<label class="checkbox-row"><input type="checkbox" name="confirmation" value="'
+            + escape(task_id, quote=True)
+            + '" required> Подтверждаю удаление задачи и её знаний</label>'
+            + '<button class="btn btn-danger" type="submit">Удалить навсегда</button></form></details>'
         )
     return '<div class="action-panel">' + "".join(forms) + "</div>" if forms else ""
 
@@ -1604,6 +1813,9 @@ _RECOVERABLE_TASK_FIELDS = {
     "comment": "comment",
     "set_jira": "jira_url",
     "set_operator_status": "operator_status",
+    "set_state": "state",
+    "set_deployment": "deploy_test",
+    "delete_task": "confirmation",
 }
 
 
@@ -1619,6 +1831,12 @@ def _recoverable_form_fields(payload: bytes) -> dict[str, str]:
         editable = _RECOVERABLE_TASK_FIELDS[action]
         if editable is not None:
             expected.add(editable)
+        if action == "set_state":
+            expected.add("wait_reason")
+        if action == "set_deployment":
+            expected.add("deploy_prod")
+            fields.setdefault("deploy_test", "0")
+            fields.setdefault("deploy_prod", "0")
         revision = fields.get("expected_revision", "")
         if not revision.isascii() or not revision.isdigit() or not revision.strip("0"):
             return {}
@@ -1672,7 +1890,7 @@ def _render_recovery_controls(
         )
         terminal = task.state in {TaskState.COMPLETED, TaskState.CANCELLED}
         if (
-            (action in {"accept", "feedback"} and not reviewing)
+            (action == "feedback" and not reviewing)
             or (action == "cancel" and terminal)
             or (action == "reopen" and not terminal)
             or (
@@ -1778,6 +1996,10 @@ def _render_dashboard_form_error(
             "comment",
             "jira_url",
             "operator_status",
+            "state",
+            "wait_reason",
+            "deploy_test",
+            "deploy_prod",
             "new_path",
             "confirmation",
         )
@@ -2601,6 +2823,13 @@ def _render_timeline(detail: DashboardTaskDetail, *, base_path: str = "/") -> st
                 if remaining:
                     chips += f'<span class="path-chip">{escape(more_paths_label(remaining))}</span>'
                 content.append(f'<div class="path-chips">{chips}</div>')
+        if event.target_state is not None:
+            content.append(
+                _state_pill(
+                    event.target_state.value,
+                    None if event.target_wait_reason is None else event.target_wait_reason.value,
+                )
+            )
         if event.operator_feedback is not None:
             content.append(
                 f'<blockquote class="feedback-quote">{escape(event.operator_feedback)}</blockquote>'
@@ -3072,6 +3301,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             OSError,
             sqlite3.DatabaseError,
             DatabaseError,
+            GitWorkspaceError,
             ProjectSkillPolicyError,
             TaskError,
             TaskCheckpointError,
@@ -3150,6 +3380,10 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     self.workspace_invalidations.put(request.workspace_id)
                 redirect_target = page.redirect_target
             else:
+                if request.action == "delete_task" and (
+                    page.kind != "task" or page.identity != request.task_id
+                ):
+                    raise TaskValidationError("Task deletion target does not match its page")
                 mutate_dashboard_task(
                     self.database_path,
                     request,
@@ -3158,7 +3392,12 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 request,
                 (DashboardProjectDeleteRequest, DashboardWorkspaceRelocationRequest),
             ):
-                redirect_target = page.redirect_target
+                redirect_target = (
+                    _url(self.route_path, "workspaces", request.workspace_id)
+                    if isinstance(request, DashboardActionRequest)
+                    and request.action == "delete_task"
+                    else page.redirect_target
+                )
         except TaskValidationError:
             self._send_form_error(400, page, payload)
             return
@@ -3220,6 +3459,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 OSError,
                 sqlite3.DatabaseError,
                 DatabaseError,
+                GitWorkspaceError,
                 ProjectSkillPolicyError,
                 RegistryError,
                 TaskError,
@@ -3246,6 +3486,29 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     data_version = current_data_version
                     self._write_sse("event: refresh\ndata: changed\n\n")
                 if monotonic() >= heartbeat_at:
+                    if view in {"workspace", "project"}:
+                        try:
+                            refreshed_snapshot = _view_fingerprint(
+                                self.database_path,
+                                view,
+                                identity,
+                                search_query,
+                                page,
+                            )
+                        except (
+                            GitWorkspaceError,
+                            RegistryError,
+                            TaskError,
+                            SearchError,
+                            OSError,
+                            sqlite3.DatabaseError,
+                            DatabaseError,
+                        ):
+                            self._write_sse("event: refresh\ndata: changed\n\n")
+                            return
+                        if refreshed_snapshot != current_snapshot:
+                            current_snapshot = refreshed_snapshot
+                            self._write_sse("event: refresh\ndata: changed\n\n")
                     self._write_sse(": heartbeat\n\n")
                     heartbeat_at = monotonic() + _DASHBOARD_SSE_HEARTBEAT_SECONDS
         except (BrokenPipeError, ConnectionResetError, TimeoutError):

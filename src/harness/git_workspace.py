@@ -5,6 +5,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
+from typing import Literal
 
 _GIT_COMMAND_TIMEOUT_SECONDS = 1.5
 _GIT_CONTEXT_ENVIRONMENT = (
@@ -91,8 +92,26 @@ def inspect_git_workspace_runtime_identity(
 ) -> GitWorkspaceRuntimeIdentity:
     """Return canonical Git paths plus ephemeral inode identity for one live status read."""
     _require_git_workspace_deadline(deadline)
-    layout = inspect_git_workspace(path, deadline=deadline)
-    git_dir = Path(_rev_parse(layout.workspace_root, "--git-dir", deadline=deadline))
+    invocation_dir = _existing_directory(path)
+    values = _rev_parse(
+        invocation_dir,
+        ("--show-toplevel", "--git-common-dir", "--absolute-git-dir"),
+        deadline=deadline,
+    ).split("\n")
+    if len(values) == 3 and all(values):
+        root, common, private = (Path(value) for value in values)
+        if not common.is_absolute():
+            common = invocation_dir / common
+        layout = GitWorkspaceLayout(
+            workspace_root=_normalize_existing_path(root),
+            git_common_dir=_normalize_existing_path(common),
+        )
+        git_dir = private
+    else:
+        # POSIX paths may themselves contain newlines. Keep the established independent
+        # reads for ambiguous output instead of guessing field boundaries or rejecting paths.
+        layout = inspect_git_workspace(path, deadline=deadline)
+        git_dir = Path(_rev_parse(layout.workspace_root, "--git-dir", deadline=deadline))
     if not git_dir.is_absolute():
         git_dir = layout.workspace_root / git_dir
     normalized_git_dir = _normalize_existing_path(git_dir)
@@ -141,17 +160,23 @@ def inspect_workspace_runtime_identity(
         )
 
 
-def inspect_git_working_tree_status(path: Path) -> GitWorkingTreeStatus:
+def inspect_git_working_tree_status(
+    path: Path,
+    *,
+    deadline: float | None = None,
+    untracked_files: Literal["normal", "all"] = "normal",
+) -> GitWorkingTreeStatus:
     """Return branch/HEAD and a bounded dirty-path count from stable Git porcelain output."""
+    _require_git_workspace_deadline(deadline)
     invocation_dir = _existing_directory(path)
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain=v2", "--branch", "--untracked-files=normal"],
+            ["git", "status", "--porcelain=v2", "--branch", f"--untracked-files={untracked_files}"],
             cwd=invocation_dir,
             check=False,
             capture_output=True,
             env=_git_environment(),
-            timeout=_GIT_COMMAND_TIMEOUT_SECONDS,
+            timeout=_git_command_timeout(deadline),
         )
     except subprocess.TimeoutExpired as exc:
         raise GitWorkspaceError(f"Git status inspection timed out at {invocation_dir}") from exc
@@ -251,14 +276,14 @@ def _decode_git_value(value: bytes) -> str:
 
 def _rev_parse(
     invocation_dir: Path,
-    argument: str,
+    argument: str | tuple[str, ...],
     *,
     deadline: float | None = None,
 ) -> str:
     timeout = _git_command_timeout(deadline)
     try:
         result = subprocess.run(
-            ["git", "rev-parse", argument],
+            ["git", "rev-parse", *((argument,) if isinstance(argument, str) else argument)],
             cwd=invocation_dir,
             check=False,
             capture_output=True,

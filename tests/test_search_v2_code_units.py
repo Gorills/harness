@@ -186,7 +186,7 @@ def test_natural_code_query_prefers_definition_unit_over_lexical_mention(tmp_pat
         )
 
         assert results[0].ref == "code:src/engine.py"
-        assert results[0].match_reason == "code unit definition phrase"
+        assert results[0].match_reason == "code unit exact identifier"
         assert results[0].short_summary == "function rotateRefreshToken"
         assert results[0].evidence is not None
         assert "def rotateRefreshToken" in results[0].evidence.snippet
@@ -330,7 +330,7 @@ def test_schema_20_migrates_existing_18_database_in_place(
 ) -> None:
     database = tmp_path / "harness.db"
     current = storage.SCHEMA_VERSION
-    assert current == 21
+    assert current >= 20
     monkeypatch.setattr(storage, "SCHEMA_VERSION", 18)
     initialize_database(database)
     connection = sqlite3.connect(database)
@@ -343,7 +343,7 @@ def test_schema_20_migrates_existing_18_database_in_place(
     monkeypatch.setattr(storage, "SCHEMA_VERSION", current)
     status = initialize_database(database)
 
-    assert status.schema_version == 21
+    assert status.schema_version == current
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id FROM projects").fetchall() == [("preserved-project",)]
@@ -358,6 +358,76 @@ def test_schema_20_migrates_existing_18_database_in_place(
             ).fetchone() == (table,)
         assert connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1"
-        ).fetchone() == (21,)
+        ).fetchone() == (current,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("query", ["project_search", "where project search happens"])
+def test_whole_definition_wins_before_candidate_cap_and_same_file_phrase(
+    tmp_path: Path, query: str
+) -> None:
+    files = {
+        f"src/helper_{index:03}.py": f"def first_project_search_{index}():\n    return 0\n"
+        for index in range(110)
+    }
+    files["src/zz_bridge.py"] = (
+        "_PROJECT_SEARCH_DESCRIPTION = 'search metadata'\n"
+        "def build_mcp_server():\n    def project_search():\n        return 'actual implementation'\n"
+    )
+    _root, connection, workspace_id = _registered(tmp_path, files)
+    try:
+        scan_workspace(connection, workspace_id)
+        hits = search_project(
+            connection, workspace_id, query, scope=ProjectSearchScope.CODE, limit=3
+        )
+        assert hits[0].path == "src/zz_bridge.py"
+        assert hits[0].short_summary == "function build_mcp_server.project_search"
+        assert hits[0].evidence is not None
+        assert "actual implementation" in hits[0].evidence.snippet
+    finally:
+        connection.close()
+
+
+def test_definition_candidate_cap_applies_after_per_file_selection(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/many.py": "\n".join(
+                "def project_search():\n    return 1\n" for index in range(110)
+            ),
+            "src/zz_actual.py": "def build_server():\n    def project_search():\n        return 2\n",
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+        hits = search_project(
+            connection,
+            workspace_id,
+            "where project search happens",
+            scope=ProjectSearchScope.CODE,
+            limit=3,
+        )
+        actual = next(hit for hit in hits if hit.path == "src/zz_actual.py")
+        assert actual.short_summary == "function build_server.project_search"
+    finally:
+        connection.close()
+
+
+def test_exact_path_and_filename_still_precede_whole_definition(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(
+        tmp_path,
+        {
+            "src/project_search.py": "VALUE = 1\n",
+            "src/bridge.py": "def project_search():\n    return 2\n",
+        },
+    )
+    try:
+        scan_workspace(connection, workspace_id)
+        for query in ("src/project_search.py", "project_search.py", "project_search"):
+            hits = search_project(
+                connection, workspace_id, query, scope=ProjectSearchScope.CODE, limit=3
+            )
+            assert hits[0].path == "src/project_search.py"
     finally:
         connection.close()

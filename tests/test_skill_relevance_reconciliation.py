@@ -42,6 +42,7 @@ from harness.skills import (
     resolve_workspace_skills,
 )
 from harness.storage import connect_database, initialize_database
+from harness.task_workflow import task_accept
 from harness.tasks import (
     TaskRecord,
     TaskRevisionConflictError,
@@ -274,14 +275,9 @@ def test_task_terminal_transition_does_not_change_project_skills(tmp_path: Path)
     try:
         before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
         working = _start(connection, root, "Mobile slice", ("expo",))
-        completed = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.COMPLETED,
-            summary="Shipped mobile work",
-            next_step=None,
-        )
+        completed = task_accept(
+            connection, workspace_id, working.task_id, expected_revision=working.revision
+        ).task
         assert completed.state is TaskState.COMPLETED
         mutate_dashboard_task(
             database,
@@ -502,7 +498,7 @@ def test_failed_task_mutation_does_not_change_project_skills(tmp_path: Path) -> 
             workspace_hints=_hints(root),
             task_id=working.task_id,
             expected_revision=working.revision + 7,
-            state=TaskState.COMPLETED,
+            state=TaskState.WORKING,
             summary="stale",
             next_step=None,
             wait_reason=None,
@@ -534,14 +530,9 @@ def test_reconcile_failure_does_not_rollback_committed_task(
     registry = _polyglot_registry(tmp_path)
     try:
         working = _start(connection, root, "Mobile slice", ("expo",))
-        completed = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.COMPLETED,
-            summary="Committed before projection",
-            next_step=None,
-        )
+        completed = task_accept(
+            connection, workspace_id, working.task_id, expected_revision=working.revision
+        ).task
         committed_revision = completed.revision
 
         def fail_projection(*_args: object, **_kwargs: object) -> None:

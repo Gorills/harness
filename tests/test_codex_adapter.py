@@ -86,7 +86,7 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
     assert "project_status" in instructions
     assert "deferred" in instructions
     assert "deferred/omitted Harness tools" in instructions
-    assert "instruction snapshots do not refresh" in instructions
+    assert "After config changes restart Codex/new conversation" in instructions
     assert HIDDEN_INSTRUCTION_BODY not in instructions
     assert value == {
         "mcp_servers": {
@@ -133,53 +133,32 @@ def test_codex_project_reconcile_binds_a_directory_without_git(tmp_path: Path) -
 
 
 def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> None:
-    assert len(CODEX_BOOTSTRAP_INSTRUCTION_BODY.encode("utf-8")) < 1024
-    first_512 = CODEX_BOOTSTRAP_INSTRUCTION_BODY[:512]
-    assert "must be the first repository action" in first_512
-    assert "Before shell/read/search/browser/change" in first_512
-    assert "project_status" in first_512
-    assert "deferred" in first_512
-    assert "deferred/omitted Harness tools" in first_512
-    assert "discovery alone may precede status" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Before broad repository exploration" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "before diagnosis/edits" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "never skip" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Small work or known paths still need a Task" in (CODEX_BOOTSTRAP_INSTRUCTION_BODY)
-    assert "may skip search, not Task" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "natural-language code/doc discovery may use native search directly" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "lexical hits allow broad fallback" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Complete untruncated exact_coverage replaces native search" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "discussion only" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "waiver" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "New Task only for a distinct outcome" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "task_id+expected_revision" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "complete only when the outcome is done" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Phase shift" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "restart Codex/new conversation" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "before changes and checkpoint progress" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-
-
-def test_codex_bootstrap_matches_canonical_workflow() -> None:
     text = CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    after_status = text.split("After status", maxsplit=1)[1]
-    task_at = after_status.find("start/resume a Harness Task")
-    search_at = after_status.find("`project_search`")
-    assert 0 <= task_at < search_at
-    assert "After successful `project_status`, use `project_search`" not in text
-    assert "expand selected refs with" not in text
-    assert "then use native tools. Start or resume a Harness Task" not in text
-    assert "code/doc paths may be read natively, project_context optional" in text
-    assert "natural-language code/doc discovery may use native search directly" in text
-    assert "lexical hits allow broad fallback" in text
     assert len(text.encode("utf-8")) < 1024
+    for required in (
+        "must be the first repository action",
+        "Before shell/read/search/browser/change",
+        "deferred/omitted Harness tools",
+        "discovery alone may precede status",
+        "restart Codex/new conversation",
+        "substantial changes",
+        "multi-step work",
+        "needed continuity",
+        "explicit request",
+        "Quick questions, reads, and small local edits may proceed without a Task",
+        "Same outcome: one Task",
+        "New Task only for a distinct outcome",
+        "Resume by explicit ID",
+        "task_id+expected_revision",
+        "ready => waiting(operator_review)",
+        "Only the operator completes Tasks",
+        "`project_search` before broad native work",
+        "project_context optional",
+        "Complete untruncated exact_coverage replaces native search",
+    ):
+        assert required in text
+    assert "Small work or known paths still need a Task" not in text
+    assert "before diagnosis/edits" not in text
 
 
 def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: Path) -> None:
@@ -275,6 +254,7 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
         codex_module._TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])

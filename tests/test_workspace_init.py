@@ -169,7 +169,7 @@ def test_hidden_is_refused_for_filesystem_workspace(tmp_path: Path) -> None:
 def test_schema_21_persists_skill_inclusions(tmp_path: Path) -> None:
     database = tmp_path / "harness.db"
     status = initialize_database(database)
-    assert status.schema_version == SCHEMA_VERSION == 21
+    assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

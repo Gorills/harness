@@ -130,7 +130,7 @@ v1 enforces at most one distinct `working` Task per Workspace transactionally. P
 
 Each Task carries a monotonically increasing `revision` used only as an optimistic-concurrency token. Every successful Task mutation increments it. A caller never uses timestamps, bridge identity, or Workspace-current state as a substitute for this revision.
 
-Operator tracking is orthogonal to lifecycle state. A Task may carry one Jira URL and one nullable delivery marker (`deploy_test` or `deploy_prod`), plus immutable operator comments in its event history. These human-maintained fields never substitute for `working`/`waiting`/`completed`/`cancelled` or a waiting reason. Their mutations use the same explicit Task identity and revision CAS as every other existing-Task write.
+Operator tracking is orthogonal to lifecycle state. A Task may carry one Jira URL and two independent deployment flags (`deploy_test` and `deploy_prod`, including both true), plus immutable operator comments in its event history. These human-maintained fields never substitute for `working`/`waiting`/`completed`/`cancelled` or a waiting reason. Their mutations use the same explicit Task identity and revision CAS as every other existing-Task write.
 
 The name intentionally overlaps with the MCP Tasks extension, but the semantics do not. In v1, `task_start` and `task_checkpoint` are ordinary bounded MCP tool calls that mutate/query Harness-owned durable Task state in `harnessd`; they do not return or manage MCP task handles. A future use of the MCP Tasks extension would be justified only for a genuinely long-running single MCP operation and must remain orthogonal to Harness Task identity.
 
@@ -190,10 +190,10 @@ Normal workflow remains low-ritual:
 
 ```text
 project_status
-→ task_start/resume
+→ task_start/resume when durable tracking is useful
 → project_search when exact/durable retrieval helps, otherwise native discovery
 → native work
-→ task_checkpoint
+→ task_checkpoint for tracked work; ready → waiting(operator_review)
 ```
 
 `project_search` is required before broad native discovery only for explicit identifiers/quoted
@@ -206,25 +206,22 @@ repeating native search for the same needle.
 for selected semantic context. Code and doc hits that already include an exact path may be read
 with targeted native tools immediately; `project_context` remains available for metadata
 verification. An exact path already in hand (operator message, open file, git status, or a prior
-hit) may skip `project_search`; skipping search does not skip Task.
+hit) may skip `project_search`. Search itself does not require a Task.
 
-`task_start` / resume is required before diagnosis and native edits, including read-only
-investigation. Complexity, an already-known path, or a small diff is not an exemption. Broad
-discovery, including `project_search`, happens inside that Task. A failed
-schema or tool call is a blocker: retry from the public schema rather than skipping Harness.
-Checkpoint after each logical stage, even when no files changed. One requested user outcome owns
-one Task across diagnosis, implementation, verification, clarifications, continuation, subagents,
-and host restarts. Resume the selected unfinished Task explicitly by ID; messages and phases are
-not Task boundaries. Create a Task only for a distinct requested outcome, after completing
-existing work or checkpointing it to `waiting` with its reason. Keep authorized unfinished work
-`working`; use `waiting` for a real dependency
-with its reason, and `completed` only when the requested outcome is done. An audit-only request
-can complete as an audit; a subsequently authorized implementation is a distinct deliverable.
-Always-on MCP/Codex instructions must not describe an
-operator discussion waiver; that waiver lives in checkout `AGENTS.md`, covers only a
-discussion phase without diagnosis/edits/broad exploration, and ends at the next implement, fix,
-or investigate request. Specification §71's "before meaningful changes" reading is superseded by
-[ADR-0038](docs/decisions/0038-task-required-for-diagnosis-and-schema-retry.md).
+Start or resume a Task for substantial changes, multi-step work, needed durable continuity,
+or an explicit operator request. Quick questions, read-only inspection, and small local edits
+may proceed after status without a Task when tracking adds no useful continuity. If the scope
+grows, start tracking before continuing. This is a workflow judgment, not a new required reason
+field or approval ritual. A failed Harness call requires schema-guided retry.
+
+For tracked work, one requested outcome owns one Task across diagnosis, implementation,
+verification, clarifications, continuation, subagents, and host restarts. Resume explicitly by ID;
+messages and phases are not Task boundaries. Checkpoint each logical stage. Keep unfinished work
+`working`; use `waiting` with its dependency reason. A ready result, including an audit, uses
+`waiting(operator_review)` until the operator accepts it. Agent checkpoint writers accept only
+`working` and `waiting`; historical `completed` checkpoints remain readable. Only operator
+operations complete or cancel Tasks. These decisions supersede ADR-0038's unconditional
+Task-before-diagnosis requirement; see [ADR-0066](docs/decisions/0066-operator-owned-task-lifecycle.md).
 
 The compact MCP and Codex bootstrap bodies share the same outcome-boundary wording from
 `agent_instructions.py`; tool descriptions explain resume and completion semantics. After actual
@@ -239,7 +236,7 @@ from titles or replace the explicit-ID state machine. Real-model compliance is a
 But the implementation is explicitly workspace-domain based and write-safe:
 
 - `task_start` without `task_id` creates a new Task only when the Workspace has no distinct `working` Task. Creation has no prior Task revision; the one-working-Task invariant and creation are enforced in one transaction, and the response returns the new `task_id` plus initial `revision`.
-- `task_start` with `task_id` resumes an existing Task. If that Task is already the Workspace's `working` Task, resume is idempotent/read-like and returns its current revision without mutating Task state.
+- `task_start` with `task_id` resumes an existing Task. If that Task is already the Workspace's `working` Task and its recorded origin is unchanged, resume is idempotent/read-like and returns its current revision. An explicit initial branch handoff changes origin with revision CAS and advances the revision (ADR-0067).
 - If resume would mutate an existing Task (for example `waiting → working`), `task_start` MUST also include `expected_revision`; the transition uses the same compare-and-set rule as every other existing-Task mutation and returns the incremented revision.
 - `completed` and `cancelled` Tasks are never reopened by `task_start`. Dashboard `task_reopen` is a separate human-only CAS operation that preserves Task identity, appends a `reopened` event, and still obeys the one-working-Task-per-Workspace invariant.
 - Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
@@ -249,7 +246,10 @@ But the implementation is explicitly workspace-domain based and write-safe:
 - The daemon verifies Task/Workspace ownership and transition validity, then applies an existing-Task mutation only when the stored revision equals `expected_revision`; success increments and returns the new revision.
 - Revision mismatch or a required-but-missing `expected_revision` is a bounded conflict/error with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
 - A stale call for Task A must never be retargeted to whichever Task is current when the request executes, and a stale writer for Task A must never overwrite a newer checkpoint for Task A.
-- Dashboard Task mutations (`Accept`, feedback, comment, Jira/status update, reopen, cancel) use the same revision precondition at the application boundary; interfaces do not get a concurrency bypass.
+- Dashboard Task mutations (`Accept`, feedback, comment, Jira/deployment update, state selection, reopen, cancel, delete) use the same revision precondition at the application boundary; interfaces do not get a concurrency bypass.
+- Operators may explicitly choose any lifecycle state with its required wait reason, preserving the one-working-Task invariant. Completion records acceptance; a ready agent report alone does not.
+- Test and production deployment are independent durable booleans. Schema v22 backfills the legacy single marker; old event/checkpoint history remains readable. Both flags may be true.
+- Confirmed operator Task deletion checks identity and revision, then removes source-Task Knowledge and the Task with its dependent history and retrieval projections in one transaction. It never deletes repository files.
 - A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose Task continuity.
 
 This preserves the intended cheap workflow without relying on obsolete MCP session state. Existing-Task writes carry stable identity plus a concurrency token; idempotent resume of an already-working Task still needs no extra ritual call.
@@ -267,7 +267,7 @@ Keep exactly five primary tools until data proves another operation is necessary
 Write targeting rule:
 
 - creating through `task_start` returns a new Harness `task_id` and initial `revision`;
-- resuming an already-`working` Task by `task_id` is idempotent and returns its current revision;
+- resuming an already-`working` Task by `task_id` with unchanged origin is idempotent and returns its current revision; an explicit initial branch handoff requires revision CAS and advances it;
 - a `task_start` resume that changes existing Task state requires `task_id` + `expected_revision`;
 - `task_checkpoint` requires `task_id` + `expected_revision`; successful existing-Task mutation returns the incremented revision;
 - revision mismatch or missing required revision is non-mutating and requires refresh/reconciliation;
@@ -437,16 +437,26 @@ the serialized structured result plus wire reserve; it removes lower-priority ev
 tail hits, and sets `results_truncated=true` when hit metadata is removed instead of replacing the
 useful response with a budget error.
 
-Natural-search evidence prefers an exact internal source line from a selected code-unit definition,
-proven call, or syntactic relation and consumes that hint before IPC serialization. File-level hits
-without a usable structural anchor select the shortest 48-line window covering the maximum number of
-distinct significant query terms, with at least two terms required for a multi-term source. Evidence
-slots count snippets actually returned rather than failed rereads, so a changed or unrelocatable
-higher-ranked file does not prevent a later safe hit from carrying current-source context.
+Natural-search evidence uses an internal source line selected by code-unit, proven-call, or
+syntactic-relation retrieval. Whole normalized code-unit names/qualified names rank ahead of
+identifier substrings, below exact paths, filenames, and filename stems. SQL ranks matching units
+and selects one best unit per file before its candidate cap; many definitions in one file cannot
+consume other files' structural candidate slots.
+
+After the existing current-source SHA check, code-unit definition evidence starts at its
+selected declaration and extends forward within 48 lines/3 KiB, stopping before the next indexed
+declaration in the same or an ancestor qualified scope. The private scope/line hints are consumed
+before IPC serialization. This is a bounded source window, not a guarantee of a complete function.
+Call/import/inheritance anchors retain three lines of local context on either side. File-level
+hits select the shortest 48-line window covering the maximum number of distinct significant
+terms, with at least two terms required for a multi-term source, and add at most three context
+lines per side within that bound. Evidence slots count snippets actually returned rather than
+failed rereads. The three-slot and 12 KiB response limits remain unchanged (ADR-0059 amendment).
 
 Natural queries use bounded Unicode/camel/snake term normalization, conservative English/Russian
 filler removal, and prefix/inflection alternatives. Retrieval ranks explicit evidence tiers—exact
-path, exact filename, exact filename stem, exact normalized title/identifier phrase, Russian
+path, exact filename, exact filename stem, whole normalized code-unit name, exact normalized
+title/identifier phrase, Russian
 case-form title/identifier phrase, dense lexical coverage, all significant terms, then partial match.
 The Russian phrase tier uses a separate case-ending matcher, excludes broader derivations, and
 leaves prefix-only matches at their lower lexical tier. Query expansion still adds at most one
@@ -467,6 +477,20 @@ a hard filter or a substitute for query relevance. More sophisticated RRF/Workin
 can replace this internal fusion later without changing refs or tool shapes.
 
 ## 13. Knowledge and staleness
+
+Task and Knowledge reads also require active-checkout applicability (ADR-0067). Schema v23
+adds bounded origin/checkpoint Git evidence without backfilling historical fingerprints from
+today's files. One request-local resolver checks live identity, HEAD/branch and consulted
+content before return. Task history uses its latest checkpoint: originating-branch continuity
+survives edits, while cross-branch visibility requires captured commit ancestry or complete
+changed-path content evidence. Knowledge uses its own source checkpoint and current anchors;
+operator/imported anchors receive the same live check. Unanchored agent Knowledge does not
+inherit the Task's ongoing-work exemption. Filtering precedes Task/Knowledge search limits and
+checkpoint history pagination; direct refs cannot bypass it. Workspace/Project dashboard views
+are filtered, while the global operator Task archive retains all branches for management.
+Whole-file squash/cherry-pick proofs are intentionally conservative when other edits alter the
+same file. One-working-Task-per-Workspace remains a persistence invariant even for hidden Tasks;
+the generic conflict directs the operator to the archive without exposing hidden identities.
 
 Knowledge is deliberately sparse. A card is created only when it can plausibly prevent future re-investigation.
 

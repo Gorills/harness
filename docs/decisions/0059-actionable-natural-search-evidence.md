@@ -21,6 +21,35 @@ source context.
 
 ## Decision
 
+### Amendment: whole definitions and compact evidence (2026-09-14)
+
+Whole normalized code-unit names or qualified names rank ahead of identifier substrings, while
+exact paths, filenames, and filename stems retain precedence. This also applies after ordinary
+natural-query normalization: `where project search happens` prefers `project_search` over
+`_first_project_search` or `_PROJECT_SEARCH_DESCRIPTION`. Ranking and selection of each file's
+best code unit happen in SQL before the bounded candidate cap. A file with many definitions
+therefore cannot consume all candidate slots and hide other files' structural matches. This is
+lexical/syntax ranking, not a claim of semantic completeness or Russian-to-English translation.
+
+Code-unit candidates carry a private qualified parent scope alongside the existing line hint.
+After the current-source SHA check, definition evidence starts at that declaration and extends
+forward within 48 lines and 3 KiB. A bounded indexed lookup stops it before the next declaration
+in the same or an ancestor scope, including a top-level declaration after a class's last method.
+These are indexed syntax boundaries, not inferred runtime ownership or a guarantee of a complete
+function body. No new parser pass, persisted schema, or model-visible field is added.
+
+Call/import/inheritance anchors keep three context lines on either side. File-level lexical
+evidence keeps its shortest maximum-coverage range plus at most three lines of context per side,
+still inside the 48-line bound. It no longer fills every available line with unrelated padding.
+Private line/scope hints are consumed before serialization. Existing SHA/containment checks,
+three returned evidence slots, 12 KiB response budget, and explicit truncation remain unchanged.
+
+Regression fixtures cover more than 96 misleading definitions, per-file candidate fairness,
+natural and exact queries, path precedence, large preceding functions, short definitions followed
+by unrelated siblings, ancestor-scope boundaries, and compact call/lexical context.
+
+### Original decision
+
 Code-unit definition, proven call, and syntactic relation candidates carry an internal
 `evidence_line` through ranking. After the existing current-file containment, regular-file, UTF-8,
 and indexed-SHA checks, evidence is built around that exact line when it still contains at least one

@@ -43,57 +43,43 @@ from harness.task_checkpoints import (
     list_task_checkpoints,
     list_task_events,
 )
-from harness.tasks import TaskState, get_task, get_task_stack_hints
+from harness.tasks import TaskState, TaskWaitReason, get_task, get_task_stack_hints
 from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
 
-def test_server_instructions_require_task_before_diagnosis_within_budget() -> None:
-    encoded = _SERVER_INSTRUCTIONS.encode("utf-8")
+def test_server_instructions_allow_proportionate_tasks_within_budget() -> None:
+    assert len(_SERVER_INSTRUCTIONS.encode("utf-8")) < 1024
     first_512 = _SERVER_INSTRUCTIONS[:512]
-    assert len(encoded) < 1024
-    assert "must be the first repository action" in first_512
-    assert "Before any shell command" in first_512
-    assert "Russian" in first_512
-    assert "title" in first_512
-    assert "next_step" in first_512
-    assert "stack_hints" in first_512
-    assert "optional Task metadata" in first_512
-    assert "before diagnosis" in _SERVER_INSTRUCTIONS
-    assert "never skip" in _SERVER_INSTRUCTIONS
-    assert "Small work or known paths still need a Task" in _SERVER_INSTRUCTIONS
-    assert "may skip search, not Task" in _SERVER_INSTRUCTIONS
-    assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
-    assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in (
-        _SERVER_INSTRUCTIONS
-    )
-    assert "New Task only for a distinct outcome" in _SERVER_INSTRUCTIONS
-    assert "complete only when outcome is done" in _SERVER_INSTRUCTIONS
-    assert "implement-after-diagnosis" not in _SERVER_INSTRUCTIONS
-    assert "code/doc paths may be read natively, project_context optional" in _SERVER_INSTRUCTIONS
-    assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
-    assert "discussion only" not in _SERVER_INSTRUCTIONS
-    assert "waiver" not in _SERVER_INSTRUCTIONS
-    assert "trivial" not in _SERVER_INSTRUCTIONS
-    assert "skip Task for" not in _SERVER_INSTRUCTIONS
-    assert "meaningful changes" not in _SERVER_INSTRUCTIONS
-
-
-def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
-    text = _SERVER_INSTRUCTIONS
-    after_status = text.split("After status", maxsplit=1)[1]
-    task_at = after_status.find("start/resume a Task")
-    search_at = after_status.find("project_search")
-    assert 0 <= task_at < search_at
-    assert "After status use project_search" not in text
-    assert "After status, use project_search" not in text
-    assert "project_search, project_context, then native tools" not in text
-    assert "code/doc paths may be read natively, project_context optional" in text
-    assert "natural-language code/doc discovery may use native search directly" in text
-    assert "lexical hits allow broad fallback" in text
-    assert "project_context only for selected semantic refs." not in text
+    for required in (
+        "must be the first repository action",
+        "Before any shell command",
+        "Russian",
+        "title",
+        "next_step",
+        "stack_hints",
+        "optional Task metadata",
+    ):
+        assert required in first_512
+    for required in (
+        "substantial changes",
+        "multi-step work",
+        "needed continuity",
+        "explicit request",
+        "Quick questions, reads, and small local edits may proceed without a Task",
+        "Same outcome: one Task",
+        "New Task only for a distinct outcome",
+        "task_id+expected_revision",
+        "ready => waiting(operator_review)",
+        "Only the operator completes Tasks",
+        "project_search before broad native work",
+        "Complete untruncated exact_coverage replaces native search",
+    ):
+        assert required in _SERVER_INSTRUCTIONS
+    assert "Small work or known paths still need a Task" not in _SERVER_INSTRUCTIONS
+    assert "before diagnosis/edits" not in _SERVER_INSTRUCTIONS
 
 
 def test_project_search_description_allows_targeted_native_read_after_localization() -> None:
@@ -104,11 +90,11 @@ def test_project_search_description_allows_targeted_native_read_after_localizati
     assert "structuredContent" in description
     assert "results_truncated=true" in description
     assert "project_context is not required for those kinds" in description
-    assert "after task_start or resume" in description
+    assert "Search itself does not require a Task" in description
     assert "Natural-language code/doc discovery may use native broad search directly" in description
     assert "ordinary lexical hits do not suppress broader native fallback" in description
     assert "Skip this search when an exact path" in description
-    assert "Task remains required" in description
+    assert "Task remains required" not in description
     assert "use project_context only for selected refs" not in description
 
 
@@ -124,15 +110,15 @@ def test_task_start_description_states_stack_hints_are_not_skill_selectors() -> 
     assert "not a Skill selector" in _TASK_START_DESCRIPTION
     assert "optional durable Task metadata" in _TASK_START_DESCRIPTION
     assert "live skill injection" in _TASK_START_DESCRIPTION
-    assert "Do not skip because work looks small or the path is known" in _TASK_START_DESCRIPTION
+    assert "small local edits may proceed without a Task" in _TASK_START_DESCRIPTION
     assert "resume the relevant working/waiting Task from project_status by ID" in (
         _TASK_START_DESCRIPTION
     )
     assert (
         "messages, tool calls and subagents do not each need a new Task" in _TASK_START_DESCRIPTION
     )
-    assert "audit-only request may finish as an audit" in _TASK_START_DESCRIPTION
-    assert "after completing or waiting existing work" in _TASK_START_DESCRIPTION
+    assert "A ready audit also waits for operator review" in _TASK_START_DESCRIPTION
+    assert "Keep existing work working or put it waiting with its reason" in _TASK_START_DESCRIPTION
     assert "task_start cannot reopen completed/cancelled Tasks" in _TASK_START_DESCRIPTION
 
 
@@ -276,7 +262,7 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
             assert "Before any shell command" in first_512
             assert "project_status" in first_512
             assert "deferred" in first_512
-            assert "deferred/omitted Harness tools" in first_512
+            assert "find deferred/omitted tools" in first_512
             assert "discovery is the only allowed pre-status action" in first_512
             listed = await client.list_tools()
             assert listed.tools[0].description is not None
@@ -817,11 +803,11 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "stack_hints" in instructions[:512]
                 assert "optional Task metadata" in instructions[:512]
                 assert "durable SCM mutations" in instructions
-                assert "code/doc paths may be read natively" in instructions
-                assert "project_context optional" in instructions
+                assert "Paths allow native reads" in instructions
+                assert "context optional" in instructions
                 assert "project_context only for selected semantic refs." not in instructions
-                assert "before diagnosis" in instructions
-                assert "never skip" in instructions
+                assert "substantial changes" in instructions
+                assert "retry errors" in instructions
                 assert "After status, start/resume a Task" in instructions
                 assert (
                     "Same outcome: one Task across diagnosis, implementation, checks and follow-ups"
@@ -854,8 +840,11 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "256 UTF-8 bytes after trimming" in search_properties["query"]["description"]
                 assert "Russian" in by_name["task_start"]["description"]
                 assert "not a Skill selector" in by_name["task_start"]["description"]
-                assert "before diagnosis" in by_name["task_start"]["description"]
-                assert "project_search" in by_name["task_start"]["description"]
+                assert "substantial changes" in by_name["task_start"]["description"]
+                assert (
+                    "small local edits may proceed without a Task"
+                    in by_name["task_start"]["description"]
+                )
                 assert "omit task_id" in by_name["task_start"]["description"]
                 assert "never pass summary" in by_name["task_start"]["description"]
                 assert "read this schema and retry" in by_name["task_start"]["description"]
@@ -869,8 +858,7 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                     "a turn ending is not completion" in by_name["task_checkpoint"]["description"]
                 )
                 assert (
-                    "completed only when the requested outcome is done"
-                    in by_name["task_checkpoint"]["description"]
+                    "Only the operator completes Tasks" in by_name["task_checkpoint"]["description"]
                 )
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
@@ -1553,14 +1541,16 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
                 {
                     "task_id": task_id,
                     "expected_revision": 7,
-                    "state": "completed",
+                    "state": "waiting",
+                    "wait_reason": "operator_review",
+                    "next_step": "Operator accepts the result",
                     "summary": "Completed the same fix after the dependency became available",
                 },
             )
             assert completed.is_error is False
             assert completed.structured_content is not None
             assert completed.structured_content["task_id"] == task_id
-            assert completed.structured_content["state"] == "completed"
+            assert completed.structured_content["state"] == "waiting"
             assert completed.structured_content["revision"] == 8
     finally:
         stop.set()
@@ -1573,7 +1563,8 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
         assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (1,)
         assert get_task_baseline(connection, task_id) == baseline
         task = get_task(connection, task_id)
-        assert task.state is TaskState.COMPLETED
+        assert task.state is TaskState.WAITING
+        assert task.wait_reason is TaskWaitReason.OPERATOR_REVIEW
         assert task.revision == 8
         checkpoints = list_task_checkpoints(connection, task_id)
         assert tuple(checkpoint.task_revision for checkpoint in checkpoints) == (2, 3, 4, 5, 6, 8)

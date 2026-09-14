@@ -9,6 +9,7 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from harness.git_applicability import WorkspaceApplicability, capture_checkpoint_evidence
 from harness.knowledge import (
     KnowledgeCardRecord,
     KnowledgeDraft,
@@ -67,6 +68,7 @@ class TaskEventType(StrEnum):
     JIRA_LINK_UPDATED = "jira_link_updated"
     OPERATOR_STATUS_UPDATED = "operator_status_updated"
     CANCELLED = "cancelled"
+    STATE_CHANGED = "state_changed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,8 @@ class TaskEventRecord:
     jira_url: str | None
     operator_status: TaskOperatorStatus | None
     created_at: str
+    target_state: TaskState | None = None
+    target_wait_reason: TaskWaitReason | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +147,10 @@ def checkpoint_task(
 ) -> TaskCheckpointMutation:
     """Atomically checkpoint one working Task using stable identity and revision CAS."""
     _validate_expected_revision(expected_revision)
+    if state is TaskState.COMPLETED:
+        raise TaskValidationError(
+            "only the operator may complete a Task; use waiting/operator_review"
+        )
     _validate_checkpoint_state(state, wait_reason, next_step)
     normalized_summary = _validate_text(
         summary,
@@ -176,6 +184,11 @@ def checkpoint_task(
                 f"checkpoint requires working Task; current state is {current.state.value}"
             )
 
+        applicability = WorkspaceApplicability(connection, current.workspace_id, timeout_seconds=30)
+        if not applicability.task_visible(task_id) and not applicability.initial_handoff_allowed(
+            task_id
+        ):
+            raise TaskWorkspaceConflictError("Task is unavailable in the active Git context")
         mechanical = _calculate_mechanical_checkpoint(connection, current)
         timestamp = _utc_timestamp(now)
         new_revision = expected_revision + 1
@@ -220,6 +233,12 @@ def checkpoint_task(
             normalized_knowledge,
             timestamp=timestamp,
         )
+        capture_checkpoint_evidence(connection, checkpoint.checkpoint_id)
+        if _calculate_mechanical_checkpoint(connection, current) != mechanical:
+            raise TaskCheckpointMechanicalError(
+                "Workspace changed during checkpoint evidence capture"
+            )
+        applicability.validate()
         event = _insert_checkpoint_event(connection, checkpoint)
         updated = get_task(connection, task_id)
         connection.execute("COMMIT")
@@ -379,6 +398,7 @@ def list_task_events(
     *,
     limit: int | None = None,
     offset: int = 0,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[TaskEventRecord, ...]:
     """Load events chronologically, optionally a bounded page counted from the latest rows."""
     get_task(connection, task_id)
@@ -390,18 +410,31 @@ def list_task_events(
         raise TaskCheckpointError("Task event list offset requires a bounded limit")
     order = "ORDER BY id" if limit is None else "ORDER BY id DESC LIMIT ? OFFSET ?"
     parameters: tuple[object, ...] = (task_id,) if limit is None else (task_id, limit, offset)
-    rows = connection.execute(
-        f"""
-        SELECT
-            id, task_id, task_revision, event_type, checkpoint_id, operator_feedback,
-            operator_comment, jira_url, operator_status, created_at
-        FROM task_events
-        WHERE task_id = ?
-        {order}
-        """,
-        parameters,
-    )
-    records = [_event_from_row(row) for row in rows]
+    visibility = ""
+    if applicability is not None:
+        connection.create_function(
+            "harness_history_checkpoint_visible", 1, applicability.checkpoint_visible
+        )
+        visibility = (
+            "AND (checkpoint_id IS NULL OR harness_history_checkpoint_visible(checkpoint_id))"
+        )
+    try:
+        rows = connection.execute(
+            f"""
+            SELECT
+                id, task_id, task_revision, event_type, checkpoint_id, operator_feedback,
+                operator_comment, jira_url, operator_status, created_at,
+                deploy_test, deploy_prod, target_state, target_wait_reason
+            FROM task_events
+            WHERE task_id = ? {visibility}
+            {order}
+            """,
+            parameters,
+        )
+        records = [_event_from_row(row) for row in rows]
+    finally:
+        if applicability is not None:
+            connection.create_function("harness_history_checkpoint_visible", 1, None)
     if limit is not None:
         records.reverse()
     return tuple(records)
@@ -690,6 +723,10 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         jira_url,
         operator_status,
         created_at,
+        deploy_test,
+        deploy_prod,
+        target_state,
+        target_wait_reason,
     ) = row
     if (
         isinstance(event_id, bool)
@@ -724,6 +761,7 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         TaskEventType.REOPENED,
         TaskEventType.ACCEPTED,
         TaskEventType.CANCELLED,
+        TaskEventType.STATE_CHANGED,
     }:
         if task_revision <= 1 or checkpoint_id is not None or any(v is not None for v in payloads):
             raise TaskCheckpointError("lifecycle Task event has invalid persisted linkage")
@@ -783,6 +821,42 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
             )
         except ValueError as exc:
             raise TaskCheckpointError("operator status event has invalid persisted value") from exc
+    parsed_state: TaskState | None = None
+    parsed_reason: TaskWaitReason | None = None
+    if parsed_event_type is TaskEventType.STATE_CHANGED:
+        if not isinstance(target_state, str) or (
+            target_wait_reason is not None and not isinstance(target_wait_reason, str)
+        ):
+            raise TaskCheckpointError("operator state event has invalid types")
+        try:
+            parsed_state = TaskState(target_state)
+            parsed_reason = (
+                None if target_wait_reason is None else TaskWaitReason(target_wait_reason)
+            )
+        except (ValueError, TypeError) as exc:
+            raise TaskCheckpointError("operator state event has invalid state") from exc
+        if parsed_state is TaskState.COMPLETED or (
+            (parsed_state is TaskState.WAITING) != (parsed_reason is not None)
+        ):
+            raise TaskCheckpointError("operator state event has invalid waiting reason")
+    elif target_state is not None or target_wait_reason is not None:
+        raise TaskCheckpointError("unexpected operator state event payload")
+    if deploy_test is not None or deploy_prod is not None:
+        if (
+            parsed_event_type is not TaskEventType.OPERATOR_STATUS_UPDATED
+            or type(deploy_test) is not int
+            or deploy_test not in (0, 1)
+            or type(deploy_prod) is not int
+            or deploy_prod not in (0, 1)
+            or operator_status is not None
+        ):
+            raise TaskCheckpointError("operator deployment event has invalid flags")
+        if deploy_test and deploy_prod:
+            parsed_operator_status = TaskOperatorStatus.DEPLOY_BOTH
+        elif deploy_test:
+            parsed_operator_status = TaskOperatorStatus.DEPLOY_TEST
+        elif deploy_prod:
+            parsed_operator_status = TaskOperatorStatus.DEPLOY_PROD
     return TaskEventRecord(
         event_id=event_id,
         task_id=task_id,
@@ -794,6 +868,8 @@ def _event_from_row(row: tuple[object, ...]) -> TaskEventRecord:
         jira_url=jira_url,
         operator_status=parsed_operator_status,
         created_at=created_at,
+        target_state=parsed_state,
+        target_wait_reason=parsed_reason,
     )
 
 

@@ -11,8 +11,7 @@ from harness.registry import create_project, register_workspace
 from harness.retrieval import ProjectSearchScope, search_exact_source_inspection, search_project
 from harness.search_text import contains_russian_case_phrase, matching_term_count
 from harness.storage import connect_database, initialize_database
-from harness.task_workflow import task_checkpoint, task_start
-from harness.tasks import TaskState
+from harness.task_workflow import task_accept, task_start
 
 _RELEVANCE_CASES = (
     ("задачей", ProjectSearchScope.TASKS, "task:tasks"),
@@ -35,14 +34,7 @@ _NEGATIVE_QUERIES = ("мониторингом", "проверкой")
 
 def _completed_task(connection: sqlite3.Connection, workspace_id: str, title: str) -> str:
     task = task_start(connection, workspace_id, title)
-    task_checkpoint(
-        connection,
-        workspace_id,
-        task.task_id,
-        expected_revision=task.revision,
-        state=TaskState.COMPLETED,
-        summary="Работа завершена",
-    )
+    task_accept(connection, workspace_id, task.task_id, expected_revision=task.revision)
     return f"task:{task.task_id}"
 
 

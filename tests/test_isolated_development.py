@@ -433,40 +433,40 @@ def test_checkout_codex_config_is_generated_not_tracked_stdio() -> None:
     assert "harness-dev" not in config["mcp_servers"]
 
 
-def test_checkout_agent_instructions_require_harness_before_native_tools() -> None:
+def test_checkout_agent_instructions_require_status_and_proportionate_tracking() -> None:
     instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     bootstrap = instructions.split("## Isolated development", maxsplit=1)[0]
+    normalized = " ".join(bootstrap.split())
 
     assert "`project_status` must be the first repository action" in bootstrap
     assert "deferred or omitted from the initial visible tool list" in bootstrap
-    assert "only allowed\n  pre-status action" in bootstrap
-    assert "After status, start or resume a Harness Task" in bootstrap
-    assert "Natural-language code/doc discovery may use native repository search" in bootstrap
-    assert "Ordinary lexical code/doc hits are candidate localization only" in bootstrap
-    assert "before diagnosis or edits" in bootstrap
-    assert "read the tool schema and retry" in bootstrap
-    assert "Checkpoint each logical stage" in bootstrap
-    assert "One requested outcome uses one Harness Task" in bootstrap
-    assert "diagnosis, implementation, verification, clarifications, and continuation" in bootstrap
-    assert "Messages, tool calls, and subagents do not each need a new Task" in bootstrap
-    assert "new Task only for a distinct requested outcome" in bootstrap
-    assert "fresh host\n  conversation" in bootstrap
-    assert "same unfinished Harness\n  Task" in bootstrap
-    assert "shift from diagnosis to implementation requires" not in bootstrap
-    assert "targeted native read/search is allowed" in bootstrap
-    assert "already has an exact path" in bootstrap
-    assert "skipping search does not skip Task" in bootstrap
-    assert "Do not skip a Task because" in bootstrap
-    assert "Complexity is not a Task gate" in bootstrap
-    assert "explicit operator waiver" in bootstrap
-    assert "не создавай таску" in bootstrap
-    assert "это обсуждение" in bootstrap
-    assert "ends the waiver" in bootstrap
-    assert "discussion only" in bootstrap
-    assert "before changes and checkpoint meaningful" not in bootstrap
-    assert "After status, use `project_search`" not in bootstrap
-    assert "skip Task for trivial" not in bootstrap
-    assert "simple changes need no Task" not in bootstrap
+    assert "only allowed pre-status action" in normalized
+    assert "start or resume a Harness Task for substantial changes, multi-step work" in normalized
+    assert "work needing durable continuity, or an explicit operator request" in normalized
+    assert "read-only inspection, and small local edits may proceed without a Task" in normalized
+    assert "If work grows beyond that scope, start a Task before continuing" in normalized
+    assert "reading the schema and retrying, not bypassing the failure" in normalized
+    assert "Natural-language code/doc discovery may use native search directly" in normalized
+    assert "Lexical hits are localization candidates and allow broader fallback" in normalized
+    assert "An exact path may be read natively" in normalized
+    assert "Search does not itself require a Task" in normalized
+    assert "Complete, untruncated `exact_coverage` replaces native search" in normalized
+    assert "Reuse one Task for one requested outcome" in normalized
+    assert (
+        "diagnosis, implementation, checks, clarifications, continuation, subagents" in normalized
+    )
+    assert "Every existing-Task mutation carries its current `expected_revision`" in normalized
+    assert "Checkpoint each logical stage of tracked work" in normalized
+    assert "`waiting` with `operator_review`" in normalized
+    assert "Only the operator accepts/completes or cancels a Task" in normalized
+    assert "must not automatically close it" in normalized
+    assert "A ready audit also awaits operator acceptance" in normalized
+    assert "Respect an explicit operator request not to create a Task" in normalized
+    assert "fresh host conversation" in normalized
+    assert "same unfinished Harness Task" in normalized
+    assert "Do not skip a Task because" not in bootstrap
+    assert "Complexity is not a Task gate" not in bootstrap
+    assert "skipping search does not skip Task" not in bootstrap
 
 
 def test_cursor_bootstrap_matches_canonical_workflow() -> None:
@@ -478,16 +478,17 @@ def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     assert "After status use project_search" not in text
     assert "After status, use project_search" not in text
     assert "project_search, project_context, then native tools" not in text
-    assert "code/doc paths may be read natively" in text
-    assert "project_context optional" in text
-    assert "Small work or known paths still need a Task" in text
+    assert "Paths allow native reads; context optional" in text
+    assert "for substantial changes, multi-step work, needed continuity" in text
+    assert "Quick questions, reads, and small local edits may proceed without a Task" in text
     assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in text
     assert "New Task only for a distinct outcome" in text
-    assert "implement-after-diagnosis" not in text
-    assert "may skip search, not Task" in text
+    assert "ready => waiting(operator_review)" in text
+    assert "Only the operator completes Tasks" in text
+    assert "Small work or known paths still need a Task" not in text
+    assert "may skip search, not Task" not in text
     assert "discussion only" not in text
     assert "waiver" not in text
-    assert "project_context only for selected semantic refs." not in text
     assert len(text.encode("utf-8")) < 1024
 
 

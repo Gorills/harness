@@ -19,6 +19,8 @@ from harness.retrieval import (
     search_tasks,
 )
 from harness.storage import connect_database, initialize_database
+from harness.task_workflow import task_set_deployment, task_start
+from harness.tasks import TaskOperatorStatus
 
 _FIRST_ID = "a123456789" + "0" * 22
 _SECOND_ID = "a123456789" + "1" * 22
@@ -129,6 +131,95 @@ def _task(
 
 def _ids(hits: tuple[ProjectSearchHit, ...]) -> list[str]:
     return [hit.ref.removeprefix("task:").partition("#")[0] for hit in hits]
+
+
+@pytest.mark.parametrize(
+    ("deploy_test", "deploy_prod", "expected_status", "queries"),
+    [
+        (True, False, TaskOperatorStatus.DEPLOY_TEST, ("deploy_test",)),
+        (False, True, TaskOperatorStatus.DEPLOY_PROD, ("deploy_prod",)),
+        (
+            True,
+            True,
+            TaskOperatorStatus.DEPLOY_BOTH,
+            ("deploy_test", "deploy_prod", "деплой на тест", "деплой на прод"),
+        ),
+    ],
+)
+def test_historical_deployment_search_and_context_survive_clearing_current_flags(
+    database: tuple[sqlite3.Connection, Path],
+    tmp_path: Path,
+    deploy_test: bool,
+    deploy_prod: bool,
+    expected_status: TaskOperatorStatus,
+    queries: tuple[str, ...],
+) -> None:
+    connection, _path = database
+    workspace_id = _workspace(connection, tmp_path / "repo")
+    task = task_start(connection, workspace_id, "Подготовить релиз")
+    marked = task_set_deployment(
+        connection,
+        workspace_id,
+        task.task_id,
+        expected_revision=task.revision,
+        deploy_test=deploy_test,
+        deploy_prod=deploy_prod,
+    )
+    task_set_deployment(
+        connection,
+        workspace_id,
+        task.task_id,
+        expected_revision=marked.task.revision,
+        deploy_test=False,
+        deploy_prod=False,
+    )
+    expected_ref = f"task:{task.task_id}#event:{marked.event.event_id}"
+    for query in queries:
+        hits = search_project(
+            connection, workspace_id, query, scope=ProjectSearchScope.TASKS, limit=5
+        )
+        assert [hit.ref for hit in hits] == [expected_ref]
+        assert hits[0].short_summary == expected_status.value
+        (context,) = read_project_context(connection, workspace_id, (hits[0].ref,))
+        assert context.data["operator_status"] is None
+        assert context.data["selected_event"] == {
+            "event_id": marked.event.event_id,
+            "task_revision": marked.task.revision,
+            "event_type": "operator_status_updated",
+            "operator_status": expected_status.value,
+            "operator_status_truncated": False,
+            "created_at": marked.event.created_at,
+        }
+    (history,) = read_project_context(connection, workspace_id, (f"task:{task.task_id}",))
+    recent_history = history.data["recent_history"]
+    assert isinstance(recent_history, list)
+    assert any(
+        isinstance(event, dict) and event.get("operator_status") == expected_status.value
+        for event in recent_history
+    )
+
+
+@pytest.mark.parametrize("legacy_status", ["deploy_test", "deploy_prod"])
+def test_legacy_deployment_event_keeps_search_and_context_payload(
+    database: tuple[sqlite3.Connection, Path], tmp_path: Path, legacy_status: str
+) -> None:
+    connection, _path = database
+    workspace_id = _workspace(connection, tmp_path / "repo")
+    _task(connection, workspace_id, _FIRST_ID, "Legacy release")
+    cursor = connection.execute(
+        "INSERT INTO task_events(task_id,task_revision,event_type,operator_status,created_at) "
+        "VALUES (?,3,'operator_status_updated',?,'legacy-time')",
+        (_FIRST_ID, legacy_status),
+    )
+    hits = search_project(
+        connection, workspace_id, legacy_status, scope=ProjectSearchScope.TASKS, limit=5
+    )
+    assert [hit.ref for hit in hits] == [f"task:{_FIRST_ID}#event:{cursor.lastrowid}"]
+    assert hits[0].short_summary == legacy_status
+    (context,) = read_project_context(connection, workspace_id, (hits[0].ref,))
+    selected_event = context.data["selected_event"]
+    assert isinstance(selected_event, dict)
+    assert selected_event["operator_status"] == legacy_status
 
 
 @pytest.mark.parametrize("fragment_kind", ["checkpoint", "operator_comment"])

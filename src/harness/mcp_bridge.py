@@ -27,7 +27,11 @@ from mcp_types import (
 from mcp_types import Tool as MCPTool
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
+from harness.agent_instructions import (
+    TASK_CONTINUITY_INSTRUCTIONS,
+    TASK_CREATION_INSTRUCTIONS,
+    TASK_REVIEW_INSTRUCTIONS,
+)
 from harness.codex_adapter import (
     CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE,
     codex_profile_missing_workspace_root,
@@ -69,23 +73,24 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
-    "Harness required. project_status must be the first repository action. Before any shell "
-    "command/read/search/browser/change, find deferred/omitted Harness tools; discovery is the "
-    "only allowed pre-status action. Russian Task title/summary/next_step, Knowledge title/body. "
-    "stack_hints: optional Task metadata. After status, start/resume a Task before "
-    "diagnosis/edits; schema error: retry, never skip. "
+    "project_status must be the first repository action. Before any shell "
+    "command/read/search/browser/change, find deferred/omitted tools; discovery is the "
+    "only allowed pre-status action. Russian Task title/summary/next_step and Knowledge. "
+    "stack_hints: optional Task metadata. "
+    + TASK_CREATION_INSTRUCTIONS
     + TASK_CONTINUITY_INSTRUCTIONS
-    + "Small work or known paths still need a Task. "
+    + "Resume by ID; retry errors. "
     "IDs/literals/Knowledge/Tasks: project_search before broad native work; "
-    "natural-language code/doc discovery may use native search directly; lexical hits allow "
-    "broad fallback. Exact paths may skip search, not Task; code/doc paths may be read natively, "
-    "project_context optional. Complete untruncated exact_coverage replaces native search. "
-    "Checkpoint each stage with task_id+expected_revision; complete only when outcome is done. "
-    "Hidden forbids durable SCM mutations."
+    "Natural queries allow native search; lexical hits allow fallback. "
+    "Paths allow native reads; context optional. "
+    "Complete untruncated exact_coverage replaces native search. "
+    + TASK_REVIEW_INSTRUCTIONS
+    + "Hidden forbids durable SCM mutations."
 )
 _PROJECT_SEARCH_DESCRIPTION = (
     "Search current Project Intelligence across local code/doc text and identifiers, durable "
-    "Knowledge, and Task history. Harness reconciles watcher lag before retrieval. Explicit "
+    "Knowledge, and Task history applicable to the active checkout. Harness reconciles watcher "
+    "lag before retrieval. Explicit "
     "identifiers and quoted/backticked literals may return exact_coverage with current-source "
     "locations and aggregate counts. Identifier coverage may also include symbol_navigation: "
     "current-source precise Python/JS/TS/TSX/Go/Rust/Java syntax definitions/calls/imports/inheritance with relation evidence; "
@@ -96,20 +101,21 @@ _PROJECT_SEARCH_DESCRIPTION = (
     "needed, targeted native read is allowed. If exact coverage is incomplete, targeted native "
     "search fallback is allowed. Successful data is in structuredContent; results_truncated=true "
     "means lower-priority hits were omitted to preserve the response budget. project_context is "
-    "not required for those kinds. Use after task_start or resume when exact identifiers/literals "
+    "not required for those kinds. Use when exact identifiers/literals "
     "or Knowledge/Task retrieval benefit from it. Natural-language code/doc discovery may use native "
     "broad search directly, and ordinary lexical hits do not suppress broader native fallback. Skip "
-    "this search when an exact path is already in hand; Task remains required."
+    "this search when an exact path is already in hand. Search itself does not require a Task."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
     "information. Not mandatory for code or doc refs that already include a path; those "
-    "expose metadata only. Knowledge and Task refs expose bounded durable semantic context."
+    "expose metadata only. Knowledge and Task refs expose bounded durable semantic context "
+    "only when applicable to the active checkout."
 )
 _TASK_START_DESCRIPTION = (
-    "Create a new durable Harness task, or explicitly resume an existing task. Required "
-    f"before diagnosis, project_search, and edits. Do not skip because work looks small or "
-    f"the path is known. A new title is operator-facing {_OPERATOR_LANGUAGE}. "
+    "Create a new durable Harness task, or explicitly resume an existing task. "
+    + TASK_CREATION_INSTRUCTIONS
+    + f"A new title is operator-facing {_OPERATOR_LANGUAGE}. "
     "Create with title and optional stack_hints only; omit task_id; never pass summary or "
     "a placeholder id. Resume uses a real task_id plus expected_revision when required. "
     "A schema error is a blocker: read this schema and retry. stack_hints are optional "
@@ -119,8 +125,9 @@ _TASK_START_DESCRIPTION = (
     " For the same requested outcome, resume the relevant working/waiting Task from project_status "
     "by ID. Diagnosis, implementation, verification, clarifications, continuation and host restarts "
     "reuse that Task; messages, tool calls and subagents do not each need a new Task. Create only "
-    "for a distinct requested outcome, after completing or waiting existing work. An audit-only request "
-    "may finish as an audit; never extend its scope without authorization. task_start cannot reopen "
+    "for a distinct requested outcome. Keep existing work working or put it waiting with its reason. "
+    "A ready audit also waits for operator review; never extend its scope without authorization. "
+    "task_start cannot reopen "
     "completed/cancelled Tasks; operator reopening is separate."
 )
 _ISOLATED_CHECKOUT_REFUSAL_INSTRUCTIONS = (
@@ -451,6 +458,8 @@ def build_mcp_server(
         if (
             task_status.workspace_id != status.workspace_id
             or task_status.schema_version != status.schema_version
+            or task_status.head != status.head
+            or task_status.branch != status.branch
         ):
             raise ValueError("project_status Workspace changed during bounded status read")
         selected_task = task_status.task
@@ -631,7 +640,8 @@ def build_mcp_server(
             "including diagnosis with no code change. Requires task_id and expected_revision. "
             "Use working while the requested outcome still has authorized work; intermediate "
             "diagnosis or a turn ending is not completion. Use waiting only for a real dependency "
-            "with the required wait_reason; completed only when the requested outcome is done. "
+            "with the required wait_reason. A ready result uses waiting with operator_review. "
+            "Only the operator completes Tasks; agents cannot checkpoint completed or cancelled. "
             f"Write summary, next_step, and Knowledge title/body in {_OPERATOR_LANGUAGE}. Add "
             "Knowledge only for verified reusable findings that avoid future re-investigation; "
             "prefer precise code/document anchors and do not summarize every file or persist "
@@ -642,7 +652,7 @@ def build_mcp_server(
         ctx: Context[Any, Any],
         task_id: str,
         expected_revision: StrictInt,
-        state: Literal["working", "waiting", "completed"],
+        state: Literal["working", "waiting"],
         summary: str,
         next_step: str | None = None,
         wait_reason: Literal["operator_review", "operator_input", "external"] | None = None,

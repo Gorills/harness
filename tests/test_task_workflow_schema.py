@@ -184,6 +184,11 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
         connection.execute("DROP TABLE task_search")
         connection.execute("DROP TABLE knowledge_search")
         connection.execute("DROP TABLE task_checkpoint_verification")
+        connection.execute("DROP TABLE task_git_evidence_paths")
+        connection.execute("DROP TABLE task_git_evidence")
+        connection.execute("DROP TABLE task_git_origins")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_test")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_prod")
         connection.execute("DELETE FROM schema_migrations WHERE version >= 7")
         connection.commit()
     finally:
@@ -191,7 +196,7 @@ def test_schema_v6_migrates_checkpoint_events_without_fabricating_lifecycle_hist
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 21
+    assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
         assert connection.execute(

@@ -9,6 +9,7 @@ from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path
 
+from harness.git_applicability import WorkspaceApplicability
 from harness.index import (
     MAX_EXACT_SEARCH_FILE_BYTES,
     ExactSearchReadStatus,
@@ -38,6 +39,7 @@ from harness.search_text import (
     analyze_search_query,
     contains_russian_case_phrase,
     contains_term_phrase,
+    identifier_tokens,
     is_document_path,
     is_generated_text_output_path,
     matching_term_count,
@@ -55,7 +57,13 @@ from harness.symbol_navigation import (
     python_workspace_module_candidate_paths,
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
-from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
+from harness.tasks import (
+    TaskNotFoundError,
+    TaskOperatorStatus,
+    get_relevant_task,
+    get_task,
+    get_task_stack_hints,
+)
 from harness.verification import list_checkpoint_verification
 
 _DEFAULT_CANDIDATE_LIMIT = 96
@@ -98,11 +106,12 @@ EVIDENCE_REASON_RESPONSE_BUDGET = "response_budget"
 _QUALITY_EXACT_PATH = 0
 _QUALITY_EXACT_FILENAME = 1
 _QUALITY_EXACT_FILENAME_STEM = 2
-_QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 3
-_QUALITY_RUSSIAN_CASE_PHRASE = 4
-_QUALITY_DENSE_CONTENT = 5
-_QUALITY_ALL_TERMS = 6
-_QUALITY_PARTIAL = 7
+_QUALITY_EXACT_IDENTIFIER = 3
+_QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 4
+_QUALITY_RUSSIAN_CASE_PHRASE = 5
+_QUALITY_DENSE_CONTENT = 6
+_QUALITY_ALL_TERMS = 7
+_QUALITY_PARTIAL = 8
 _QUALITY_STALE_OFFSET = 4
 _QUALITY_EXACT_TASK_ID = 0
 _QUALITY_TASK_ID_PREFIX = 1
@@ -344,6 +353,7 @@ class ProjectSearchHit:
     evidence: ProjectSearchEvidence | None = None
     evidence_reason: str | None = None
     evidence_line: int | None = None
+    evidence_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,8 +387,24 @@ def search_project(
     scope: ProjectSearchScope = ProjectSearchScope.ALL,
     limit: int,
     response_reserve_bytes: int = 0,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[ProjectSearchHit, ...]:
     """Search bounded Project Intelligence while keeping filesystem search Workspace-local."""
+    if applicability is None:
+        applicability = WorkspaceApplicability(connection, workspace_id)
+        hits = search_project(
+            connection,
+            workspace_id,
+            query,
+            scope=scope,
+            limit=limit,
+            response_reserve_bytes=response_reserve_bytes,
+            applicability=applicability,
+        )
+        applicability.validate()
+        return hits
+    if applicability.workspace_id != workspace_id:
+        raise ProjectRetrievalError("applicability Workspace mismatch")
     workspace = get_workspace(connection, workspace_id)
     project = get_project(connection, workspace.project_id)
     normalized = _normalize_query(query)
@@ -423,6 +449,7 @@ def search_project(
                 limit,
                 active_workspace_id=workspace_id,
                 include_unanchored_agent_asserted=True,
+                applicability=applicability,
             )
         )
     elif scope is ProjectSearchScope.TASKS:
@@ -433,6 +460,7 @@ def search_project(
                 limit,
                 project_id=project.project_id,
                 active_workspace_id=workspace_id,
+                applicability=applicability,
             )
         )
     else:
@@ -443,6 +471,7 @@ def search_project(
                 analyzed,
                 limit,
                 active_workspace_id=workspace_id,
+                applicability=applicability,
             ),
             _file_hits(
                 connection,
@@ -464,6 +493,7 @@ def search_project(
                 limit,
                 project_id=project.project_id,
                 active_workspace_id=workspace_id,
+                applicability=applicability,
             ),
         )
         hits = _fuse_ranked_channels(channels, limit)
@@ -716,8 +746,19 @@ def read_project_context(
     connection: sqlite3.Connection,
     workspace_id: str,
     refs: tuple[str, ...],
+    *,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[ProjectContextItem, ...]:
     """Expand only explicitly selected refs and fail closed on cross-Project identities."""
+    if applicability is None:
+        applicability = WorkspaceApplicability(connection, workspace_id)
+        resolved_items = read_project_context(
+            connection, workspace_id, refs, applicability=applicability
+        )
+        applicability.validate()
+        return resolved_items
+    if applicability.workspace_id != workspace_id:
+        raise ProjectRetrievalError("applicability Workspace mismatch")
     workspace = get_workspace(connection, workspace_id)
     project = get_project(connection, workspace.project_id)
     items: list[ProjectContextItem] = []
@@ -754,6 +795,10 @@ def read_project_context(
                 raise ProjectRetrievalRefError("selected Knowledge ref does not exist") from exc
             if card.project_id != project.project_id:
                 raise ProjectRetrievalRefError("selected Knowledge ref belongs to another Project")
+            if not applicability.knowledge_visible(card):
+                raise ProjectRetrievalRefError(
+                    "selected Knowledge ref is unavailable in the active Git context"
+                )
             items.append(
                 ProjectContextItem(
                     ref=ref,
@@ -763,7 +808,21 @@ def read_project_context(
             )
             continue
         if ref.startswith("task:"):
-            items.append(_task_context(connection, project.project_id, ref))
+            task_id = ref.removeprefix("task:").partition("#")[0]
+            if not applicability.task_visible(task_id):
+                raise ProjectRetrievalRefError(
+                    "selected Task ref is unavailable in the active Git context"
+                )
+            fragment = ref.partition("#")[2]
+            if fragment.startswith("checkpoint:") and not applicability.checkpoint_visible(
+                fragment.removeprefix("checkpoint:")
+            ):
+                raise ProjectRetrievalRefError(
+                    "selected checkpoint is unavailable in the active Git context"
+                )
+            items.append(
+                _task_context(connection, project.project_id, ref, applicability=applicability)
+            )
             continue
         raise ProjectRetrievalRefError("selected Project context ref kind is unsupported")
     return tuple(items)
@@ -863,36 +922,61 @@ def _indexed_code_unit_hits(
         _FILE_CANDIDATE_LIMIT,
         max(24, limit * 8, len(query.terms) * 16),
     )
-    rows = connection.execute(
-        """
-        SELECT
-            units.relative_path,
-            units.name,
-            units.qualified_name,
-            units.symbol_kind,
-            units.line,
-            bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
-            manifests.content_sha256,
-            files.kind,
-            files.content_sha256
-        FROM indexed_code_unit_search
-        JOIN indexed_code_units AS units
-            ON units.id = indexed_code_unit_search.rowid
-        JOIN indexed_code_unit_files AS manifests
-            ON manifests.workspace_id = units.workspace_id
-           AND manifests.relative_path = units.relative_path
-        JOIN indexed_files AS files
-            ON files.workspace_id = units.workspace_id
-           AND files.relative_path = units.relative_path
-        WHERE indexed_code_unit_search MATCH ?
-          AND units.workspace_id = ?
-          AND manifests.status = 'ok'
-        ORDER BY bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
-                 units.relative_path, units.line, units.column
+
+    def match_rank(name: object, qualified_name: object, path: object) -> int:
+        if (
+            not isinstance(name, str)
+            or not isinstance(qualified_name, str)
+            or not isinstance(path, str)
+        ):
+            raise ProjectRetrievalError("code-unit search returned invalid persisted types")
+        quality = _code_unit_match_quality(query, name, qualified_name)
+        return quality * 3 + _path_relevance_penalty(path, query.terms)
+
+    # FTS auxiliaries must execute in MATCH before windowing. Rank whole names and select
+    # each file's best unit before the cap, so one large file cannot crowd out other files.
+    sql = """
+        WITH matched AS MATERIALIZED (
+            SELECT units.relative_path, units.name, units.qualified_name, units.symbol_kind,
+                   units.line, units.column,
+                   bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0) AS score,
+                   manifests.content_sha256 AS manifest_sha256,
+                   files.kind, files.content_sha256 AS indexed_sha256,
+                   harness_code_unit_match_rank(
+                       units.name, units.qualified_name, units.relative_path
+                   ) AS match_rank
+            FROM indexed_code_unit_search
+            JOIN indexed_code_units AS units ON units.id = indexed_code_unit_search.rowid
+            JOIN indexed_code_unit_files AS manifests
+                ON manifests.workspace_id = units.workspace_id
+               AND manifests.relative_path = units.relative_path
+            JOIN indexed_files AS files
+                ON files.workspace_id = units.workspace_id
+               AND files.relative_path = units.relative_path
+            WHERE indexed_code_unit_search MATCH ?
+              AND units.workspace_id = ? AND manifests.status = 'ok'
+              AND manifests.content_sha256 = files.content_sha256
+        ), per_file AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY relative_path ORDER BY match_rank, score, line, column
+            ) AS unit_position
+            FROM matched
+        )
+        SELECT relative_path, name, qualified_name, symbol_kind, line, score,
+               manifest_sha256, kind, indexed_sha256
+        FROM per_file WHERE unit_position = 1
+        ORDER BY match_rank, score, relative_path, line, column
         LIMIT ?
-        """,
-        (query.all_fts_expression, workspace_id, candidate_limit),
-    ).fetchall()
+    """
+    connection.create_function("harness_code_unit_match_rank", 3, match_rank, deterministic=True)
+    try:
+        rows = connection.execute(
+            sql, (query.all_fts_expression, workspace_id, candidate_limit)
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ProjectRetrievalError("code-unit search candidate ranking failed") from exc
+    finally:
+        connection.create_function("harness_code_unit_match_rank", 3, None)
     ranked_by_ref: dict[str, _RankedProjectHit] = {}
     for row in rows:
         (
@@ -926,13 +1010,12 @@ def _indexed_code_unit_hits(
             )
         if manifest_sha256 != indexed_sha256:
             continue
-        phrase_match = contains_term_phrase(query.terms, name) or contains_term_phrase(
-            query.terms, qualified_name
-        )
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if phrase_match else _QUALITY_DENSE_CONTENT
-        reason = (
-            "code unit definition phrase" if phrase_match else "code unit definition (all terms)"
-        )
+        quality = _code_unit_match_quality(query, name, qualified_name)
+        reason = {
+            _QUALITY_EXACT_IDENTIFIER: "code unit exact identifier",
+            _QUALITY_TITLE_OR_IDENTIFIER_PHRASE: "code unit definition phrase",
+            _QUALITY_DENSE_CONTENT: "code unit definition (all terms)",
+        }[quality]
         ref = f"code:{relative_path}"
         candidate = _RankedProjectHit(
             hit=ProjectSearchHit(
@@ -948,6 +1031,7 @@ def _indexed_code_unit_hits(
                 freshness="indexed_snapshot",
                 path=relative_path,
                 evidence_line=line,
+                evidence_scope=qualified_name.rpartition(".")[0],
             ),
             quality=quality,
             matched_terms=len(query.terms),
@@ -958,6 +1042,14 @@ def _indexed_code_unit_hits(
         if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
             ranked_by_ref[ref] = candidate
     return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
+
+
+def _code_unit_match_quality(query: AnalyzedSearchQuery, name: str, qualified_name: str) -> int:
+    if query.terms in (identifier_tokens(name), identifier_tokens(qualified_name)):
+        return _QUALITY_EXACT_IDENTIFIER
+    if contains_term_phrase(query.terms, name) or contains_term_phrase(query.terms, qualified_name):
+        return _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+    return _QUALITY_DENSE_CONTENT
 
 
 def _indexed_resolved_code_relation_hits(
@@ -1498,18 +1590,34 @@ def _knowledge_hits(
     *,
     active_workspace_id: str,
     include_unanchored_agent_asserted: bool = False,
+    applicability: WorkspaceApplicability,
 ) -> tuple[_RankedProjectHit, ...]:
     candidate_limit = _candidate_limit(limit)
-    rows = connection.execute(
-        """
-        SELECT knowledge_id, bm25(knowledge_search, 0.0, 0.0, 5.0, 1.0) AS score
-        FROM knowledge_search
-        WHERE knowledge_search MATCH ? AND project_id = ?
-        ORDER BY score, knowledge_id
-        LIMIT ?
-        """,
-        (query.fts_expression, project_id, candidate_limit),
-    ).fetchall()
+
+    def visible(knowledge_id: str) -> bool:
+        card = get_knowledge_card(connection, knowledge_id)
+        return applicability.knowledge_visible(card) and (
+            card.source_type is not KnowledgeSourceType.AGENT_ASSERTED
+            or bool(card.anchors)
+            or include_unanchored_agent_asserted
+        )
+
+    connection.create_function("harness_knowledge_visible", 1, visible)
+    try:
+        rows = connection.execute(
+            """
+            SELECT knowledge_id, bm25(knowledge_search, 0.0, 0.0, 5.0, 1.0) AS score
+            FROM knowledge_search
+            WHERE knowledge_search MATCH ? AND project_id = ?
+                AND harness_knowledge_visible(knowledge_id)
+            ORDER BY score, knowledge_id LIMIT ?
+            """,
+            (query.fts_expression, project_id, candidate_limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ProjectRetrievalError("Knowledge applicability proof unavailable") from exc
+    finally:
+        connection.create_function("harness_knowledge_visible", 1, None)
     ranked: list[_RankedProjectHit] = []
     seen: set[str] = set()
     for knowledge_id, raw_score in rows:
@@ -1521,13 +1629,6 @@ def _knowledge_hits(
         card = get_knowledge_card(connection, knowledge_id)
         if card.project_id != project_id:
             raise ProjectRetrievalError("Knowledge search index crossed Project ownership")
-        if not _knowledge_applies_to_workspace(
-            connection,
-            card,
-            active_workspace_id,
-            include_unanchored_agent_asserted=include_unanchored_agent_asserted,
-        ):
-            continue
         stale = card.freshness is KnowledgeFreshness.NEEDS_REVALIDATION
         location = card.anchors[0].relative_path if card.anchors else f"project:{project_id[:12]}"
         anchor_text = " ".join(
@@ -1568,34 +1669,6 @@ def _knowledge_hits(
     return tuple(ranked[:limit])
 
 
-def _knowledge_applies_to_workspace(
-    connection: sqlite3.Connection,
-    card: KnowledgeCardRecord,
-    active_workspace_id: str,
-    *,
-    include_unanchored_agent_asserted: bool,
-) -> bool:
-    if card.source_type is not KnowledgeSourceType.AGENT_ASSERTED:
-        return True
-    if not card.anchors:
-        return include_unanchored_agent_asserted
-    anchors_match = True
-    for anchor in card.anchors:
-        indexed = get_indexed_file(connection, active_workspace_id, anchor.relative_path)
-        if (
-            indexed is None
-            or indexed.kind.value != anchor.fingerprint_kind.value
-            or indexed.content_sha256 != anchor.content_sha256
-        ):
-            anchors_match = False
-            break
-    if anchors_match:
-        return True
-    return include_unanchored_agent_asserted and all(
-        anchor.workspace_id == active_workspace_id for anchor in card.anchors
-    )
-
-
 def _task_hits(
     connection: sqlite3.Connection,
     query: AnalyzedSearchQuery,
@@ -1603,9 +1676,46 @@ def _task_hits(
     *,
     project_id: str | None = None,
     active_workspace_id: str | None = None,
+    applicability: WorkspaceApplicability | None = None,
+) -> tuple[_RankedProjectHit, ...]:
+    def fragment_visible(ref: str) -> bool:
+        return (
+            applicability is None
+            or not ref.startswith("checkpoint:")
+            or applicability.checkpoint_visible(ref.removeprefix("checkpoint:"))
+        )
+
+    if applicability is not None:
+        connection.create_function("harness_task_fragment_visible", 1, fragment_visible)
+        connection.create_function("harness_task_visible", 1, applicability.task_visible)
+    try:
+        return _task_hits_with_visibility(
+            connection,
+            query,
+            limit,
+            project_id=project_id,
+            active_workspace_id=active_workspace_id,
+            applicability=applicability,
+        )
+    finally:
+        if applicability is not None:
+            connection.create_function("harness_task_visible", 1, None)
+            connection.create_function("harness_task_fragment_visible", 1, None)
+
+
+def _task_hits_with_visibility(
+    connection: sqlite3.Connection,
+    query: AnalyzedSearchQuery,
+    limit: int,
+    *,
+    project_id: str | None = None,
+    active_workspace_id: str | None = None,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[_RankedProjectHit, ...]:
     current = (
-        None if active_workspace_id is None else get_relevant_task(connection, active_workspace_id)
+        None
+        if active_workspace_id is None
+        else get_relevant_task(connection, active_workspace_id, applicability=applicability)
     )
     current_task_id = None if current is None else current.task_id
     identifier_hits = _task_identifier_hits(
@@ -1614,6 +1724,7 @@ def _task_hits(
         limit,
         project_id=project_id,
         current_task_id=current_task_id,
+        applicability=applicability,
     )
     if identifier_hits:
         return identifier_hits
@@ -1648,6 +1759,8 @@ def _task_hits(
     if project_id is not None:
         sql += " AND project_id = ?"
         params.append(project_id)
+    if applicability is not None:
+        sql += " AND harness_task_visible(task_id) AND harness_task_fragment_visible(fragment_ref)"
     sql += """
         ), per_task AS (
             SELECT *, ROW_NUMBER() OVER (
@@ -1728,12 +1841,15 @@ def _task_identifier_hits(
     *,
     project_id: str | None,
     current_task_id: str | None,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[_RankedProjectHit, ...]:
     identifier = query.normalized.removeprefix("task:")
     canonical = (
         identifier.lower() if re.fullmatch(r"[0-9a-fA-F]{10,32}", identifier) else identifier
     )
     scope_sql = " AND workspaces.project_id = ?" if project_id is not None else ""
+    if applicability is not None:
+        scope_sql += " AND harness_task_visible(tasks.id)"
     owner_sql = "FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id"
     params: list[object] = [query.normalized, identifier, canonical]
     if project_id is not None:
@@ -1861,7 +1977,7 @@ def _task_fragment_projection(
         row = connection.execute(
             """
             SELECT task_id, task_revision, event_type, operator_feedback,
-                   operator_comment, jira_url, operator_status
+                   operator_comment, jira_url, operator_status, deploy_test, deploy_prod
             FROM task_events
             WHERE id = ?
             """,
@@ -1880,7 +1996,10 @@ def _task_fragment_projection(
         ):
             raise ProjectRetrievalError("Task search event ownership mismatch")
         event_type = _require_text(row[2], "Task event type")
-        raw_summary = next((value for value in row[3:] if isinstance(value, str)), None)
+        operator_status = _task_event_delivery_status(row[6], row[7], row[8])
+        raw_summary = next(
+            (value for value in (*row[3:6], operator_status) if isinstance(value, str)), None
+        )
         if raw_summary is None:
             raise ProjectRetrievalError("Task search event has no searchable payload")
         revision = row[1]
@@ -1895,10 +2014,35 @@ def _task_fragment_projection(
     raise ProjectRetrievalError("Task search fragment ref is invalid")
 
 
+def _task_event_delivery_status(
+    legacy_status: object, deploy_test: object, deploy_prod: object
+) -> str | None:
+    """Project immutable event delivery evidence, retaining pre-v22 history."""
+    if deploy_test is None and deploy_prod is None:
+        if legacy_status is not None and not isinstance(legacy_status, str):
+            raise ProjectRetrievalError("Task event delivery status is invalid")
+        return legacy_status
+    if (
+        type(deploy_test) is not int
+        or deploy_test not in (0, 1)
+        or type(deploy_prod) is not int
+        or deploy_prod not in (0, 1)
+        or legacy_status is not None
+    ):
+        raise ProjectRetrievalError("Task event deployment flags are invalid")
+    if deploy_test and deploy_prod:
+        return TaskOperatorStatus.DEPLOY_BOTH.value
+    if deploy_test:
+        return TaskOperatorStatus.DEPLOY_TEST.value
+    return TaskOperatorStatus.DEPLOY_PROD.value if deploy_prod else None
+
+
 def _task_context(
     connection: sqlite3.Connection,
     project_id: str,
     ref: str,
+    *,
+    applicability: WorkspaceApplicability,
 ) -> ProjectContextItem:
     task_part, separator, fragment = ref.partition("#")
     task_id = task_part.removeprefix("task:")
@@ -1928,7 +2072,9 @@ def _task_context(
     }
     if not separator:
         history: list[dict[str, object]] = []
-        for event in list_task_events(connection, task.task_id, limit=_CONTEXT_HISTORY_LIMIT):
+        for event in list_task_events(
+            connection, task.task_id, limit=_CONTEXT_HISTORY_LIMIT, applicability=applicability
+        ):
             item: dict[str, object] = {
                 "event_type": event.event_type.value,
                 "task_revision": event.task_revision,
@@ -2020,7 +2166,8 @@ def _task_context(
         row = connection.execute(
             """
             SELECT task_id, task_revision, event_type, operator_feedback,
-                   operator_comment, jira_url, operator_status, created_at
+                   operator_comment, jira_url, operator_status, created_at,
+                   deploy_test, deploy_prod
             FROM task_events
             WHERE id = ?
             """,
@@ -2033,7 +2180,7 @@ def _task_context(
             ("operator_feedback", row[3]),
             ("operator_comment", row[4]),
             ("jira_url", row[5]),
-            ("operator_status", row[6]),
+            ("operator_status", _task_event_delivery_status(row[6], row[8], row[9])),
         )
         payload = next(
             ((name, value) for name, value in payload_names if isinstance(value, str)),
@@ -2181,6 +2328,7 @@ def _attach_current_source_evidence(
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_PATH_ONLY,
                     evidence_line=None,
+                    evidence_scope=None,
                 )
             )
             continue
@@ -2191,6 +2339,7 @@ def _attach_current_source_evidence(
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET,
                     evidence_line=None,
+                    evidence_scope=None,
                 )
             )
             continue
@@ -2207,6 +2356,7 @@ def _attach_current_source_evidence(
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX,
                     evidence_line=None,
+                    evidence_scope=None,
                 )
             )
             continue
@@ -2217,11 +2367,22 @@ def _attach_current_source_evidence(
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
                     evidence_line=None,
+                    evidence_scope=None,
                 )
             )
             continue
         evidence = (
-            _search_evidence_at_line(read.text, hit.evidence_line, query.terms)
+            _search_evidence_at_line(
+                read.text,
+                hit.evidence_line,
+                query.terms,
+                forward=hit.evidence_scope is not None,
+                end_line=(
+                    _code_unit_evidence_end_line(connection, workspace.workspace_id, hit)
+                    if hit.evidence_scope is not None
+                    else None
+                ),
+            )
             if hit.evidence_line is not None
             else None
         )
@@ -2234,16 +2395,46 @@ def _attach_current_source_evidence(
                     evidence=None,
                     evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
                     evidence_line=None,
+                    evidence_scope=None,
                 )
             )
             continue
-        annotated.append(replace(hit, evidence=evidence, evidence_reason=None, evidence_line=None))
+        annotated.append(
+            replace(
+                hit,
+                evidence=evidence,
+                evidence_reason=None,
+                evidence_line=None,
+                evidence_scope=None,
+            )
+        )
         evidence_budget -= 1
     return _fit_search_hits_to_response_budget(
         annotated,
         query.normalized,
         response_reserve_bytes=response_reserve_bytes,
     )
+
+
+def _code_unit_evidence_end_line(
+    connection: sqlite3.Connection, workspace_id: str, hit: ProjectSearchHit
+) -> int | None:
+    """Bound a verified definition by the next indexed peer or ancestor-scope declaration."""
+    assert hit.evidence_scope is not None
+    parts = hit.evidence_scope.split(".") if hit.evidence_scope else []
+    scopes = [".".join(parts[:count]) for count in range(len(parts) + 1)]
+    placeholders = ",".join("?" for _ in scopes)
+    row = connection.execute(
+        f"""
+        SELECT MIN(line) FROM indexed_code_units
+        WHERE workspace_id = ? AND relative_path = ? AND line > ?
+          AND CASE WHEN qualified_name = name THEN ''
+              ELSE substr(qualified_name, 1, length(qualified_name) - length(name) - 1)
+              END IN ({placeholders})
+        """,
+        (workspace_id, hit.path, hit.evidence_line, *scopes),
+    ).fetchone()
+    return None if row is None or row[0] is None else int(row[0]) - 1
 
 
 def _indexed_content_sha256(
@@ -2337,6 +2528,9 @@ def _search_evidence_at_line(
     text: str,
     line: int,
     terms: tuple[str, ...],
+    *,
+    forward: bool = False,
+    end_line: int | None = None,
 ) -> ProjectSearchEvidence | None:
     lines = text.splitlines()
     if line < 1 or line > len(lines):
@@ -2345,7 +2539,9 @@ def _search_evidence_at_line(
     matched_terms = matching_terms(terms, lines[match_line])
     if not matched_terms:
         return None
-    return _search_evidence_from_line_range(lines, match_line, match_line, matched_terms)
+    return _search_evidence_from_line_range(
+        lines, match_line, match_line, matched_terms, forward=forward, end_line=end_line
+    )
 
 
 def _remove_search_evidence_match(counts: dict[str, int], term: str) -> None:
@@ -2361,19 +2557,31 @@ def _search_evidence_from_line_range(
     match_start: int,
     match_end: int,
     required_terms: tuple[str, ...],
+    *,
+    forward: bool = False,
+    end_line: int | None = None,
 ) -> ProjectSearchEvidence | None:
     start = match_start
     end = match_end
+    # Structural anchors spend their window on the declaration and following implementation.
+    # Lexical windows retain the selected covering range with only a little surrounding context.
+    minimum_start = match_start if forward else max(0, match_start - 3)
+    maximum_end = min(
+        len(lines) - 1,
+        match_start + MAX_SEARCH_EVIDENCE_SNIPPET_LINES - 1 if forward else match_end + 3,
+    )
+    if end_line is not None:
+        maximum_end = min(maximum_end, max(match_end, end_line - 1))
     while end - start + 1 < MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
         grew = False
-        if start > 0:
+        if start > minimum_start:
             expanded = "\n".join(lines[start - 1 : end + 1])
             if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
                 start -= 1
                 grew = True
         if end - start + 1 >= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
             break
-        if end + 1 < len(lines):
+        if end < maximum_end:
             expanded = "\n".join(lines[start : end + 2])
             if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
                 end += 1

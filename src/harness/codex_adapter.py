@@ -14,7 +14,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from harness.agent_instructions import TASK_CONTINUITY_INSTRUCTIONS
+from harness.agent_instructions import (
+    TASK_CONTINUITY_INSTRUCTIONS,
+    TASK_CREATION_INSTRUCTIONS,
+    TASK_REVIEW_INSTRUCTIONS,
+)
 from harness.dashboard import load_or_create_dashboard_access_token, read_dashboard_access_token
 from harness.git_workspace import inspect_workspace_layout
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
@@ -161,20 +165,35 @@ _NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "logical stage.\n"
 )
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness required. `project_status` must be the first repository action. "
     "Before shell/read/search/browser/change, find deferred/omitted Harness tools; discovery alone "
     "may precede status. After Harness config changes restart Codex/new conversation; instruction "
     "snapshots do not refresh. After status, start/resume a Harness Task before diagnosis/edits; "
     "schema error: retry, never skip. "
-    + TASK_CONTINUITY_INSTRUCTIONS
-    + "Small work or known paths still need a Task. "
+    "Same outcome: one Task across diagnosis, implementation, checks and follow-ups. "
+    "New Task only for a distinct outcome. "
+    "Small work or known paths still need a Task. "
     "Identifiers/literals/Knowledge/Tasks: `project_search` before broad native work; "
     "natural-language code/doc discovery may use native search directly; lexical hits allow broad "
     "fallback. Exact paths may skip search, not Task; code/doc paths may be read natively, "
     "project_context optional. Complete untruncated exact_coverage replaces native search. "
     "Checkpoint each logical stage with task_id+expected_revision; complete only when the outcome "
     "is done."
+)
+
+
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness required. `project_status` must be the first repository action. "
+    "Before shell/read/search/browser/change, find deferred/omitted Harness tools; "
+    "discovery alone may precede status. After config changes restart Codex/new conversation. "
+    + TASK_CREATION_INSTRUCTIONS
+    + TASK_CONTINUITY_INSTRUCTIONS
+    + "Resume by explicit ID; retry schema errors. "
+    "Identifiers/literals/Knowledge/Tasks: `project_search` before broad native work; "
+    "natural-language discovery may use native search. Lexical hits allow broad fallback. "
+    "Exact paths allow native reads; project_context optional. "
+    "Complete untruncated exact_coverage replaces native search. " + TASK_REVIEW_INSTRUCTIONS
 )
 
 _OWNED_CODEX_BOOTSTRAP_BASES = (
@@ -185,6 +204,7 @@ _OWNED_CODEX_BOOTSTRAP_BASES = (
     _TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(

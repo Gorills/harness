@@ -109,7 +109,7 @@ def test_latest_report_without_checks_does_not_promote_historical_verification(
             other_workspace.workspace_id,
             other.task_id,
             expected_revision=other.revision,
-            state=TaskState.COMPLETED,
+            state=TaskState.WORKING,
             summary="Чужой отчёт",
             verification=[VerificationDraft("Foreign", VerificationStatus.PASSED, "FOREIGN PROOF")],
         )

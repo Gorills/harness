@@ -27,7 +27,7 @@ from harness.registry import create_project, register_workspace
 from harness.search import SearchError
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import TaskCheckpointError, list_task_events
-from harness.task_workflow import task_checkpoint, task_start
+from harness.task_workflow import task_accept, task_checkpoint, task_start
 from harness.tasks import TaskState, TaskWaitReason
 
 
@@ -102,13 +102,8 @@ def test_dashboard_metrics_count_every_waiting_and_working_task(tmp_path: Path) 
                 next_step="Дождаться результата",
             )
         completed = task_start(connection, workspace_id, "Завершённая задача")
-        task_checkpoint(
-            connection,
-            workspace_id,
-            completed.task_id,
-            expected_revision=completed.revision,
-            state=TaskState.COMPLETED,
-            summary="Готово",
+        task_accept(
+            connection, workspace_id, completed.task_id, expected_revision=completed.revision
         )
         task_start(connection, workspace_id, "Текущая работа")
         other_root = tmp_path / "other"
@@ -139,14 +134,7 @@ def test_task_history_pages_keep_all_tasks_and_search_query(tmp_path: Path) -> N
         for number in range(26):
             task = task_start(connection, workspace_id, f"История {number:02}")
             task_ids.add(task.task_id)
-            task_checkpoint(
-                connection,
-                workspace_id,
-                task.task_id,
-                expected_revision=task.revision,
-                state=TaskState.COMPLETED,
-                summary="Готово",
-            )
+            task_accept(connection, workspace_id, task.task_id, expected_revision=task.revision)
     finally:
         connection.close()
 

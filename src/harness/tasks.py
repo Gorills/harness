@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
+from harness.git_applicability import WorkspaceApplicability, capture_task_origin
 from harness.registry import get_workspace
 from harness.task_baseline import (
     TaskBaselineRecord,
@@ -68,6 +69,7 @@ class TaskOperatorStatus(StrEnum):
 
     DEPLOY_TEST = "deploy_test"
     DEPLOY_PROD = "deploy_prod"
+    DEPLOY_BOTH = "deploy_test_and_prod"
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +82,20 @@ class TaskRecord:
     state: TaskState
     wait_reason: TaskWaitReason | None
     jira_url: str | None
-    operator_status: TaskOperatorStatus | None
+    deploy_test: bool
+    deploy_prod: bool
     revision: int
     created_at: str
     updated_at: str
+
+    @property
+    def operator_status(self) -> TaskOperatorStatus | None:
+        """Compatibility presentation of the independent deployment flags."""
+        if self.deploy_test and self.deploy_prod:
+            return TaskOperatorStatus.DEPLOY_BOTH
+        if self.deploy_test:
+            return TaskOperatorStatus.DEPLOY_TEST
+        return TaskOperatorStatus.DEPLOY_PROD if self.deploy_prod else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +150,7 @@ def get_task(connection: sqlite3.Connection, task_id: str) -> TaskRecord:
     """Load one Task by stable Harness identity."""
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod,
                revision, created_at, updated_at
         FROM tasks
         WHERE id = ?
@@ -201,41 +213,49 @@ def get_working_task(
 def get_relevant_task(
     connection: sqlite3.Connection,
     workspace_id: str,
+    *,
+    applicability: WorkspaceApplicability | None = None,
 ) -> TaskRecord | None:
     """Return the current working Task, or the most recently updated waiting Task."""
     get_workspace(connection, workspace_id)
-    row = connection.execute(
+    rows = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod,
                revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ? AND state IN ('working', 'waiting')
         ORDER BY CASE state WHEN 'working' THEN 0 ELSE 1 END, updated_at DESC, id DESC
-        LIMIT 1
         """,
         (workspace_id,),
-    ).fetchone()
-    return None if row is None else _task_from_row(row)
+    )
+    for row in rows:
+        if applicability is None or applicability.task_visible(row[0]):
+            return _task_from_row(row)
+    return None
 
 
 def get_latest_task(
     connection: sqlite3.Connection,
     workspace_id: str,
+    *,
+    applicability: WorkspaceApplicability | None = None,
 ) -> TaskRecord | None:
     """Return the most recently updated Task for a Workspace, regardless of terminal state."""
     get_workspace(connection, workspace_id)
-    row = connection.execute(
+    rows = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod,
                revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ?
         ORDER BY updated_at DESC, id DESC
-        LIMIT 1
         """,
         (workspace_id,),
-    ).fetchone()
-    return None if row is None else _task_from_row(row)
+    )
+    for row in rows:
+        if applicability is None or applicability.task_visible(row[0]):
+            return _task_from_row(row)
+    return None
 
 
 def transition_task_state(
@@ -297,6 +317,7 @@ def _create_task_with_baseline_in_transaction(
             raise TaskConflictError("workspace already has a working task") from exc
         raise
     baseline = persist_task_baseline(connection, task.task_id, snapshot)
+    capture_task_origin(connection, task.task_id)
     return TaskCreationRecord(task=task, baseline=baseline)
 
 
@@ -367,7 +388,9 @@ def _reopen_task_in_transaction(
         )
     existing = _working_task(connection, current.workspace_id)
     if existing is not None and existing.task_id != current.task_id:
-        raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
+        raise TaskConflictError(
+            "workspace already has a working task; defer it in the operator task archive first"
+        )
     try:
         cursor = connection.execute(
             """
@@ -428,7 +451,8 @@ def _new_task_record(*, workspace_id: str, title: str, timestamp: str) -> TaskRe
         state=TaskState.WORKING,
         wait_reason=None,
         jira_url=None,
-        operator_status=None,
+        deploy_test=False,
+        deploy_prod=False,
         revision=1,
         created_at=timestamp,
         updated_at=timestamp,
@@ -472,7 +496,7 @@ def _working_task(
 ) -> TaskRecord | None:
     row = connection.execute(
         """
-        SELECT id, workspace_id, title, state, wait_reason, jira_url, operator_status,
+        SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod,
                revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ? AND state = 'working'
@@ -552,7 +576,8 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
         state,
         wait_reason,
         jira_url,
-        operator_status,
+        deploy_test,
+        deploy_prod,
         revision,
         created_at,
         updated_at,
@@ -567,7 +592,10 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
         or not isinstance(state, str)
         or (wait_reason is not None and not isinstance(wait_reason, str))
         or (jira_url is not None and not isinstance(jira_url, str))
-        or (operator_status is not None and not isinstance(operator_status, str))
+        or type(deploy_test) is not int
+        or deploy_test not in (0, 1)
+        or type(deploy_prod) is not int
+        or deploy_prod not in (0, 1)
         or isinstance(revision, bool)
         or not isinstance(revision, int)
         or revision <= 0
@@ -586,12 +614,6 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
     except ValueError as exc:
         raise TaskError(f"task row has unsupported wait_reason: {wait_reason!r}") from exc
     _validate_state_reason(task_state, task_wait_reason)
-    try:
-        task_operator_status = (
-            TaskOperatorStatus(operator_status) if operator_status is not None else None
-        )
-    except ValueError as exc:
-        raise TaskError(f"task row has unsupported operator_status: {operator_status!r}") from exc
     return TaskRecord(
         task_id=task_id,
         workspace_id=workspace_id,
@@ -599,7 +621,8 @@ def _task_from_row(row: tuple[object, ...]) -> TaskRecord:
         state=task_state,
         wait_reason=task_wait_reason,
         jira_url=jira_url,
-        operator_status=task_operator_status,
+        deploy_test=bool(deploy_test),
+        deploy_prod=bool(deploy_prod),
         revision=revision,
         created_at=created_at,
         updated_at=updated_at,

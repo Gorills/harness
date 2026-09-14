@@ -232,11 +232,13 @@ _EVENT_LABELS = {
     TaskEventType.OPERATOR_COMMENT: EVENT_COMMENT,
     TaskEventType.JIRA_LINK_UPDATED: EVENT_JIRA_UPDATED,
     TaskEventType.OPERATOR_STATUS_UPDATED: EVENT_OPERATOR_STATUS_UPDATED,
+    TaskEventType.STATE_CHANGED: "Состояние изменено оператором",
     TaskEventType.CANCELLED: EVENT_CANCELLED,
 }
 _OPERATOR_STATUS_LABELS = {
     TaskOperatorStatus.DEPLOY_TEST.value: OPERATOR_STATUS_DEPLOY_TEST,
     TaskOperatorStatus.DEPLOY_PROD.value: OPERATOR_STATUS_DEPLOY_PROD,
+    TaskOperatorStatus.DEPLOY_BOTH.value: "Деплой на тест · Деплой на прод",
 }
 
 
@@ -327,3 +329,6 @@ def task_crumb(task_id: str) -> str:
 
 def document_title(label: str) -> str:
     return f"{label} · {BRAND}"
+
+
+OPERATOR_STATE_WORKING = "В работе"

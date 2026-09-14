@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import urlsplit
 
+from harness.git_applicability import WorkspaceApplicability, persist_initial_handoff
 from harness.knowledge import KnowledgeDraft
 from harness.registry import get_workspace
 from harness.task_checkpoints import (
@@ -34,6 +35,7 @@ from harness.tasks import (
     _transition_task_state_in_transaction,
     _utc_timestamp,
     _validate_expected_revision,
+    _validate_state_reason,
     get_task,
 )
 from harness.verification import VerificationDraft
@@ -82,35 +84,46 @@ def task_resume(
     expected_revision: int | None = None,
     now: datetime | None = None,
 ) -> TaskRecord:
-    """Idempotently attach to working Task or CAS-resume a waiting Task."""
+    """Resume the explicit Task, with CAS for waiting or initial branch handoff."""
     get_workspace(connection, workspace_id)
-    current = _task_in_workspace(connection, workspace_id, task_id)
-    if current.state is TaskState.WORKING:
-        return current
-    if current.state in {TaskState.COMPLETED, TaskState.CANCELLED}:
-        raise TaskTransitionError(f"cannot resume terminal Task in state {current.state.value}")
-    if expected_revision is None:
-        raise TaskValidationError("resuming a waiting Task requires expected_revision")
-    _validate_expected_revision(expected_revision)
+    if expected_revision is not None:
+        _validate_expected_revision(expected_revision)
     timestamp = _utc_timestamp(now)
-
     connection.execute("BEGIN IMMEDIATE")
     try:
         current = _task_in_workspace(connection, workspace_id, task_id)
-        if current.state is TaskState.WORKING:
-            connection.execute("COMMIT")
-            return current
+        applicability = WorkspaceApplicability(connection, workspace_id)
+        handoff = not applicability.task_visible(task_id)
+        if handoff and not applicability.initial_handoff_allowed(task_id):
+            raise TaskWorkspaceConflictError("Task is unavailable in the active Git context")
         if current.state in {TaskState.COMPLETED, TaskState.CANCELLED}:
             raise TaskTransitionError(f"cannot resume terminal Task in state {current.state.value}")
-        updated = _transition_task_state_in_transaction(
-            connection,
-            task_id,
-            expected_revision=expected_revision,
-            state=TaskState.WORKING,
-            wait_reason=None,
-            timestamp=timestamp,
-        )
+        if current.state is TaskState.WORKING and not handoff:
+            applicability.validate()
+            connection.execute("COMMIT")
+            return current
+        if expected_revision is None:
+            raise TaskValidationError(
+                "resuming a waiting Task or initial branch handoff requires expected_revision"
+            )
+        _require_expected_revision(current, expected_revision)
+        if handoff:
+            persist_initial_handoff(connection, task_id, applicability)
+        if current.state is TaskState.WORKING:
+            updated = _advance_task_revision_in_transaction(
+                connection, task_id, expected_revision=expected_revision, timestamp=timestamp
+            )
+        else:
+            updated = _transition_task_state_in_transaction(
+                connection,
+                task_id,
+                expected_revision=expected_revision,
+                state=TaskState.WORKING,
+                wait_reason=None,
+                timestamp=timestamp,
+            )
         _insert_lifecycle_event(connection, updated, TaskEventType.RESUMED)
+        applicability.validate()
         connection.execute("COMMIT")
         return updated
     except Exception:
@@ -157,25 +170,95 @@ def task_accept(
     expected_revision: int,
     now: datetime | None = None,
 ) -> TaskOperatorMutation:
-    """CAS-complete one Task waiting specifically for operator review."""
+    """Accept the explicit Task from any state; completion belongs to the operator."""
+    return task_set_state(
+        connection,
+        workspace_id,
+        task_id,
+        expected_revision=expected_revision,
+        state=TaskState.COMPLETED,
+        now=now,
+    )
+
+
+def task_set_state(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    task_id: str,
+    *,
+    expected_revision: int,
+    state: TaskState,
+    wait_reason: TaskWaitReason | None = None,
+    now: datetime | None = None,
+) -> TaskOperatorMutation:
+    """Choose any lifecycle state explicitly as operator, preserving CAS and one working Task."""
     _validate_expected_revision(expected_revision)
+    if not isinstance(state, TaskState) or (
+        wait_reason is not None and not isinstance(wait_reason, TaskWaitReason)
+    ):
+        raise TaskValidationError("operator Task state or wait reason is unsupported")
+    _validate_state_reason(state, wait_reason)
     timestamp = _utc_timestamp(now)
     connection.execute("BEGIN IMMEDIATE")
     try:
         current = _task_in_workspace(connection, workspace_id, task_id)
         _require_expected_revision(current, expected_revision)
-        _require_operator_review_wait(current)
-        updated = _transition_task_state_in_transaction(
-            connection,
-            task_id,
-            expected_revision=expected_revision,
-            state=TaskState.COMPLETED,
-            wait_reason=None,
-            timestamp=timestamp,
+        if state is TaskState.WORKING:
+            existing = connection.execute(
+                "SELECT id FROM tasks WHERE workspace_id = ? AND state = 'working' AND id <> ?",
+                (workspace_id, task_id),
+            ).fetchone()
+            if existing is not None:
+                from harness.tasks import TaskConflictError
+
+                raise TaskConflictError("workspace already has a working task")
+        connection.execute(
+            "UPDATE tasks SET state = ?, wait_reason = ?, revision = revision + 1, "
+            "updated_at = ? WHERE id = ? AND revision = ?",
+            (
+                state.value,
+                None if wait_reason is None else wait_reason.value,
+                timestamp,
+                task_id,
+                expected_revision,
+            ),
         )
-        event = _insert_operator_event(connection, updated, TaskEventType.ACCEPTED)
+        updated = get_task(connection, task_id)
+        event = _insert_operator_event(
+            connection,
+            updated,
+            TaskEventType.ACCEPTED if state is TaskState.COMPLETED else TaskEventType.STATE_CHANGED,
+            target_state=None if state is TaskState.COMPLETED else state,
+            target_wait_reason=wait_reason,
+        )
         connection.execute("COMMIT")
         return TaskOperatorMutation(task=updated, event=event)
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+
+
+def task_delete(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    task_id: str,
+    *,
+    expected_revision: int,
+) -> None:
+    """Permanently remove a Task and its provenance Knowledge, never repository files."""
+    _validate_expected_revision(expected_revision)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _task_in_workspace(connection, workspace_id, task_id)
+        _require_expected_revision(current, expected_revision)
+        connection.execute("DELETE FROM knowledge_cards WHERE source_task_id = ?", (task_id,))
+        cursor = connection.execute(
+            "DELETE FROM tasks WHERE id = ? AND revision = ?", (task_id, expected_revision)
+        )
+        if cursor.rowcount != 1:
+            raise TaskRevisionConflictError("task revision changed during deletion")
+        connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -364,16 +447,57 @@ def task_set_operator_status(
     _validate_expected_revision(expected_revision)
     if operator_status is not None and not isinstance(operator_status, TaskOperatorStatus):
         raise TaskValidationError("operator_status is unsupported")
-    return _mutate_operator_metadata(
+    return task_set_deployment(
         connection,
         workspace_id,
         task_id,
         expected_revision=expected_revision,
-        column="operator_status",
-        value=None if operator_status is None else operator_status.value,
-        event_type=TaskEventType.OPERATOR_STATUS_UPDATED,
+        deploy_test=operator_status
+        in {TaskOperatorStatus.DEPLOY_TEST, TaskOperatorStatus.DEPLOY_BOTH},
+        deploy_prod=operator_status
+        in {TaskOperatorStatus.DEPLOY_PROD, TaskOperatorStatus.DEPLOY_BOTH},
         now=now,
     )
+
+
+def task_set_deployment(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    task_id: str,
+    *,
+    expected_revision: int,
+    deploy_test: bool,
+    deploy_prod: bool,
+    now: datetime | None = None,
+) -> TaskOperatorMutation:
+    """Atomically set both independent deployment flags with an immutable snapshot."""
+    _validate_expected_revision(expected_revision)
+    if type(deploy_test) is not bool or type(deploy_prod) is not bool:
+        raise TaskValidationError("deployment flags must be booleans")
+    timestamp = _utc_timestamp(now)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        current = _task_in_workspace(connection, workspace_id, task_id)
+        _require_expected_revision(current, expected_revision)
+        connection.execute(
+            "UPDATE tasks SET deploy_test = ?, deploy_prod = ?, operator_status = NULL, "
+            "revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?",
+            (int(deploy_test), int(deploy_prod), timestamp, task_id, expected_revision),
+        )
+        updated = get_task(connection, task_id)
+        event = _insert_operator_event(
+            connection,
+            updated,
+            TaskEventType.OPERATOR_STATUS_UPDATED,
+            deploy_test=deploy_test,
+            deploy_prod=deploy_prod,
+        )
+        connection.execute("COMMIT")
+        return TaskOperatorMutation(task=updated, event=event)
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
 
 
 def _require_expected_revision(task: TaskRecord, expected_revision: int) -> None:
@@ -504,9 +628,14 @@ def _insert_operator_event(
     operator_comment: str | None = None,
     jira_url: str | None = None,
     operator_status: TaskOperatorStatus | None = None,
+    deploy_test: bool | None = None,
+    deploy_prod: bool | None = None,
+    target_state: TaskState | None = None,
+    target_wait_reason: TaskWaitReason | None = None,
 ) -> TaskEventRecord:
     if event_type not in {
         TaskEventType.ACCEPTED,
+        TaskEventType.STATE_CHANGED,
         TaskEventType.OPERATOR_FEEDBACK,
         TaskEventType.OPERATOR_COMMENT,
         TaskEventType.JIRA_LINK_UPDATED,
@@ -538,8 +667,9 @@ def _insert_operator_event(
         """
         INSERT INTO task_events(
             task_id, task_revision, event_type, checkpoint_id, operator_feedback,
-            operator_comment, jira_url, operator_status, created_at
-        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
+            operator_comment, jira_url, operator_status, created_at,
+            deploy_test, deploy_prod, target_state, target_wait_reason
+        ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task.task_id,
@@ -550,6 +680,10 @@ def _insert_operator_event(
             jira_url,
             None if operator_status is None else operator_status.value,
             task.updated_at,
+            None if deploy_test is None else int(deploy_test),
+            None if deploy_prod is None else int(deploy_prod),
+            None if target_state is None else target_state.value,
+            None if target_wait_reason is None else target_wait_reason.value,
         ),
     )
     event_id = cursor.lastrowid
@@ -564,8 +698,10 @@ def _insert_operator_event(
         operator_feedback=operator_feedback,
         operator_comment=operator_comment,
         jira_url=jira_url,
-        operator_status=operator_status,
+        operator_status=updated_status(deploy_test, deploy_prod, operator_status),
         created_at=task.updated_at,
+        target_state=target_state,
+        target_wait_reason=target_wait_reason,
     )
 
 
@@ -613,3 +749,15 @@ def _insert_lifecycle_event(
         operator_status=None,
         created_at=task.updated_at,
     )
+
+
+def updated_status(
+    deploy_test: bool | None, deploy_prod: bool | None, legacy: TaskOperatorStatus | None
+) -> TaskOperatorStatus | None:
+    if deploy_test is None:
+        return legacy
+    if deploy_test and deploy_prod:
+        return TaskOperatorStatus.DEPLOY_BOTH
+    if deploy_test:
+        return TaskOperatorStatus.DEPLOY_TEST
+    return TaskOperatorStatus.DEPLOY_PROD if deploy_prod else None

@@ -15,6 +15,7 @@ from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from harness.git_applicability import WorkspaceApplicability
 from harness.git_workspace import (
     GitWorkingTreeStatus,
     GitWorkspaceError,
@@ -325,23 +326,22 @@ def read_workspace_task_status(
         ]
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
-    if not workspace_layout_compatible(workspace, runtime_identity.layout):
-        raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
-        )
-
+    applicability = WorkspaceApplicability(connection, workspace.workspace_id)
     connection.execute("BEGIN")
     try:
         current_workspace = get_workspace(connection, workspace.workspace_id)
         if current_workspace != workspace:
             raise WorkspaceResolutionError("workspace registry identity changed during Task status")
-        task = get_relevant_task(connection, workspace.workspace_id)
+        task = get_relevant_task(connection, workspace.workspace_id, applicability=applicability)
         checkpoint = (
             get_latest_task_checkpoint_status(connection, task.task_id)
             if task is not None
             else None
         )
+        if checkpoint is not None and not applicability.checkpoint_visible(
+            checkpoint.checkpoint_id
+        ):
+            checkpoint = None
         verification = (
             list_checkpoint_verification(connection, checkpoint.checkpoint_id)
             if checkpoint is not None
@@ -352,14 +352,12 @@ def read_workspace_task_status(
             if task is not None and task.state is TaskState.WORKING
             else None
         )
+        applicability.validate()
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-
-    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during Task status")
 
     task_summary = (
         None
@@ -392,6 +390,8 @@ def read_workspace_task_status(
         task=task_summary,
         last_checkpoint=checkpoint_summary,
         pending_operator_feedback=pending_operator_feedback,
+        head=applicability.head,
+        branch=applicability.branch,
     )
 
 
@@ -466,9 +466,10 @@ def read_project_search(
     scan_lock: Lock,
 ) -> ProjectSearchResult:
     """Resolve one Workspace and read one current Project Intelligence search snapshot."""
-    workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
+    workspace = _resolve_retrieval_workspace(connection, hints)
     deadline = monotonic() + _PROJECT_SEARCH_CURRENTNESS_SECONDS
     project = get_project(connection, workspace.project_id)
+    applicability: WorkspaceApplicability | None = None
     for _attempt in range(2):
         currentness = ensure_workspace_search_index_current(
             connection,
@@ -476,6 +477,8 @@ def read_project_search(
             scan_lock,
             deadline=deadline,
         )
+        if applicability is None:
+            applicability = WorkspaceApplicability(connection, workspace.workspace_id)
         connection.execute("BEGIN")
         try:
             current_workspace = get_workspace(connection, workspace.workspace_id)
@@ -498,11 +501,13 @@ def read_project_search(
                 query,
                 scope=scope,
                 limit=limit,
+                applicability=applicability,
                 response_reserve_bytes=(
                     exact_coverage_response_reserve(exact_coverage)
                     + symbol_navigation_response_reserve(symbol_navigation)
                 ),
             )
+            applicability.validate()
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -514,10 +519,7 @@ def read_project_search(
             currentness,
             deadline=deadline,
         ):
-            if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-                raise WorkspaceResolutionError(
-                    "workspace Git identity changed during Project search"
-                )
+            applicability.validate()
             return ProjectSearchResult(
                 schema_version=SCHEMA_VERSION,
                 workspace_id=workspace.workspace_id,
@@ -536,7 +538,8 @@ def read_project_context_result(
     refs: tuple[str, ...],
 ) -> ProjectContextResult:
     """Resolve one Workspace and expand only selected refs from one consistent Project snapshot."""
-    workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
+    workspace = _resolve_retrieval_workspace(connection, hints)
+    applicability = WorkspaceApplicability(connection, workspace.workspace_id)
     connection.execute("BEGIN")
     try:
         current_workspace = get_workspace(connection, workspace.workspace_id)
@@ -545,14 +548,15 @@ def read_project_context_result(
                 "workspace registry identity changed during Project context"
             )
         project = get_project(connection, workspace.project_id)
-        items = read_project_context(connection, workspace.workspace_id, refs)
+        items = read_project_context(
+            connection, workspace.workspace_id, refs, applicability=applicability
+        )
+        applicability.validate()
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during Project context")
     return ProjectContextResult(
         schema_version=SCHEMA_VERSION,
         workspace_id=workspace.workspace_id,
@@ -563,7 +567,7 @@ def read_project_context_result(
 
 def _resolve_retrieval_workspace(
     connection: sqlite3.Connection, hints: Sequence[WorkspaceHint]
-) -> tuple[WorkspaceRecord, object]:
+) -> WorkspaceRecord:
     registered = list_workspaces(connection)
     resolution = WorkspaceResolver(
         [
@@ -571,13 +575,7 @@ def _resolve_retrieval_workspace(
             for item in registered
         ]
     ).resolve(hints)
-    workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
-    if not workspace_layout_compatible(workspace, runtime_identity.layout):
-        raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
-        )
-    return workspace, runtime_identity
+    return get_workspace(connection, resolution.workspace_id)
 
 
 def read_workspace_index_entry(

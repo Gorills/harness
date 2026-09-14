@@ -14,6 +14,7 @@ from harness.storage import connect_database, initialize_database
 from harness.task_baseline import get_task_baseline
 from harness.task_checkpoints import TaskEventType, list_task_checkpoints, list_task_events
 from harness.task_workflow import (
+    task_accept,
     task_checkpoint,
     task_resume,
     task_start,
@@ -270,13 +271,11 @@ def test_task_resume_rejects_terminal_task_and_distinct_working_task(tmp_path: P
             )
         assert get_task(connection, first.task_id) == waiting.task
 
-        completed = task_checkpoint(
+        completed = task_accept(
             connection,
             workspace_id,
             second.task_id,
             expected_revision=1,
-            state=TaskState.COMPLETED,
-            summary="Second done",
         )
         with pytest.raises(TaskTransitionError, match="terminal Task"):
             task_resume(
@@ -377,7 +376,7 @@ def test_public_checkpoint_keeps_explicit_identity_across_sequential_revisions(
                 workspace_id,
                 started.task_id,
                 expected_revision=1,
-                state=TaskState.COMPLETED,
+                state=TaskState.WORKING,
                 summary="Stale",
             )
 

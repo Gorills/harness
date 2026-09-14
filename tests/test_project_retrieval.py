@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -18,6 +19,7 @@ from harness.retrieval import (
     search_tasks,
 )
 from harness.storage import connect_database, initialize_database
+from harness.task_baseline import capture_workspace_task_baseline, persist_task_baseline
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -84,15 +86,25 @@ def _task_history(
         (task_id, workspace_id, title),
     )
     checkpoint_id = f"checkpoint-{task_id}"
+    baseline = capture_workspace_task_baseline(connection, workspace_id)
+    persist_task_baseline(connection, task_id, baseline)
     connection.execute(
         """
         INSERT INTO task_checkpoints(
             id, task_id, task_revision, state, wait_reason, summary, next_step,
             created_at, baseline_head, current_head, current_branch, current_dirty_path_count
         ) VALUES (?, ?, 2, 'working', NULL, ?, 'Continue verification', 'checkpoint-time',
-                  NULL, NULL, 'main', 0)
+                  ?, ?, ?, ?)
         """,
-        (checkpoint_id, task_id, summary),
+        (
+            checkpoint_id,
+            task_id,
+            summary,
+            baseline.head,
+            baseline.head,
+            baseline.branch,
+            len(baseline.dirty_paths),
+        ),
     )
     connection.execute(
         """
@@ -271,7 +283,7 @@ def test_project_search_uses_content_for_natural_queries_and_compound_identifier
         assert natural[0].ref == "code:src/refresh_token.py"
         assert natural[0].match_reason == "dense lexical content (all terms)"
         assert compound[0].ref == "code:src/refresh_token.py"
-        assert compound[0].match_reason == "code unit definition phrase"
+        assert compound[0].match_reason == "code unit exact identifier"
         assert compound[0].short_summary == "function rotateRefreshToken"
         assert test_query[0].ref == "code:tests/test_refresh_token.py"
         assert natural[0].evidence is not None
@@ -592,7 +604,7 @@ def test_project_context_expands_only_selected_refs_and_fails_closed_cross_proje
 
         with pytest.raises(ProjectRetrievalRefError, match="another Project"):
             read_project_context(connection, workspace_id, ("knowledge:other-card",))
-        with pytest.raises(ProjectRetrievalRefError, match="another Project"):
+        with pytest.raises(ProjectRetrievalRefError, match=r"unavailable|another Project"):
             read_project_context(connection, workspace_id, ("task:other-task",))
         with pytest.raises(ProjectRetrievalRefError, match="kind does not match"):
             read_project_context(connection, workspace_id, ("code:docs/refresh-rotation.md",))
@@ -616,6 +628,10 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
             ("large-card", project_id, "T" * 256, "B" * 8192),
         )
         for index in range(8):
+            relative_path = f"deep/{index}/" + "/".join(["p" * 180] * 10)
+            anchor_path = tmp_path / "repo" / relative_path
+            anchor_path.parent.mkdir(parents=True, exist_ok=True)
+            anchor_path.write_bytes(b"anchored content\n")
             connection.execute(
                 """
                 INSERT INTO knowledge_anchors(
@@ -626,9 +642,9 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
                 (
                     "large-card",
                     workspace_id,
-                    f"deep/{index}/" + ("p" * 1800),
+                    relative_path,
                     f"symbol-{index}",
-                    f"{index:x}" * 64,
+                    hashlib.sha256(anchor_path.read_bytes()).hexdigest(),
                 ),
             )
 
