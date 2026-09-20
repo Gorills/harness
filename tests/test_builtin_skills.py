@@ -351,43 +351,22 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
     change = _builtin_by_id("complex-change-planning")
     language = _builtin_by_id("language-engineering")
     legacy = _builtin_by_id("legacy-preservation")
-    security_web = dict(_builtin_by_id("secure-by-design").references)["web-backend.md"]
+    security = _builtin_by_id("secure-by-design")
     assert architecture.applies_facets == ("software-project",)
     assert change.applies_facets == ("software-project",)
     assert language.applies_facets == ("software-project",)
     assert language.applies_languages
     assert legacy.applies_facets == ("software-project",)
     assert legacy.task_hints == ()
-    assert "characterization, contract, or golden tests" in legacy.body
-    assert dict(architecture.references)["architecture-decisions.md"]
-    assert (
-        "Record an ADR only for durable decisions"
-        in dict(architecture.references)["architecture-decisions.md"]
-    )
-    assert "measured workload" in dict(architecture.references)["scalability.md"]
-    assert (
-        "independently test the requested behavior"
-        in dict(change.references)["specification-audit.md"]
-    )
-    assert "as if you did not implement it" in dict(change.references)["independent-review.md"]
-    assert "legacy-preservation.md" not in dict(change.references)
-    assert "legacy-preservation" in change.body
-    assert change.description.startswith(
-        "Use when planning a cross-boundary or migration-ordered change"
-    )
-    assert "preserving legacy compatibility" not in change.description
-    assert (
-        "exclude ordinary single-module bugfixes and routine test-only work" in change.description
-    )
-    assert legacy.description.startswith("Use when")
-    assert "established behavior" in legacy.description
-    assert "greenfield-only" in legacy.description
-    testing = _builtin_by_id("testing-strategy")
-    conventions = " ".join(testing.body.split())
-    assert "Do not duplicate facts Harness can derive from manifests" in conventions
-    assert "canonical task runner" in conventions
-    assert "unsafe operations" in conventions
-    assert "Argon2id" in security_web
+    assert set(dict(architecture.references)) == {
+        "architecture-decisions.md",
+        "scalability.md",
+    }
+    assert set(dict(change.references)) == {
+        "independent-review.md",
+        "specification-audit.md",
+    }
+    assert "web-backend.md" in dict(security.references)
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)

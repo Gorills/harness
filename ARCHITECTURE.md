@@ -486,8 +486,11 @@ survives edits, while cross-branch visibility requires captured commit ancestry 
 changed-path content evidence. Knowledge uses its own source checkpoint and current anchors;
 operator/imported anchors receive the same live check. Unanchored agent Knowledge does not
 inherit the Task's ongoing-work exemption. Filtering precedes Task/Knowledge search limits and
-checkpoint history pagination; direct refs cannot bypass it. Workspace/Project dashboard views
-are filtered, while the global operator Task archive retains all branches for management.
+checkpoint history pagination; direct refs cannot bypass it. Operator dashboard Task lists,
+counts, and Task-history search retain all branches of that home/Workspace/Project scope;
+current-Task focus and model-facing reads stay Git-filtered. A missing checkout still
+withholds Task disclosure.
+
 Whole-file squash/cherry-pick proofs are intentionally conservative when other edits alter the
 same file. One-working-Task-per-Workspace remains a persistence invariant even for hidden Tasks;
 the generic conflict directs the operator to the archive without exposing hidden identities.
@@ -620,6 +623,13 @@ Adapters must be idempotent and preserve unknown user configuration.
 The implemented Linux/POSIX installation slice supports local Codex CLI/IDE/desktop project config and local Cursor IDE/CLI. `harness install --host cursor|codex|all` performs runtime, ownership, compatible-skill, Hidden-policy, and registered-Workspace preflight before mutation, then replaces a stale daemon only through the frozen schema/package-version/interpreter/code identity contract. Omitted `--host` selects Cursor. `--host all` installs the Codex+Cursor pair. Claude Code is no longer a supported Harness host ([ADR-0039](docs/decisions/0039-retire-claude-code-host.md)). Codex production MCP is an ownership-marked `.codex/config.toml` in each trusted project, with an authenticated daemon-owned Streamable HTTP URL and exact absolute `X-Harness-Workspace-Root`; required initialization validates daemon connectivity, capability, and Workspace before Codex starts. Hidden adds exact project `developer_instructions`, while Harness never writes Codex trust, user-global config, or `AGENTS.md`. Cursor remains project-only with the canonical absolute Workspace root, official enable/tool verification, and owned JSON cleanup. Historical untracked interpolation configs migrate; tracked configs require manual adoption. Direct subprocess probes never replace a failing Cursor host verification. Install and uninstall skip registered Workspace roots that cannot be resolved as directories, name them in the CLI, and leave those registry rows for doctor; live Workspaces stay fail-closed for ownership and tracked-config collisions. Generated configs and markers use Git-local exclusions. The Harness source checkout keeps a tracked Cursor overlay; Codex uses the same locally generated private HTTP config as production Workspaces.
 
 `harness init` binds one folder (Git optional). `harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation for an already-registered Workspace. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Cursor → Codex continuity; real Codex acceptance exercises the configured HTTP path.
+
+The checkout global-refresh helper activates its default Cursor+Codex set through one
+`harness install --host all` lifecycle call, preserving joint preflight and the existing combined
+Codex-then-Cursor adapter order. Post-install repair errors
+identify the bounded phase, Workspace/root, selected profiles, and safe underlying cause, then state
+that integration may be partially updated and provide exact idempotent retry and doctor commands.
+The helper preserves the failing lifecycle status and prints no success epilogue after that failure.
 
 ADR-0036 defines source-checkout global dogfood. Its `scan --global-dogfood` path is accepted only
 from an external tool-installed interpreter and returns after registration/indexing, before host or

@@ -216,6 +216,10 @@ def test_project_search_retrieves_scoped_knowledge_tasks_code_and_docs(tmp_path:
         titles = {hit.title for hit in across_projects}
         assert "Rotate session credentials" in titles
         assert "Other Project refresh work" in titles
+        scoped = search_tasks(connection, "refresh", limit=5, project_id=project_id)
+        scoped_titles = {hit.title for hit in scoped}
+        assert "Rotate session credentials" in scoped_titles
+        assert "Other Project refresh work" not in scoped_titles
 
         code = search_project(
             connection, workspace_id, "refresh token", scope=ProjectSearchScope.CODE, limit=5

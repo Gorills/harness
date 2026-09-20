@@ -68,7 +68,7 @@ def _feature_task(connection: sqlite3.Connection, root: Path, workspace: str) ->
     ).task
 
 
-def test_workspace_and_project_filter_branch_while_global_archive_remains_available(
+def test_workspace_archive_keeps_other_branch_tasks_while_current_task_follows_checkout(
     tmp_path: Path,
 ) -> None:
     root, database, connection, project, workspace = _setup(tmp_path)
@@ -78,11 +78,14 @@ def test_workspace_and_project_filter_branch_while_global_archive_remains_availa
         _git(root, "checkout", "main")
         detail = read_dashboard_workspace_detail(database, workspace, search_query="feature")
         assert detail.workspace.task_id is None
-        assert detail.workspace.active_task_count == detail.workspace.review_task_count == 0
-        assert detail.task_count == 0
-        assert detail.recent_tasks == ()
-        assert detail.task_search_results == ()
-        assert read_dashboard_project_detail(database, project).workspaces[0].task_id is None
+        assert detail.workspace.active_task_count == detail.workspace.review_task_count == 1
+        assert detail.task_count == 1
+        assert detail.recent_tasks[0].task.task_id == task.task_id
+        assert detail.task_search_results
+        project_detail = read_dashboard_project_detail(database, project)
+        assert project_detail.workspaces[0].task_id is None
+        assert project_detail.workspaces[0].active_task_count == 1
+        assert project_detail.workspaces[0].review_task_count == 1
         assert _view_fingerprint(database, "workspace", workspace, None) != feature_fingerprint
         assert read_dashboard_home(database).recent_tasks[0].task.task_id == task.task_id
         assert read_dashboard_task_detail(database, task.task_id).task == task
@@ -109,7 +112,7 @@ def test_workspace_and_project_filter_branch_while_global_archive_remains_availa
         connection.close()
 
 
-def test_branch_filter_precedes_dashboard_history_count_limit_and_page(tmp_path: Path) -> None:
+def test_workspace_history_pages_include_other_branch_tasks(tmp_path: Path) -> None:
     root, database, connection, _project, workspace = _setup(tmp_path)
     try:
         visible = set()
@@ -124,10 +127,18 @@ def test_branch_filter_precedes_dashboard_history_count_limit_and_page(tmp_path:
             task = task_start(connection, workspace, f"feature {number}")
             task_accept(connection, workspace, task.task_id, expected_revision=task.revision)
         _git(root, "checkout", "main")
-        page = read_dashboard_workspace_detail(database, workspace, page=2)
-        assert page.task_count == 3
-        assert page.page == 1
-        assert {row.task.task_id for row in page.recent_tasks} == visible
+        first = read_dashboard_workspace_detail(database, workspace, page=1)
+        second = read_dashboard_workspace_detail(database, workspace, page=2)
+        assert first.task_count == second.task_count == 28
+        assert first.page == 1
+        assert second.page == 2
+        assert len(first.recent_tasks) == 24
+        assert len(second.recent_tasks) == 4
+        first_ids = {row.task.task_id for row in first.recent_tasks}
+        second_ids = {row.task.task_id for row in second.recent_tasks}
+        assert first_ids.isdisjoint(second_ids)
+        assert visible <= (first_ids | second_ids)
+        assert len(first_ids | second_ids) == 28
         assert read_dashboard_home(database).task_count == 28
     finally:
         connection.close()
@@ -218,7 +229,8 @@ def test_workspace_sse_refreshes_after_branch_only_switch_without_database_write
                 break
         else:
             raise AssertionError("branch-only change did not refresh the Workspace view")
-        assert read_dashboard_workspace_detail(database, workspace).task_count == 0
+        assert read_dashboard_workspace_detail(database, workspace).task_count == 1
+        assert read_dashboard_workspace_detail(database, workspace).workspace.task_id is None
     finally:
         if client is not None:
             client.close()

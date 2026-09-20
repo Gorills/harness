@@ -65,7 +65,7 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 _DOCTOR_RUNTIME_SCOPE = "Doctor scope: SQLite runtime only."
 _DOCTOR_DATABASE_SCOPE = "Doctor scope: SQLite runtime + selected initialized database."
 _FAILURE_DETAIL_MAX_LENGTH = 1024
-_RECOVERY_SHUTDOWN_TIMEOUT_SECONDS = 10.0
+_RECOVERY_SHUTDOWN_TIMEOUT_SECONDS = 40.0
 _RECOVERY_SHUTDOWN_POLL_SECONDS = 0.05
 
 

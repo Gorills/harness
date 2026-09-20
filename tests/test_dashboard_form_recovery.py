@@ -370,7 +370,7 @@ def test_recovery_navigation_failure_does_not_claim_an_empty_registry(
     ) -> tuple[dashboard_module.DashboardWorkspaceRow, ...]:
         raise OSError("NAVIGATION-ERROR-MUST-NOT-APPEAR")
 
-    monkeypatch.setattr(dashboard_module, "read_dashboard_workspace_rows", unavailable_rows)
+    monkeypatch.setattr(dashboard_module, "_read_dashboard_navigation_rows", unavailable_rows)
     manager = DashboardServerManager(database)
     try:
         base = manager.get_url()

@@ -1936,7 +1936,15 @@ def _serve_workspace_skills(
     except GitWorkspaceError as exc:
         _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
         return
-    except (RegistryError, SkillRuntimeError):
+    except SkillRuntimeError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message=exc.operator_message,
+        )
+        return
+    except RegistryError:
         _try_send_error(
             client,
             request_id=request_id,

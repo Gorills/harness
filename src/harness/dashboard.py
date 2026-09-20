@@ -6,6 +6,7 @@ import secrets
 import sqlite3
 import stat
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from html import escape
@@ -199,7 +200,7 @@ from harness.registry import (
     relocate_workspace,
     workspace_layout_compatible,
 )
-from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project, search_tasks
+from harness.retrieval import ProjectSearchHit, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
 from harness.skill_policy import (
@@ -275,6 +276,7 @@ _DASHBOARD_SSE_POLL_SECONDS = 1.0
 _DASHBOARD_SSE_HEARTBEAT_SECONDS = 10.0
 _DASHBOARD_SSE_SESSION_SECONDS = 30.0
 _DASHBOARD_SSE_MAX_CLIENTS = 8
+_DASHBOARD_LIVE_STATUS_WORKERS = 8
 _DASHBOARD_RESPONSE_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -468,8 +470,8 @@ class _DashboardPageRequest:
     page: int = 1
 
 
-def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
-    """Read a consistent persisted Projects overview plus fail-closed live Git summaries."""
+def _read_dashboard_navigation_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
+    """Read persisted Workspace summaries needed by global dashboard navigation."""
     connection = connect_database(database_path)
     try:
         connection.execute("BEGIN")
@@ -483,7 +485,12 @@ def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspa
             raise
     finally:
         connection.close()
-    return tuple(_with_live_workspace_status(row) for row in rows)
+    return rows
+
+
+def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
+    """Read a consistent persisted Projects overview plus fail-closed live Git summaries."""
+    return _with_live_workspace_statuses(_read_dashboard_navigation_rows(database_path))
 
 
 def _load_recent_dashboard_tasks(
@@ -491,7 +498,6 @@ def _load_recent_dashboard_tasks(
     *,
     workspace_id: str | None = None,
     page: int = 1,
-    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[DashboardTaskRow, ...]:
     if workspace_id is None:
         rows = connection.execute(
@@ -505,30 +511,21 @@ def _load_recent_dashboard_tasks(
             (_DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
         ).fetchall()
     else:
-        query = f"""
+        rows = connection.execute(
+            f"""
             SELECT tasks.id, workspaces.project_id
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             WHERE tasks.workspace_id = ?
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-        """
-        if applicability is None:
-            rows = connection.execute(
-                query + " LIMIT ? OFFSET ?",
-                (
-                    workspace_id,
-                    _DASHBOARD_RECENT_TASK_LIMIT,
-                    (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT,
-                ),
-            ).fetchall()
-        else:
-            visible = [
-                row
-                for row in connection.execute(query, (workspace_id,))
-                if applicability.task_visible(row[0])
-            ]
-            offset = (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT
-            rows = visible[offset : offset + _DASHBOARD_RECENT_TASK_LIMIT]
+            LIMIT ? OFFSET ?
+            """,
+            (
+                workspace_id,
+                _DASHBOARD_RECENT_TASK_LIMIT,
+                (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT,
+            ),
+        ).fetchall()
     loaded = tuple((get_task(connection, task_id), project_id) for task_id, project_id in rows)
     recorded_branches = _read_recorded_git_branches(
         connection,
@@ -557,16 +554,7 @@ def _history_page(page: int, total: int, page_size: int) -> int:
 def _dashboard_task_count(
     connection: sqlite3.Connection,
     workspace_id: str | None = None,
-    *,
-    applicability: WorkspaceApplicability | None = None,
 ) -> int:
-    if applicability is not None:
-        return sum(
-            applicability.task_visible(row[0])
-            for row in connection.execute(
-                "SELECT id FROM tasks WHERE workspace_id = ?", (workspace_id,)
-            )
-        )
     where = "" if workspace_id is None else " WHERE workspace_id = ?"
     params = () if workspace_id is None else (workspace_id,)
     row = connection.execute("SELECT COUNT(*) FROM tasks" + where, params).fetchone()
@@ -580,6 +568,7 @@ def read_dashboard_home(
     *,
     search_query: str | None = None,
     page: int = 1,
+    include_live_status: bool = True,
 ) -> DashboardHomePage:
     """Read the loopback home page: Projects, recent Tasks, and optional Task search."""
     connection = connect_database(database_path)
@@ -606,7 +595,7 @@ def read_dashboard_home(
     finally:
         connection.close()
     return DashboardHomePage(
-        workspaces=tuple(_with_live_workspace_status(row) for row in persisted),
+        workspaces=(_with_live_workspace_statuses(persisted) if include_live_status else persisted),
         recent_tasks=recent_tasks,
         search_query=search_query,
         task_search_results=results,
@@ -665,7 +654,7 @@ def read_dashboard_workspace_detail(
     search_query: str | None = None,
     page: int = 1,
 ) -> DashboardWorkspaceDetail:
-    """Read one Workspace detail page with bounded Task history and optional path search."""
+    """Read one Workspace detail page with the operator Task archive and optional path search."""
     connection = connect_database(database_path)
     try:
         try:
@@ -684,17 +673,13 @@ def read_dashboard_workspace_detail(
                 tasks_available=applicability is not None,
             )
             task_count = (
-                _dashboard_task_count(connection, workspace_id, applicability=applicability)
-                if applicability is not None
-                else 0
+                _dashboard_task_count(connection, workspace_id) if applicability is not None else 0
             )
             page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
             recent_tasks = (
                 ()
                 if applicability is None
-                else _load_recent_dashboard_tasks(
-                    connection, workspace_id=workspace_id, page=page, applicability=applicability
-                )
+                else _load_recent_dashboard_tasks(connection, workspace_id=workspace_id, page=page)
             )
             results = (
                 ()
@@ -709,13 +694,11 @@ def read_dashboard_workspace_detail(
             task_results = (
                 ()
                 if search_query is None or applicability is None
-                else search_project(
+                else search_tasks(
                     connection,
-                    workspace_id,
                     search_query,
-                    scope=ProjectSearchScope.TASKS,
-                    applicability=applicability,
                     limit=_DASHBOARD_SEARCH_LIMIT,
+                    project_id=workspace.project_id,
                 )
             )
             row = _with_live_workspace_status(row)
@@ -742,7 +725,11 @@ def read_dashboard_workspace_detail(
 
 
 def read_dashboard_task_detail(
-    database_path: Path, task_id: str, *, page: int = 1
+    database_path: Path,
+    task_id: str,
+    *,
+    page: int = 1,
+    include_live_status: bool = True,
 ) -> DashboardTaskDetail:
     """Read one Task's immutable timeline and the live summary for its owning Workspace."""
     connection = connect_database(database_path)
@@ -810,7 +797,7 @@ def read_dashboard_task_detail(
     finally:
         connection.close()
     return DashboardTaskDetail(
-        workspace=_with_live_workspace_status(row),
+        workspace=_with_live_workspace_status(row) if include_live_status else row,
         task=task,
         git_branch=git_branch,
         baseline_git_branch=baseline_git_branch,
@@ -858,22 +845,6 @@ def _read_workspace_row_persisted(
         """,
         (workspace.workspace_id,),
     ).fetchone()
-    if applicability is not None:
-        visible_states = [
-            (state, reason)
-            for task_id, state, reason in connection.execute(
-                "SELECT id, state, wait_reason FROM tasks WHERE workspace_id = ?",
-                (workspace.workspace_id,),
-            )
-            if applicability.task_visible(task_id)
-        ]
-        counts = (
-            sum(state in {"working", "waiting"} for state, _reason in visible_states),
-            sum(
-                state == "waiting" and reason == "operator_review"
-                for state, reason in visible_states
-            ),
-        )
     if not tasks_available:
         counts = (0, 0)
     if counts is None or any(
@@ -950,6 +921,30 @@ def _with_live_workspace_status(row: DashboardWorkspaceRow) -> DashboardWorkspac
         dirty_path_count=dirty_path_count,
         live_error=live_error,
     )
+
+
+def _with_live_workspace_statuses(
+    rows: tuple[DashboardWorkspaceRow, ...],
+) -> tuple[DashboardWorkspaceRow, ...]:
+    if len(rows) <= 1:
+        return tuple(_with_live_workspace_status(row) for row in rows)
+    workers = min(_DASHBOARD_LIVE_STATUS_WORKERS, len(rows))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return tuple(pool.map(_with_live_workspace_status, rows))
+
+
+def _without_live_git(row: DashboardWorkspaceRow) -> DashboardWorkspaceRow:
+    if row.branch is None and row.dirty_path_count is None and row.live_error is None:
+        return row
+    return replace(row, branch=None, dirty_path_count=None, live_error=None)
+
+
+def _fingerprint_home(home: DashboardHomePage) -> DashboardHomePage:
+    return replace(home, workspaces=tuple(_without_live_git(row) for row in home.workspaces))
+
+
+def _fingerprint_task_detail(detail: DashboardTaskDetail) -> DashboardTaskDetail:
+    return replace(detail, workspace=_without_live_git(detail.workspace))
 
 
 def _read_task_baseline_branch(
@@ -2026,7 +2021,7 @@ def _render_dashboard_form_error(
     )
     navigation_rows = None
     try:
-        navigation_rows = read_dashboard_workspace_rows(database_path)
+        navigation_rows = _read_dashboard_navigation_rows(database_path)
     except (
         OSError,
         sqlite3.DatabaseError,
@@ -2386,7 +2381,7 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             view="projects",
             search_query=home.search_query,
             page=home.page,
-            snapshot=_snapshot_fingerprint(home),
+            snapshot=_snapshot_fingerprint(_fingerprint_home(home)),
         ),
         content=content,
         navigation_rows=rows,
@@ -2973,6 +2968,7 @@ def render_task_page(
         (project_name, workspace_url),
         (task_crumb(task.task_id), None),
     ]
+    fingerprinted = _fingerprint_task_detail(detail)
     return _render_shell(
         base_path=base_path,
         page_title=document_title(task.title),
@@ -2983,7 +2979,7 @@ def render_task_page(
             identity=task.task_id,
             page=detail.page,
             snapshot=_snapshot_fingerprint(
-                detail if navigation_rows is None else (detail, navigation_rows)
+                fingerprinted if navigation_rows is None else (fingerprinted, navigation_rows)
             ),
         ),
         content=content,
@@ -3112,7 +3108,7 @@ def _render_page(database_path: Path, base_path: str, request: _DashboardPageReq
             ),
             base_path=base_path,
         )
-    navigation_rows = read_dashboard_workspace_rows(database_path)
+    navigation_rows = _read_dashboard_navigation_rows(database_path)
     assert request.identity is not None
     if request.kind == "project":
         return render_project_page(
@@ -3217,7 +3213,14 @@ def _view_fingerprint(
     page: int = 1,
 ) -> str:
     if view == "projects":
-        value: object = read_dashboard_home(database_path, search_query=search_query, page=page)
+        value: object = _fingerprint_home(
+            read_dashboard_home(
+                database_path,
+                search_query=search_query,
+                page=page,
+                include_live_status=False,
+            )
+        )
     elif view == "project":
         assert identity is not None
         value = read_dashboard_project_detail(database_path, identity)
@@ -3231,11 +3234,18 @@ def _view_fingerprint(
         )
     elif view == "task":
         assert identity is not None
-        value = read_dashboard_task_detail(database_path, identity, page=page)
+        value = _fingerprint_task_detail(
+            read_dashboard_task_detail(
+                database_path,
+                identity,
+                page=page,
+                include_live_status=False,
+            )
+        )
     else:
         raise DashboardError("unsupported dashboard fingerprint view")
     if view != "projects":
-        value = (value, read_dashboard_workspace_rows(database_path))
+        value = (value, _read_dashboard_navigation_rows(database_path))
     return _snapshot_fingerprint(value)
 
 

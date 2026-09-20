@@ -225,6 +225,28 @@ carry a nested legacy playbook. `backend-security` unique password-KDF guidance 
 non-mechanical Knowledge-capture bullets (task runner, focused tests, local env, unsafe ops,
 release practice) live in `testing-strategy`.
 
+## 2026-09-20 amendment: quality guidance is proportional to change risk
+
+The built-in pack guides engineering judgment rather than imposing the same ceremony on every
+change. Presentation-only copy, CSS, spacing, and layout edits use a focused local visual check, but do not
+by themselves require new automated tests, an ADR, a change plan, or a security review. Ordinary
+logic changes use the smallest useful checks for the behavior changed and add regression coverage
+when it protects a real failure mode. Authentication and authorization boundaries, durable data and
+migrations, and CI/release/deployment behavior retain strict, focused verification appropriate to
+their risk. Machine-consumed strings, commands, queries, required warnings, accessibility semantics,
+and public contracts remain behavioral changes even when only a string literal changes.
+
+When repository policy allows draft publication before CI, the pack does not require every full
+local gate to finish first; mandatory real gates still must pass at the stage where policy requires
+them. Nested references are read only when the affected boundary needs them. A projected skill is
+available to the host, not automatically invoked for every change, and existing operator
+authorization remains valid instead of being requested again by a skill. The pack introduces no
+new planning, security, or verification report as a routine deliverable.
+
+This amendment supersedes earlier ADR-0029 wording to the extent that it made frontend design or
+security guidance appear mandatory for low-risk edits merely because the corresponding skill was
+projected. The applicability and packaging decisions remain unchanged.
+
 ## Consequences
 - Useful discipline becomes portable and host-neutral without a giant always-on rules prompt.
 - High-precision facets prevent ambiguous ecosystem dependencies from selecting the wrong surface

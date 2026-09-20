@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-14
+- **Amended:** 2026-09-18
 - **Deciders:** Operator request; repository architecture review
 
 ## Context
@@ -61,17 +62,20 @@ the separate `fresh`/`needs_revalidation` historical label; applicability never 
 Task/Knowledge filtering precedes FTS candidate limits, Task ID/prefix limits and history
 pagination. Checkpoint fragments have their own applicability test, including search fragments,
 direct refs and recent Task history. A visible latest Task cannot expose an incompatible older
-checkpoint. Explicit model refs fail closed rather than bypassing eligibility. Workspace and
-Project dashboard views use the same proofs; the global operator home and Task archive retain
-all branches for management, deferral and deletion. Private Task-status IPC carries sampled
-HEAD/branch so the bridge rejects mixed status round trips without adding model-visible fields.
+checkpoint. Explicit model refs fail closed rather than bypassing eligibility. Operator dashboard
+Task lists, counts, and Task-history search retain every Task of that home/Workspace/Project
+scope for management, deferral and deletion. Current-Task focus, agent status/search/context, and
+Knowledge remain Git-applicability filtered. A missing checkout still withholds Task disclosure.
+Private Task-status IPC carries sampled HEAD/branch so the bridge rejects mixed status round
+trips without adding model-visible fields.
 
 ## Compatibility and limits
 
 - Migration does not populate new evidence from today's checkout. Existing clean committed
   checkpoints can use their old recorded commit/changed-path evidence; legacy dirty checkpoints
   cannot acquire invented cross-branch content proofs. Unknown metadata stays unavailable when
-  it cannot be proven. The global operator archive remains available.
+  it cannot be proven. The operator dashboard archive remains available per Workspace/Project,
+  not only on the daemon-wide home page.
 - There is still one `working` Task per Workspace. A hidden working Task can therefore block
   starting another tracked Task. The error exposes no hidden Task ID/title and directs the
   operator to defer it in the archive. Small work can also remain untracked under ADR-0066.
@@ -92,5 +96,7 @@ then commit/integration, later edits/reset, explicit initial handoff and stale C
 initialization, older Knowledge versus later Task work, hidden checkpoint fragments, manual
 anchors, capture-race rollback, unknown evidence, legacy migration, deadline rejection, and
 110 matching hidden Tasks ahead of one eligible Task with one memoized ancestry subprocess.
-Dashboard/IPC/stdio tests cover caller wiring and mixed-round-trip status rejection. Existing
+Dashboard tests cover operator archive lists/search across branches, current-Task focus following
+the checkout, and missing-checkout non-disclosure. IPC/stdio tests cover caller wiring and
+mixed-round-trip status rejection. Existing
 source, response-budget, negative-disclosure and Task migration checks remain required.

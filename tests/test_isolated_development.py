@@ -1173,9 +1173,7 @@ def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> 
     fields = _plan_fields(result.stdout)
     fake_bin = Path(env["FAKE_UV_BIN_DIR"])
     assert fields["hosts"] == "cursor,codex"
-    assert fields["lifecycle_commands"] == (
-        f"{fake_bin / 'harness'} install --host cursor; {fake_bin / 'harness'} install --host codex"
-    )
+    assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host all"
     assert fields["HARNESS_DEV_ROOT"] == ""
     assert fields["XDG_STATE_HOME"] == str(original_state)
     assert fields["XDG_RUNTIME_DIR"] == str(original_runtime)
@@ -1227,6 +1225,62 @@ def test_install_global_doctor_only_dry_run_does_not_reinstall(tmp_path: Path) -
     assert fields["mode"] == "doctor-only"
     log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
     assert "tool install" not in log
+
+
+def test_install_global_explicit_combined_hosts_use_one_joint_preflight(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "cursor,codex"],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    fake_bin = Path(env["FAKE_UV_BIN_DIR"])
+    assert fields["hosts"] == "cursor,codex"
+    assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host all"
+
+
+def test_install_global_reports_partial_activation_and_preserves_failure_status(
+    tmp_path: Path,
+) -> None:
+    env = _install_global_env(tmp_path)
+    fake_uv = Path(env["HARNESS_DEV_UV"])
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$UV_LOG"\n'
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "uv 0.12.5"; exit 0; fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then\n'
+        '  printf "%s\\n" "$FAKE_UV_BIN_DIR"; exit 0\n'
+        "fi\n"
+        'if [ "$1" = "python" ] && [ "$2" = "install" ]; then exit 0; fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then exit 0; fi\n'
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    installed = Path(env["FAKE_UV_BIN_DIR"]) / "harness"
+    lifecycle_log = tmp_path / "harness.log"
+    env["HARNESS_LIFECYCLE_LOG"] = str(lifecycle_log)
+    installed.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$HARNESS_LIFECYCLE_LOG"\n'
+        'if [ "$1" = "install" ]; then exit 17; fi\n'
+        'if [ "$1" = "doctor" ]; then exit 88; fi\n'
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    installed.chmod(0o755)
+
+    result = _run([str(INSTALL_GLOBAL_SCRIPT)], cwd=REPO_ROOT, env=env)
+
+    assert result.returncode == 17
+    assert lifecycle_log.read_text(encoding="utf-8").splitlines() == ["install --host all"]
+    assert "package refresh succeeded, but host activation is incomplete" in result.stderr
+    assert f"Retry: {installed} install --host all" in result.stderr
+    assert f"Then verify: {installed} doctor" in result.stderr
+    assert "Global Harness package now uses" not in result.stdout
 
 
 def test_install_global_does_not_pass_checkout_imports_to_installed_runtime(

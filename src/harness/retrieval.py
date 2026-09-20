@@ -732,14 +732,15 @@ def search_tasks(
     query: str,
     *,
     limit: int,
+    project_id: str | None = None,
 ) -> tuple[ProjectSearchHit, ...]:
-    """Search durable Task history across every registered Project on this daemon."""
+    """Search durable Task history for the operator archive, optionally one Project."""
     normalized = _normalize_query(query)
     analyzed = analyze_search_query(normalized)
     if not analyzed.terms:
         raise SearchError("project search query has no searchable tokens")
     _validate_limit(limit)
-    return _project_hits(_task_hits(connection, analyzed, limit))
+    return _project_hits(_task_hits(connection, analyzed, limit, project_id=project_id))
 
 
 def read_project_context(

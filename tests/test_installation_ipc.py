@@ -8,17 +8,20 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Event, Lock
+from types import SimpleNamespace
 
 import pytest
 
-from harness.daemon import _serve_skill_cleanup, serve_daemon
+from harness.daemon import _serve_skill_cleanup, _serve_workspace_skills, serve_daemon
 from harness.ipc import (
+    IpcRemoteError,
     request_shutdown,
     request_skill_cleanup,
     request_workspace_init,
     request_workspace_skills_reconcile,
 )
 from harness.skill_runtime import SkillCleanupResult as RuntimeSkillCleanupResult
+from harness.skill_runtime import SkillRuntimeError
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 pytestmark = pytest.mark.skipif(__import__("os").name == "nt", reason="POSIX daemon integration")
@@ -130,6 +133,132 @@ def test_daemon_reconciles_and_cleans_project_skills_then_shuts_down(
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+
+def test_daemon_reports_actionable_skill_projection_collision_without_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _skill_registry(home)
+    root = tmp_path / "repo-with-private-name"
+    _repo(root)
+    user_skill = root / ".agents" / "skills" / "python-helper"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("SENSITIVE-SKILL-CONTENT\n", encoding="utf-8")
+    database = tmp_path / "state" / "harness.db"
+    socket_path = tmp_path / "run" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    try:
+        scan = request_workspace_init(socket_path, root)
+        with pytest.raises(IpcRemoteError) as caught:
+            request_workspace_skills_reconcile(
+                socket_path,
+                (
+                    WorkspaceHint(
+                        path=scan.workspace_root,
+                        source="test-root",
+                        match_mode=WorkspaceHintMatchMode.ROOT,
+                    ),
+                ),
+                ("cursor",),
+            )
+
+        assert caught.value.code == "skill_integration_error"
+        assert caught.value.message == (
+            "Workspace skill projection conflicts with tracked or user-owned content; inspect "
+            ".agents/skills and Git tracking"
+        )
+        assert str(root) not in caught.value.message
+        assert "SENSITIVE-SKILL-CONTENT" not in caught.value.message
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_daemon_reports_invalid_skill_registry_without_manifest_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    _skill_registry(home)
+    manifest = home / ".harness" / "skills" / "python-helper" / "harness.yaml"
+    manifest.write_text("private manifest text that must not escape\n", encoding="utf-8")
+    root = tmp_path / "repo"
+    _repo(root)
+    database = tmp_path / "state" / "harness.db"
+    socket_path = tmp_path / "run" / "harness.sock"
+    stop, executor, future = _start_daemon(database, socket_path)
+    try:
+        scan = request_workspace_init(socket_path, root)
+        with pytest.raises(IpcRemoteError) as caught:
+            request_workspace_skills_reconcile(
+                socket_path,
+                (
+                    WorkspaceHint(
+                        path=scan.workspace_root,
+                        source="test-root",
+                        match_mode=WorkspaceHintMatchMode.ROOT,
+                    ),
+                ),
+                ("cursor",),
+            )
+
+        assert caught.value.code == "skill_integration_error"
+        assert caught.value.message == (
+            "Harness skill registry is invalid or unsafe; rerun harness install and inspect the "
+            "skill registry"
+        )
+        assert "private manifest text" not in caught.value.message
+        assert str(manifest) not in caught.value.message
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_daemon_redacts_unclassified_skill_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = sqlite3.connect(":memory:", check_same_thread=False)
+    server_peer, client_peer = socket.socketpair()
+    try:
+        monkeypatch.setattr(
+            "harness.daemon._resolve_task_workspace",
+            lambda *_args: SimpleNamespace(workspace_id="workspace-id"),
+        )
+
+        def fail_reconcile(*_args: object) -> None:
+            raise SkillRuntimeError("secret-token\n/private/workspace")
+
+        monkeypatch.setattr("harness.daemon.reconcile_workspace_skills", fail_reconcile)
+        _serve_workspace_skills(
+            server_peer,
+            database,
+            "skills-request",
+            (),
+            ("cursor",),
+            Lock(),
+        )
+        payload = client_peer.recv(4096)
+        response = json.loads(payload)
+
+        assert len(payload) < 512
+        assert response["error"] == {
+            "code": "skill_integration_error",
+            "message": (
+                "Workspace skill integration could not be reconciled safely; run harness doctor"
+            ),
+        }
+        assert b"secret-token" not in payload
+        assert b"private/workspace" not in payload
+    finally:
+        server_peer.close()
+        client_peer.close()
+        database.close()
 
 
 def test_global_skill_cleanup_skips_replaced_workspace_identity(

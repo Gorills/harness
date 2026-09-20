@@ -34,8 +34,8 @@ Usage:
 This command:
   1. leaves isolated-development overlay environment (HARNESS_DEV_ROOT / .harness XDG)
   2. reinstalls the current tree with `uv tool install --force --reinstall --python 3.13 .`
-  3. runs that tool-installed `harness install --host <host>` for each selected profile
-     (default: cursor and codex)
+  3. runs that tool-installed `harness install` once for the selected profile set
+     (default: cursor and codex, jointly preflighted through `--host all`)
   4. runs that same `harness doctor` unless --no-doctor
 
 `--package-only` performs only step 2. It is intended for the agent-operated
@@ -191,14 +191,29 @@ hosts_plan_value() {
 }
 
 lifecycle_commands_plan_value() {
-    local uv_bin="$1"
-    local harness_bin="$2"
+    local harness_bin="$1"
+    local lifecycle_host
+    lifecycle_host="$(lifecycle_host_value)"
+    if [[ -n "$lifecycle_host" ]]; then
+        printf '%s install --host %s\n' "$harness_bin" "$lifecycle_host"
+    fi
+}
+
+lifecycle_host_value() {
     local host
-    local value=""
+    local has_cursor=0
+    local has_codex=0
     for host in "${HOSTS[@]}"; do
-        value="${value:+$value; }$harness_bin install --host $host"
+        [[ "$host" == "cursor" ]] && has_cursor=1
+        [[ "$host" == "codex" ]] && has_codex=1
     done
-    printf '%s\n' "$value"
+    if [[ "$has_cursor" -eq 1 && "$has_codex" -eq 1 ]]; then
+        printf '%s\n' "all"
+    elif [[ "$has_cursor" -eq 1 ]]; then
+        printf '%s\n' "cursor"
+    elif [[ "$has_codex" -eq 1 ]]; then
+        printf '%s\n' "codex"
+    fi
 }
 
 print_plan() {
@@ -220,7 +235,7 @@ python=$REQUIRED_PYTHON
 package_command=$uv_bin tool install --force --reinstall --python $REQUIRED_PYTHON .
 harness=$harness_bin
 hosts=$(hosts_plan_value)
-lifecycle_commands=$(lifecycle_commands_plan_value "$uv_bin" "$harness_bin")
+lifecycle_commands=$(lifecycle_commands_plan_value "$harness_bin")
 doctor_command=$harness_bin doctor
 HARNESS_DEV_ROOT=${HARNESS_DEV_ROOT-}
 XDG_STATE_HOME=${XDG_STATE_HOME-}
@@ -323,10 +338,18 @@ if [[ "$DOCTOR_ONLY" -eq 0 ]]; then
         exit 1
     fi
     if [[ "$PACKAGE_ONLY" -eq 0 ]]; then
-        for host in "${HOSTS[@]}"; do
-            echo "Updating user-global host registration (--host $host)" >&2
-            "$HARNESS_BIN" install --host "$host"
-        done
+        lifecycle_host="$(lifecycle_host_value)"
+        echo "Updating user-global host registration (--host $lifecycle_host)" >&2
+        if "$HARNESS_BIN" install --host "$lifecycle_host"; then
+            :
+        else
+            install_status=$?
+            echo "scripts/install-global: package refresh succeeded, but host activation is incomplete." >&2
+            echo "Some Harness-owned host/project integration may already be updated." >&2
+            echo "Retry: $HARNESS_BIN install --host $lifecycle_host" >&2
+            echo "Then verify: $HARNESS_BIN doctor" >&2
+            exit "$install_status"
+        fi
     fi
 fi
 

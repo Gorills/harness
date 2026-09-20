@@ -14,6 +14,7 @@ from urllib.request import urlopen
 
 import pytest
 
+import harness.dashboard as dashboard_module
 from harness.daemon import DaemonError, serve_daemon
 from harness.dashboard import (
     DashboardError,
@@ -85,6 +86,20 @@ def _registered_database(tmp_path: Path) -> tuple[Path, Path, str]:
         return root, database, workspace.workspace_id
     finally:
         connection.close()
+
+
+def _record_live_status_inspections(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    inspected: list[str] = []
+    original = dashboard_module._with_live_workspace_status
+
+    def record_live_status(
+        row: dashboard_module.DashboardWorkspaceRow,
+    ) -> dashboard_module.DashboardWorkspaceRow:
+        inspected.append(row.workspace_id)
+        return original(row)
+
+    monkeypatch.setattr(dashboard_module, "_with_live_workspace_status", record_live_status)
+    return inspected
 
 
 def _start_server(
@@ -177,6 +192,110 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
         assert denied.value.code == 404
     finally:
         manager.close()
+
+
+def test_task_page_live_status_is_scoped_to_owning_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    other_root = tmp_path / "other-repo"
+    _make_repo(other_root)
+    connection = connect_database(database)
+    try:
+        task = task_start(connection, workspace_id, "Inspect only this Workspace")
+        other_project = create_project(connection)
+        other_workspace = register_workspace(
+            connection,
+            project_id=other_project.project_id,
+            path=other_root,
+        )
+        scan_workspace(connection, other_workspace.workspace_id)
+    finally:
+        connection.close()
+
+    inspected = _record_live_status_inspections(monkeypatch)
+    page = dashboard_module._DashboardPageRequest(
+        "task",
+        task.task_id,
+        None,
+        f"/tasks/{task.task_id}/",
+    )
+    html = dashboard_module._render_page(database, "/", page)
+    assert task.title in html
+    assert f"/workspaces/{other_workspace.workspace_id}/" in html
+    assert inspected == [workspace_id]
+
+    inspected.clear()
+    fingerprint = dashboard_module._view_fingerprint(database, "task", task.task_id, None)
+    assert inspected == []
+    assert f"snapshot={fingerprint}" in html
+
+
+def test_home_page_live_status_is_not_repeated_for_sse_fingerprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    other_root = tmp_path / "other-repo"
+    _make_repo(other_root)
+    connection = connect_database(database)
+    try:
+        task_start(connection, workspace_id, "Keep the overview current")
+        other_project = create_project(connection)
+        other_workspace = register_workspace(
+            connection,
+            project_id=other_project.project_id,
+            path=other_root,
+        )
+        scan_workspace(connection, other_workspace.workspace_id)
+    finally:
+        connection.close()
+
+    inspected = _record_live_status_inspections(monkeypatch)
+    page = dashboard_module._DashboardPageRequest("projects", None, None, "/")
+    html = dashboard_module._render_page(database, "/", page)
+    assert set(inspected) == {workspace_id, other_workspace.workspace_id}
+    assert inspected.count(workspace_id) == 1
+    assert inspected.count(other_workspace.workspace_id) == 1
+
+    inspected.clear()
+    fingerprint = dashboard_module._view_fingerprint(database, "projects", None, None)
+    assert inspected == []
+    assert f"snapshot={fingerprint}" in html
+
+
+def test_workspace_page_live_status_skips_unrelated_workspaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, database, workspace_id = _registered_database(tmp_path)
+    other_root = tmp_path / "other-repo"
+    _make_repo(other_root)
+    connection = connect_database(database)
+    try:
+        other_project = create_project(connection)
+        other_workspace = register_workspace(
+            connection,
+            project_id=other_project.project_id,
+            path=other_root,
+        )
+        scan_workspace(connection, other_workspace.workspace_id)
+    finally:
+        connection.close()
+
+    inspected = _record_live_status_inspections(monkeypatch)
+    page = dashboard_module._DashboardPageRequest(
+        "workspace",
+        workspace_id,
+        None,
+        f"/workspaces/{workspace_id}/",
+    )
+    html = dashboard_module._render_page(database, "/", page)
+    assert f"/workspaces/{other_workspace.workspace_id}/" in html
+    assert inspected == [workspace_id]
+
+    inspected.clear()
+    fingerprint = dashboard_module._view_fingerprint(database, "workspace", workspace_id, None)
+    assert inspected == [workspace_id]
+    assert f"snapshot={fingerprint}" in html
 
 
 def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
@@ -378,9 +497,13 @@ def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Pat
     assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in project_html
 
     workspace = read_dashboard_workspace_detail(database, workspace_id)
-    assert workspace.recent_tasks == ()
+    assert workspace.workspace.task_id is None
+    assert len(workspace.recent_tasks) == 1
+    assert workspace.recent_tasks[0].git_branch == DashboardGitBranch(
+        captured=True, name="feature/dashboard-branch"
+    )
     workspace_html = render_workspace_page(workspace, base_path="/cap/")
-    assert "feature/dashboard-branch" not in workspace_html
+    assert "feature/dashboard-branch" in workspace_html
 
     assert row.task_id is not None
     detail = read_dashboard_task_detail(database, row.task_id)

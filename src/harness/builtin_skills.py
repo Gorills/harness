@@ -127,52 +127,75 @@ class _Replacement:
 BUILTIN_SKILLS: Final[tuple[BuiltinSkill, ...]] = (
     BuiltinSkill(
         "testing-strategy",
-        "Use when implementing or modifying software behavior; defines reproduction, regression coverage, focused verification, and repository-required completion checks.",
+        "Use when choosing verification for a software change or fixing a bug; scale checks to failure risk, and do not require automated tests for cosmetic edits.",
         (),
         """
 # Testing strategy
-- Reproduce failures or define a falsifiable acceptance check before changing behavior when practical.
-- During iteration, run the smallest relevant unit/integration checks that can catch the change.
-- Add the smallest regression coverage that protects the actual failure mode and important negative path; do not expand the test surface for unrelated behavior.
-- Mock network/external systems at explicit boundaries; prefer real local domain/storage behavior where cheap.
-- Before publication or merge, run every repository-mandated quality gate for the exact candidate. A targeted green test never substitutes for required CI.
-- After repeated failed attempts, stop changing code, restate the evidence and current hypothesis, and inspect the boundary before trying another fix.
-- Report only checks that actually ran; distinguish failed, not run, and environment-blocked verification.
-- Do not duplicate facts Harness can derive from manifests or the Structural Index. Record durable
-  Knowledge only for non-mechanical conventions future agents would otherwise rediscover: focused
-  test commands, canonical task runner, local integration environment, docs locations, unsafe
-  operations, migration workflow, and release practice. Verify them from repository evidence;
-  prefer a few anchored operational facts over a broad generated project summary.
+Choose the cheapest check that can catch a plausible regression in the changed behavior. Decide
+from impact, uncertainty, and reversibility; no risk score, test plan, or approval ritual is needed.
+Presentation-only wording below means incidental human-facing text. Machine-consumed strings,
+commands, queries, routing/localization keys, required warnings, accessible semantics, and public
+contracts need checks of their affected behavior even when the diff is only a string literal.
+
+- Copy, spacing, color, layout, and other cosmetic edits: inspect the affected result. Check a
+  narrow/wide viewport if layout can change, or focus/contrast if those are affected. Do not add
+  automated tests, snapshots, or a new test framework just to assert incidental wording, CSS, or position.
+- Ordinary logic or bug fixes: reproduce the issue when practical, then run relevant existing
+  checks. Add a focused regression test when it protects a meaningful rule, recurring failure,
+  or non-obvious edge case. Existing coverage or a direct manual check can be sufficient for a
+  simple low-impact change; a changed file does not automatically need a changed test.
+- Authorization, money, durable data, concurrency, public contracts, migrations, or recovery:
+  verify the affected failure and compatibility paths. Add automated coverage for consequential
+  invariants not already protected; use real local storage/domain behavior where practical and
+  mock external systems at explicit boundaries.
+- Test observable behavior, not private implementation or incidental text. Change an existing
+  assertion only when its intended contract changes; do not bless a failing snapshot blindly.
+- Run focused checks while iterating. Broaden only for affected integration boundaries, unresolved
+  failures, or explicit repository gates. Once sufficient checks pass, stop; do not repeat them
+  on an unchanged candidate or add speculative coverage to fill time.
+- Respect repository-required gates at the stage they govern. A reviewed draft may be published
+  after focused checks when policy allows CI to run the remaining gates; merge/release still
+  requires the exact candidate's mandatory checks. Do not invent a full local suite requirement.
+- After repeated failed fixes, inspect the evidence and revise the hypothesis before editing again.
+- Report what ran and material verification gaps briefly. Do not enumerate irrelevant checks as N/A.
+  Record durable Knowledge only for verified, reusable conventions that future work would otherwise
+  rediscover: non-obvious test commands, canonical task runner, local environment, unsafe operations,
+  migration workflow, or release practice. Do not duplicate mechanically detectable facts or create
+  routine reports.
 """,
         applies_facets=("software-project",),
     ),
     BuiltinSkill(
         "secure-by-design",
-        "Use when work changes a trust boundary, sensitive data, authentication, authorization, exposed input, infrastructure, or delivery security.",
+        "Use when changing authentication, authorization, sensitive-data handling, untrusted-input processing, or deployment permissions; exclude cosmetic UI, ordinary copy, and logic that preserves those boundaries.",
         (),
         """
 # Secure by design
-Security reduces likelihood and impact; it never makes a project impossible to compromise.
+Apply security guidance to the concrete boundary being changed. Being a website, a new project,
+or an internet-facing page does not by itself require a threat model, audit, or scanner suite.
 
-- For a new project, a new external interface, sensitive/regulated data, identity/payment/admin
-  behavior, or a material trust-boundary change, read
-  [security architecture](references/security-architecture.md) before choosing the implementation.
-- Read only the references for surfaces the task actually crosses:
+- For a simple public page, use safe framework rendering, keep secrets out of client code, and
+  preserve existing access and transport controls. That does not require a separate security phase.
+- For identity, payment, sensitive-data flows, or a material trust-boundary design, read
+  [security architecture](references/security-architecture.md). A short account of who can do
+  what and what must be denied is usually enough; use formal methods only when the risk or
+  repository policy calls for them.
+- Read only the reference sections for the changed security surface:
   [web and backend](references/web-backend.md),
   [browser frontend](references/browser-frontend.md),
   [mobile](references/mobile.md), and
   [infrastructure and supply chain](references/infrastructure-supply-chain.md).
-- For every security-sensitive change and every new externally reachable project, define and execute
-  the applicable evidence in [security verification](references/verification.md).
+- Use [security verification](references/verification.md) for checks of the affected control.
+  Do not expand a local fix into a whole-application audit or create a compliance checklist.
 - Preserve repository authorization and scope. Security review does not authorize production access,
   credential use, active scanning of third parties, account changes, releases, or destructive tests.
-- Prefer deny-by-default, least privilege, explicit trust boundaries, minimized sensitive data,
-  maintained platform controls, and several independent mitigations for high-impact failures.
+- Prefer deny-by-default authorization, least privilege, minimized sensitive data, and maintained
+  platform controls. Add independent mitigations where a single failure has high impact.
 - Never invent cryptography, authentication protocols, token formats, parsers, or sandboxing when a
   maintained platform facility or reviewed library satisfies the requirement.
 - Never weaken TLS, certificate validation, authorization, isolation, secret handling, or verification
-  to make a test pass. If a required control cannot be implemented or verified, report the residual
-  risk and stop at the affected boundary instead of describing the system as secure.
+  to make a test pass. A known missing critical control blocks the affected release or operation;
+  continue independent work and report concrete verification gaps without claiming security proof.
 """,
         applies_facets=("software-project",),
         references=(
@@ -181,25 +204,20 @@ Security reduces likelihood and impact; it never makes a project impossible to c
                 """
 # Security architecture
 
-Use this baseline at project inception and whenever exposure, identities, privileged operations,
-sensitive data, integrations, or deployment trust change. Align web controls to the current OWASP
-ASVS, mobile controls to OWASP MASVS/MASTG, and lifecycle controls to NIST SSDF; standards are a
-verification baseline, not a substitute for a system-specific threat model.
+Use this reference for a material change to identities, privileged operations, sensitive data,
+or trust. Start with the changed data flow and plausible failure; read only relevant sections.
+OWASP ASVS, MASVS/MASTG, and NIST SSDF are resources for deeper reviews or required assurance,
+not mandatory compliance programs for every project.
 
 ## Establish the security contract
 
-- Classify the product's data and operations by confidentiality, integrity, availability, privacy,
-  safety, fraud, and recovery impact. Minimize collection, privileges, retention, replicas, exports,
-  logs, analytics, and backups before adding encryption around unnecessary data.
-- Map actors, assets, entry points, data flows, trust zones, tenant boundaries, administrative planes,
-  external providers, build/update paths, and recovery paths. Treat clients, networks, proxies,
-  queues, files, imports, webhooks, plugins, support tools, and operators as explicit trust boundaries.
-- Enumerate realistic misuse/abuse cases and attacker goals. Apply a repeatable method such as STRIDE,
-  then rank by plausible impact and exposure; include chained failures and compromised dependencies,
-  accounts, devices, CI, and administrators.
-- Convert mitigations into testable security requirements with an owner and evidence. Record accepted
-  residual risk and expiry/reevaluation triggers; do not mark a control complete because a framework
-  usually enables it.
+- Identify the affected actors, data, entry points, and permissions. Reuse existing architecture
+  evidence instead of remapping the product. Minimize sensitive data and privileges.
+- Identify plausible abuse and its impact. For example, an object-access change needs an explicit
+  ownership rule and a cross-user denial check. A high-impact identity or multi-tenant redesign
+  may warrant a fuller threat model and independent review.
+- Verify the selected control in the actual configuration. Record consequential tradeoffs in
+  existing documentation when future maintainers need them; no separate risk register is required.
 
 ## Choose secure boundaries
 
@@ -228,9 +246,9 @@ verification baseline, not a substitute for a system-specific threat model.
 
 - Keep the threat model and requirements proportional and near the architecture they govern. Update
   existing ADRs/diagrams/runbooks instead of creating a parallel documentation system.
-- Require review for new public ingress, privilege or identity changes, sensitive-data flows,
-  cryptographic design, native code, parsers of hostile formats, sandbox escapes, build/signing
-  changes, and controls with high-impact single points of failure.
+- Review high-impact privilege, cryptographic, isolation, or delivery changes for concrete failure
+  modes. A critical self-review is sufficient unless policy requires a separate reviewer; use an
+  independent reviewer when available and useful. This does not add user-approval gates.
 - Revisit assumptions after incidents, dependency/runtime upgrades, new integrations, deployment
   topology changes, and meaningful changes in data sensitivity or attacker value.
 
@@ -244,6 +262,9 @@ Primary baselines:
                 "web-backend.md",
                 """
 # Web, API, and backend security
+
+Apply the controls for the boundary being implemented; this is a reference, not a per-change
+checklist. An endpoint edit does not require retesting unrelated authentication or infrastructure.
 
 - Use maintained framework security primitives and production settings, but verify their effective
   configuration. Patch supported runtime/framework versions promptly; isolate or remove unsupported
@@ -292,6 +313,9 @@ Primary baselines:
                 """
 # Browser frontend security
 
+Use the relevant sections for changed data rendering, session handling, cross-origin messaging,
+or script trust. Styling and static copy alone do not activate this review.
+
 - Treat every value from APIs, URLs, storage, DOM, postMessage, files, CMS, Markdown, translations,
   analytics, and third-party scripts as untrusted. Prefer framework text binding and safe DOM APIs;
   avoid raw HTML sinks. If rich HTML is required, sanitize with a maintained context-appropriate
@@ -316,9 +340,9 @@ Primary baselines:
   obtain consent before nonessential tracking. Never send credentials or sensitive data to telemetry.
 - Do not expose source maps, debug endpoints, build metadata, internal API hosts, secrets, or detailed
   errors unintentionally. Remember that obfuscation and minification do not protect client secrets.
-- Test DOM/reflected/stored XSS, CSRF, clickjacking, redirect, CORS, cache, upload/download, OAuth,
-  third-party failure, and authorization-negative paths against the production build and effective
-  response headers, not only component source.
+- Test the affected control: for example, untrusted rich HTML needs an XSS check, and a cookie or
+  origin-policy change needs the relevant CSRF/CORS check. Use the production build and effective
+  headers when build or hosting configuration can change that control.
 """,
             ),
             (
@@ -326,8 +350,8 @@ Primary baselines:
                 """
 # Mobile application security
 
-Use OWASP MASVS/MASTG as the verification baseline for Android/iOS. React Native, Expo, Flutter,
-WebView, and native modules do not make the client a trusted environment.
+Use OWASP MASVS/MASTG for a requested mobile security review or required assurance. For a feature
+change, apply only the relevant controls below. Mobile clients are not trusted server boundaries.
 
 - Never embed API secrets, private keys, service credentials, signing credentials, privileged feature
   flags, or authorization policy in the app bundle, JavaScript bundle, resources, native constants,
@@ -361,9 +385,9 @@ WebView, and native modules do not make the client a trusted environment.
   or native compatibility gates.
 - Treat root/jailbreak/emulator/debugger/obfuscation/tamper detection as defense-in-depth signals, not
   authorization boundaries. Avoid blocking legitimate users without a threat-driven requirement.
-- Test release builds on supported real OS versions for storage extraction, backups, logs, screenshots,
-  deep links, intents, WebViews, TLS, proxying, permissions, auth lifecycle, offline behavior, update
-  rollback, and compromised-device assumptions.
+- Verify the changed security behavior on a representative supported OS. Use release binaries and
+  real devices when storage, native permissions, signing, or platform behavior depends on them;
+  a cosmetic edit does not need a mobile security matrix.
 
 Official platform guidance:
 - React Native security: https://reactnative.dev/docs/security
@@ -375,6 +399,9 @@ Official platform guidance:
                 "infrastructure-supply-chain.md",
                 """
 # Infrastructure and software supply-chain security
+
+Select controls for the infrastructure or delivery boundary in scope. Do not add scanners, SBOMs,
+incident systems, or cloud services solely because this reference mentions them.
 
 - Separate development, test, staging, and production accounts/projects/networks/data/secrets.
   Production is private by default: expose only required ingress through an authenticated, patched,
@@ -401,9 +428,9 @@ Official platform guidance:
   permissions, pin third-party actions by immutable identity, protect branches/environments/releases,
   require review for sensitive paths, and prevent build output from executing with stronger trust than
   its source.
-- Produce provenance/SBOM and sign artifacts where the delivery environment can verify them. Scan
-  source, secrets, dependencies, containers, and IaC with maintained tools, but triage findings against
-  reachability/exposure and never treat a scanner as proof of security.
+- Preserve required provenance/SBOM/signing. Add tooling when repository policy or a concrete
+  delivery risk justifies it. Use relevant existing scanners and triage findings against actual
+  reachability/exposure; a green scanner is not proof of security.
 - Make deployment atomic or staged, health-gated, observable, and reversible. Protect migrations and
   one-shot jobs, preserve last-known-good artifacts/config, and rehearse credential revocation,
   containment, backup restore, and incident communication.
@@ -417,34 +444,25 @@ Official platform guidance:
                 """
 # Security verification
 
-- Derive checks from the threat model and security requirements. Map each applicable control to
-  automated or manual evidence and record N/A with a reason; a generic checklist, code review, or
-  green scanner alone is not sufficient.
-- Add negative authorization tests across role, tenant, object, and action, including unauthenticated,
-  disabled/revoked, stale-session, ownership-change, bulk/list/export, alternate-method, and concurrent
-  state-transition cases. Assert denial and absence of sensitive side effects/disclosure.
-- Test parser and boundary abuse: malformed types/encodings, duplicate fields/headers, extreme size,
-  count/depth/compression, traversal, injection metacharacters, unsafe URLs/redirects, hostile files,
-  timeouts, cancellation, replay, race, and resource exhaustion. Fuzz high-risk parsers/state machines
-  when it adds meaningful coverage.
-- Verify production-like effective configuration: TLS and origin routing, headers/CSP/CORS/cookies,
-  debug/admin exposure, proxy trust, network policy, workload identity, database/object-store ACLs,
-  secret sources, container privileges, backups, logging/redaction, and fail-closed startup.
-- Run repository-approved static analysis, secret scanning, dependency/container/IaC analysis, and
-  dynamic tests at explicit boundaries. Pin/configure tools, keep suppressions narrow with owners and
-  expiry, fail on actionable severity according to policy, and review generated reports for false
-  negatives caused by excluded paths or unsupported languages.
-- For browser surfaces, verify XSS/CSRF/CORS/CSP/clickjacking/cache/OAuth/upload/redirect behavior in
-  the production build. For APIs, verify ASVS-relevant controls and abuse/rate limits. For mobile,
-  verify applicable MASVS controls with release binaries and MASTG techniques on both platforms.
-- Review dependencies and build inputs for publisher/ownership changes, suspicious install scripts,
-  unexpected lockfile deltas, vulnerable reachable components, unsigned/unverified artifacts, and CI
-  permission expansion. Generate and retain the artifact/SBOM/provenance required by deployment.
+Choose checks from the changed control and its plausible failure. Reuse existing evidence and
+coverage. Do not enumerate unrelated controls, document N/A entries, or run every tool below.
+
+- Authorization changes need a positive case and meaningful denial cases at the real enforcement
+  boundary, including cross-user/tenant access where relevant. Assert no unauthorized disclosure
+  or side effects. Add regression coverage when the invariant is not already protected.
+- Untrusted parsers, file handling, URL fetching, and rendering need relevant malformed-input,
+  injection, traversal, size-limit, or redirect checks. Use fuzzing for high-risk parsers when
+  it adds useful coverage; it is not a default requirement for forms or endpoint edits.
+- Session, TLS, CORS, CSP, proxy, secret, or permission changes need checks of the effective
+  configuration at that boundary. Verify in a production-like build if it affects the result.
+- Dependency and CI permission changes need inspection of the actual lockfile, publisher, code
+  execution, and credential exposure delta. Run repository-required scanners at their required
+  stage; adding new scanners is a separate decision based on risk or policy.
 - Keep testing authorized and bounded. Do not scan production or third-party systems, use real user
   data, attempt persistence, or exceed rate/cost limits without explicit scope and approval.
-- Before release, require no known unmitigated critical/high-impact issue, documented residual risk,
-  rotation/revocation and rollback paths, monitored security signals, responsible disclosure/contact,
-  and an incident plan. Re-run affected controls against the exact release candidate.
+- A known unmitigated critical/high-impact issue blocks the affected release. Report that issue
+  and any material unverified control precisely. Follow existing release policy; do not require
+  an incident plan, disclosure program, or repeated audit for an ordinary local change.
 """,
             ),
         ),
@@ -455,10 +473,11 @@ Official platform guidance:
         (),
         """
 # Container infrastructure
-- For a new Dockerized project or a material container redesign, read both
+- Match the work to the requested environment. A local development container does not require
+  production infrastructure, a deployment matrix, or new scanners.
+- For a new Dockerized project or a material container redesign, consult
   [the project baseline](references/project-baseline.md) and
-  [the image/runtime guide](references/image-runtime.md). Local development, automated tests,
-  and production are separate acceptance environments, not postponed follow-ups.
+  [the image/runtime guide](references/image-runtime.md) for the environments actually in scope.
 - For a focused edit, read only the reference governing the affected boundary.
 - Operate only on this project's declared containers, compose files, networks, and volumes.
 - Reuse the repository task runner and existing service names before adding another entry point.
@@ -483,10 +502,13 @@ Official platform guidance:
                 """
 # Docker project baseline
 
+Apply the sections for the requested environments and changed runtime behavior. Preserve existing
+production guarantees, but do not create a production/CI platform for a development-only request.
+
 ## Configuration matrix
 
-- Define an explicit shared baseline plus local-development, automated-test/CI, and production
-  configuration. Compose overlays, profiles, or equivalent orchestrator configuration are all
+- Keep local-development, automated-test/CI, and production settings distinct when those
+  environments exist. Compose overlays, profiles, or equivalent orchestrator configuration are all
   acceptable when the effective result is unambiguous and documented through the task runner.
 - Local development may bind-mount source, enable hot reload/debugging, and expose convenience
   ports. Scope names, networks, and data to the project so parallel checkouts do not collide.
@@ -495,7 +517,7 @@ Official platform guidance:
   developer's durable volumes.
 - Production uses immutable built images rather than source bind mounts, production-only secrets
   and settings, minimum host port exposure, and an explicit deploy/update/rollback path.
-- Render and validate every environment's final configuration in CI or an equivalent gate; check
+- Render and validate the affected environment's final configuration; preserve required CI gates, check
   required variables and fail startup rather than silently using unsafe defaults.
 
 ## Lifecycle, resources, and logs
@@ -533,6 +555,9 @@ Official platform guidance:
                 """
 # Docker image and runtime quality
 
+Use only the recommendations relevant to the image/runtime delta. Build a changed image and smoke
+test its affected service; expand to persistence, restart, or platform checks when those can change.
+
 - Use a current trusted minimal base image, pin a deliberate version or digest, and retain an
   explicit update path so pinning does not freeze security fixes indefinitely.
 - Prefer reusable multi-stage build/test/runtime stages. The runtime stage should contain only the
@@ -549,10 +574,10 @@ Official platform guidance:
   rather than hiding them in every replica's startup.
 - Never bake credentials into layers. Do not print secrets in build output, healthchecks, command
   lines, crash reports, or image metadata.
-- Build the production target and run its smoke/integration tests in CI. Use available image
-  linting, vulnerability scanning, and SBOM/provenance checks without replacing repository gates.
-- Verify architecture/platform targets where they differ, health/readiness behavior, restart after
-  failure, bounded logs/resources, and persistence across container replacement.
+- When changing a production image, build that target and run its relevant smoke/integration checks.
+  Preserve required image scanning/provenance gates without adding tools for an unrelated edit.
+- Verify platform compatibility, health, restart, limits, or persistence when the change can affect
+  them. A comment or local configuration tweak does not require the complete runtime matrix.
 """,
             ),
         ),
@@ -563,6 +588,8 @@ Official platform guidance:
         (),
         """
 # Observability
+- Improve the signal needed by this task. A log-message edit does not require new metrics, traces,
+  alerts, dashboards, or a runbook; add those only for an identified diagnostic or operational need.
 - Prefer structured events with stable names and correlation/request identifiers.
 - Never log secrets, credentials, raw tokens, or unnecessary personal data.
 - Add metrics for user-impacting outcomes and saturation/error signals, not every internal variable.
@@ -592,13 +619,16 @@ Official platform guidance:
         (),
         """
 # CI and release
+- Scope verification to the workflow or release behavior being changed. An application edit or
+  publishing through an unchanged pipeline does not require redesigning CI or adding new gates.
 - Treat the repository's existing CI contract as authoritative; extend it rather than replacing it with generic conventions.
 - Preserve repository and organization workflow, review, and deployment policy rather than substituting generic defaults.
 - Pin third-party Actions to a reviewed full-length commit SHA where repository policy supports it, and verify that SHA belongs to the expected upstream repository.
 - Keep GITHUB_TOKEN and other workflow token permissions at the minimum the job needs.
 - Never expose privileged secrets to untrusted fork pull-request code.
 - Prefer short-lived OIDC credentials over static cloud keys where the platform supports it.
-- Use protected environments and required approval for privileged release and production deploy jobs.
+- Preserve protected environments and required approval for privileged jobs where repository policy
+  requires them. Do not invent an extra approval step for already authorized publication.
 - Preserve artifact provenance and attestations when the repository already produces them.
 - Keep dependency lockfiles current and use reproducible tool versions.
 - PR checks should cover the affected behavior; required main/release gates remain mandatory even when focused local tests are green.
@@ -611,22 +641,24 @@ Official platform guidance:
     ),
     BuiltinSkill(
         "public-frontend",
-        "Use when changing any public or indexable web frontend, including search discoverability, document semantics, accessibility, and loading performance; exclude native-only apps.",
+        "Use when creating public web pages or changing routing, search metadata, document semantics, accessibility, or loading performance; exclude native-only apps and cosmetic edits that preserve these properties.",
         (),
         """
 # Public frontend
-- Classify each affected route as public/indexable or deliberately private/non-indexable. Never
-  expose private, staging, duplicate, or state-changing URLs through accidental SEO defaults.
-- For every public route, SEO is part of implementation without a separate reminder: read and
-  apply [Google/Yandex discoverability](references/search-discoverability.md).
-- For every user-facing route or shared frontend primitive, read and apply
-  [web quality](references/web-quality.md) to the affected behavior.
+- For a new route or changed exposure, establish whether it is public/indexable or deliberately
+  private/non-indexable. Preserve existing indexing policy on unrelated edits.
+- For route, metadata, canonical, crawling, or indexable rendering changes, consult
+  [Google/Yandex discoverability](references/search-discoverability.md) for the affected property.
+  A button style or copy edit does not require a sitemap/robots/SEO audit.
+- For semantics, interaction, responsive layout, or loading changes, consult the relevant sections
+  of [web quality](references/web-quality.md). Check only what the change can affect.
 - Prefer server-rendered or statically generated indexable content when it improves reliable
   discovery and first load; do not force SSR/SSG onto authenticated application surfaces without
   a product or performance reason.
 - Preserve the framework's established routing, metadata, rendering, and design-system patterns.
-- Test rendered output and real responsive/keyboard behavior; visual polish is not evidence of
-  semantics, indexing, accessibility, or loading performance.
+- Verify the affected rendered behavior. Use keyboard checks for changed controls, narrow/wide
+  views for responsive changes, and performance measurements for a plausible loading regression.
+  Do not add automated tests or run a full accessibility/performance audit for cosmetic edits.
 """,
         applies_facets=("web-frontend",),
         references=(
@@ -634,6 +666,9 @@ Official platform guidance:
                 "search-discoverability.md",
                 """
 # Google and Yandex discoverability
+
+For a new public site, establish the discoverability features it actually needs. For an existing
+site, check only the route/metadata/indexing behavior being changed; do not rebuild unrelated SEO.
 
 - Public indexable URLs must be anonymously crawlable, return the intended HTTP status, expose
   meaningful visible text and real crawlable links, and make required CSS/JavaScript/resources
@@ -643,7 +678,7 @@ Official platform guidance:
   not as a substitute for `noindex` or authentication. Production rules must not inherit staging
   blocks; staging/private environments should combine access control with deliberate indexing
   policy. Do not block assets required to render public pages.
-- Generate and serve a valid sitemap (or bounded sitemap index) from authoritative route/content
+- For sites that need a sitemap, generate it (or a bounded sitemap index) from authoritative route/content
   data. Include absolute preferred HTTPS URLs that are indexable and return success; exclude
   redirects, errors, duplicates, private/filter/search/action URLs, and inaccurate `lastmod` data.
 - Emit one stable preferred canonical URL per indexable page and keep canonical, redirects,
@@ -664,16 +699,20 @@ Official platform guidance:
 - Write useful human content for the page's actual intent; do not add hidden text, doorway pages,
   duplicated keyword variants, or promise ranking. Search optimization improves eligibility and
   comprehension, never guarantees placement.
-- Verify the production-like rendered HTML, status codes, internal links, canonical/locale tags,
-  robots rules, sitemap contents, and structured data. When account access exists, use Google
-  Search Console and Yandex Webmaster for post-deploy inspection; their absence does not excuse
-  local checks.
+- Verify the changed discoverability contract in rendered HTML, status codes, links, metadata,
+  robots, or sitemap output as applicable. Use a production build when rendering/configuration
+  differs. Search Console/Webmaster inspection is useful for authorized post-deploy SEO work,
+  not a prerequisite for a local page edit.
 """,
             ),
             (
                 "web-quality.md",
                 """
 # Frontend web quality
+
+Use the sections relevant to the changed UI. A spacing fix needs rendered inspection; changed
+labels or controls need relevant accessibility checks; changed assets/rendering may need a loading
+check. A full audit or performance benchmark needs a concrete reason or an explicit request.
 
 - Build mobile-first responsive layouts on the same preferred URLs where practical. Use semantic
   landmarks/elements, keyboard-operable controls, visible focus, associated names/labels, logical
@@ -682,9 +721,10 @@ Official platform guidance:
 - Keep important content and primary actions useful before nonessential client JavaScript loads.
   Split by route/feature, remove unused dependencies, defer third parties, and avoid hydration or
   state duplication that adds no interaction value.
-- Use Core Web Vitals as user-facing performance criteria for public templates: target 75th-percentile
+- When performance is in scope, use Core Web Vitals as criteria for public templates: target 75th-percentile
   LCP at or below 2.5 s, INP at or below 200 ms, and CLS at or below 0.1 unless the product defines
-  stricter budgets. When field data is unavailable, record reproducible lab evidence and budgets.
+  stricter budgets. Use lab evidence for diagnosis when field data is unavailable; do not require
+  benchmarks or budget reports for unrelated visual changes.
 - Size images explicitly, provide appropriate `srcset`/`sizes` and modern formats, compress them,
   lazy-load below-the-fold media, and do not lazy-load the likely LCP image. Keep responsive media
   from causing layout shifts.
@@ -693,9 +733,10 @@ Official platform guidance:
   to content mutability; fingerprint immutable assets.
 - Preserve correct loading, empty, error, offline, and slow-network states. Abort obsolete requests,
   avoid duplicate submissions, and do not trade accessibility or correctness for optimistic UI.
-- Test representative mobile and desktop viewports, keyboard and screen-reader semantics for the
-  changed path, production builds under throttling, and regressions in bundle/performance budgets.
-  Prefer field telemetry for real-user conclusions and lab tools for reproducible diagnosis.
+- Inspect representative viewports when layout changes, keyboard/accessible semantics when
+  controls change, and throttling/bundle budgets when loading changes. Reuse existing automated
+  checks where helpful; manual inspection can be sufficient for a small presentation change.
+  Prefer field telemetry for real-user performance conclusions and lab tools for diagnosis.
 """,
             ),
         ),
@@ -706,31 +747,33 @@ Official platform guidance:
         (),
         """
 # Frontend design
-Apply this skill whenever the changed output includes a user-facing interface. Functional code is
-not finished while its hierarchy, visual language, responsive behavior, or interaction states are
-generic, inconsistent, or unverified.
+Match the design work to the request. For a small copy, spacing, color, icon, or component-position
+edit, reuse the existing tokens and patterns, make the change, and inspect the affected result.
+Check wrapping, focus, contrast, or responsive behavior only where it can change. No new design
+contract, reference tour, test suite, or redesign is required.
 
-## Make a design contract first
+For a new screen, substantial redesign, or missing visual direction, use the guidance below.
+
+## Establish a direction when needed
 Inspect the existing screens, tokens, components, brand assets, copy, and platform conventions. If
 they form a coherent system, extend it instead of silently rebranding the product. When direction
 is missing, infer a defensible direction from the subject, audience, and job instead of falling back
 to the model's favorite style.
 
-Before implementation, settle this compact contract:
+Use these prompts to settle unclear design choices; they are not a required written deliverable:
 
 1. **User and job:** who is here, what they need, and the one primary action or outcome.
 2. **Content hierarchy:** what must be noticed first, second, and only on demand.
-3. **Visual direction:** one sentence tied to the subject's real world, with three character words
-   and one explicitly rejected direction.
-4. **Signature:** one memorable compositional, typographic, material, or interaction idea. Spend
-   boldness here and keep the rest disciplined.
+3. **Visual direction:** a direction grounded in the product and its existing brand.
+4. **Character:** a distinctive idea when the brief calls for it; ordinary product controls need
+   clarity and consistency, not a mandatory signature treatment.
 5. **System:** named color roles, type roles, spacing rhythm, shape/depth rule, content width,
    density, compact-layout behavior, and motion rule.
 
-Do not show a long design essay unless the user asks. The contract exists to keep the implementation
-coherent. Read [visual language](references/visual-language.md) for every design task, then read
-exactly the applicable surface guide: [marketing and editorial sites](references/marketing-sites.md)
-or [product and mobile interfaces](references/product-interfaces.md). A mixed product may need both.
+Keep these decisions lightweight and reuse established answers. Consult
+[visual language](references/visual-language.md) when defining a direction, and the relevant
+[marketing and editorial](references/marketing-sites.md) or
+[product and mobile](references/product-interfaces.md) guidance when designing those surfaces.
 
 ## Build from hierarchy, not decoration
 - Put real content and the primary task into the layout before polishing surfaces. Copy, images,
@@ -741,9 +784,8 @@ or [product and mobile interfaces](references/product-interfaces.md). A mixed pr
   navigation, and interaction where necessary, not merely smaller text and stacked columns.
 - Prefer familiar controls and clear affordances. Originality belongs in visual voice and
   composition, not in making standard actions hard to recognize.
-- Complete the real states: default, hover where available, focus-visible, active, selected,
-  disabled, loading, empty, error, success, long content, and permission/offline states that the
-  product can reach.
+- Complete states introduced or affected by the change: for example, a new submit flow needs
+  loading/error/success behavior; a margin adjustment does not need an offline-state matrix.
 - Preserve repository architecture and the established design system. A design task does not
   authorize framework replacement, route churn, destructive rewrites, invented claims, or unrelated
   copy changes.
@@ -762,10 +804,10 @@ numbers, people, product screenshots, or photographic evidence. Use supplied/lic
 clearly marked placeholders, or honest copy.
 
 ## Verify the rendered result
-Before handoff, read and execute [visual review](references/visual-review.md). Inspect the rendered
-interface at representative compact and wide sizes, fix the highest-impact problems as one batch,
-and confirm once more. If rendering is unavailable, say that visual verification was not run; source
-inspection alone is not proof of design quality.
+Inspect the rendered result when possible. For new screens, substantial redesigns, or a requested
+design audit, use [visual review](references/visual-review.md). For a small edit, inspect the changed
+area and a relevant adjacent state or breakpoint; stop when it looks and behaves correctly. If
+rendering is unavailable, state that limitation briefly without inventing an approval gate.
 """,
         applies_facets=("mobile-app", "web-frontend"),
         references=(
@@ -773,6 +815,9 @@ inspection alone is not proof of design quality.
                 "visual-language.md",
                 """
 # Visual language
+
+Use this guide when establishing or revising a visual direction. Existing designs and narrow
+edits normally supply these decisions already; do not manufacture a new design system each time.
 
 ## Derive a direction from the subject
 Start with the product rather than a style catalog. Name three concrete nouns from its world—tools,
@@ -908,19 +953,17 @@ longer choreography must never delay task completion and must respect reduced-mo
                 """
 # Visual review
 
-Do not review only the component you remember changing. Review the complete affected path and its
-neighbors so local polish does not hide broken hierarchy or system drift.
+Scope the review to the changed area and plausible effects on its neighbors. A local edit can
+use one rendered inspection; no saved screenshot set, written report, or automated visual test is
+required. Expand to the following checks for new screens, substantial redesigns, or an audit.
 
 ## Render a bounded evidence set
-1. Capture the actual target size plus at least one compact viewport around 390 px wide and one wide
-   viewport around 1440 px when web responsiveness is in scope. For native UI, use representative
-   supported devices and text scaling.
-2. Include realistic content: longest expected title/label, empty and populated data, validation
-   error, loading/disabled state, and localization expansion when relevant.
-3. Inspect keyboard order and visible focus, pointer/touch targets, contrast, reduced motion, zoom or
-   dynamic text, clipping, overflow, sticky/overlay collisions, image crop, and layout shift.
-4. Fix all material findings in one batch, then capture one confirmation pass. Stop after the bounded
-   confirmation unless a remaining defect is visible.
+1. Inspect representative compact and wide sizes when responsiveness is affected; use the project's
+   actual breakpoints. For native UI, choose relevant supported device sizes and text scaling.
+2. Use realistic content and the states the change can affect, such as a long label or loading/error.
+3. Check relevant focus, targets, contrast, motion, text scaling, overflow, overlays, or image crop.
+4. Fix material findings and recheck the affected result. Do not repeat a clean inspection without
+   new changes or evidence of a problem.
 
 ## Ask these questions against the screenshots
 - Can a person identify the screen's purpose, current state, and primary action in five seconds?
@@ -928,17 +971,16 @@ neighbors so local polish does not hide broken hierarchy or system drift.
   colors, and buttons compete at the same volume?
 - Is the direction specific to this subject, or would the same structure, palette, copy, and
   decoration fit ten unrelated products?
-- Is there exactly one controlled signature idea, and does it survive at compact size without
-  hiding content or interaction?
+- If the design uses a signature idea, does it survive at compact size without hiding content
+  or interaction?
 - Are spacing, alignment, type roles, radii, shadows, icon style, and state colors visibly coherent?
 - Is every visible element real, truthful, and useful? Remove filler copy, meaningless chips,
   decorative metrics, unsupported claims, fake logos, and redundant containers.
 - Do compact layouts feel intentionally recomposed rather than shrunken or mechanically stacked?
 - Are controls recognizable and complete across interaction, failure, and accessibility states?
 
-Source review catches invalid tokens and component drift; screenshots catch visual truth. Require
-both when the environment supports rendering. Record any platform, viewport, state, or assistive
-behavior that could not be verified instead of silently claiming completion.
+Source inspection and rendered inspection answer different questions. Report material verification
+gaps, but do not enumerate every untouched platform, viewport, or state as unverified.
 """,
             ),
         ),
@@ -949,6 +991,8 @@ behavior that could not be verified instead of silently claiming completion.
         (),
         """
 # Server application
+- Use only the guidance for the behavior being changed. A local calculation or response-copy edit
+  does not require a server-wide contract, security, startup, and resilience audit.
 - Preserve the repository's domain, delivery, persistence, and integration boundaries; framework
   handlers/controllers should translate protocols rather than become the only home of business rules.
 - For HTTP/API behavior, read [HTTP service contracts](references/http-service.md).
@@ -956,10 +1000,10 @@ behavior that could not be verified instead of silently claiming completion.
   [jobs and integrations](references/jobs-integrations.md).
 - Use the selected framework's lifecycle, validation, dependency/resource management, migrations,
   testing, and production-server conventions. Do not introduce a parallel framework abstraction.
-- Keep authentication/authorization and other hostile-boundary decisions aligned with the projected
-  secure-by-design skill; correctness tests do not substitute for negative security verification.
-- Verify focused domain and adapter behavior, then run the actual server startup/health and affected
-  integration/contract tests using the production-like configuration path.
+- Verify authorization and untrusted-input controls when those boundaries change; consult
+  secure-by-design then, rather than activating a security review for every backend edit.
+- Run focused checks for the affected domain/adapter. Exercise startup/health for lifecycle or
+  configuration changes, and integration/contract checks when a real boundary can regress.
 """,
         applies_facets=("backend-service",),
         references=(
@@ -967,6 +1011,9 @@ behavior that could not be verified instead of silently claiming completion.
                 "http-service.md",
                 """
 # HTTP service contracts
+
+Preserve the existing endpoint contract and inspect only aspects affected by the change. Establish
+the relevant contract for a new endpoint; do not create every mechanism listed below by default.
 - Define method, path, authentication, authorization, request and response schemas, status codes,
   content types, pagination/filter ordering, error shape, idempotency, caching, and versioning as one
   coherent contract. Preserve existing clients unless migration is explicitly in scope.
@@ -978,14 +1025,17 @@ behavior that could not be verified instead of silently claiming completion.
   network calls; use idempotency/outbox or a repository-established equivalent for cross-system effects.
 - Generate OpenAPI/other schemas from authoritative code or validate generated code against the
   authoritative contract. Avoid undocumented response variants and framework-specific accidental APIs.
-- Test serialization and validation failures, not-found/conflict/state transitions, cancellation,
-  retries, concurrent requests, idempotency, and compatibility with actual consumers.
+- Test the changed behavior and consequential edge cases. Serialization, cancellation, concurrency,
+  idempotency, and consumer compatibility checks apply when the edit can affect those properties.
 """,
             ),
             (
                 "jobs-integrations.md",
                 """
 # Background jobs and integrations
+
+Apply delivery/recovery mechanisms where lost or duplicate effects matter. A local scheduled helper
+does not need a queue, outbox, or dead-letter system solely to satisfy this guide.
 - Give every job one owner, durable input contract, idempotency key/effect model, timeout, retry policy,
   backoff/jitter, maximum attempts, and terminal/dead-letter/manual-repair behavior.
 - Enqueue only after the required durable state commits, using an outbox or the project's established
@@ -996,8 +1046,8 @@ behavior that could not be verified instead of silently claiming completion.
 - For external calls, set connection and total timeouts, propagate cancellation, classify retryable
   failures narrowly, bound concurrency, and define circuit/backpressure behavior. Do not retry unsafe
   non-idempotent operations blindly.
-- Verify webhook signatures/replay behavior, provider sandbox contracts, rate-limit handling, partial
-  failures, duplicate/out-of-order messages, worker shutdown, poison messages, and recovery tooling.
+- Verify affected integration risks: signatures/replay for webhooks, duplicate/partial effects for
+  delivery changes, or shutdown/recovery for lifecycle changes. Do not run an unrelated matrix.
 """,
             ),
         ),
@@ -1012,18 +1062,22 @@ This skill is for installed Android/iOS applications. Do not apply browser SEO, 
 Vitals guidance merely because Expo/React Native includes React, `react-dom`, or a web compatibility
 dependency.
 
+For copy or styling, reuse the current design and inspect the affected screen. Release builds,
+physical devices, and both-platform regression runs are needed when the change depends on native,
+lifecycle, delivery, or performance behavior, not for every UI edit.
+
 - For Expo or React Native work, read [Expo and React Native](references/expo-react-native.md).
 - For native configuration, store delivery, signing, updates, or permissions, read
   [native delivery](references/native-delivery.md).
 - Preserve the current navigation, state/data ownership, design system, native-module boundary, and
   supported OS/device matrix. Keep platform differences explicit instead of hiding them behind a
   lowest-common-denominator abstraction.
-- Design loading, empty, error, retry, offline, reconnect, permission-denied, background/foreground,
-  process-death, and interrupted-update states as product behavior.
-- Treat touch target size, screen-reader labels/order, dynamic text, contrast, motion reduction,
-  safe areas, keyboard avoidance, orientation, and locale as acceptance behavior.
-- Profile release builds on representative real devices. Test affected Android and iOS paths, not
-  only Expo Go, a browser target, emulator, or development JavaScript runtime.
+- Handle the lifecycle, network, permission, or loading/error states introduced by the feature.
+  Preserve existing states on unrelated edits.
+- Inspect relevant touch targets, accessible labels, text scaling, contrast, safe areas, keyboard,
+  or locale effects; do not repeat the entire accessibility matrix for a narrow change.
+- Use release builds and representative real devices for native or performance claims. An emulator
+  or development build can be enough for a simple UI change; state meaningful platform gaps.
 """,
         applies_facets=("mobile-app",),
         references=(
@@ -1045,9 +1099,9 @@ dependency.
   schema change, and offline conflicts.
 - Keep navigation params serializable and validate deep-link/external inputs before resolving routes.
   Model protected-route UX without treating client navigation as authorization.
-- Test with the repository's lint/type/unit tools plus focused component/integration tests. Verify a
-  development build for native modules and release builds on supported Android/iOS devices for the
-  changed lifecycle, notifications, audio/camera/location, background, or performance behavior.
+- Use relevant existing lint/type/component checks. Verify a development build for changed native
+  modules, and release/device behavior for changes to lifecycle, notifications, audio/camera/location,
+  background execution, or performance. Do not add component tests merely to freeze styling.
 """,
             ),
             (
@@ -1064,9 +1118,9 @@ dependency.
 - Version native binaries, runtime compatibility, database/cache migrations, and OTA updates together.
   Stage rollouts, monitor crashes/startup/API compatibility, retain rollback paths, and never ship an
   update to an incompatible native runtime.
-- Verify clean native generation/build when configuration changes, store-quality release artifacts for
-  both platforms, install/upgrade from the prior supported version, process death, offline startup,
-  notification/deep-link cold starts, rollback, and privacy/permission declarations.
+- Verify clean native generation/build when native configuration changes. For a delivery change,
+  check affected platforms' release/upgrade compatibility, recovery, and permission declarations.
+  Test process death, offline startup, or deep-link cold starts when the change can affect them.
 """,
             ),
         ),
@@ -1077,8 +1131,8 @@ dependency.
         (),
         """
 # Godot development
-- First derive the Godot version, renderer, target platforms, GDScript/C# mix, autoloads, InputMap,
-  Theme/localization setup, plugins, import/export settings, and project check commands. Existing
+- Establish the Godot version and inspect the scene, script, or resource being changed. Read
+  renderer, input, localization, plugin, or export configuration only when relevant. Existing
   project conventions and architecture win. Consult current official docs only for version-specific
   API, export, renderer, import, or plugin behavior the repository does not establish.
 - For gameplay, player/controller behavior, controls, input, or rebinding, read
@@ -1232,6 +1286,8 @@ dependency.
         (),
         """
 # Deployment operations
+- Keep the scope at the changed service/configuration. A timeout or log-format edit does not need
+  a new inventory, rollout design, recovery drill, or reboot test.
 - Read [Linux service and edge operations](references/linux-service-edge.md) for Nginx, systemd,
   Ansible, host-level deployment, or reverse-proxy changes.
 - Treat rendered configuration and the actual target versions as evidence. Validate in an isolated or
@@ -1249,6 +1305,8 @@ dependency.
                 "linux-service-edge.md",
                 """
 # Linux service and edge operations
+Apply only the sections for the service/edge behavior being changed. Preserve existing deployment
+policy and authorization; this reference does not introduce extra approvals.
 - For systemd, use a dedicated least-privilege identity, explicit working/data/runtime directories,
   predictable environment/config loading, restart behavior matched to failure semantics, bounded start/
   stop timeouts, correct readiness type, journal identifiers, and hardening compatible with required I/O.
@@ -1262,30 +1320,31 @@ dependency.
 - In Ansible or equivalent automation, pin collections/roles, target an explicit inventory, use check/
   diff safely, protect vault material, avoid shell when a typed idempotent module exists, notify restarts
   only on change, and serialize stateful operations that cannot overlap.
-- Validate syntax and rendered configuration (`nginx -t`, `systemd-analyze verify`, Ansible syntax/check
-  mode where meaningful), then test failure/restart, health/readiness, logs, permissions, certificate
-  renewal, rollback, and host reboot behavior in the closest safe environment.
+- Validate changed syntax/rendered configuration (`nginx -t`, `systemd-analyze verify`, Ansible
+  syntax/check mode where meaningful). Exercise affected runtime behavior in a safe environment;
+  renewal, rollback, and reboot tests are for changes that can affect those paths.
 """,
             ),
         ),
     ),
     BuiltinSkill(
         "project-architecture",
-        "Use when creating or restructuring project boundaries, modules, or ownership, recording an ADR, or changing architecture for measured load, latency, capacity, or availability.",
+        "Use when designing a new subsystem or materially changing boundaries, ownership, or architecture for measured scale; exclude routine components, local bug fixes, and cosmetic changes.",
         (),
         """
 # Project architecture
-Use this skill for a new project, a new subsystem, or a material boundary change.
-- Read repository instructions, architecture/ADRs, manifests, neighboring modules, and deployment
-  constraints before selecting a structure. Existing accepted boundaries outrank generic patterns.
+Use this skill for a material design decision. A new page, component, file, or small website can
+usually follow the existing framework structure without an ADR, architecture plan, or new layers.
+- Inspect relevant existing boundaries and constraints before selecting a structure. Read ADRs,
+  manifests, and deployment details when they bear on the decision; avoid a repository-wide tour.
 - For greenfield work, begin from product use cases, data ownership, external contracts, expected
   scale/failure modes, and team/tooling constraints. Choose the simplest architecture that meets
   them; do not cargo-cult layers, microservices, repositories, buses, or dependency injection.
 - Give each module one coherent responsibility and an explicit public API. Keep dependency
   direction, composition roots, configuration, side effects, and external adapters visible; avoid
   cycles and hidden cross-module state.
-- Define error, validation, transaction, concurrency, timeout/cancellation, idempotency, and
-  observability behavior at boundaries before scattering implementations across modules.
+- Define boundary behavior relevant to the design: for example transaction/retry semantics for
+  durable writes, or timeouts for remote calls. Do not add unused mechanisms from a checklist.
 - Keep domain policy independent of delivery/storage/framework details where that separation pays
   for itself, but do not wrap stable libraries with empty abstractions.
 - Design for test seams and replaceable external boundaries without duplicating production logic.
@@ -1294,8 +1353,8 @@ Use this skill for a new project, a new subsystem, or a material boundary change
   operational boundary, read [architecture decisions](references/architecture-decisions.md).
 - When measured load, latency, throughput, capacity, or availability drives the change, read
   [scalability](references/scalability.md).
-- Recheck the complete dependency graph and production operations after implementation; a tidy
-  folder tree alone is not evidence of sound architecture.
+- Review affected dependencies and operational consequences after implementation. Inspect the
+  complete graph only for changes with that reach, not for an ordinary new module.
 """,
         applies_facets=("software-project",),
         references=(
@@ -1339,7 +1398,11 @@ operational contract and the decision may need an ADR.
 Use the repository's selected language/runtime versions, package manager, lockfiles, formatter,
 analyzers, test runner, and conventions. Do not replace working toolchains with personal defaults.
 
-Read only the reference for each language crossed by the current change:
+Use the guidance for changed language semantics or tooling. Editing incidental presentation text
+or styling does not require a language-reference tour or all of its checks. Machine-consumed strings,
+queries, commands, required messages, and public contracts are behavior, not cosmetic text.
+For substantive code,
+consult only relevant sections of the affected language references:
 - [Python](references/python.md)
 - [JavaScript and TypeScript](references/javascript-typescript.md)
 - [Go](references/go.md)
@@ -1354,9 +1417,14 @@ Read only the reference for each language crossed by the current change:
 - [Swift](references/swift.md)
 - [SQL](references/sql.md)
 
-For polyglot boundaries, read every involved reference and verify serialization, error,
-cancellation, time, numeric, and nullability semantics on both sides. Preserve public/package API
-compatibility and run the repository's focused checks plus required gates.
+When changing a polyglot interface, verify affected semantics on both sides: serialization,
+errors, cancellation, time, numbers, or nullability as relevant. Merely editing files in two
+languages does not imply an interface change.
+
+The check commands in references are options for the affected risk, not a cumulative per-edit
+gate. Reuse existing focused checks, add tests for meaningful behavior rather than incidental
+wording, and honor explicit repository gates at their required stage. Do not introduce tooling
+or run every build/test variant just because a reference lists it.
 """,
         applies_languages=(
             "c",
@@ -1396,8 +1464,9 @@ compatibility and run the repository's focused checks plus required gates.
   timestamps, and decimal/integer representations where binary float would violate domain rules.
 - Keep dependency declarations and locks synchronized; separate runtime, development, and optional
   extras according to the repository's existing packaging model.
-- Run the configured formatter/linter, type checker, unit tests, and affected integration tests.
-  Test exception, cancellation, serialization, and concurrency paths changed by the work.
+- Use the configured formatter/linter and relevant type or focused behavior checks. Test changed
+  exception, cancellation, serialization, or concurrency risks when applicable; incidental display
+  text does not require a unit/integration suite or new assertions about wording.
 """,
             ),
             (
@@ -1417,8 +1486,9 @@ compatibility and run the repository's focused checks plus required gates.
   checking platform capabilities and bundle/server cost; update the existing lockfile exactly.
 - Use safe DOM/text APIs, validate external JSON and environment configuration, and distinguish
   absent, `null`, empty, and false values according to the domain contract.
-- Run the configured formatter/linter, type checker, unit tests, production build, and affected
-  browser/server integration tests. Check failure, cancellation, hydration, and serialization paths.
+- Use relevant configured format/lint/type checks and focused behavior tests. Build when module,
+  bundling, rendering, or configuration changes need it. Exercise failure, cancellation, hydration,
+  or serialization only when affected; cosmetic CSS/text edits do not require the whole toolchain.
 """,
             ),
             (
@@ -1456,8 +1526,8 @@ compatibility and run the repository's focused checks plus required gates.
   explicit in async/concurrent code. Do not hold blocking locks across `.await`.
 - Preserve serde/wire/schema and semver compatibility for public crates. Test relevant feature
   combinations rather than only the default feature set.
-- Run the pinned formatter, Clippy policy, unit/integration/doc tests, and affected feature/target
-  checks; use Miri, sanitizers, or fuzzing when the changed risk warrants them.
+- Use the pinned formatter/Clippy and focused checks for affected crates or feature/target contracts.
+  Use Miri, sanitizers, or fuzzing when changed unsafe, memory, or concurrency risk warrants them.
 """,
             ),
             (
@@ -1476,8 +1546,9 @@ compatibility and run the repository's focused checks plus required gates.
   domain behavior in lifecycle callbacks, reflection, global statics, or magic configuration.
 - Preserve serialization/database compatibility and make timezone, locale, decimal, and collection
   mutability choices explicit.
-- Run wrapper-based formatting/static analysis, unit and affected integration tests, packaging, and
-  compatibility checks. Test concurrency and transaction failure paths changed by the work.
+- Use wrapper-based formatting/static analysis and focused behavior checks. Add packaging or
+  compatibility checks for affected distribution/API boundaries, and failure tests for changed
+  concurrency or transaction behavior.
 """,
             ),
             (
@@ -1496,8 +1567,8 @@ compatibility and run the repository's focused checks plus required gates.
   framework validation/authorization at the correct server-side boundary.
 - Keep configuration and secrets outside compiled artifacts; use typed options and fail startup on
   missing unsafe production settings.
-- Run the pinned formatter/analyzers, build with warnings policy, unit/affected integration tests,
-  publish/trim/AOT checks when used by the project, and concurrency/cancellation failure tests.
+- Use pinned analyzers/build checks and focused tests relevant to the edit. Check publish/trim/AOT
+  when deployment compatibility can change, and failure paths when concurrency/cancellation changes.
 """,
             ),
             (
@@ -1515,8 +1586,9 @@ compatibility and run the repository's focused checks plus required gates.
   long-lived workers). Reset per-request state and close/rollback resources on every failure path.
 - Preserve public APIs, array/object shapes, serialization, database, timezone, and money semantics;
   avoid loose comparisons where type juggling can change domain behavior.
-- Update Composer constraints and lockfile together. Run the repository formatter/style checks,
-  static analyzer, unit/affected integration tests, and production autoload/container build.
+- Update Composer constraints and lockfile together when dependencies change. Use relevant existing
+  style/static and behavior checks; verify production autoload/container builds for changes that
+  can affect boot or packaging.
 """,
             ),
             (
@@ -1533,8 +1605,9 @@ compatibility and run the repository's focused checks plus required gates.
   retry, transaction, and after-commit behavior explicit.
 - Preserve method keyword arguments, hashes/JSON, database, timezone, decimal, and nil/false
   semantics across supported Ruby/framework versions.
-- Update Gemfile and lockfile consistently. Run the repository style/static checks, unit and
-  affected integration/system tests, eager-load/boot checks, and job failure/retry paths.
+- Update Gemfile and lockfile consistently when dependencies change. Use relevant style/static and
+  focused behavior checks; exercise boot for autoload/configuration changes and job failure/retry
+  paths for changes to those behaviors.
 """,
             ),
             (
@@ -1551,9 +1624,9 @@ compatibility and run the repository's focused checks plus required gates.
   assumptions. Isolate unavoidable low-level operations behind small documented contracts.
 - Preserve C ABI, binary layout, calling convention, exception boundary, serialization, and wire
   compatibility where external consumers or stored data require it.
-- Run the configured formatter/static analysis, all affected build variants/tests, sanitizers for
-  changed memory/concurrency code, and target/compiler compatibility checks. Add fuzzing for parsers
-  and unsafe boundaries when warranted.
+- Use configured static analysis and focused build/tests. Check affected target/ABI variants for
+  portability changes, and sanitizers for changed memory/concurrency code. Add fuzzing for parsers
+  and unsafe boundaries when it materially improves coverage.
 """,
             ),
             (
@@ -1596,8 +1669,9 @@ compatibility and run the repository's focused checks plus required gates.
   globs, recursive operations on roots, and cleanup that can escape a task-owned temporary directory.
 - Propagate exit status and signals, bound waits/retries, avoid leaking secrets through tracing or
   process arguments, and use atomic writes/locks where concurrent scripts share state.
-- Run the configured formatter/linter (for example shfmt/ShellCheck), syntax checks for supported
-  shells, and subprocess tests covering spaces, empty values, failures, interruption, and cleanup.
+- Use configured lint/syntax checks (for example shfmt/ShellCheck). Exercise quoting, failure,
+  interruption, or cleanup in subprocess tests when those behaviors change. Comments and incidental
+  human-facing text do not need a new matrix; preserve machine-consumed output and command semantics.
 """,
             ),
             (
@@ -1614,8 +1688,8 @@ compatibility and run the repository's focused checks plus required gates.
   observations, and tasks. Do not hide mutable global state behind singletons.
 - Preserve Codable/wire/storage schemas, public API availability, timezone/locale, Decimal, and
   platform behavior across the supported matrix.
-- Run the configured formatter/linter, package/project builds, unit/UI/integration tests for affected
-  platforms, strict-concurrency diagnostics, and release-build checks.
+- Use relevant formatter/compiler diagnostics and focused behavior checks. Expand to platform,
+  concurrency, or release-build checks when the changed code depends on those properties.
 """,
             ),
             (
@@ -1634,8 +1708,9 @@ compatibility and run the repository's focused checks plus required gates.
   and maintenance costs in index decisions.
 - Design migrations for the real data volume and deployment overlap: expand, backfill/verify, switch,
   then contract where compatibility requires it. Bound locks and define rollback or forward repair.
-- Test against the actual engine locally/CI where practical, including constraints, migrations from
-  supported prior state, rollback/repair, concurrent writes, and representative query plans.
+- Test changed query/constraint behavior against the actual engine locally/CI where practical.
+  For migrations or write-protocol changes, verify relevant prior states, rollback/repair, and
+  concurrent outcomes. A read-query edit does not automatically require a migration/recovery drill.
 """,
             ),
         ),
@@ -1646,13 +1721,14 @@ compatibility and run the repository's focused checks plus required gates.
         (),
         """
 # Data integrity
-- Read the authoritative schema/migrations, ORM mappings, read/write paths, transaction boundaries,
-  retention/backup policy, and supported deployment overlap before changing durable state.
+- Inspect the affected schema, query, and transaction first. Read migration history, backup policy,
+  or deployment overlap when the change can affect compatibility, writes, or recovery. A read-only
+  query adjustment does not require a complete data-lifecycle review.
 - Put invariant enforcement at the lowest reliable layer: database constraints for durable facts,
   application validation for contextual feedback, and tests for both. Never rely on a prior read as
   the sole protection against concurrent writes.
-- Define transaction isolation, lock ordering, idempotency, retry, timeout, and partial-failure
-  behavior. Retry only errors known to be safe and rerun the whole transaction unit.
+- Preserve transaction semantics. When changing writes or concurrency, define relevant isolation,
+  locking, idempotency, retries, and partial failure. Retry only safe errors for the whole transaction.
 - Make migrations compatible with real table size and old/new application versions. Prefer staged
   expand/backfill/verify/switch/contract changes, bounded batches, resumability, and observable
   progress over one blocking irreversible step.
@@ -1662,8 +1738,9 @@ compatibility and run the repository's focused checks plus required gates.
   selectivity, locking, storage growth, and stale-statistics behavior.
 - Prevent test/dev/prod database and volume confusion. Destructive resets require exact targets and
   explicit authorization; fixtures and tests must never depend on production data.
-- Verify constraints, supported-version migrations, failure/retry/concurrency paths, and application
-  compatibility against the actual database engine when practical.
+- Verify the affected invariant against the actual database engine when practical. Schema/write
+  changes need relevant failure/concurrency and compatibility coverage; a read-query change needs
+  correct results and, when relevant, a representative query plan.
 """,
         applies_languages=("sql",),
         applies_dependencies=(
@@ -1695,18 +1772,21 @@ compatibility and run the repository's focused checks plus required gates.
         (),
         """
 # Complex change planning
-Use Harness Task state as the source of truth. Do not create a second epic/status system unless the
-repository already requires one.
+Use this for consequential cross-boundary or migration-ordered work. File count alone is not
+complexity: a coordinated rename or small UI change across several files can proceed directly.
+When a Harness Task is used, keep continuity there; do not create a second status system. A short
+working outline is enough unless migration ordering or unresolved contracts need more detail.
 - Map affected contracts, callers, callees, persistence, tests, and operational edges before editing.
 - Split work into the smallest dependency-ordered slices that each leave the repository coherent.
 - Identify blast radius, migration/rollback concerns, and explicit acceptance evidence for risky
   boundaries.
 - Keep one current implementation slice active; checkpoint progress instead of duplicating status in
   ad-hoc files.
-- Before implementing a risky or underspecified change, read
+- When material contract uncertainty could change the implementation, consult
   [specification audit](references/specification-audit.md).
-- Established-behavior and compatibility work uses the project-wide `legacy-preservation` Skill.
-- Before publication, read [independent review](references/independent-review.md).
+- Use `legacy-preservation` for consequential compatibility changes, not every existing-code edit.
+- For the risky boundaries, use [independent review](references/independent-review.md). Do not add
+  a separate reviewer or user-approval requirement unless repository policy or the task requires it.
 """,
         applies_facets=("software-project",),
         references=(
@@ -1715,6 +1795,8 @@ repository already requires one.
                 """
 # Specification audit
 Before implementation, independently test the requested behavior against existing contracts.
+Apply this to consequential uncertainty, not every incomplete cosmetic detail. Resolve routine
+implementation choices from context and proceed without a formal audit document or confirmation.
 - Identify the authoritative spec/ADR/API/schema and invariants the change must preserve.
 - List material ambiguities, contradictions, missing failure behavior, migration concerns, and
   acceptance criteria.
@@ -1730,12 +1812,15 @@ Before implementation, independently test the requested behavior against existin
                 """
 # Independent review
 Review the finished change as if you did not implement it.
+Focus on plausible failures at the changed boundaries. A critical self-review is sufficient unless
+policy requires a separate reviewer; use an independent agent when it would add meaningful insight.
 - Re-read the governing contract and inspect the complete diff plus nearby callers/callees.
 - Look for stale-write races, unsafe defaults, ownership/collision mistakes, migration/recovery
   gaps, disclosure leaks, and tests that only prove the happy path.
 - Classify findings by materiality. Fix correctness/safety/contract issues; do not churn code for
   taste.
-- Re-run checks affected by any fix and the repository-required publication gate.
+- Re-run checks affected by a fix. Preserve repository gates at their required publication/merge
+  stage; do not repeat passing checks on an unchanged candidate.
 - Report verified evidence separately from assumptions, not-run checks, and real blockers.
 """,
             ),
@@ -1743,21 +1828,21 @@ Review the finished change as if you did not implement it.
     ),
     BuiltinSkill(
         "legacy-preservation",
-        "Use when changing established behavior, compatibility, or an existing runtime path; exclude greenfield-only design and an explicitly authorized rewrite.",
+        "Use when changing established contracts, stored formats, compatibility, or poorly understood consequential behavior; exclude cosmetic edits, routine local fixes with clear behavior, and greenfield-only design.",
         (),
         """
 # Legacy preservation
 Treat the existing system as an evidence-bearing contract, including awkward behavior that users or
 integrations may rely on.
-- Before editing, read project instructions, architecture/ADRs, manifests, the target code, nearby
-  callers/callees, tests, configuration, migrations, and relevant history. Trace the real runtime
-  path; do not infer architecture from filenames or preferred modern patterns.
-- Identify the local dependency direction, ownership boundaries, naming/error conventions,
-  persistence and serialization formats, public APIs/CLI output, deployment topology, and supported
-  runtime versions. Preserve them unless the task explicitly authorizes a migration.
-- Capture current behavior with focused characterization, contract, or golden tests at the safest
-  seam before changing poorly understood behavior. Include important failure and compatibility
-  paths, not only the desired happy path.
+- Start with the target code and its relevant caller/tests. Expand to architecture, configuration,
+  migrations, or history only when needed to resolve a concrete contract or uncertainty. A local
+  change does not need a full repository investigation.
+- Identify the public API, stored format, or runtime behavior this change could break and preserve
+  it unless the requested change authorizes altering it. Do not preserve a bug the user asked to fix
+  or ask again for permission to make the requested behavior change.
+- For poorly understood consequential behavior, capture a focused characterization or contract
+  test before modifying it when useful. Reuse existing coverage; golden tests and new snapshots
+  are not requirements for styling, wording, or straightforward low-impact fixes.
 - Make the smallest coherent change inside the nearest existing abstraction. Do not introduce a
   new framework, architectural style, duplicate service/repository layer, or parallel configuration
   mechanism in one corner merely because it would suit a greenfield design.

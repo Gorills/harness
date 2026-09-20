@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -22,10 +23,12 @@ from harness.installation import (
     install_harness,
     uninstall_harness,
 )
+from harness.ipc import IpcRemoteError, WorkspaceSkillsResult, request_workspace_skills_reconcile
 from harness.registry import VisibilityMode, create_project, register_workspace
 from harness.runtime_paths import default_runtime_paths
 from harness.storage import connect_database, initialize_database
 from harness.visibility import set_project_visibility
+from harness.workspace_resolution import WorkspaceHint
 
 pytestmark = [
     pytest.mark.skipif(os.name == "nt", reason="POSIX installation lifecycle"),
@@ -158,6 +161,116 @@ def test_linux_install_scan_uninstall_and_purge_end_to_end(
     assert "Project Intelligence: purged" in purge_output
     assert not paths.database.exists()
     assert not (home / ".harness" / "skills").exists()
+
+
+def test_failed_post_install_repair_is_idempotently_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    state_home = tmp_path / "state"
+    runtime_home = tmp_path / "runtime"
+    fake_bin = tmp_path / "bin"
+    agent_state = tmp_path / "agent-state.json"
+    write_fake_cursor_agent(fake_bin, agent_state)
+    _skill_registry(home)
+    roots = (tmp_path / "repo-a", tmp_path / "repo-b")
+    for root in roots:
+        _repo(root)
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_home))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_home))
+    monkeypatch.setenv("HARNESS_FAKE_AGENT_STATE", str(agent_state))
+    monkeypatch.setenv("PATH", path_without_agent(fake_bin))
+
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    for root in roots:
+        monkeypatch.setattr(sys, "argv", ["harness", "init", str(root)])
+        assert harness_main() == 0
+        capsys.readouterr()
+
+    first_config = roots[0] / ".cursor" / "mcp.json"
+    first_value = json.loads(first_config.read_text(encoding="utf-8"))
+    first_value["mcpServers"]["harness"]["command"] = "/stale/python"
+    first_value["mcpServers"]["user-owned"] = {
+        "type": "stdio",
+        "command": "/user/tool",
+        "args": ["serve"],
+    }
+    first_config.write_text(json.dumps(first_value, indent=2) + "\n", encoding="utf-8")
+    user_file = roots[1] / ".agents" / "skills" / "user-owned" / "SKILL.md"
+    user_file.parent.mkdir(parents=True)
+    user_file.write_text(
+        "---\nname: user-owned\ndescription: User content\n---\n\n# User content\n",
+        encoding="utf-8",
+    )
+
+    original_reconcile = request_workspace_skills_reconcile
+    calls = 0
+
+    def fail_first_reconcile(
+        socket_path: Path,
+        hints: Sequence[WorkspaceHint],
+        profiles: Sequence[str],
+        *,
+        timeout: float = 40.0,
+    ) -> WorkspaceSkillsResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise IpcRemoteError(
+                "skill_integration_error",
+                "Workspace skill projection conflicts with tracked or user-owned content; "
+                "inspect .agents/skills and Git tracking",
+            )
+        return original_reconcile(socket_path, hints, profiles, timeout=timeout)
+
+    monkeypatch.setattr(
+        "harness.installation.request_workspace_skills_reconcile",
+        fail_first_reconcile,
+    )
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 1
+    failed_output = capsys.readouterr().out
+    assert "post-install project skill reconciliation" in failed_output
+    assert "Host integration may be partially updated" in failed_output
+    assert "Retry: harness install --host cursor" in failed_output
+    after_failure = json.loads(first_config.read_text(encoding="utf-8"))
+    assert after_failure["mcpServers"]["harness"]["command"] == os.path.abspath(sys.executable)
+    assert after_failure["mcpServers"]["user-owned"]["command"] == "/user/tool"
+
+    monkeypatch.setattr(
+        "harness.installation.request_workspace_skills_reconcile",
+        original_reconcile,
+    )
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "cursor"])
+    assert harness_main() == 0
+    assert "Harness install: OK" in capsys.readouterr().out
+
+    integration_state = state_home / "harness" / "host-integrations.json"
+    assert json.loads(integration_state.read_text(encoding="utf-8"))["profiles"] == ["cursor"]
+    for root in roots:
+        project_config = json.loads((root / ".cursor" / "mcp.json").read_text(encoding="utf-8"))
+        assert project_config["mcpServers"]["harness"]["env"]["HARNESS_WORKSPACE_ROOT"] == str(
+            root.resolve()
+        )
+        assert (root / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
+    assert json.loads(first_config.read_text(encoding="utf-8"))["mcpServers"]["user-owned"] == {
+        "type": "stdio",
+        "command": "/user/tool",
+        "args": ["serve"],
+    }
+    assert user_file.read_text(encoding="utf-8").endswith("# User content\n")
+
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 0
+    doctor_output = capsys.readouterr().out
+    assert "0 FAIL" in doctor_output
 
 
 def test_install_harness_refuses_retired_claude_code() -> None:
