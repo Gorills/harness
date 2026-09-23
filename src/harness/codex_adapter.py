@@ -183,7 +183,7 @@ _MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
 )
 
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness required. `project_status` must be the first repository action. "
     "Before shell/read/search/browser/change, find deferred/omitted Harness tools; "
     "discovery alone may precede status. After config changes restart Codex/new conversation. "
@@ -196,6 +196,20 @@ CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Complete untruncated exact_coverage replaces native search. " + TASK_REVIEW_INSTRUCTIONS
 )
 
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness required. `project_status` must be the first repository action. "
+    "Before shell/read/search/browser/change, find deferred/omitted Harness tools; "
+    "discovery alone may precede status. After config changes restart Codex/new conversation. "
+    + TASK_CREATION_INSTRUCTIONS
+    + TASK_CONTINUITY_INSTRUCTIONS
+    + "Resume by explicit ID; retry schema errors. "
+    "Use native repository tools for code and documentation discovery. "
+    "Harness provides no project code/document search. "
+    "For older Task/Knowledge without ID, optionally use `project_recall`; "
+    "open selected refs with `project_context`. "
+    "Explicit code/doc refs remain metadata-only. " + TASK_REVIEW_INSTRUCTIONS
+)
+
 _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
@@ -205,6 +219,7 @@ _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(
@@ -691,6 +706,7 @@ def _desired_entry(
         return {}
     return {
         "url": mcp_http_url,
+        "enabled": True,
         "required": True,
         "startup_timeout_sec": 30,
         "http_headers": {
@@ -718,6 +734,7 @@ def _desired_config(
         [
             "[mcp_servers.harness]",
             f"url = {_toml_string(entry['url'])}",
+            "enabled = true",
             "required = true",
             "startup_timeout_sec = 30",
             "",
@@ -789,6 +806,8 @@ def _isolated_development_bootstrap_is_current(value: dict[str, object]) -> bool
     return (
         value.get("developer_instructions") == CODEX_BOOTSTRAP_INSTRUCTION_BODY
         and entry is not None
+        and entry.get("enabled") is True
+        and entry.get("required") is True
         and entry.get("experimental_environment") == "local"
     )
 
@@ -870,8 +889,13 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     if "url" in entry:
         headers = entry.get("http_headers")
         return (
-            set(entry) == {"url", "required", "startup_timeout_sec", "http_headers"}
+            set(entry)
+            in (
+                {"url", "required", "startup_timeout_sec", "http_headers"},
+                {"url", "enabled", "required", "startup_timeout_sec", "http_headers"},
+            )
             and isinstance(entry.get("url"), str)
+            and entry.get("enabled", True) is True
             and entry.get("required") is True
             and entry.get("startup_timeout_sec") == 30
             and isinstance(headers, dict)

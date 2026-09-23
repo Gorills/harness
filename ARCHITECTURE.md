@@ -33,7 +33,6 @@ Codex ─ authenticated Streamable HTTP MCP ──────────┤
                                                     ├─ Registry
                                                     ├─ Tasks
                                                     ├─ Indexer / Watcher
-                                                    ├─ Search
                                                     ├─ Knowledge
                                                     ├─ Documentation
                                                     ├─ Skill Resolver
@@ -53,7 +52,6 @@ One daemon per OS user. It owns:
 - structural index and filesystem watcher;
 - Task state and task events;
 - agent activity records;
-- search and Working Sets;
 - semantic Knowledge and staleness;
 - skill resolution state;
 - dashboard API and event stream.
@@ -68,14 +66,17 @@ Streamable HTTP for Codex. It:
 1. reaches daemon-owned state through local IPC; the Codex HTTP adapter runs with `harnessd`, so
    Codex never needs access to the Unix socket;
 2. resolves the current Workspace using host-specific and generic hints;
-3. exposes the five model-facing MCP tools;
+3. exposes the bounded model-facing MCP tools;
 4. applies exposure limits at the model boundary;
 5. records bridge lifecycle/activity as observable metadata;
-6. never owns a second copy of task/search/index/knowledge logic.
+6. never owns a second copy of task/index/knowledge logic.
 
 ### Dashboard
 
-The dashboard talks to the same daemon/domain state as MCP. It does not have an independent database or alternate task workflow.
+The dashboard talks to the same daemon/domain state as MCP for Projects, Tasks and Knowledge.
+It does not duplicate that database or Task workflow. The operator's personal notes and access
+credentials are a separate private subsystem with selectable password protection, outside
+Harness business state and every model surface; see [ADR-0069](docs/decisions/0069-project-hub-and-private-vault.md).
 
 ## 4. Protocol baseline: MCP 2026-07-28
 
@@ -156,10 +157,6 @@ Derived mechanical index of filesystem/Git structure. It is disposable/rebuildab
 
 Durable, provenance-bearing semantic knowledge learned during real task work. Code-related cards should carry anchors/fingerprints and explicit freshness.
 
-### Working Set
-
-Derived, bounded relevance state for a Task/Workspace. It boosts ranking but does not become a hard search filter or source of truth.
-
 ## 6. Workspace resolution
 
 Workspace resolution is the most important host boundary that the original specification left implicit.
@@ -191,22 +188,17 @@ Normal workflow remains low-ritual:
 ```text
 project_status
 → task_start/resume when durable tracking is useful
-→ project_search when exact/durable retrieval helps, otherwise native discovery
-→ native work
+→ native repository discovery and work
 → task_checkpoint for tracked work; ready → waiting(operator_review)
 ```
 
-`project_search` is required before broad native discovery only for explicit identifiers/quoted
-literals and for Knowledge/Task retrieval. Natural-language code/doc discovery may start with
-native repository search. Ordinary lexical code/doc hits are localization candidates, not proof
-that broader native fallback is redundant. Only complete, untruncated `exact_coverage` suppresses
-repeating native search for the same needle.
-
-`project_context` is not a mandatory step after every search hit. Knowledge and Task refs use it
-for selected semantic context. Code and doc hits that already include an exact path may be read
-with targeted native tools immediately; `project_context` remains available for metadata
-verification. An exact path already in hand (operator message, open file, git status, or a prior
-hit) may skip `project_search`. Search itself does not require a Task.
+Agents use native repository tools for code and documentation discovery. Harness no longer
+provides project code/document search or requires a Harness call before native exploration.
+`project_recall` can find durable Knowledge and Task references when earlier IDs are unknown;
+it does not search code or documentation and is never a prerequisite for native exploration.
+`project_context` expands selected explicit Knowledge and Task references. Explicit
+code/document refs remain metadata-only compatibility inputs; no Harness discovery tool
+generates them.
 
 Start or resume a Task for substantial changes, multi-step work, needed durable continuity,
 or an explicit operator request. Quick questions, read-only inspection, and small local edits
@@ -256,13 +248,20 @@ This preserves the intended cheap workflow without relying on obsolete MCP sessi
 
 ## 8. Model-facing MCP surface
 
-Keep exactly five primary tools until data proves another operation is necessary:
+The model-facing surface has five tools:
 
 - `project_status`
-- `project_search`
 - `project_context`
+- `project_recall`
 - `task_start`
 - `task_checkpoint`
+
+`project_recall` is an optional, bounded lookup over durable Knowledge and Task records.
+It returns only applicable references, titles, optional short summaries and freshness;
+the caller uses `project_context` to expand a selected reference. The response bounds its
+serialized size, removes previews before dropping any hits, and reports whether results
+were truncated. It exposes no code/document/path search, raw source, or cross-checkout
+Task/Knowledge that lacks current Git evidence.
 
 Write targeting rule:
 
@@ -275,7 +274,7 @@ Write targeting rule:
 
 `project_status` includes the effective `visibility_mode` (`normal` or `hidden`) as a compact domain field so the model can obey the current publication policy. Host capability diagnostics and enforcement internals stay out of the model-visible payload and belong in `doctor`/dashboard surfaces.
 
-The model-visible `index` object is a cheap SQLite snapshot: `indexed_file_count` is the current Structural Index inventory, `content_search_document_count` is the number of those current search documents that actually participate in code/docs content FTS retrieval (`indexed_search_documents` joined to `indexed_content_search`), and last-known reconcile provenance (`index_revision`, `last_successful_reconcile_at`, `last_reconcile_kind`) records when and how the index last successfully reconciled, including a no-op persist that still advances the watermark. Binary, NUL, invalid-UTF-8, symlink, oversized, and generated `.log`/`.out` paths can remain in the mechanical inventory without becoming content documents. A zero search hit is therefore not proof of absence across every indexed file. Provenance is last-known success, not proof that nothing changed afterwards and not a live freshness claim. Status must not reread Workspace source, run a freshness scan, or add Git work to compute these index fields.
+The model-visible `index` object is a cheap SQLite snapshot: `indexed_file_count` is the current Structural Index inventory, and last-known reconcile provenance (`index_revision`, `last_successful_reconcile_at`, `last_reconcile_kind`) records when and how the index last successfully reconciled, including a no-op persist that still advances the watermark. Provenance is last-known success, not proof that nothing changed afterwards and not a live freshness claim. Status must not reread Workspace source, run a freshness scan, or add Git work to compute these index fields.
 
 Each tool contract owns:
 
@@ -310,12 +309,11 @@ IPC requirements:
 - explicit request/response schema independent of MCP wire types;
 - bounded message sizes;
 - protocol versioning between bridge and daemon;
-- cancellation/timeouts, with command-specific bounds (status stays short; search is longer than
-  status so a large Workspace inventory cannot surface to MCP as `local IPC request timed out`);
+- cancellation/timeouts, with command-specific bounds;
 - bounded concurrent client handling so one slow request does not head-of-line block unrelated callers;
 - one SQLite connection per accepted IPC worker rather than sharing a connection across threads;
 - a bounded 30-second SQLite writer wait on daemon-owned connections so Task mutations do not fail
-  under a normal watcher/search reconciliation transaction;
+  under a normal watcher reconciliation transaction;
 - no source/context logging by default;
 - reconnect behavior that does not mutate Task state implicitly.
 
@@ -340,44 +338,20 @@ Persistence rules:
 - idempotent indexer writes;
 - derived data rebuildable independently from durable task/knowledge state.
 
-The exact required FTS5 capability set, including contentless-delete tables, must be checked by
-`harness doctor` at runtime because Python/SQLite builds are an environment capability, not a safe
-universal assumption.
-
 ## 11. Indexing
 
-Initial scan is deterministic, local, and non-LLM.
+The Structural Index is derived from the current Workspace filesystem and Git state. An
+authoritative scan inventories eligible files and their mechanical identities under the
+ignore/sensitivity policy, then updates the index transactionally. It supports status,
+Knowledge staleness and skill relevance without exposing a repository search service.
 
-Indexing pipeline:
-
-```text
-Workspace discovery
-→ ignore/sensitivity policy
-→ file inventory + hashes
-→ language/parser selection
-→ symbols/imports/exports where supported
-→ docs/Git metadata
-→ transactional index update
-→ FTS refresh
-```
-
-Incremental watcher observations are debounced/coalesced and reconciled against the filesystem.
+Incremental watcher observations are debounced and reconciled against the filesystem.
 Idle polls use a subprocess-free metadata token over directory/Git-control state plus one rotating
 128-path metadata shard; Git status/HEAD confirmation runs only after that token changes. A bounded
-same-HEAD dirty-path set is reconciled through the canonical index/FTS/Knowledge rules without
-hashing unrelated files. Initial, HEAD/policy/unknown/large changes and the periodic safety pass
-remain full authoritative scans. Watcher observations are hints; the filesystem is authoritative.
-Rename may be observed as delete+create and must still converge correctly.
-
-`ParserAdapter` remains a narrow language parsing boundary. Unsupported languages degrade to paths/text/docs/Git rather than failing the project.
-
-The implemented lexical projection indexes regular UTF-8 code/docs up to 1 MiB during the same
-authoritative reconciliation. It revalidates stable bytes against the mechanical SHA-256 snapshot,
-skips symlinks/binary/NUL/invalid-UTF-8/oversized content, and writes a contentless FTS5 index in the
-same transaction as `indexed_files`. Generated `.log`/`.out` diagnostic artifacts remain in the
-mechanical inventory but are not treated as code/docs search content. The durable mapping contains
-no readable source body. A schema migration creates only the empty derived structure; live source is
-backfilled by the next watcher or explicit scan.
+same-HEAD dirty-path set can be reconciled incrementally. Initial, HEAD/policy/unknown/large
+changes and the periodic safety pass receive a full authoritative scan. Watcher observations
+are hints; the filesystem is authoritative. Rename may be observed as delete+create and must
+still converge correctly.
 
 Successful full and incremental reconciles persist last-known provenance in the same SQLite
 transaction (`workspace_index_reconcile`: monotonic per-Workspace `index_revision`, timezone-aware
@@ -387,94 +361,19 @@ successful reconcile and still advances those fields. Watcher in-memory `last_re
 the source of truth. New Workspaces have no provenance row until the first successful scan; status
 then reports JSON nulls rather than fake zeros.
 
-## 12. Search
+## 12. Task lookup
 
-Search combines independent retrieval channels and fuses ranked results rather than relying on a single opaque score:
+The dashboard retains human lookup and filtering over durable Task records. Task titles,
+checkpoint summaries and next steps, branches, feedback, comments, Jira links and delivery
+markers may contribute bounded Task hits. Exact Task IDs take precedence over textual matches;
+the displayed hexadecimal prefix and `task:<id>` references remain accepted. Ambiguous prefixes
+return bounded Task lists in the requested Project scope, or across registered Projects on the
+home dashboard. Task lookup returns metadata and history, never repository source.
 
-- exact path/symbol;
-- normalized identifier tokens;
-- SQLite FTS5;
-- structural proximity;
-- docs;
-- fresh semantic Knowledge;
-- relevant Task history;
-- optional embeddings for semantic text only.
-
-Use a simple fusion strategy such as Reciprocal Rank Fusion before introducing manually tuned weight matrices.
-
-Search must explain why a result matched and must penalize stale semantic evidence.
-
-Task-history FTS fragments include Task titles, checkpoint summaries/next steps, durable Git branches, operator feedback/comments, Jira links, and operator delivery markers. Dashboard Workspace search combines these bounded Project-scoped Task hits with its existing Workspace-local indexed-path hits; the home dashboard searches Task history across every registered Project. Both channels return metadata/history only and never raw source.
-
-Task-history candidate limits apply after selecting each Task's best matching fragment. A compact
-materialized SQL ranking uses the shared title/term matcher and BM25, then a per-Task window selects
-one fragment before the candidate cap. Long checkpoint/comment histories therefore cannot consume
-all candidate slots. Ranking still examines every matching fragment; returned candidate rows and
-authoritative payload reads remain bounded. Exact Task IDs take precedence over lexical Task
-mentions. Generated hexadecimal IDs also accept case-insensitive prefixes of 10–31 characters,
-including the dashboard's displayed 10-character ID; `task:` references are accepted too. Ambiguous
-prefixes return a bounded list in the request's Project scope (all Projects on the home dashboard).
-Unknown identifiers fall back to lexical retrieval. Direct ID results use the canonical Task ref and
-latest checkpoint summary; lexical results preserve the best matching fragment ref.
-
-The implemented Project Intelligence retrieval boundary is daemon-owned. Workspace hints resolve exactly one registered Workspace and fix the owning Project identity. Before `project_search` candidate retrieval, the daemon proves read-your-worktree currentness instead of assuming the asynchronous watcher has already converged. It attempts the watcher scan lock without waiting; when that lock is busy, ADR-0062 permits a read-only warm proof in one short SQLite transaction using the persisted change token, index revision, and complete live/indexed candidate-path equality. That transaction closes before retrieval and its final latest-revision check. A missing or mismatched proof still requires the existing lock and reconciliation within the remaining deadline; no mutable lock or visibility boundary changes. Schema-v17 search-currentness stores only the last search-proven Git HEAD/change token plus dirty path names. The current watcher snapshot, previous/current dirty paths, exact current Git/ignore candidate-path set, and a bounded old-HEAD→new-HEAD `git diff --name-only --no-renames` determine whether the daemon can reconcile incrementally under the existing 256-path limit or must perform a full authoritative scan. Search state is recorded only after a stable post-reconcile snapshot whose candidate paths equal `indexed_files`; source movement during retrieval causes one retry and repeated movement fails rather than serving a mixed snapshot. Successful search reports `workspace_state=current`. Current code/docs remain Workspace-local structural-index data; Knowledge and Task-history channels are Project-scoped. Rebuildable FTS5 tables are candidate/ranking indexes only: selected search/context payloads are reread from authoritative `indexed_files`, `knowledge_cards`/anchors, Tasks, checkpoints, and events. Contentless code/docs FTS never stores source bodies and is never queried with `snippet()`/`highlight()` as if it did. After FTS selects a code/doc candidate, `project_search` may attach a bounded current-source evidence window only when a live Workspace-contained regular-file reread matches the indexed content SHA and the significant query terms still relocate in that text. A changed file keeps its locator and returns `evidence=null` with `evidence_reason=changed_since_index`; an unsafe or unrelocatable match uses `current_match_not_relocated`; dropping already-built evidence because the 12 KiB payload is full uses `response_budget`; path-only hits without a content document use `path_only`. Explicit identifier-shaped or quoted/backticked queries may also produce `exact_coverage`: a case-sensitive literal scan over current non-generated regular code/docs source, reading at most 8 MiB per file and 64 MiB per query, returning aggregate matched-file/occurrence/line counts plus at most 24 path/line/column previews. NUL/binary and invalid-UTF-8 files are explicitly non-text; oversized/unstable/unavailable source or the total scan bound makes `complete=false`. Location truncation is independent of aggregate counting. Only complete, untruncated exact coverage authorizes treating that needle as exhaustively located instead of repeating native `rg`/`grep`. Identifier-shaped code/all queries may additionally return `symbol_navigation`. Precise providers reuse the already verified current-source exact pass: Python `.py`/`.pyi` uses offline CPython AST, while locked `ast-grep-py` supplies offline syntax trees for JS/JSX, TS/TSX, Go, Rust, and Java. Simple identifiers parse files containing the identifier; dotted identifiers broaden candidates by leaf name so qualified definitions can be found without requiring their dotted literal at the definition site. Explicit language mappings classify definitions, calls, selected imports, and inheritance while preserving lexical scope/test-path metadata and bounded current-source evidence. This remains syntax navigation rather than general type/dispatch resolution. Query-targeted Python analysis may additionally attach a positive-only `resolved_target` to a call when a unique unshadowed `import`/`from import` lexical binder proves the imported target; the original source `target` is retained. Named nested functions may walk enclosing callable scopes from nearest to farthest and use the first unique safe import, while any nearer shadowing/ambiguity plus `global`/`nonlocal`, lambda, and comprehension cases fail closed. A bounded second positive step may attach a concrete `resolved_definition_*` location when that proven import target maps to one unique current Workspace Python module path and either one direct top-level definition or a chain of at most four safe explicit top-level `from ... import ...` re-exports ending at one direct definition. Absolute modules use unique module-shaped path suffixes, relative imports use deterministic package-relative path arithmetic, and ambiguous/rebound/cyclic/too-deep/pure-relative-re-export/missing/changed targets remain unvalidated. Neither import step proves import execution, `sys.path` behavior, or runtime mutation safety. Query-targeted Python analysis may separately resolve an exact `self.method()` or `cls.method()` call to one unique safe direct method of the same syntactic class when the direct caller has a proven receiver shape and neither receiver nor target descriptor is ambiguous. For one unique undecorated top-level class with at most one simple-name top-level base in the same file, it may also follow at most four declared base edges and select the nearest safe direct method; any nearer class-namespace binder, duplicate/unsafe method, rebound base name, multiple/non-simple/cross-file base, decorated/metaclass-shaped class, cycle, or fifth edge fails closed. The resulting inherited `resolved_target` identifies the nearest syntactic definition along that bounded declared chain, not the runtime dispatch target of a possible subclass instance. Member chains, `super()`, constructor/type flow, multiple/cross-file MRO, and runtime dynamic-dispatch candidate reasoning remain unresolved. These receiver proofs are current-source only and are not emitted by scan-time structural extraction. Scan-time schema-v20 extraction persists caller-local Python import-resolution provenance and safe explicit top-level re-export provenance, then rebuilds a separate proven direct/re-export call-edge projection for the entire Workspace after every full or incremental structural reconciliation. The edge projection links source relation ids to target code-unit ids, follows at most four re-export edges with cycle detection, fails closed above 32768 lexical candidates, and is rebuilt even when only a target module changed. Non-Python relations remain unresolved in this slice. Syntax failures, >1 MiB parser candidates, and unsupported matching languages are explicit and never replaced by regex guesses; `precise_classification_complete` also requires zero unsupported matching files. At most 16 relations and 5 KiB of symbol-navigation data are exposed, with aggregate counts surviving evidence/relation truncation. Exact coverage plus symbol navigation reserve bytes before rich hit evidence, preserving the established 12 KiB `project_search` budget. Knowledge and Task hits never attach file evidence. Cross-Project refs fail closed. `project_context` expands only explicit bounded refs; source code is never returned there and remains a native-host read. `needs_revalidation` Knowledge is labelled as historical evidence and ranked after fresh Knowledge. Schema v18 derives a bounded definition-only code-unit candidate index inside the same Structural Index transaction. Schema v19 extends that manifest with bounded unresolved syntactic call/import/inheritance rows and a contentless relation projection; equal source target spellings still do not imply symbol identity. Schema v20 adds bounded Python caller-local import provenance, safe explicit top-level re-export provenance, a Workspace manifest for resolved-edge completeness, and a contentless proven-call projection linking one persisted source relation to one persisted target code unit. Natural relation-intent search may use either unresolved source spellings or the stronger v20 proven target spelling, while current-source exact symbol navigation continues to recompute its own proof. All structural projections store names/targets, kinds, lexical scopes, locations, SHA-keyed status/provenance, and no source bodies. Multiple/cross-file inheritance, `super()`, runtime dynamic-dispatch candidate reasoning, and constructor/type-flow resolution remain later Search-v2 structural layers; semantic embeddings/reranking follow as an additional candidate channel rather than replacing exact search.
-
-The IPC decoder preserves the same symbol-navigation contract through MCP serialization.
-`precise_languages` is a sorted unique subset of the seven supported providers; it may be empty
-when only unsupported source matches. Unresolved relations retain their nine-field shape.
-Python call bindings add `resolved_target` and `resolution_kind` together; validated imported
-definitions add all five definition-location/validation fields together. Partial proofs, unknown
-fields or enum values, and explicit null optional fields are rejected. Internal `resolution_module`
-never crosses IPC/MCP. Decoded proof fields remain inside the existing 16-relation, 5 KiB navigation
-and 12 KiB search budgets. Real daemon IPC and subprocess MCP tests must cover this boundary, not
-only the producer's domain result.
-
-Currentness deadline expiry returns the fixed bounded `search_timeout` error; repeatedly moving source returns `search_workspace_changed`. Both include retry guidance without private source or index details. Other retrieval failures retain their existing bounded contracts.
-
-Successful MCP search uses `structuredContent` as its single authoritative representation and leaves
-the required `content` array empty, avoiding SDK-generated duplicate JSON. The MCP boundary measures
-the serialized structured result plus wire reserve; it removes lower-priority evidence first, then
-tail hits, and sets `results_truncated=true` when hit metadata is removed instead of replacing the
-useful response with a budget error.
-
-Natural-search evidence uses an internal source line selected by code-unit, proven-call, or
-syntactic-relation retrieval. Whole normalized code-unit names/qualified names rank ahead of
-identifier substrings, below exact paths, filenames, and filename stems. SQL ranks matching units
-and selects one best unit per file before its candidate cap; many definitions in one file cannot
-consume other files' structural candidate slots.
-
-After the existing current-source SHA check, code-unit definition evidence starts at its
-selected declaration and extends forward within 48 lines/3 KiB, stopping before the next indexed
-declaration in the same or an ancestor qualified scope. The private scope/line hints are consumed
-before IPC serialization. This is a bounded source window, not a guarantee of a complete function.
-Call/import/inheritance anchors retain three lines of local context on either side. File-level
-hits select the shortest 48-line window covering the maximum number of distinct significant
-terms, with at least two terms required for a multi-term source, and add at most three context
-lines per side within that bound. Evidence slots count snippets actually returned rather than
-failed rereads. The three-slot and 12 KiB response limits remain unchanged (ADR-0059 amendment).
-
-Natural queries use bounded Unicode/camel/snake term normalization, conservative English/Russian
-filler removal, and prefix/inflection alternatives. Retrieval ranks explicit evidence tiers—exact
-path, exact filename, exact filename stem, whole normalized code-unit name, exact normalized
-title/identifier phrase, Russian
-case-form title/identifier phrase, dense lexical coverage, all significant terms, then partial match.
-The Russian phrase tier uses a separate case-ending matcher, excludes broader derivations, and
-leaves prefix-only matches at their lower lexical tier. Query expansion still adds at most one
-inflection prefix with a minimum five-character remainder. Russian location questions conditionally
-ignore `реализован`/`реализована`/`реализовано`/`реализованы` and `находится`/`находятся`, analogous to
-English location intent; original literal/identifier text is unchanged. This does not translate
-Russian questions into English identifiers or claim complete morphology.
-For queries of three through eight significant terms,
-code/docs candidate generation admits bounded leave-one-term-out (`N-1/N`) matches; it does not fall
-back to arbitrary OR retrieval. Contentless FTS5 `NEAR` within 128 tokens marks dense matches, greater
-coverage wins inside that tier, and BM25 remains only an intra-tier candidate order. One common
-normalized token cannot create a partial multi-term hit. Test and archived paths receive
-only same-tier penalties unless the query explicitly requests them. For `scope=all`, comparable
-quality/coverage tiers are ordered first and uncalibrated channel ranks are then deterministically
-interleaved; this avoids presenting a heterogeneous BM25 value as a global score while allowing
-directly relevant fresh Knowledge to beat a general lexical hit. Current-Task state is a boost, not
-a hard filter or a substitute for query relevance. More sophisticated RRF/Working-Set/graph ranking
-can replace this internal fusion later without changing refs or tool shapes.
+This is a Task-record navigation feature. It does not advertise code or documentation retrieval,
+does not require a current-source scan, and does not change the agent's native repository
+discovery workflow. The prior project search contract and its derived code/document retrieval
+projections were retired by [ADR-0071](docs/decisions/0071-retire-project-code-search.md).
 
 ## 13. Knowledge and staleness
 
@@ -485,7 +384,7 @@ content before return. Task history uses its latest checkpoint: originating-bran
 survives edits, while cross-branch visibility requires captured commit ancestry or complete
 changed-path content evidence. Knowledge uses its own source checkpoint and current anchors;
 operator/imported anchors receive the same live check. Unanchored agent Knowledge does not
-inherit the Task's ongoing-work exemption. Filtering precedes Task/Knowledge search limits and
+inherit the Task's ongoing-work exemption. Filtering precedes Task lookup limits and
 checkpoint history pagination; direct refs cannot bypass it. Operator dashboard Task lists,
 counts, and Task-history search retain all branches of that home/Workspace/Project scope;
 current-Task focus and model-facing reads stay Git-filtered. A missing checkout still
@@ -549,6 +448,15 @@ Stack evidence describes the whole Workspace. The resolver does not narrow the p
 current Task `stack_hints`. Built-in descriptions state when the host should load each projected
 skill, so host-native progressive disclosure remains discriminating inside the project pack.
 
+Dashboard settings preview exact skill additions/removals per Workspace with the same resolver
+and runtime host profiles used by Apply. A bounded read-only snapshot distinguishes selection,
+current projected bytes, pending refresh, collisions, absent hosts and source-overlay exclusion;
+current files never imply current-conversation loading. Settings SSE also observes filesystem
+repairs. Python stdlib/embedded-web detection uses fresh indexed bytes, bounded AST evidence and
+conservative lexical bindings; it does not turn Task hints into selection signals. Dart/Flutter
+instructions remain progressive references in the existing catalog. See
+[ADR-0072](docs/decisions/0072-skill-evidence-and-delivery-preview.md).
+
 Projection is host-native and owned by adapters.
 
 Important compatibility rule: several hosts scan overlapping compatibility directories. In particular, Cursor loads `.agents/skills`, `.cursor/skills`, and compatibility skill trees including Claude/Codex locations. Therefore a naïve strategy that copies the same Harness skill to every host directory can produce duplicate model-visible skills.
@@ -578,6 +486,17 @@ authoritative index changes. Task mutations do not enqueue skill reconciliation.
 failure remains a
 repairable integration condition reported by doctor; it never rolls back or duplicates committed
 Task state.
+
+Lifecycle skill reconciliation refreshes the Workspace Structural Index under the daemon's
+existing scan lock before resolving relevance. After the existing 30-second lock-acquisition
+budget, refresh receives a fresh 180-second daemon deadline; the IPC timeout is 220 seconds. This
+keeps the operation bounded, prevents watcher contention from consuming the repair budget, and
+allows large stale generated-tree indexes to be removed after exclusion-policy changes.
+Installation must not depend on the watcher having caught up after a daemon restart or offline
+edits. Manifest parsing/currentness failures are
+reported as relevance-resolution failures, separately from invalid durable Project skill policy;
+bounded operator messages do not expose manifest content or nested exception text. Invalid
+manifests and projection ownership collisions still fail closed.
 
 ## 15. Normal and Hidden visibility modes
 
@@ -653,7 +572,7 @@ Do not branch core business logic on host identity.
 
 ## 17. Dashboard
 
-The dashboard uses the Python stdlib loopback HTTP server. HTML/CSS/JavaScript assets, Project/Workspace/Task drill-down, bounded indexed-path search, and SSE freshness hints live at the loopback root without a path token. Realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
+The dashboard uses the Python stdlib loopback HTTP server. HTML/CSS/JavaScript assets, Project/Workspace/Task drill-down, Task lookup, and SSE freshness hints live at the loopback root without a path token. Realtime remains presentation-only and does not create another source of truth. The listener starts with `harnessd`. Chrome copy is Russian and limited to the current work process. Persisted Task titles, summaries, next steps, and Knowledge cards are shown as stored; MCP instructions tell agents to write those fields in Russian.
 
 The daemon also owns Codex's Streamable HTTP MCP endpoint on `127.0.0.1:17375` (isolated
 development: `17376`). It is a separate authenticated protocol surface, not part of the dashboard
@@ -667,8 +586,14 @@ Dashboard rules:
 - serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
-- show a sidebar of Project links to `/workspaces/{id}/`, plus home Task search and a bounded Task list that pins live (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies or a second dashboard;
-- Workspace detail exposes an explicit control that opens Project skill-scope management on `/projects/{id}/#skill-scope`; sidebar and breadcrumbs still use `/workspaces/{id}/` ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
+- show Project cards on the home page and sidebar links to `/projects/{id}/`, with direct Task
+  and private-vault navigation, plus home Task search and a bounded Task list that pins live
+  (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies;
+- every Project screen shares Overview / Tasks / Notes/access / Settings navigation. Settings live
+  at `/projects/{id}/settings/`, including skill scope, visibility and Project management. The legacy
+  `/projects/{id}/#skill-scope` anchor links to the new location. Existing Workspace/Task routes remain;
+- notes links preserve an explicitly validated source Workspace/Task in the dashboard wrapper and
+  offer a direct return to that Task; these navigation identities never enter the private frame;
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
@@ -676,6 +601,7 @@ Dashboard rules:
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
 - SSE and the explicit refresh control re-fetch the current same-origin HTML and replace the rendered layout in place; they must not force a full page navigation. Dirty operator input still blocks automatic apply ([ADR-0043](docs/decisions/0043-dashboard-in-place-html-refresh.md)).
+- JavaScript enhances action forms with immediate saving feedback and applies the existing POST/303 HTML response in place. Concurrent submissions and competing refresh responses are suppressed; drafts and fresh server revision tokens remain protected. Workspace/Project live status reuses its request-local applicability proof to avoid duplicate identity inspections ([ADR-0068](docs/decisions/0068-dashboard-mutation-response-latency.md)).
 - dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 
@@ -691,11 +617,30 @@ from fresh authoritative state. Automatic refresh yields to dirty controls; expl
 preserves compatible drafts and interaction state without restoring hidden revision tokens. When
 the matching form disappeared, the draft remains available instead of being applied elsewhere.
 See [ADR-0065](docs/decisions/0065-dashboard-evidence-history-and-draft-recovery.md).
+Shared navigation, operator-focused layout, settings routing and draft-aware navigation follow
+[ADR-0070](docs/decisions/0070-project-navigation-and-operator-focus.md). Task decisions precede
+history in reading order; unavailable Workspaces retain an immediate relocation action.
 - Task cards, Task lists, Task facts, and checkpoint timeline entries always show the durable Git branch recorded for that Task (latest checkpoint, otherwise the Task baseline). That identity is not the live Workspace checkout. Detached HEAD is shown as `(detached)`; Tasks that predate baseline capture show an em dash.
 - Task detail supports bounded operator comments, one Jira link, the `deploy_test`/`deploy_prod` marker, and explicit reopen of terminal Tasks. Overview cards show the marker and direct Jira navigation when present. These fields are operator state, not additional Task lifecycle states.
-- Project and Workspace detail support explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. The deletion form may render on Workspace detail, but the POST still targets `/projects/{id}/` and must match that Project identity. Workspace detail supports explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Relocation POST identity must match the Workspace page that rendered it.
+- Project and Workspace detail support explicitly confirmed deletion of the logical Project and its Harness-owned durable state without touching repository files. The deletion form renders in Project settings; its POST must match that Project identity (the legacy Project URL remains accepted). Workspace settings and unavailable Workspace detail support explicit relocation to a canonical live Git path while preserving Project/Workspace/Task/Knowledge identity; relocation clears only rebuildable index rows and the watcher repopulates them from the new root. Relocation POST identity must match the Workspace page that rendered it.
 
 ## 18. Security and privacy boundaries
+
+Personal project notes/credentials use a separately owned KDBX4 file and subprocess, with an
+independent browser origin and unlock bearer. Only public Project identity/name pass from the
+dashboard into the frame. Private records, keys and sessions never enter core SQLite, IPC, MCP,
+Knowledge or SSE. Successful private writes require a durable full backup first;
+restore retains the prior file. These backups are independent of Harness database recovery.
+An explicit no-password mode uses empty-password KDBX, opens automatically and has no idle lock;
+its files/backups have no password-based confidentiality. Mode transitions retain a prior snapshot
+and commit the new mode in the KDBX itself, without a separate key/mode-file transaction.
+In password-protected mode, opt-in automatic entry uses the Linux desktop Secret Service; no file keyring fallback exists.
+Navigation preserves a short-lived bearer in the private origin's sessionStorage, never record
+content or the master password. Explicit/idle lock pauses automatic entry; a normal restart
+can open through the OS keychain again. Keychain enrollment is independent of KDBX backups.
+This is not OS-user isolation against unrestricted same-account shell/browser access. See
+[ADR-0069](docs/decisions/0069-project-hub-and-private-vault.md) and the
+[operator guide](docs/private-vault.md).
 
 - Local-only by default.
 - Daemon IPC restricted to current OS user.
@@ -728,7 +673,7 @@ Automate deterministically:
 - schema/migrations;
 - registry/workspace identity;
 - deterministic scan and incremental reconciliation;
-- search/ranking acceptance fixtures;
+- Task lookup acceptance fixtures;
 - Task lifecycle and concurrency invariant;
 - Knowledge staleness;
 - exact MCP tool schemas and descriptions;
@@ -749,8 +694,6 @@ Keep a separate matrix because core tests cannot prove proprietary host behavior
 - relevant native skill visible and irrelevant skills absent;
 - host switch resumes the same Harness Task;
 - Harness failure preserves the mode contract: Normal stays native/unrestricted by Harness; Hidden keeps agent publication denied while ordinary edits/read-only Git and human Git outside the agent path remain usable.
-
-Optional Codex JSONL classification (`scripts/eval_search_behavior.py`, sanitized metrics on `accept_codex --run-model`) is acceptance evidence for search-vs-native-grep behavior, not a daemon or MCP contract. It separately flags native search that repeats a complete, untruncated `exact_coverage` needle so Search-v2 regressions are measurable rather than inferred from prompt wording.
 
 No passing unit/integration suite may be described as proof of these host-specific behaviors.
 
@@ -790,7 +733,6 @@ src/harness/
   infrastructure/
     db/
     indexing/
-    search/
     hosts/
     ipc/
   interfaces/
@@ -800,7 +742,6 @@ src/harness/
 tests/
   unit/
   integration/
-  search/
   mcp_contract/
   mcp_wire/
   dashboard/

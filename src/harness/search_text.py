@@ -76,7 +76,6 @@ _LOCATION_INTENT_TERMS = frozenset(
     }
 )
 _DOC_EXTENSIONS = {".md", ".mdx", ".rst", ".txt", ".adoc"}
-_GENERATED_TEXT_OUTPUT_EXTENSIONS = {".log", ".out"}
 _QUERY_TERM_LIMIT = 24
 _ENGLISH_QUERY_SUFFIXES = (
     "ingly",
@@ -236,28 +235,6 @@ def identifier_tokens(value: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def identifier_expansion(value: str, *, maximum_bytes: int) -> str:
-    """Return only extra tokens needed to make compound identifiers lexically searchable."""
-    expanded: list[str] = []
-    used_bytes = 0
-    for raw_word in _WORDS.findall(value):
-        parts = identifier_tokens(raw_word)
-        if len(parts) <= 1:
-            continue
-        for part in parts:
-            encoded_size = len(part.encode("utf-8")) + (1 if expanded else 0)
-            if used_bytes + encoded_size > maximum_bytes:
-                return " ".join(expanded)
-            expanded.append(part)
-            used_bytes += encoded_size
-    return " ".join(expanded)
-
-
-def query_term_prefixes(term: str) -> tuple[str, ...]:
-    """Return the exact term plus the one optional inflection prefix used by lexical matching."""
-    return _query_prefixes(term)
-
-
 def matching_term_count(terms: tuple[str, ...], *values: str) -> int:
     """Count query terms represented by exact or FTS-equivalent prefix tokens."""
     return len(matching_terms(terms, *values))
@@ -327,12 +304,6 @@ def is_document_path(path: str) -> bool:
         or "/docs/" in lowered
         or (not suffix and name.startswith(("readme", "adr")))
     )
-
-
-def is_generated_text_output_path(path: str) -> bool:
-    """Return whether a text path is a generated diagnostic/output artifact, not code/docs."""
-    name = path.casefold().rsplit("/", 1)[-1]
-    return Path(name).suffix in _GENERATED_TEXT_OUTPUT_EXTENSIONS
 
 
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:

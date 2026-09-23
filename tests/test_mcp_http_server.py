@@ -79,7 +79,7 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "tools/call",
-                "params": {"name": "project_search", "arguments": {"query": " " * 17000 + "token"}},
+                "params": {"name": "task_start", "arguments": {"title": "x" * 17000}},
             }
         )
         async with httpx2.AsyncClient() as raw:
@@ -99,8 +99,8 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
                 listed = await client.list_tools()
                 assert [tool.name for tool in listed.tools] == [
                     "project_status",
-                    "project_search",
                     "project_context",
+                    "project_recall",
                     "task_start",
                     "task_checkpoint",
                 ]
@@ -108,11 +108,6 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
                 assert not result.is_error
                 assert result.structured_content is not None
                 assert result.structured_content["workspace_id"] == scan.workspace_id
-                padded = await client.call_tool("project_search", {"query": " " * 13000 + "token"})
-                assert not padded.is_error
-                assert padded.structured_content is not None
-                assert padded.structured_content["query"] == "token"
-                assert len(json.dumps(padded.structured_content).encode("utf-8")) < 12 * 1024
 
         missing_root_headers = {
             MCP_HTTP_AUTHORIZATION_HEADER: f"Bearer {token}",

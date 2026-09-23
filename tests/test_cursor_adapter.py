@@ -755,7 +755,17 @@ def test_cursor_project_enable_verifies_exact_five_tools(
 
     result = adapter.enable_and_verify_project_mcp(root)
     assert result.status is CursorProjectRuntimeStatus.VERIFIED
-    assert result.tools == CURSOR_PROJECT_MCP_TOOLS
+    assert (
+        result.tools
+        == CURSOR_PROJECT_MCP_TOOLS
+        == (
+            "project_status",
+            "project_context",
+            "project_recall",
+            "task_start",
+            "task_checkpoint",
+        )
+    )
     again = adapter.enable_and_verify_project_mcp(root)
     assert again.status is CursorProjectRuntimeStatus.VERIFIED
 

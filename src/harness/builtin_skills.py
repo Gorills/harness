@@ -1036,8 +1036,10 @@ the relevant contract for a new endpoint; do not create every mechanism listed b
 
 Apply delivery/recovery mechanisms where lost or duplicate effects matter. A local scheduled helper
 does not need a queue, outbox, or dead-letter system solely to satisfy this guide.
-- Give every job one owner, durable input contract, idempotency key/effect model, timeout, retry policy,
-  backoff/jitter, maximum attempts, and terminal/dead-letter/manual-repair behavior.
+- Give each job a clear owner and failure behavior. For durable or externally visible work that can be
+  lost or repeated, define its input contract, idempotency/effect model, timeout, bounded retry policy,
+  and terminal/manual-repair behavior appropriate to the delivery system. A local helper without
+  durable delivery needs only the lifecycle and error handling its work requires.
 - Enqueue only after the required durable state commits, using an outbox or the project's established
   atomic pattern where lost/duplicate delivery matters. Assume at-least-once delivery unless proven
   otherwise and make observable effects safe under repetition.
@@ -1067,6 +1069,8 @@ physical devices, and both-platform regression runs are needed when the change d
 lifecycle, delivery, or performance behavior, not for every UI edit.
 
 - For Expo or React Native work, read [Expo and React Native](references/expo-react-native.md).
+- For installed Flutter Android/iOS work, read [Flutter engineering](references/flutter.md); use
+  the Dart language guidance in `language-engineering` when changing Dart semantics or tooling.
 - For native configuration, store delivery, signing, updates, or permissions, read
   [native delivery](references/native-delivery.md).
 - Preserve the current navigation, state/data ownership, design system, native-module boundary, and
@@ -1102,6 +1106,27 @@ lifecycle, delivery, or performance behavior, not for every UI edit.
 - Use relevant existing lint/type/component checks. Verify a development build for changed native
   modules, and release/device behavior for changes to lifecycle, notifications, audio/camera/location,
   background execution, or performance. Do not add component tests merely to freeze styling.
+""",
+            ),
+            (
+                "flutter.md",
+                """
+# Flutter engineering
+- Derive the Flutter/Dart SDK constraints, dependency versions, target platforms, and project tooling
+  from `pubspec.yaml`, the lockfile, CI, and existing SDK pin. Do not upgrade Flutter, Dart, plugins,
+  or generated platform projects independently without checking their compatibility.
+- Preserve the project's widget/state/navigation ownership. Use stable keys where identity matters;
+  dispose controllers, focus nodes, animation controllers, and stream subscriptions with their owner.
+  After an `await`, check that a widget is still mounted before using its context or updating its state.
+- Use Flutter layout and semantics for the affected UI: safe areas, text scaling, keyboard insets,
+  focus order, platform conventions, and accessibility labels. A copy or spacing edit needs a rendered
+  check of the changed screen, not a new design system or both-platform release matrix.
+- Treat a plugin or platform-channel change as native work. Check Android/iOS permission and build
+  declarations, typed message/error behavior, and the target platform build; a passing Dart unit test
+  or hot reload does not establish native startup or release compatibility.
+- Use the project's formatter/analyzer and focused widget or behavior tests. Exercise cold start,
+  process restoration, deep links, offline behavior, real devices, or release builds only when the
+  changed lifecycle, plugin, delivery, or performance path depends on them.
 """,
             ),
             (
@@ -1413,6 +1438,7 @@ consult only relevant sections of the affected language references:
 - [Ruby](references/ruby.md)
 - [C and C++](references/c-cpp.md)
 - [GDScript](references/gdscript.md)
+- [Dart](references/dart.md)
 - [Shell](references/shell.md)
 - [Swift](references/swift.md)
 - [SQL](references/sql.md)
@@ -1430,6 +1456,7 @@ or run every build/test variant just because a reference lists it.
             "c",
             "cpp",
             "csharp",
+            "dart",
             "go",
             "gdscript",
             "java",
@@ -1448,6 +1475,25 @@ or run every build/test variant just because a reference lists it.
         ),
         applies_facets=("software-project",),
         references=(
+            (
+                "dart.md",
+                """
+# Dart engineering
+- Honor the Dart SDK constraint in `pubspec.yaml`, the project's package/lock workflow, analyzer
+  settings, and the language features available on supported targets. Keep generated source derived
+  from its schema/annotations; change the source and regenerate rather than hand-editing output.
+- Keep public nullability and `required` contracts precise. Use `late`, `dynamic`, casts, and `!`
+  only for proven invariants; validate decoded JSON and platform data before treating it as typed.
+- Own asynchronous work: await or deliberately supervise Futures, propagate failures, and cancel
+  Streams/subscriptions when their owner ends. Avoid using mutable state after an asynchronous gap
+  without rechecking the relevant lifecycle. Keep isolate messages serializable and explicit.
+- Preserve API, JSON, persistence, time-zone, and numeric semantics. Use integer/decimal-safe
+  representations where binary floating point would change money or other exact domain values.
+- Run the configured `dart format`/`dart analyze` and focused tests for changed behavior. Expand to
+  package, platform, or build checks only when the affected contract needs them; Flutter widget,
+  device, and native-plugin behavior belongs to `mobile-application`.
+""",
+            ),
             (
                 "python.md",
                 """

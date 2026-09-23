@@ -136,7 +136,9 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert 'class="app-sidebar"' in overview
         assert 'class="project-navigation"' in overview
         assert f"workspaces/{quote(workspace_id, safe='')}/" in overview
-        assert f"projects/{quote(project_id, safe='')}/" not in overview
+        assert f"projects/{quote(project_id, safe='')}/" in overview
+        assert f"vault/{quote(project_id, safe='')}/" in overview
+        assert 'class="hub-grid"' in overview
         assert 'class="nav-task"' not in overview
         assert "Поиск по всем задачам" in overview
         assert "Последние задачи" in overview
@@ -181,15 +183,23 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
             workspace_url + "?" + urlencode({"q": "feature flag"})
         )
         assert status == 200
-        assert "src/feature_flag.py" in workspace_page
-        assert "идентификатор" in workspace_page
+        assert "src/feature_flag.py" not in workspace_page
+        assert "идентификатор" not in workspace_page
+        assert "Поиск по задачам" in workspace_page
         assert "ENABLED = True" not in workspace_page
         assert task.task_id[:10] in workspace_page
+        status, _headers, workspace_task_search = _read(
+            workspace_url + "?" + urlencode({"q": "Polish dashboard"})
+        )
+        assert status == 200
+        assert 'class="search-hit"' in workspace_task_search
+        assert "Polish" in workspace_task_search
+        assert "src/feature_flag.py" not in workspace_task_search
         assert 'Ветка <strong class="mono">main</strong>' in workspace_page
         assert "Текущая задача" in workspace_page
         assert "Папка" in workspace_page
-        assert "Удаление проекта" in workspace_page
-        assert f'action="/projects/{quote(project_id, safe="")}/"' in workspace_page
+        assert "Удаление проекта" not in workspace_page
+        assert f'href="/projects/{quote(project_id, safe="")}/settings/"' in workspace_page
 
         status, _headers, task_page = _read(task_url)
         assert status == 200

@@ -214,10 +214,10 @@ def test_failed_reconcile_does_not_advance_revision(
             (workspace_id,),
         ).fetchone()
 
-        def fail_search(*_args: object, **_kwargs: object) -> None:
+        def fail_provenance(*_args: object, **_kwargs: object) -> None:
             raise IndexingError("synthetic reconcile failure")
 
-        monkeypatch.setattr(index_module, "_reconcile_search_documents", fail_search)
+        monkeypatch.setattr(index_module, "_write_index_reconcile_provenance", fail_provenance)
         (root / "added.txt").write_text("added\n", encoding="utf-8")
         with pytest.raises(IndexingError, match="synthetic reconcile failure"):
             scan_workspace(connection, workspace_id)

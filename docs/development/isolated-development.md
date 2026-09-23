@@ -59,11 +59,10 @@ These commands autostart an isolated `harnessd` when the local socket is absent.
 ```bash
 scripts/dev harness init
 scripts/dev harness status
-scripts/dev harness search indexed_files
 scripts/dev harness dashboard
 ```
 
-`init` / `scan` / `status` / `search` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
+`init` / `scan` / `status` default `PATH` to the current working directory. `scripts/dev` runs them with cwd set to the repository root. The isolated dashboard listener starts with that daemon on `127.0.0.1:17374`. `scripts/dev harness dashboard` prints `http://127.0.0.1:17374/`. The same URL is also in `.harness/runtime/harness/dashboard.url` while the daemon is running.
 
 The first isolated `init` also reconciles the current built-in skill pack into the checkout-local
 registry (the count is not an invariant; see
@@ -164,7 +163,6 @@ commands:
 
 ```bash
 scripts/dogfood status
-scripts/dogfood search "workspace resolution"
 scripts/dogfood scan
 scripts/dogfood dashboard
 ```

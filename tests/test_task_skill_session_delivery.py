@@ -18,7 +18,6 @@ from harness.index import scan_workspace
 from harness.ipc import TaskStartRequestData, TaskStartResult, WorkspaceTaskSummary
 from harness.mcp_bridge import (
     _PROJECT_CONTEXT_DESCRIPTION,
-    _PROJECT_SEARCH_DESCRIPTION,
     _SERVER_INSTRUCTIONS,
     _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
@@ -29,7 +28,6 @@ from harness.registry import create_project, register_workspace
 from harness.retrieval import (
     ProjectRetrievalRefError,
     ProjectSearchKind,
-    ProjectSearchScope,
     read_project_context,
 )
 from harness.skills import (
@@ -73,7 +71,6 @@ def _mcp_session_snapshot(
             "current_task": current_task,
             "instructions": _SERVER_INSTRUCTIONS,
             "task_start_description": _TASK_START_DESCRIPTION,
-            "project_search": _PROJECT_SEARCH_DESCRIPTION,
             "project_context": _PROJECT_CONTEXT_DESCRIPTION,
         },
         sort_keys=True,
@@ -148,8 +145,8 @@ def test_adr_0041_historical_mcp_does_not_deliver_skill_bodies(tmp_path: Path) -
 
     assert tuple(_TOOL_ARGUMENTS) == (
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     )
@@ -200,8 +197,8 @@ def test_adr_0041_historical_mcp_does_not_deliver_skill_bodies(tmp_path: Path) -
 def test_mcp_surface_does_not_deliver_skill_bodies() -> None:
     assert tuple(_TOOL_ARGUMENTS) == (
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     )
@@ -239,23 +236,12 @@ def test_mcp_surface_does_not_deliver_skill_bodies() -> None:
     assert "live skill injection" in _TASK_START_DESCRIPTION
     assert len(_SERVER_INSTRUCTIONS.encode("utf-8")) < 1024
     assert "optional Task metadata" in _SERVER_INSTRUCTIONS
-    for text in (
-        _PROJECT_SEARCH_DESCRIPTION,
-        _PROJECT_CONTEXT_DESCRIPTION,
-    ):
-        assert "hot reload" not in text
-        assert "recommended_skills" not in text
+    assert "hot reload" not in _PROJECT_CONTEXT_DESCRIPTION
+    assert "recommended_skills" not in _PROJECT_CONTEXT_DESCRIPTION
 
 
 def test_project_context_rejects_skill_ref(tmp_path: Path) -> None:
     assert {kind.value for kind in ProjectSearchKind} == {"code", "doc", "knowledge", "task"}
-    assert {scope.value for scope in ProjectSearchScope} == {
-        "all",
-        "code",
-        "docs",
-        "knowledge",
-        "tasks",
-    }
     database = tmp_path / "harness.db"
     initialize_database(database)
     connection = connect_database(database)
@@ -349,8 +335,8 @@ def test_synthetic_gate_task_start_does_not_deliver_skill_x_through_mcp(
     try:
         assert session_tools == (
             "project_status",
-            "project_search",
             "project_context",
+            "project_recall",
             "task_start",
             "task_checkpoint",
         )

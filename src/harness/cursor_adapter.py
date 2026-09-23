@@ -47,8 +47,8 @@ _GIT_TIMEOUT_SECONDS = 5.0
 _AGENT_COMMAND_TIMEOUT_SECONDS = 10.0
 CURSOR_PROJECT_MCP_TOOLS = (
     "project_status",
-    "project_search",
     "project_context",
+    "project_recall",
     "task_start",
     "task_checkpoint",
 )

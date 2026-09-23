@@ -66,11 +66,11 @@ ADR-0030 selects project-scoped Codex MCP rather than a user-level shared proces
 Workspace is not established by current documentation. ADR-0037 replaces the failed stdio-to-Unix
 socket route with a daemon-owned authenticated Streamable HTTP endpoint. The adapter writes the
 canonical Workspace root as `X-Harness-Workspace-Root` and writes the private daemon capability as
-an `Authorization` header. The generated server is required; initialization validates the bearer,
+an `Authorization` header. The generated server is explicitly enabled and required; initialization validates the bearer,
 registered Workspace, and daemon path before Codex can start. Automatic mutation is limited to an
 absent `.codex/config.toml` or a
 complete container proven by Harness's adjacent ownership marker. Existing exact config may be
-adopted manually; arbitrary user TOML, foreign same-name servers, tracked mutation, malformed
+adopted manually only with explicit `enabled = true` and `required = true`; arbitrary user TOML, foreign same-name servers, tracked mutation, malformed
 files, symlinks, and unknown additions to an owned container fail closed without rewrite.
 
 Harness-created Codex config and marker files are kept untracked through exact root-anchored Git
@@ -101,12 +101,7 @@ prompt must not return the unmatched sibling nonce. That sibling is a Codex acce
 fairness device (projected so description selection can fail closed); an unmatched prompt
 must not select it. The runner then checks
 doctor/skills/config/cleanup, verifies that `codex debug prompt-input` includes the exact Harness
-bootstrap in model-visible input, and emits a sanitized report. When `--run-model` is used, the
-report may include sanitized `search_behavior` metrics from `scripts/eval_search_behavior.py`
-(strong vs zero/insufficient Harness hits, targeted vs broad native follow-up). That field is
-metrics-only; the standalone CLI JSON includes redacted evidence. The classifier is acceptance
-evidence only: it does not add daemon telemetry or MCP fields. The same script classifies
-existing `codex exec --json` JSONL without a model when given `--workspace-root`. The key is
+bootstrap in model-visible input, and emits a sanitized report. The key is
 passed only to `codex exec`;
 the runner uses temporary trusted `CODEX_HOME` state and never reads saved Codex authentication or
 writes user trust/config. A local-only stdio preflight passed on 2026-08-28 with `codex-cli 0.147.0`.
@@ -116,9 +111,10 @@ acceptance remain in the matrix below. The prompt-input check applies to a fresh
 
 On 2026-09-06, local-only preflight passed with `codex-cli 0.153.4` and the current temporary
 wheel: two distinct Workspace identities, trusted project config discovery, untrusted-project
-refusal, prompt-input bootstrap, all five SDK HTTP tool calls, zero doctor failures, owned cleanup,
+refusal, prompt-input bootstrap, all five SDK HTTP tool calls (the historical catalog), zero doctor failures, owned cleanup,
 and unchanged user Codex config. This did not run a model or verify GUI/native Skill selection.
-Reproduce with the preflight command in [release acceptance](release-linux.md).
+The current checkout catalog has five tools, including `project_recall` for durable
+Knowledge/Task discovery; reproduce it with the preflight command in [release acceptance](release-linux.md).
 
 When Harness changes a Codex project config, its CLI guidance requires fully quitting and reopening
 the client and starting a fresh host conversation so its instruction snapshot includes the change.
@@ -127,11 +123,10 @@ explicit `task_id` with the current revision. A host restart alone does not crea
 Task or reopen a completed/cancelled Task. Editing checkout source or documentation does not
 activate a generated host config; the restart boundary follows actual config reconciliation.
 The acceptance check for the fresh conversation is behavioral: `project_status` is the first
-project action; diagnosis and `project_search` occur only after `task_start` or resume. Compact
-`project_status.index` remains a snapshot (`indexed_file_count`,
-`content_search_document_count` for code/docs content FTS coverage, and last-known
-reconcile provenance) and is not a live
-freshness or absence proof. Only tool discovery needed to locate and call Harness is
+project action; substantial tracked work starts or resumes a Task before further work.
+Code and documentation discovery uses native repository tools. Compact
+`project_status.index` remains a snapshot (`indexed_file_count` and last-known
+reconcile provenance), not a live freshness proof. Only tool discovery needed to locate and call Harness is
 allowed before status. Harness does
 not generate or merge root `AGENTS.md`:
 that file is user-owned, and claiming it would be unsafe across existing instructions and linked

@@ -3,10 +3,13 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 import harness.daemon as daemon
+import harness.dashboard as dashboard_module
+import harness.git_applicability as git_applicability_module
 from harness.dashboard import (
     _view_fingerprint,
     read_dashboard_home,
@@ -16,6 +19,12 @@ from harness.dashboard import (
     render_workspace_page,
 )
 from harness.git_applicability import GitApplicabilityError, WorkspaceApplicability
+from harness.git_workspace import (
+    GitWorkingTreeStatus,
+    GitWorkspaceRuntimeIdentity,
+    inspect_git_working_tree_status,
+    inspect_workspace_runtime_identity,
+)
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
 from harness.retrieval import ProjectRetrievalRefError
@@ -66,6 +75,123 @@ def _feature_task(connection: sqlite3.Connection, root: Path, workspace: str) ->
         summary="Изменён ответ",
         next_step="Проверить feature",
     ).task
+
+
+def test_workspace_dashboard_reuses_applicability_identity_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, database, connection, _project, workspace = _setup(tmp_path)
+    identity_calls: list[str] = []
+    status_calls: list[tuple[str, str]] = []
+    original_applicability_identity = inspect_workspace_runtime_identity
+    original_dashboard_identity = inspect_workspace_runtime_identity
+    original_applicability_status = inspect_git_working_tree_status
+    original_dashboard_status = inspect_git_working_tree_status
+
+    def applicability_identity(
+        path: Path, *, deadline: float | None = None
+    ) -> GitWorkspaceRuntimeIdentity:
+        identity_calls.append("applicability")
+        return original_applicability_identity(path, deadline=deadline)
+
+    def dashboard_identity(
+        path: Path, *, deadline: float | None = None
+    ) -> GitWorkspaceRuntimeIdentity:
+        identity_calls.append("dashboard")
+        return original_dashboard_identity(path, deadline=deadline)
+
+    def applicability_status(
+        path: Path,
+        *,
+        deadline: float | None = None,
+        untracked_files: Literal["normal", "all"] = "normal",
+    ) -> GitWorkingTreeStatus:
+        status_calls.append(("applicability", untracked_files))
+        return original_applicability_status(
+            path,
+            deadline=deadline,
+            untracked_files=untracked_files,
+        )
+
+    def dashboard_status(
+        path: Path,
+        *,
+        deadline: float | None = None,
+        untracked_files: Literal["normal", "all"] = "normal",
+    ) -> GitWorkingTreeStatus:
+        status_calls.append(("dashboard", untracked_files))
+        return original_dashboard_status(
+            path,
+            deadline=deadline,
+            untracked_files=untracked_files,
+        )
+
+    monkeypatch.setattr(
+        git_applicability_module,
+        "inspect_workspace_runtime_identity",
+        applicability_identity,
+    )
+    monkeypatch.setattr(
+        dashboard_module,
+        "inspect_workspace_runtime_identity",
+        dashboard_identity,
+    )
+    monkeypatch.setattr(
+        git_applicability_module,
+        "inspect_git_working_tree_status",
+        applicability_status,
+    )
+    monkeypatch.setattr(
+        dashboard_module,
+        "inspect_git_working_tree_status",
+        dashboard_status,
+    )
+    try:
+        detail = read_dashboard_workspace_detail(database, workspace)
+        assert detail.workspace.live_error is None
+        assert identity_calls == ["applicability", "applicability"]
+        assert status_calls == [
+            ("applicability", "all"),
+            ("dashboard", "normal"),
+            ("applicability", "all"),
+        ]
+    finally:
+        connection.close()
+
+
+def test_workspace_dashboard_still_rejects_checkout_switch_during_live_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, database, connection, _project, workspace = _setup(tmp_path)
+    _git(root, "branch", "feature")
+    original_status = inspect_git_working_tree_status
+
+    def switching_status(
+        path: Path,
+        *,
+        deadline: float | None = None,
+        untracked_files: Literal["normal", "all"] = "normal",
+    ) -> GitWorkingTreeStatus:
+        status = original_status(
+            path,
+            deadline=deadline,
+            untracked_files=untracked_files,
+        )
+        _git(root, "checkout", "feature")
+        return status
+
+    monkeypatch.setattr(
+        dashboard_module,
+        "inspect_git_working_tree_status",
+        switching_status,
+    )
+    try:
+        with pytest.raises(GitApplicabilityError, match="Git state changed"):
+            read_dashboard_workspace_detail(database, workspace)
+    finally:
+        connection.close()
 
 
 def test_workspace_archive_keeps_other_branch_tasks_while_current_task_follows_checkout(

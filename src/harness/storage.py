@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1953,6 +1953,37 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
                      AND content_sha256 NOT GLOB '*[^0-9a-f]*'))
             );
         """,
+        )
+        return
+    if target_version == 24:
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            DROP TRIGGER IF EXISTS knowledge_search_insert;
+            DROP TRIGGER IF EXISTS knowledge_search_delete;
+            DROP TRIGGER IF EXISTS knowledge_search_update;
+            DROP TRIGGER IF EXISTS indexed_resolved_code_relation_search_delete;
+            DROP TRIGGER IF EXISTS indexed_code_relation_search_delete;
+            DROP TRIGGER IF EXISTS indexed_code_unit_search_delete;
+            DROP TRIGGER IF EXISTS indexed_content_search_delete;
+
+            DROP TABLE IF EXISTS indexed_resolved_code_relation_search;
+            DROP TABLE IF EXISTS indexed_code_relation_search;
+            DROP TABLE IF EXISTS indexed_code_unit_search;
+            DROP TABLE IF EXISTS indexed_content_search;
+
+            DROP TABLE IF EXISTS indexed_resolved_code_relations;
+            DROP TABLE IF EXISTS indexed_resolved_relation_workspaces;
+            DROP TABLE IF EXISTS indexed_python_reexports;
+            DROP TABLE IF EXISTS indexed_code_relations;
+            DROP TABLE IF EXISTS indexed_code_units;
+            DROP TABLE IF EXISTS indexed_code_unit_files;
+            DROP TABLE IF EXISTS indexed_search_documents;
+            DROP TABLE IF EXISTS knowledge_search;
+
+            DROP TABLE IF EXISTS workspace_search_index_dirty_paths;
+            DROP TABLE IF EXISTS workspace_search_index_state;
+            """,
         )
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")

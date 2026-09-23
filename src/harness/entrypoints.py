@@ -1,5 +1,4 @@
 import errno
-import json
 import os
 import sys
 from argparse import ArgumentParser
@@ -33,14 +32,12 @@ from harness.ipc import (
     IpcTransportError,
     VisibilityResult,
     WorkspaceScanResult,
-    WorkspaceSearchResult,
     WorkspaceStatusResult,
     request_dashboard_url,
     request_set_visibility,
     request_shutdown,
     request_workspace_init,
     request_workspace_scan,
-    request_workspace_search,
     request_workspace_skills_reconcile,
     request_workspace_status,
 )
@@ -51,7 +48,6 @@ from harness.runtime_paths import (
     default_runtime_paths,
     ensure_private_state_directory,
 )
-from harness.search import DEFAULT_SEARCH_LIMIT
 from harness.skill_runtime import (
     SkillRuntimeError,
     active_skill_profiles_for_runtime,
@@ -224,7 +220,6 @@ def _print_workspace_status(status: WorkspaceStatusResult) -> None:
     print(f"Git branch: {status.branch if status.branch is not None else '(detached)'}")
     print(f"Dirty paths: {status.dirty_path_count}")
     print(f"Indexed files: {status.indexed_file_count}")
-    print(f"Content search documents: {status.content_search_document_count}")
     print(
         "Index revision: "
         f"{status.index_revision if status.index_revision is not None else '(none)'}"
@@ -309,17 +304,6 @@ def _print_visibility(result: VisibilityResult) -> None:
     print(f"Schema: {result.schema_version}")
 
 
-def _print_workspace_search(result: WorkspaceSearchResult) -> None:
-    print(f"Project: {result.project_id}")
-    print(f"Workspace: {result.workspace_id}")
-    print(f"Workspace root: {result.workspace_root}")
-    print(f"Matches: {len(result.results)}")
-    for hit in result.results:
-        relative_path = json.dumps(hit.relative_path, ensure_ascii=False)
-        print(f"{relative_path}\t{hit.kind.value}\t{hit.size_bytes}\t{hit.match_kind.value}")
-    print(f"Schema: {result.schema_version}")
-
-
 def _bounded_failure(prefix: str, detail: str) -> int:
     detail = detail.replace("\r", "\\r").replace("\n", "\\n")
     if len(detail) > _FAILURE_DETAIL_MAX_LENGTH:
@@ -346,10 +330,6 @@ def _install_failure(detail: str) -> int:
 
 def _uninstall_failure(detail: str) -> int:
     return _bounded_failure("Harness uninstall", detail)
-
-
-def _search_failure(detail: str) -> int:
-    return _bounded_failure("Harness search", detail)
 
 
 def _dashboard_failure(detail: str) -> int:
@@ -814,45 +794,6 @@ def _run_dashboard(socket_path: Path | None) -> int:
     return 0
 
 
-def _run_search(
-    query: str,
-    workspace_location: Path,
-    socket_path: Path | None,
-    limit: int,
-) -> int:
-    if socket_path is None:
-        try:
-            socket_path = _canonical_socket()
-        except (RuntimePathError, IpcError) as exc:
-            return _search_failure(str(exc))
-
-    try:
-        location = workspace_location.expanduser().resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        return _search_failure(f"workspace path cannot be resolved: {workspace_location}: {exc}")
-    if not location.is_dir():
-        return _search_failure(f"workspace path is not a directory: {location}")
-
-    try:
-        result = request_workspace_search(
-            socket_path,
-            [
-                WorkspaceHint(
-                    path=location,
-                    source="cli-location",
-                    match_mode=WorkspaceHintMatchMode.LOCATION,
-                )
-            ],
-            query,
-            limit=limit,
-        )
-    except IpcError as exc:
-        return _search_failure(str(exc))
-
-    _print_workspace_search(result)
-    return 0
-
-
 def _run_daemon(database_path: Path, socket_path: Path) -> int:
     stop_event = Event()
 
@@ -1112,41 +1053,6 @@ def harness_main() -> int:
         metavar="PATH",
         help="override the canonical per-user Unix-domain socket path",
     )
-    search_parser = subparsers.add_parser(
-        "search",
-        help="search one registered Workspace's current Structural Index",
-        description=(
-            "Resolve PATH to a registered Workspace and search its current deterministic indexed "
-            "paths through the per-user Harness daemon without reading source content."
-        ),
-    )
-    search_parser.add_argument(
-        "query",
-        metavar="QUERY",
-        help="bounded path or identifier query",
-    )
-    search_parser.add_argument(
-        "path",
-        type=Path,
-        nargs="?",
-        default=Path("."),
-        metavar="PATH",
-        help="location inside the registered Workspace (default: current directory)",
-    )
-    search_parser.add_argument(
-        "--limit",
-        type=int,
-        default=DEFAULT_SEARCH_LIMIT,
-        metavar="N",
-        help=f"maximum results (default: {DEFAULT_SEARCH_LIMIT})",
-    )
-    search_parser.add_argument(
-        "--socket",
-        type=Path,
-        metavar="PATH",
-        help="override the canonical per-user Unix-domain socket path",
-    )
-
     skills_parser = subparsers.add_parser(
         "skills",
         help="inspect the canonical Harness skill registry",
@@ -1220,8 +1126,6 @@ def harness_main() -> int:
         )
     if args.command == "visibility":
         return _run_visibility(args.mode, args.path, args.socket)
-    if args.command == "search":
-        return _run_search(args.query, args.path, args.socket, args.limit)
     if args.command == "skills":
         if args.skills_command == "list":
             return _run_skills_list()
@@ -1250,9 +1154,9 @@ def harnessd_main() -> int:
     subparsers = parser.add_subparsers(dest="command")
     serve_parser = subparsers.add_parser(
         "serve",
-        help="serve the implemented local IPC status, search, and scan paths",
+        help="serve the implemented local IPC status, context, Task, and scan paths",
         description=(
-            "Serve bounded local IPC status, indexed-path search, and deterministic scan paths "
+            "Serve bounded local IPC status, context, Task, and deterministic scan paths "
             "using canonical per-user database and socket defaults unless explicitly overridden."
         ),
     )

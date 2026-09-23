@@ -208,7 +208,6 @@ def test_delete_removes_provenance_and_history_atomically_and_keeps_source(tmp_p
             "knowledge_cards",
             "knowledge_anchors",
             "task_search",
-            "knowledge_search",
         ):
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
         assert (root / "source.py").read_text() == "answer = 42\n"

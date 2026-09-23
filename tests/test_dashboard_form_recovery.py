@@ -107,7 +107,7 @@ def test_stale_comment_preserves_draft_and_requires_explicit_fresh_revision_retr
         assert 'role="alert"' in text
         assert "Данные изменились" in text
         assert "New checkpoint since the form was opened" in text
-        assert f'class="nav-project-link" href="/workspaces/{workspace_id}/"' in text
+        assert 'class="nav-project-link" href="/projects/' in text
         assert "Пока нет проектов" not in text
         assert text.count('data-state="manual"') == 2
         assert text.count("Обновление вручную") == 2

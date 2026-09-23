@@ -26,7 +26,7 @@ async def test_mcp_status_rejects_git_change_between_private_ipc_responses(
     monkeypatch: pytest.MonkeyPatch, changed: str
 ) -> None:
     status = WorkspaceStatusResult(
-        schema_version=23,
+        schema_version=24,
         workspace_id="workspace",
         project_id="project",
         visibility_mode="normal",
@@ -35,13 +35,12 @@ async def test_mcp_status_rejects_git_change_between_private_ipc_responses(
         branch="main",
         dirty_path_count=0,
         indexed_file_count=0,
-        content_search_document_count=0,
         index_revision=None,
         last_successful_reconcile_at=None,
         last_reconcile_kind=None,
     )
     task_status = WorkspaceTaskStatusResult(
-        schema_version=23,
+        schema_version=24,
         workspace_id="workspace",
         task=WorkspaceTaskSummary(
             "secret-task", "Unmerged private task", TaskState.WORKING, None, 1
@@ -74,7 +73,7 @@ async def test_private_task_status_git_snapshot_is_not_added_to_model_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     status = WorkspaceStatusResult(
-        schema_version=23,
+        schema_version=24,
         workspace_id="workspace",
         project_id="project",
         visibility_mode="normal",
@@ -83,12 +82,11 @@ async def test_private_task_status_git_snapshot_is_not_added_to_model_payload(
         branch=None,
         dirty_path_count=0,
         indexed_file_count=0,
-        content_search_document_count=0,
         index_revision=None,
         last_successful_reconcile_at=None,
         last_reconcile_kind=None,
     )
-    task_status = WorkspaceTaskStatusResult(23, "workspace", None, None, None, None, None)
+    task_status = WorkspaceTaskStatusResult(24, "workspace", None, None, None, None, None)
     monkeypatch.setattr(bridge, "_mcp_tool_refusal", lambda: None)
     monkeypatch.setattr(bridge, "_workspace_hints", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(bridge, "_socket_path", lambda: Path("/unused"))
@@ -125,7 +123,7 @@ def test_private_task_status_snapshot_decoder_rejects_bad_types(field: str, valu
         "request_id": "status",
         "ok": True,
         "result": {
-            "schema_version": 23,
+            "schema_version": 24,
             "workspace_id": "workspace",
             "task": None,
             "last_checkpoint": None,

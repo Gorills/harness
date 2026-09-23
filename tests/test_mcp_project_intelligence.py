@@ -179,7 +179,7 @@ def rotateRefreshToken(repository, previous_credential):
 
 
 @pytest.mark.anyio
-async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
+async def test_real_mcp_expands_selected_project_knowledge_and_task_history(
     tmp_path: Path,
 ) -> None:
     (
@@ -210,183 +210,114 @@ async def test_real_mcp_searches_and_expands_project_knowledge_and_task_history(
     )
     try:
         async with Client(stdio_client(params)) as client:
-            knowledge = await client.call_tool(
-                "project_search",
-                {"query": "refresh rotation invariant", "scope": "knowledge", "limit": 5},
-            )
-            assert knowledge.is_error is False
-            assert knowledge.structured_content is not None
-            knowledge_results = knowledge.structured_content["results"]
-            assert [item["kind"] for item in knowledge_results] == ["knowledge"]
-            assert knowledge_results[0]["freshness"] == "fresh"
-            assert f"knowledge:{legacy_knowledge_id}" not in {
-                item["ref"] for item in knowledge_results
-            }
             unavailable = await client.call_tool(
                 "project_context", {"refs": [f"knowledge:{legacy_knowledge_id}"]}
             )
             assert unavailable.is_error is True
             assert "Legacy rotation invalidates" not in str(unavailable.content)
-            assert "SECRET_OTHER_PROJECT" not in json.dumps(
-                knowledge.structured_content, sort_keys=True
-            )
 
-            for scope, expected_ref, match_reason in (
-                (
-                    "knowledge",
-                    f"knowledge:{russian_knowledge_id}",
-                    "Knowledge Russian case-form title phrase",
-                ),
-                (
-                    "tasks",
-                    f"task:{task_id}#checkpoint:{current_checkpoint_id}",
-                    "Task checkpoint summary/next step/branch",
-                ),
-            ):
-                russian = await client.call_tool(
-                    "project_search", {"query": "задачей", "scope": scope, "limit": 3}
-                )
-                assert russian.is_error is False
-                assert russian.structured_content is not None
-                russian_results = russian.structured_content["results"]
-                assert [item["ref"] for item in russian_results] == [expected_ref]
-                assert russian_results[0]["match_reason"] == match_reason
-                assert russian_results[0]["evidence"] is None
-                assert "path" not in russian_results[0]
-                assert russian.structured_content["exact_coverage"] is None
-                assert russian.structured_content["symbol_navigation"] is None
-                serialized = json.dumps(russian.structured_content, ensure_ascii=False)
-                assert "SECRET_OTHER_PROJECT" not in serialized
-                assert "replace_and_invalidate" not in serialized
-
-            tasks = await client.call_tool(
-                "project_search",
+            selected = await client.call_tool(
+                "project_context",
                 {
-                    "query": "transactional replacement enforced",
-                    "scope": "tasks",
-                    "limit": 3,
+                    "refs": [
+                        f"knowledge:{russian_knowledge_id}",
+                        f"task:{task_id}#checkpoint:{current_checkpoint_id}",
+                        "code:src/token_service.py",
+                    ]
                 },
             )
-            assert tasks.is_error is False
-            assert tasks.structured_content is not None
-            task_results = tasks.structured_content["results"]
-            assert task_results[0]["ref"] == (f"task:{task_id}#checkpoint:{current_checkpoint_id}")
-            assert task_results[0]["kind"] == "task"
+            assert selected.is_error is False
+            assert selected.structured_content is not None
+            assert [item["ref"] for item in selected.structured_content["items"]] == [
+                f"knowledge:{russian_knowledge_id}",
+                f"task:{task_id}#checkpoint:{current_checkpoint_id}",
+                "code:src/token_service.py",
+            ]
             assert "SECRET_OTHER_PROJECT" not in json.dumps(
-                tasks.structured_content, sort_keys=True
+                selected.structured_content, sort_keys=True
             )
+            for ref in (f"knowledge:{other_knowledge_id}", f"task:{other_task_id}"):
+                rejected = await client.call_tool("project_context", {"refs": [ref]})
+                assert rejected.is_error is True
+                assert "SECRET_OTHER_PROJECT" not in str(rejected.content)
 
-            for query, match_reason in (
-                (task_id, "Task ID"),
-                (task_id[:10], "Task ID prefix"),
-            ):
-                by_id = await client.call_tool(
-                    "project_search", {"query": query, "scope": "tasks", "limit": 3}
+            recalled = await client.call_tool(
+                "project_recall", {"query": "refresh rotation", "kind": "knowledge"}
+            )
+            assert recalled.is_error is False
+            assert recalled.structured_content is not None
+            assert set(recalled.structured_content) == {
+                "query",
+                "kind",
+                "results_truncated",
+                "results",
+            }
+            assert recalled.structured_content["kind"] == "knowledge"
+            knowledge_hits = recalled.structured_content["results"]
+            assert len(knowledge_hits) == 1
+            assert knowledge_hits[0]["title"] == "Refresh rotation current invariant"
+            assert knowledge_hits[0]["ref"] != f"knowledge:{legacy_knowledge_id}"
+            assert all(
+                set(hit) == {"ref", "title", "short_summary", "freshness"} for hit in knowledge_hits
+            )
+            assert "Legacy rotation invalidates" not in json.dumps(recalled.structured_content)
+            assert "SECRET_OTHER_PROJECT" not in json.dumps(recalled.structured_content)
+            assert "src/token_service.py" not in json.dumps(recalled.structured_content)
+
+            # The highest-ranked title match is hidden on this Git snapshot. A lower
+            # body match must still fill limit=1 after applicability filtering.
+            connection = connect_database(database)
+            try:
+                connection.execute(
+                    """UPDATE knowledge_cards
+                    SET title = 'Current invariant', body = 'refresh rotation still applies'
+                    WHERE source_checkpoint_id = ?
+                      AND title = 'Refresh rotation current invariant'""",
+                    (current_checkpoint_id,),
                 )
-                assert by_id.is_error is False
-                assert by_id.structured_content is not None
-                assert by_id.structured_content["results"] == [
-                    {
-                        "ref": f"task:{task_id}",
-                        "kind": "task",
-                        "title": "Token hardening",
-                        "location": f"task:{task_id}",
-                        "short_summary": "Transactional replacement now enforced",
-                        "match_reason": match_reason,
-                        "freshness": "durable_history",
-                        "evidence": None,
-                        "evidence_reason": None,
-                    }
-                ]
-                assert by_id.structured_content["results_truncated"] is False
-                assert by_id.structured_content["exact_coverage"] is None
-                assert by_id.structured_content["symbol_navigation"] is None
-
-            for query in (other_task_id, other_task_id[:10]):
-                outside_project = await client.call_tool(
-                    "project_search", {"query": query, "scope": "tasks", "limit": 3}
-                )
-                assert outside_project.is_error is False
-                assert outside_project.structured_content is not None
-                assert outside_project.structured_content["results"] == []
-                assert "SECRET_OTHER_PROJECT" not in json.dumps(
-                    outside_project.structured_content, sort_keys=True
-                )
-
-            code = await client.call_tool(
-                "project_search",
-                {
-                    "query": "where previous credential invalidation happens",
-                    "scope": "code",
-                    "limit": 3,
-                },
+            finally:
+                connection.close()
+            visible_after_filter = await client.call_tool(
+                "project_recall",
+                {"query": "refresh rotation", "kind": "knowledge", "limit": 1},
             )
-            assert code.is_error is False
-            assert code.structured_content is not None
-            assert code.structured_content["results"][0]["ref"] == ("code:src/token_service.py")
-            assert code.structured_content["results"][0]["short_summary"] is None
-            code_hit = code.structured_content["results"][0]
-            assert code_hit["evidence"] is not None
-            assert "replace_and_invalidate" in code_hit["evidence"]["snippet"]
-            assert "bm25" not in json.dumps(code.structured_content).casefold()
+            assert visible_after_filter.is_error is False
+            assert visible_after_filter.structured_content is not None
+            assert [hit["title"] for hit in visible_after_filter.structured_content["results"]] == [
+                "Current invariant"
+            ]
 
-            exact = await client.call_tool(
-                "project_search",
-                {"query": "rotateRefreshToken", "scope": "code", "limit": 3},
+            task_recall = await client.call_tool(
+                "project_recall", {"query": "Token hardening", "kind": "task"}
             )
-            assert exact.is_error is False
-            assert exact.structured_content is not None
-            assert exact.structured_content["workspace_state"] == "current"
-            # Definition hints are consumed before the real daemon IPC and MCP round trip.
-            for hit in exact.structured_content["results"]:
-                assert "evidence_line" not in hit
-                assert "evidence_scope" not in hit
-            exact_coverage = exact.structured_content["exact_coverage"]
-            assert exact_coverage is not None
-            assert exact_coverage["needle"] == "rotateRefreshToken"
-            assert exact_coverage["complete"] is True
-            assert exact_coverage["locations_truncated"] is False
-            assert exact_coverage["matched_occurrences"] == 1
-            assert exact_coverage["locations"][0]["path"] == "src/token_service.py"
-            symbol_navigation = exact.structured_content["symbol_navigation"]
-            assert symbol_navigation is not None
-            assert symbol_navigation["precise_languages"] == ["python"]
-            assert symbol_navigation["candidate_precise_files"] == 1
-            assert symbol_navigation["parsed_precise_files"] == 1
-            assert symbol_navigation["precise_classification_complete"] is True
-            assert symbol_navigation["definition_count"] == 1
-            assert symbol_navigation["call_count"] == 0
-            symbol_definition = symbol_navigation["relations"][0]
-            assert symbol_definition["kind"] == "definition"
-            assert symbol_definition["path"] == "src/token_service.py"
-            assert "def rotateRefreshToken" in symbol_definition["evidence"]["snippet"]
+            assert task_recall.is_error is False
+            assert task_recall.structured_content is not None
+            assert len(task_recall.structured_content["results"]) == 1
+            assert task_recall.structured_content["results"][0]["ref"].startswith(f"task:{task_id}")
+            assert "SECRET_OTHER_PROJECT" not in json.dumps(task_recall.structured_content)
 
-            assert knowledge_results[0].get("evidence") is None
-            assert tasks.structured_content["results"][0].get("evidence") is None
-
-            docs = await client.call_tool(
-                "project_search", {"query": "rotation", "scope": "docs", "limit": 2}
+            other_task_recall = await client.call_tool(
+                "project_recall", {"query": "SECRET_OTHER_PROJECT", "kind": "task"}
             )
-            assert docs.is_error is False
-            assert docs.structured_content is not None
-            assert docs.structured_content["results"][0]["ref"] == "doc:docs/rotation.md"
-            assert docs.structured_content["results"][0]["kind"] == "doc"
+            assert other_task_recall.is_error is False
+            assert other_task_recall.structured_content is not None
+            assert other_task_recall.structured_content["results"] == []
+            assert "Other project secret" not in json.dumps(other_task_recall.structured_content)
+
+            unavailable_recall = await client.call_tool(
+                "project_recall", {"query": "SECRET_OTHER_PROJECT", "kind": "knowledge"}
+            )
+            assert unavailable_recall.is_error is False
+            assert unavailable_recall.structured_content == {
+                "query": "SECRET_OTHER_PROJECT",
+                "kind": "knowledge",
+                "results_truncated": False,
+                "results": [],
+            }
 
             # Matching source makes the old card applicable again, while its durable
             # needs_revalidation label remains unchanged rather than being auto-refreshed.
             _git(root, "restore", "--", "src/token_service.py")
-            restored = await client.call_tool(
-                "project_search",
-                {"query": "refresh rotation invariant", "scope": "knowledge", "limit": 5},
-            )
-            assert restored.is_error is False
-            assert restored.structured_content is not None
-            restored_results = restored.structured_content["results"]
-            assert [item["ref"] for item in restored_results] == [
-                f"knowledge:{legacy_knowledge_id}"
-            ]
-            assert restored_results[0]["freshness"] == "needs_revalidation"
-
             context = await client.call_tool(
                 "project_context",
                 {

@@ -32,6 +32,7 @@ from harness.dashboard import (
     render_task_page,
     render_workspace_page,
 )
+from harness.git_applicability import WorkspaceApplicability
 from harness.index import scan_workspace
 from harness.ipc import (
     DashboardUrlResult,
@@ -91,6 +92,7 @@ def _registered_database(tmp_path: Path) -> tuple[Path, Path, str]:
 def _record_live_status_inspections(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     inspected: list[str] = []
     original = dashboard_module._with_live_workspace_status
+    original_applicability = dashboard_module._with_applicability_live_workspace_status
 
     def record_live_status(
         row: dashboard_module.DashboardWorkspaceRow,
@@ -98,7 +100,19 @@ def _record_live_status_inspections(monkeypatch: pytest.MonkeyPatch) -> list[str
         inspected.append(row.workspace_id)
         return original(row)
 
+    def record_applicability_live_status(
+        row: dashboard_module.DashboardWorkspaceRow,
+        applicability: WorkspaceApplicability,
+    ) -> dashboard_module.DashboardWorkspaceRow:
+        inspected.append(row.workspace_id)
+        return original_applicability(row, applicability)
+
     monkeypatch.setattr(dashboard_module, "_with_live_workspace_status", record_live_status)
+    monkeypatch.setattr(
+        dashboard_module,
+        "_with_applicability_live_workspace_status",
+        record_applicability_live_status,
+    )
     return inspected
 
 
@@ -167,14 +181,14 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
         assert "Проекты · Harness" in body
-        assert "Поиск по всем задачам и последние обновления." in body
+        assert "Задачи, заметки и доступы — всё под рукой." in body
         assert "Последние задачи" in body
         assert 'class="nav-task"' not in body
-        assert "/projects/" not in body
+        assert "/projects/" in body
         assert "Основная копия" not in body
         assert "ревью" in body
         assert f"workspaces/{workspace_id}/" in body
-        assert "/projects/" not in body
+        assert "/vault/" in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
         with urlopen(url + f"workspaces/{workspace_id}/", timeout=2) as workspace_response:
             workspace_body = workspace_response.read().decode("utf-8")
@@ -222,7 +236,7 @@ def test_task_page_live_status_is_scoped_to_owning_workspace(
     )
     html = dashboard_module._render_page(database, "/", page)
     assert task.title in html
-    assert f"/workspaces/{other_workspace.workspace_id}/" in html
+    assert f"/projects/{other_workspace.project_id}/" in html
     assert inspected == [workspace_id]
 
     inspected.clear()
@@ -289,7 +303,7 @@ def test_workspace_page_live_status_skips_unrelated_workspaces(
         f"/workspaces/{workspace_id}/",
     )
     html = dashboard_module._render_page(database, "/", page)
-    assert f"/workspaces/{other_workspace.workspace_id}/" in html
+    assert f"/projects/{other_workspace.project_id}/" in html
     assert inspected == [workspace_id]
 
     inspected.clear()
@@ -601,7 +615,8 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
     assert len(rows) == 2
     assert len({row.project_id for row in rows}) == 1
     assert any(f"workspaces/{row.workspace_id}/" in html for row in rows)
-    assert "/projects/" not in html
+    assert f"/projects/{project_id}/" in html
+    assert html.count('class="hub-card"') == 1
     assert 'class="nav-task"' not in html
     assert "Поиск по всем задачам" in html
     assert "Последние задачи" in html
@@ -618,8 +633,8 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
         read_dashboard_workspace_detail(database, workspace_id),
         base_path="/",
     )
-    assert "Удаление проекта" in workspace_html
-    assert f'action="/projects/{project_id}/"' in workspace_html
+    assert "Удаление проекта" not in workspace_html
+    assert f'href="/projects/{project_id}/settings/"' in workspace_html
 
 
 def test_dashboard_workspace_exposes_project_skill_scope_entry(tmp_path: Path) -> None:
@@ -630,19 +645,23 @@ def test_dashboard_workspace_exposes_project_skill_scope_entry(tmp_path: Path) -
         read_dashboard_workspace_detail(database, workspace_id),
         base_path="/",
     )
-    skill_scope_href = f'href="/projects/{project_id}/#skill-scope"'
-    assert "Управление скиллами проекта" in workspace_html
-    assert workspace_html.count(skill_scope_href) == 2
-    assert 'class="btn btn-primary skill-scope-entry"' in workspace_html
-    assert 'class="btn skill-scope-entry"' in workspace_html
-    assert f'class="nav-project-link" href="/workspaces/{workspace_id}/"' in workspace_html
+    assert f'href="/projects/{project_id}/settings/"' in workspace_html
+    assert "Настройки проекта и папок" in workspace_html
+    assert 'class="btn btn-primary skill-scope-entry"' not in workspace_html
+    assert f'class="nav-project-link" href="/projects/{project_id}/"' in workspace_html
     project_html = render_project_page(
         read_dashboard_project_detail(database, project_id),
         base_path="/",
     )
     assert 'id="skill-scope"' in project_html
-    assert 'class="skill-scope-current" aria-current="true"' in project_html
-    assert "Управление скиллами проекта" not in project_html
+    assert f'href="/projects/{project_id}/settings/#skill-scope"' in project_html
+    settings_html = render_project_page(
+        read_dashboard_project_detail(database, project_id),
+        base_path="/",
+        settings=True,
+    )
+    assert 'id="skill-scope"' in settings_html
+    assert 'class="skill-scope-current" aria-current="true"' in settings_html
 
 
 def test_dashboard_home_pins_live_tasks_ahead_of_newer_completed(

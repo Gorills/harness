@@ -15,8 +15,8 @@ from harness.dashboard import (
     render_workspace_page,
 )
 from harness.index import scan_workspace
-from harness.registry import create_project, register_workspace
-from harness.retrieval import ProjectSearchScope, search_project
+from harness.registry import create_project, get_workspace, register_workspace
+from harness.retrieval import search_tasks
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import TaskEventType, list_task_events
 from harness.task_workflow import (
@@ -204,12 +204,11 @@ def test_operator_tracking_reopen_and_task_search_are_one_cas_history(tmp_path: 
             "feature/HAR-42-dashboard",
             "деплой на тест",
         ):
-            hits = search_project(
+            hits = search_tasks(
                 connection,
-                workspace_id,
                 query,
-                scope=ProjectSearchScope.TASKS,
                 limit=8,
+                project_id=get_workspace(connection, workspace_id).project_id,
             )
             assert hits and hits[0].ref.startswith(f"task:{started.task_id}")
 

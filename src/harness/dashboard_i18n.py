@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from harness.registry import VisibilityMode
-from harness.search import SearchMatchKind
 from harness.task_checkpoints import TaskEventType
 from harness.tasks import TaskOperatorStatus, TaskState, TaskWaitReason
 from harness.verification import VerificationSource, VerificationStatus
@@ -65,25 +64,38 @@ EMPTY_WORKSPACES_HINT = "В нужной папке выполните harness i
 EMPTY_PROJECT_WORKSPACES_TITLE = "Пока нет папок"
 EMPTY_PROJECT_WORKSPACES_HINT = "У этого проекта ещё нет зарегистрированной папки."
 PROJECT_MANAGEMENT = "Управление проектом"
-SKILL_SCOPE = "Области разработки"
+SKILL_SCOPE = "Скиллы проекта"
 MANAGE_SKILL_SCOPE = "Управление скиллами проекта"
-MANAGE_SKILL_SCOPE_HINT = "Включить или скрыть области разработки для всех папок проекта."
+MANAGE_SKILL_SCOPE_HINT = "Состав и доставка скиллов во все папки проекта."
 SKILL_SCOPE_HINT = (
-    "Базовые quality skills всегда включены. Авто подхватывает область по файлам, "
-    "Включить — сразу, даже в пустой папке, Не использовать — скрывает область."
+    "Настройка действует для всех папок проекта и будущих скиллов выбранной области. "
+    "Раскройте действие, чтобы проверить, что добавится и что уберётся. "
+    "Агент сам выбирает, какие из доступных инструкций использовать."
 )
 SKILL_SCOPE_AUTO = "Авто"
-SKILL_SCOPE_INCLUDED = "Включить"
-SKILL_SCOPE_EXCLUDED = "Не использовать"
-SKILL_SCOPE_AUTO_HINT = (
-    "Skills этой области добавляются только когда Harness обнаруживает её в стеке."
-)
-SKILL_SCOPE_INCLUDED_HINT = (
-    "Skills этой области проецируются сразу, даже если файлов стека ещё нет."
-)
-SKILL_SCOPE_EXCLUDED_HINT = (
-    "Skills этой области не проецируются в проект, даже если стек обнаружен."
-)
+SKILL_SCOPE_INCLUDED = "Добавлять в проект"
+SKILL_SCOPE_EXCLUDED = "Исключить из проекта"
+SKILL_SCOPE_AUTO_HINT = "Состав определяется обнаруженным стеком каждой папки."
+SKILL_SCOPE_INCLUDED_HINT = "Область выбрана вручную, даже если файлов стека ещё нет."
+SKILL_SCOPE_EXCLUDED_HINT = "Специализированные скиллы этой области исключены из отбора."
+SKILL_SUMMARIES = {
+    "testing-strategy": "Проверки по риску изменения, без лишних тестов для косметики.",
+    "secure-by-design": "Защита затронутых границ доступа, входных и чувствительных данных.",
+    "container-infrastructure": "Сборка образов, контейнерное окружение и ограничения ресурсов.",
+    "observability": "Полезные логи, метрики и трассировки с ограниченным объёмом данных.",
+    "ci-release": "Надёжность CI, права задач и существующие правила выпуска.",
+    "public-frontend": "Качество web-страниц; SEO только для публичных индексируемых страниц.",
+    "frontend-design": "Композиция, состояния и визуальная проверка web и mobile интерфейсов.",
+    "server-application": "HTTP-контракты, фоновые задачи и внешние интеграции.",
+    "mobile-application": "Мобильный lifecycle, Flutter, Expo / React Native и native-доставка.",
+    "godot-development": "Gameplay, ввод, интерфейс и производительность Godot.",
+    "deployment-operations": "Развёртывание и эксплуатация Linux-сервисов и edge-конфигурации.",
+    "project-architecture": "Границы модулей, владение данными и существенные архитектурные решения.",
+    "language-engineering": "Правила языка, runtime и существующих инструментов проекта.",
+    "data-integrity": "Транзакции, миграции и сохранность долговечных данных.",
+    "complex-change-planning": "Планирование и независимая проверка сложных изменений.",
+    "legacy-preservation": "Совместимость существующих контрактов и безопасная миграция.",
+}
 SKILL_SCOPE_BACKEND = "Backend"
 SKILL_SCOPE_FRONTEND = "Frontend"
 SKILL_SCOPE_MOBILE = "Mobile"
@@ -164,8 +176,8 @@ TASK = "Задача"
 ACTIONS = "Действия"
 NO_ACTIONS = "Сейчас действий нет"
 SEARCH_SECTION = "Поиск"
-SEARCH_PLACEHOLDER = "Задача, ветка, Jira, комментарий или путь"
-SEARCH_LABEL = "Поиск по задачам и индексу"
+SEARCH_PLACEHOLDER = "Задача, ветка, Jira или комментарий"
+SEARCH_LABEL = "Поиск по задачам"
 SEARCH = "Найти"
 NO_SEARCH_HITS_TITLE = "Ничего не нашлось"
 RECENT_TASKS = "Задачи"
@@ -195,10 +207,6 @@ UNAVAILABLE_HEADING = "Дашборд недоступен"
 WAIT_OPERATOR_REVIEW = "ревью"
 WAIT_OPERATOR_INPUT = "ввод оператора"
 WAIT_EXTERNAL = "внешнее"
-MATCH_EXACT_PATH = "точный путь"
-MATCH_EXACT_FILENAME = "имя файла"
-MATCH_IDENTIFIER = "идентификатор"
-MATCH_SUBSTRING = "подстрока пути"
 EM_DASH = "—"
 
 _TASK_STATE_LABELS = {
@@ -215,12 +223,6 @@ _WAIT_REASON_LABELS = {
     TaskWaitReason.OPERATOR_REVIEW.value: WAIT_OPERATOR_REVIEW,
     TaskWaitReason.OPERATOR_INPUT.value: WAIT_OPERATOR_INPUT,
     TaskWaitReason.EXTERNAL.value: WAIT_EXTERNAL,
-}
-_MATCH_KIND_LABELS = {
-    SearchMatchKind.EXACT_PATH.value: MATCH_EXACT_PATH,
-    SearchMatchKind.EXACT_FILENAME.value: MATCH_EXACT_FILENAME,
-    SearchMatchKind.IDENTIFIER_TOKENS.value: MATCH_IDENTIFIER,
-    SearchMatchKind.PATH_SUBSTRING.value: MATCH_SUBSTRING,
 }
 _EVENT_LABELS = {
     TaskEventType.CREATED: EVENT_CREATED,
@@ -283,10 +285,6 @@ def wait_reason_label(reason: str | None) -> str:
     if reason is None:
         return EM_DASH
     return _WAIT_REASON_LABELS.get(reason, reason)
-
-
-def match_kind_label(kind: str) -> str:
-    return _MATCH_KIND_LABELS.get(kind, kind)
 
 
 def event_label(event_type: TaskEventType) -> str:

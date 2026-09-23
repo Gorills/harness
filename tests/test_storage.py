@@ -845,26 +845,26 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
-        connection.execute("DROP TABLE indexed_resolved_code_relation_search")
-        connection.execute("DROP TABLE indexed_resolved_code_relations")
-        connection.execute("DROP TABLE indexed_resolved_relation_workspaces")
-        connection.execute("DROP TABLE indexed_python_reexports")
-        connection.execute("DROP TABLE indexed_code_relation_search")
-        connection.execute("DROP TABLE indexed_code_relations")
-        connection.execute("DROP TABLE indexed_code_unit_search")
-        connection.execute("DROP TABLE indexed_code_units")
-        connection.execute("DROP TABLE indexed_code_unit_files")
-        connection.execute("DROP TABLE indexed_content_search")
-        connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_relation_workspaces")
+        connection.execute("DROP TABLE IF EXISTS indexed_python_reexports")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_units")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_files")
+        connection.execute("DROP TABLE IF EXISTS indexed_content_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_search_documents")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
         connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
-        connection.execute("DROP TABLE workspace_search_index_dirty_paths")
-        connection.execute("DROP TABLE workspace_search_index_state")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_dirty_paths")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_state")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
-        connection.execute("DROP TABLE knowledge_search")
+        connection.execute("DROP TABLE IF EXISTS knowledge_search")
         connection.execute("DROP TABLE task_checkpoint_verification")
         connection.execute("DROP TABLE task_git_evidence_paths")
         connection.execute("DROP TABLE task_git_evidence")
@@ -892,5 +892,113 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
         ).fetchall() == [(version,) for version in range(1, SCHEMA_VERSION + 1)]
         assert connection.execute("SELECT COUNT(*) FROM task_checkpoints").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+_RETIRED_SEARCH_PREFIXES = (
+    "indexed_search_documents",
+    "indexed_content_search",
+    "indexed_code_unit",
+    "indexed_code_relation",
+    "indexed_resolved_code_relation",
+    "indexed_resolved_relation_workspaces",
+    "indexed_python_reexports",
+    "workspace_search_index_",
+    "knowledge_search",
+)
+
+
+def _retired_search_objects(connection: sqlite3.Connection) -> set[str]:
+    return {
+        name
+        for (name,) in connection.execute("SELECT name FROM sqlite_schema")
+        if name.startswith(_RETIRED_SEARCH_PREFIXES)
+    }
+
+
+def test_fresh_v24_schema_keeps_task_lookup_without_project_search_tables(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "fresh.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        assert _retired_search_objects(connection) == set()
+        tables = {
+            name
+            for (name,) in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
+        }
+        assert {"indexed_files", "task_search", "knowledge_cards"} <= tables
+    finally:
+        connection.close()
+
+
+def test_v24_migration_drops_project_search_projections_and_preserves_durable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "retire-project-search.db"
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 23)
+        initialize_database(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            "INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir) "
+            "VALUES ('workspace', 'project', '/repo', '/repo/.git')"
+        )
+        connection.execute(
+            "INSERT INTO indexed_files(workspace_id, relative_path, kind, size_bytes, content_sha256) "
+            "VALUES ('workspace', 'src/app.py', 'file', 8, ?)",
+            ("0" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO indexed_search_documents("
+            "workspace_id, relative_path, corpus, content_sha256, title, path_tokens, identifier_tokens"
+            ") VALUES ('workspace', 'src/app.py', 'code', ?, 'app.py', 'src app py', 'app')",
+            ("0" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO tasks(id, workspace_id, title, state, revision, created_at, updated_at) "
+            "VALUES ('task', 'workspace', 'Preserved task', 'completed', 1, 'now', 'now')"
+        )
+        connection.execute(
+            "INSERT INTO knowledge_cards("
+            "id, project_id, kind, title, body, source_type, created_at, updated_at, freshness"
+            ") VALUES ('card', 'project', 'invariant', 'Preserved card', "
+            "'Durable knowledge', 'operator', 'now', 'now', 'fresh')"
+        )
+        assert _retired_search_objects(connection)
+        assert connection.execute(
+            "SELECT task_id FROM task_search WHERE task_search MATCH 'preserved'"
+        ).fetchall() == [("task",)]
+        assert connection.execute(
+            "SELECT knowledge_id FROM knowledge_search WHERE knowledge_search MATCH 'preserved'"
+        ).fetchall() == [("card",)]
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = initialize_database(database)
+    assert status.schema_version == 24
+
+    connection = connect_database(database)
+    try:
+        assert _retired_search_objects(connection) == set()
+        assert connection.execute(
+            "SELECT relative_path FROM indexed_files WHERE workspace_id = 'workspace'"
+        ).fetchall() == [("src/app.py",)]
+        assert connection.execute("SELECT id, title FROM tasks").fetchall() == [
+            ("task", "Preserved task")
+        ]
+        assert connection.execute("SELECT id, title, body FROM knowledge_cards").fetchall() == [
+            ("card", "Preserved card", "Durable knowledge")
+        ]
+        assert connection.execute(
+            "SELECT task_id FROM task_search WHERE task_search MATCH 'preserved'"
+        ).fetchall() == [("task",)]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         connection.close()

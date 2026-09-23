@@ -277,8 +277,13 @@ def test_dashboard_relocates_workspace_without_losing_identity_or_files(tmp_path
         with urlopen(workspace_url, timeout=2) as response:
             body = response.read().decode("utf-8")
         assert str(moved) in body
-        assert "Проект перенесён в другую папку" in body
-        assert "harness scan" in body
+        assert "Настройки проекта и папок" in body
+        with urlopen(
+            base_url + f"projects/{workspace.project_id}/settings/", timeout=2
+        ) as response:
+            settings = response.read().decode("utf-8")
+        assert "Проект перенесён в другую папку" in settings
+        assert "harness scan" in settings
     finally:
         manager.close()
 
@@ -298,16 +303,16 @@ def test_dashboard_project_deletion_requires_confirmation_and_preserves_files(
         parsed = urlsplit(base_url)
         origin = f"http://127.0.0.1:{parsed.port}"
         project_url = base_url + f"projects/{quote(project_id, safe='')}/"
-        with urlopen(project_url, timeout=2) as response:
+        with urlopen(project_url + "settings/", timeout=2) as response:
             body = response.read().decode("utf-8")
         assert "Удаление проекта" in body
         assert "Файлы на диске останутся" in body
         workspace_url = base_url + f"workspaces/{quote(workspace_id, safe='')}/"
         with urlopen(workspace_url, timeout=2) as workspace_response:
             workspace_body = workspace_response.read().decode("utf-8")
-        assert "Удаление проекта" in workspace_body
-        assert f'action="/projects/{quote(project_id, safe="")}/"' in workspace_body
-        assert "Файлы на диске останутся" in workspace_body
+        assert "Удаление проекта" not in workspace_body
+        assert f'href="/projects/{quote(project_id, safe="")}/settings/"' in workspace_body
+        assert f'action="/projects/{quote(project_id, safe="")}/settings/"' in body
 
         fields: dict[str, str | int] = {
             "action": "delete_project",
@@ -609,9 +614,13 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         assert 'name="visibility_mode"' not in body
         with urlopen(workspace_url, timeout=2) as response:
             workspace_body = response.read().decode("utf-8")
-        assert ">Скрытый<" in workspace_body
-        assert f'action="{urlsplit(workspace_url).path}"' in workspace_body
-        assert "Cursor не блокирует git-команды агента" not in workspace_body
+        settings_url = url + f"projects/{quote(project_id, safe='')}/settings/"
+        assert ">Скрытый<" not in workspace_body
+        with urlopen(settings_url, timeout=2) as response:
+            settings_body = response.read().decode("utf-8")
+        assert ">Скрытый<" in settings_body
+        assert f'action="{urlsplit(settings_url).path}"' in settings_body
+        assert "Cursor не блокирует git-команды агента" not in settings_body
 
         fields: dict[str, str | int] = {
             "action": "set_visibility",
@@ -634,7 +643,7 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         )
         assert gitignore_after == gitignore_before
 
-        with urlopen(workspace_url, timeout=2) as response:
+        with urlopen(settings_url, timeout=2) as response:
             hidden_workspace = response.read().decode("utf-8")
         assert ">Обычный<" in hidden_workspace
         assert "Cursor не блокирует git-команды агента" in hidden_workspace

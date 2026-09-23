@@ -160,6 +160,7 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
     assert by_id["language-engineering"].portable_files == (
         PurePosixPath("SKILL.md"),
         PurePosixPath("references/c-cpp.md"),
+        PurePosixPath("references/dart.md"),
         PurePosixPath("references/dotnet.md"),
         PurePosixPath("references/gdscript.md"),
         PurePosixPath("references/go.md"),
@@ -249,6 +250,45 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
             resolve_skills(definitions, DetectedProjectStack(frozenset(), frozenset(), frozenset()))
         )
         == ()
+    )
+
+
+def test_dart_and_flutter_route_language_and_native_guidance(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+
+    dart_package = DetectedProjectStack(
+        frozenset({"dart"}),
+        frozenset(),
+        frozenset({"pubspec.yaml"}),
+        frozenset({"software-project"}),
+    )
+    dart_resolved = {
+        item.definition.skill_id: item for item in resolve_skills(definitions, dart_package)
+    }
+    assert "language-engineering" in dart_resolved
+    assert "mobile-application" not in dart_resolved
+    assert "language:dart" in dart_resolved["language-engineering"].match_reasons
+
+    flutter_app = DetectedProjectStack(
+        frozenset({"dart"}),
+        frozenset({"flutter"}),
+        frozenset({"pubspec.yaml"}),
+        frozenset({"mobile-app", "software-project"}),
+    )
+    flutter_resolved = {
+        item.definition.skill_id: item for item in resolve_skills(definitions, flutter_app)
+    }
+    assert {"language-engineering", "mobile-application"} <= flutter_resolved.keys()
+    assert "public-frontend" not in flutter_resolved
+    assert (
+        PurePosixPath("references/dart.md")
+        in flutter_resolved["language-engineering"].definition.portable_files
+    )
+    assert (
+        PurePosixPath("references/flutter.md")
+        in flutter_resolved["mobile-application"].definition.portable_files
     )
 
 

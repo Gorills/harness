@@ -1,0 +1,47 @@
+{
+  "all_five_model_tools_verified": false,
+  "all_five_wire_tools_verified": true,
+  "codex_project_config_discoveries_verified": 2,
+  "codex_prompt_bootstrap_verified": true,
+  "codex_version": "codex-cli 0.156.1",
+  "doctor_zero_fail": true,
+  "generated_skill_count_per_workspace": 8,
+  "generated_skill_names": [
+    "acceptance-negative",
+    "acceptance-skill",
+    "complex-change-planning",
+    "language-engineering",
+    "legacy-preservation",
+    "project-architecture",
+    "secure-by-design",
+    "testing-strategy"
+  ],
+  "mcp_skill_body_delivery_contract": "mcp-does-not-deliver-skill-bodies",
+  "model_completed_harness_tool_calls": [],
+  "model_run": false,
+  "negative_skill_preflight_policy": "projected; nonce absent from the positive skill-read prompt",
+  "owned_cleanup_verified": true,
+  "project_configs_verified": 2,
+  "runtime_source": "user-global-uv-tool",
+  "schema_version": 3,
+  "skill_negative_verified": false,
+  "skill_read_verified": false,
+  "untrusted_project_fail_closed_verified": true,
+  "user_codex_config_unchanged": true,
+  "wire_verified_harness_tool_calls": [
+    "project_status",
+    "project_context",
+    "project_recall",
+    "task_start",
+    "task_checkpoint"
+  ],
+  "wire_workspace_ids": [
+    "759a9a0cff014bf184d3bbace705b436",
+    "02ffc8006abe455d8dd6a95655ee915a"
+  ],
+  "workspace_identities": [
+    "/tmp/harness-codex-real-host-uio7r9f0/workspace-a",
+    "/tmp/harness-codex-real-host-uio7r9f0/workspace-b"
+  ],
+  "workspace_isolation_verified": true
+}

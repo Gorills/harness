@@ -10,6 +10,7 @@ from typing import Final
 from harness.cursor_adapter import find_isolated_development_root
 from harness.git_workspace import GitWorkspaceError, inspect_workspace_runtime_identity
 from harness.host_adapters import (
+    HostIntegrationError,
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
@@ -46,7 +47,15 @@ _DEFAULT_DEVELOPMENT_PROFILES: Final[tuple[str, ...]] = ("codex", "cursor")
 _DEVELOPMENT_PROFILES_ENV: Final[str] = "HARNESS_DEV_SKILL_PROFILES"
 
 _SKILL_FAILURE_CATEGORIES: Final[frozenset[str]] = frozenset(
-    {"generic", "policy", "projection", "projection_collision", "registry", "workspace_identity"}
+    {
+        "generic",
+        "policy",
+        "resolution",
+        "projection",
+        "projection_collision",
+        "registry",
+        "workspace_identity",
+    }
 )
 
 
@@ -64,6 +73,11 @@ class SkillRuntimeError(RuntimeError):
         """Return bounded operator guidance without exposing nested exception details."""
         if self._failure_category == "policy":
             return "Project skill policy could not be resolved; review the Project skill settings"
+        if self._failure_category == "resolution":
+            return (
+                "Workspace skill relevance could not be resolved; check project manifests and "
+                "refresh the Workspace with harness scan"
+            )
         if self._failure_category == "projection":
             return (
                 "Workspace skill projection could not be updated safely; inspect project "
@@ -249,10 +263,17 @@ def cleanup_projected_skills(
     for workspace in workspaces:
         try:
             _validate_workspace_identity(workspace)
+            if (
+                not os.environ.get("HARNESS_DEV_ROOT")
+                and find_isolated_development_root(workspace.workspace_root)
+                == workspace.workspace_root
+            ):
+                skipped += 1
+                continue
             projection = apply_skill_projection(
                 plan_skill_projection(workspace.workspace_root, (), surfaces)
             )
-        except (GitWorkspaceError, SkillRuntimeError, SkillError):
+        except (GitWorkspaceError, HostIntegrationError, SkillRuntimeError, SkillError):
             skipped += 1
             continue
         cleaned += 1
@@ -301,8 +322,10 @@ def _reconcile_failure(exc: SkillError | ProjectSkillPolicyError) -> SkillRuntim
         category = "projection_collision"
     elif isinstance(exc, SkillRegistryError):
         category = "registry"
-    elif isinstance(exc, (SkillResolutionError, ProjectSkillPolicyError)):
+    elif isinstance(exc, ProjectSkillPolicyError):
         category = "policy"
+    elif isinstance(exc, SkillResolutionError):
+        category = "resolution"
     elif isinstance(exc, SkillProjectionError):
         category = "projection"
     else:

@@ -16,7 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import accept_codex as acceptance_module
-import eval_search_behavior
 from accept_codex import (
     _MODEL_USAGE_DISCLOSURE,
     ACCEPTANCE_NEGATIVE_SKILL_DESCRIPTION,
@@ -39,6 +38,7 @@ from accept_codex import (
     _skill_read_prompt,
     _validate_wire_instructions,
     _validate_wire_tools,
+    _verify_codex_inspection,
     completed_harness_tool_calls,
     discovery_actions_before_task_start,
     evidence_contains_skill_marker,
@@ -60,6 +60,111 @@ from harness.daemon import _acquire_daemon_lock, serve_daemon
 from harness.mcp_bridge import _SERVER_INSTRUCTIONS
 from harness.runtime_paths import default_runtime_paths
 from harness.skills import DetectedProjectStack, load_skill_registry, resolve_skills
+
+
+def test_codex_inspection_rejects_different_bearer_without_disclosing_it(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    expected_headers = {
+        "Authorization": "Bearer generated-secret",
+        "X-Harness-Workspace-Root": str(workspace.resolve()),
+    }
+    payload = {
+        "name": "harness",
+        "enabled": True,
+        "disabled_reason": None,
+        "transport": {
+            "type": "streamable_http",
+            "url": "http://127.0.0.1:17376/mcp",
+            "http_headers": {**expected_headers, "Authorization": "Bearer stale-secret"},
+        },
+    }
+
+    with pytest.raises(CodexAcceptanceError) as failure:
+        _verify_codex_inspection(
+            payload,
+            workspace,
+            "http://127.0.0.1:17376/mcp",
+            expected_headers,
+        )
+
+    assert "generated-secret" not in str(failure.value)
+    assert "stale-secret" not in str(failure.value)
+
+
+def test_codex_inspection_accepts_exact_generated_headers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    headers = {
+        "Authorization": "Bearer generated-secret",
+        "X-Harness-Workspace-Root": str(workspace.resolve()),
+    }
+
+    _verify_codex_inspection(
+        {
+            "name": "harness",
+            "enabled": True,
+            "disabled_reason": None,
+            "transport": {
+                "type": "streamable_http",
+                "url": "http://127.0.0.1:17376/mcp",
+                "http_headers": headers,
+            },
+        },
+        workspace,
+        "http://127.0.0.1:17376/mcp",
+        headers,
+    )
+
+
+def test_acceptance_initializes_both_workspaces_before_scanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "user-codex"))
+    commands: list[tuple[str, Path]] = []
+    registered: set[Path] = set()
+
+    monkeypatch.setattr(
+        acceptance_module,
+        "_build_installed_wheel",
+        lambda *_args: (Path("/installed/harness"), Path("/installed/python")),
+    )
+    monkeypatch.setattr(acceptance_module, "_stop_acceptance_daemon", lambda *_args: None)
+
+    def run(
+        command: Sequence[str], *, cwd: Path, **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[0] == "/installed/harness":
+            commands.append((command[1], cwd))
+            if command[1] == "init":
+                registered.add(cwd)
+            elif command[1] == "scan":
+                if cwd not in registered:
+                    raise CodexAcceptanceError("Workspace was scanned before init")
+                raise CodexAcceptanceError("stop after registered scan")
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(acceptance_module, "_run", run)
+
+    with pytest.raises(CodexAcceptanceError, match="stop after registered scan"):
+        acceptance_module.run_acceptance(
+            codex=Path("/codex"),
+            uv=Path("/uv"),
+            timeout=1,
+            model=None,
+            evidence_path=None,
+            run_model=False,
+        )
+
+    assert [name for name, _workspace in commands] == [
+        "install",
+        "init",
+        "init",
+        "scan",
+        "uninstall",
+    ]
+    assert {workspace for name, workspace in commands if name == "init"} == registered
+    assert len(registered) == 2
 
 
 @pytest.mark.parametrize("failure_stage", ["install", "verification"])
@@ -322,7 +427,7 @@ def test_codex_acceptance_rejects_discovery_before_task_start() -> None:
             "item": {
                 "type": "mcp_tool_call",
                 "server": "harness",
-                "tool": "project_search",
+                "tool": "project_context",
                 "status": "completed",
             },
         },
@@ -343,12 +448,12 @@ def test_codex_acceptance_rejects_discovery_before_task_start() -> None:
     ]
 
     assert discovery_actions_before_task_start(search_before_task) == (
-        "mcp:harness:project_search",
+        "mcp:harness:project_context",
     )
     assert discovery_actions_before_task_start(native_before_task) == ("command_execution",)
 
 
-def test_codex_acceptance_allows_search_after_task_start() -> None:
+def test_codex_acceptance_allows_context_after_task_start() -> None:
     events = [
         {
             "type": "item.completed",
@@ -373,7 +478,7 @@ def test_codex_acceptance_allows_search_after_task_start() -> None:
             "item": {
                 "type": "mcp_tool_call",
                 "server": "harness",
-                "tool": "project_search",
+                "tool": "project_context",
                 "status": "completed",
             },
         },
@@ -384,65 +489,11 @@ def test_codex_acceptance_allows_search_after_task_start() -> None:
     assert project_actions_before_harness_status(events) == ()
 
 
-def test_accept_codex_search_behavior_is_metrics_only_when_present() -> None:
-    events = [
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "mcp_tool_call",
-                "server": "harness",
-                "tool": "project_status",
-                "status": "completed",
-            },
-        },
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "mcp_tool_call",
-                "server": "harness",
-                "tool": "task_start",
-                "status": "completed",
-            },
-        },
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "mcp_tool_call",
-                "server": "harness",
-                "tool": "project_search",
-                "status": "completed",
-                "arguments": {"query": "authenticate user"},
-                "result": {
-                    "structured_content": {
-                        "results": [{"kind": "code", "path": "src/auth.py"}],
-                    }
-                },
-            },
-        },
-        {
-            "type": "item.completed",
-            "item": {
-                "type": "command_execution",
-                "command": "cat src/auth.py",
-                "status": "completed",
-            },
-        },
-    ]
-    payload = eval_search_behavior.sanitized_search_behavior_metrics(
-        events, workspace_root=Path("/tmp/ws")
-    )
-    assert tuple(payload) == eval_search_behavior.SANITIZED_METRIC_KEYS
-    assert "evidence" not in payload
-    assert "candidate_paths" not in payload
-    assert "native_commands" not in payload
-    assert "schema_version" not in payload
-
-
 def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     properties = {
         "project_status": (),
-        "project_search": ("query", "scope", "limit"),
         "project_context": ("refs",),
+        "project_recall": ("query", "kind", "limit"),
         "task_start": ("title", "stack_hints", "task_id", "expected_revision"),
         "task_checkpoint": (
             "task_id",
@@ -530,15 +581,16 @@ def test_codex_acceptance_prompt_exercises_natural_discovery_without_tool_hints(
     assert "README.md" in prompt
     assert "Harness" not in prompt
     create_at = prompt.find("create a Russian-titled work record")
-    find_at = prompt.find("find relevant project material")
-    assert 0 <= create_at < find_at
-    assert "may be read natively" in prompt
-    assert "semantic refs" in prompt
+    recall_at = prompt.find("find that work record by its title")
+    read_at = prompt.find("Read README.md and pyproject.toml")
+    assert 0 <= create_at < recall_at < read_at
+    assert "native repository tools" in prompt
+    assert "code:pyproject.toml" in prompt
     assert "find and expand the relevant project context" not in prompt
     for tool_name in (
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ):

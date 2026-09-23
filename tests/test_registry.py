@@ -211,24 +211,6 @@ def test_relocate_workspace_preserves_identity_and_tasks_but_clears_derived_inde
             """,
             (workspace.workspace_id, "0" * 64),
         )
-        search_document = connection.execute(
-            """
-            INSERT INTO indexed_search_documents(
-                workspace_id, relative_path, corpus, content_sha256,
-                title, path_tokens, identifier_tokens
-            ) VALUES (?, 'tracked.txt', 'code', ?, 'tracked.txt', 'tracked txt', 'tracked')
-            """,
-            (workspace.workspace_id, "0" * 64),
-        )
-        assert search_document.lastrowid is not None
-        connection.execute(
-            """
-            INSERT INTO indexed_content_search(
-                rowid, title, path_tokens, identifier_tokens, body
-            ) VALUES (?, 'tracked.txt', 'tracked txt', 'tracked', 'initial')
-            """,
-            (search_document.lastrowid,),
-        )
         connection.execute(
             """
             INSERT INTO tasks(id, workspace_id, title, state, revision, created_at, updated_at)
@@ -256,10 +238,6 @@ def test_relocate_workspace_preserves_identity_and_tasks_but_clears_derived_inde
             "SELECT COUNT(*) FROM indexed_files WHERE workspace_id = ?",
             (workspace.workspace_id,),
         ).fetchone() == (0,)
-        assert connection.execute("SELECT COUNT(*) FROM indexed_search_documents").fetchone() == (
-            0,
-        )
-        assert connection.execute("SELECT COUNT(*) FROM indexed_content_search").fetchone() == (0,)
     finally:
         connection.close()
 
@@ -319,24 +297,6 @@ def test_delete_project_removes_related_harness_state_without_touching_repositor
             """,
             (workspace.workspace_id, "0" * 64),
         )
-        search_document = connection.execute(
-            """
-            INSERT INTO indexed_search_documents(
-                workspace_id, relative_path, corpus, content_sha256,
-                title, path_tokens, identifier_tokens
-            ) VALUES (?, 'tracked.txt', 'code', ?, 'tracked.txt', 'tracked txt', 'tracked')
-            """,
-            (workspace.workspace_id, "0" * 64),
-        )
-        assert search_document.lastrowid is not None
-        connection.execute(
-            """
-            INSERT INTO indexed_content_search(
-                rowid, title, path_tokens, identifier_tokens, body
-            ) VALUES (?, 'tracked.txt', 'tracked txt', 'tracked', 'initial')
-            """,
-            (search_document.lastrowid,),
-        )
         connection.execute(
             """
             INSERT INTO tasks(id, workspace_id, title, state, revision, created_at, updated_at)
@@ -378,13 +338,10 @@ def test_delete_project_removes_related_harness_state_without_touching_repositor
         assert list_workspaces(connection) == ()
         for table in (
             "indexed_files",
-            "indexed_search_documents",
-            "indexed_content_search",
             "tasks",
             "task_search",
             "knowledge_cards",
             "knowledge_anchors",
-            "knowledge_search",
         ):
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
         assert repository.is_dir()

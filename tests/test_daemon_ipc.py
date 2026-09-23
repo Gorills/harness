@@ -223,7 +223,6 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
             branch=branch,
             dirty_path_count=1,
             indexed_file_count=1,
-            content_search_document_count=1,
             index_revision=1,
             last_successful_reconcile_at=status.last_successful_reconcile_at,
             last_reconcile_kind="full",
@@ -262,7 +261,6 @@ def test_workspace_status_round_trip_resolves_registered_root_and_live_git_state
                 "branch": branch,
                 "dirty_path_count": 1,
                 "indexed_file_count": 1,
-                "content_search_document_count": 1,
                 "index_revision": 1,
                 "last_successful_reconcile_at": status.last_successful_reconcile_at,
                 "last_reconcile_kind": "full",
@@ -366,6 +364,8 @@ def test_workspace_status_rejects_malformed_params_and_daemon_recovers(
     [
         b'{"version":2,"request_id":"bad","method":"status"}\n',
         b'{"version":1,"request_id":"bad","method":"project_status"}\n',
+        b'{"version":1,"request_id":"bad","method":"project_search"}\n',
+        b'{"version":1,"request_id":"bad","method":"workspace_search"}\n',
         b"not-json\n",
     ],
 )

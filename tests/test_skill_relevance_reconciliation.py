@@ -26,7 +26,6 @@ from harness.dashboard import (
     mutate_dashboard_skill_policy,
     mutate_dashboard_task,
 )
-from harness.host_integration_state import HostIntegrationState
 from harness.index import scan_workspace
 from harness.ipc import TaskCheckpointRequestData, TaskStartRequestData
 from harness.registry import create_project, get_workspace, register_workspace
@@ -387,16 +386,16 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
         )
         assert status == 303
         assert _drain(invalidations) == []
-        get_status, html = _get_text(project_url)
+        get_status, html = _get_text(project_url + "settings/")
         assert get_status == 200
-        assert "Области разработки" in html
-        assert "<strong>Frontend</strong><span" in html
+        assert "Скиллы проекта" in html
+        assert "<h3>Frontend</h3><span" in html
         assert 'data-mode="excluded"' in html
         assert 'name="facet" value="web-frontend"' in html
         assert 'name="mode" value="auto"' in html
         assert 'name="mode" value="included"' in html
-        assert 'aria-label="Авто: Frontend"' in html
-        assert 'aria-label="Включить: Frontend"' in html
+        assert 'aria-label="Применить: Frontend — Авто"' in html
+        assert 'aria-label="Применить: Frontend — Добавлять в проект"' in html
     finally:
         manager.close()
 
@@ -428,8 +427,8 @@ def test_dashboard_skill_scope_reconciles_each_workspace_and_retries_only_failur
 
     monkeypatch.setattr(
         dashboard_module,
-        "load_host_integration_state_for_database",
-        lambda _database: HostIntegrationState(profiles=frozenset({"codex"})),
+        "active_skill_profiles_for_runtime",
+        lambda _database: ("codex",),
     )
     reconciled: list[tuple[str, tuple[str, ...]]] = []
 

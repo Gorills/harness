@@ -122,8 +122,8 @@ def test_dashboard_metrics_count_every_waiting_and_working_task(tmp_path: Path) 
     project = render_project_page(
         read_dashboard_project_detail(database, project_id), base_path="/"
     )
-    assert _metric(project, "Активные задачи") == 4
-    assert _metric(project, "На ревью") == 2
+    assert "<span>Активные задачи: 4</span>" in project
+    assert "<span>Ожидают проверки: 2</span>" in project
 
 
 def test_task_history_pages_keep_all_tasks_and_search_query(tmp_path: Path) -> None:

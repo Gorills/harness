@@ -5,7 +5,6 @@ import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -21,9 +20,7 @@ from harness.knowledge import (
 from harness.registry import create_project, register_workspace, register_workspace_for_init
 from harness.retrieval import (
     ProjectRetrievalRefError,
-    ProjectSearchScope,
     read_project_context,
-    search_project,
 )
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import TaskCheckpointMechanicalError, TaskCheckpointMutation
@@ -128,23 +125,6 @@ def test_branch_visibility_before_and_after_code_integration(
             *(f"knowledge:{k.knowledge_id}" for k in checkpoint.knowledge_cards),
         )
         _git(root, "checkout", "main")
-        for query in ("FeatureOnlyEvidence", task.task_id, task.task_id[:12]):
-            assert (
-                search_project(
-                    connection, workspace_id, query, scope=ProjectSearchScope.TASKS, limit=5
-                )
-                == ()
-            )
-        assert (
-            search_project(
-                connection,
-                workspace_id,
-                "FeatureOnlyEvidence",
-                scope=ProjectSearchScope.KNOWLEDGE,
-                limit=5,
-            )
-            == ()
-        )
         resolver = WorkspaceApplicability(connection, workspace_id)
         assert get_relevant_task(connection, workspace_id, applicability=resolver) is None
         resolver.validate()
@@ -281,14 +261,6 @@ def test_incompatible_old_checkpoint_is_hidden_from_search_and_recent_history(
         assert resolver.task_visible(task.task_id)
         assert not resolver.checkpoint_visible(first.checkpoint.checkpoint_id)
         assert resolver.checkpoint_visible(second.checkpoint.checkpoint_id)
-        hits = search_project(
-            connection,
-            workspace_id,
-            "obsolete_unique_payload",
-            scope=ProjectSearchScope.TASKS,
-            limit=5,
-        )
-        assert all("obsolete_unique_payload" not in (hit.short_summary or "") for hit in hits)
         context = read_project_context(connection, workspace_id, (f"task:{task.task_id}",))
         assert "obsolete_unique_payload" not in str(context)
 
@@ -464,7 +436,7 @@ def test_v23_migration_does_not_fabricate_legacy_dirty_evidence(tmp_path: Path) 
         connection.execute("DROP TABLE task_git_evidence_paths")
         connection.execute("DROP TABLE task_git_evidence")
         connection.execute("DROP TABLE task_git_origins")
-        connection.execute("DELETE FROM schema_migrations WHERE version=23")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 23")
         _commit(root, "feature")
         _git(root, "checkout", "main")
         _git(root, "merge", "--ff-only", "feature")
@@ -497,48 +469,3 @@ def test_checkpoint_counts_individual_untracked_paths_and_rejects_null_hashes(
                     "INSERT INTO task_git_evidence_paths(checkpoint_id,relative_path,kind,content_sha256) VALUES (?,'invalid',?,NULL)",
                     (checkpoint.checkpoint.checkpoint_id, kind),
                 )
-
-
-def test_visibility_filters_before_limit_and_memoizes_duplicate_ancestry(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with _workspace(tmp_path) as (connection, root, workspace_id):
-        base = _git(root, "rev-parse", "HEAD")
-        _git(root, "checkout", "-b", "feature")
-        (root / "service.py").write_text("value = 'feature'\n")
-        feature = _commit(root, "feature")
-        _git(root, "checkout", "main")
-        for index in range(110):
-            task_id = f"hidden{index}"
-            connection.execute(
-                "INSERT INTO tasks(id,workspace_id,title,state,revision,created_at,updated_at) VALUES (?,?,'Needle','completed',2,'c','u')",
-                (task_id, workspace_id),
-            )
-            connection.execute(
-                "INSERT INTO task_baselines(task_id,head,branch,captured_at,index_is_fresh,index_file_count,index_snapshot_sha256) VALUES (?,?,'feature','c',1,0,?)",
-                (task_id, base, "0" * 64),
-            )
-            connection.execute(
-                "INSERT INTO task_checkpoints(id,task_id,task_revision,state,summary,created_at,current_head,current_branch,current_dirty_path_count) VALUES (?,?,2,'completed','Needle','u',?,'feature',0)",
-                (task_id, task_id, feature),
-            )
-            connection.execute(
-                "INSERT INTO task_checkpoint_changed_paths(checkpoint_id,relative_path) VALUES (?,'service.py')",
-                (task_id,),
-            )
-        visible = task_start(connection, workspace_id, "Relevant Needle")
-        calls: list[object] = []
-        original = subprocess.run
-
-        def counted(*args: Any, **kwargs: Any) -> Any:
-            if "merge-base" in args[0]:
-                calls.append(args[0])
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(subprocess, "run", counted)
-        hits = search_project(
-            connection, workspace_id, "Needle", scope=ProjectSearchScope.TASKS, limit=1
-        )
-        assert [hit.ref for hit in hits] == [f"task:{visible.task_id}"]
-        assert len(calls) == 1

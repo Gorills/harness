@@ -666,6 +666,7 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     entry = config["mcp_servers"]["harness"]
     port = os.environ["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"]
     assert entry["url"] == f"http://127.0.0.1:{port}/mcp"
+    assert entry["enabled"] is True
     assert entry["required"] is True
     assert entry["http_headers"]["X-Harness-Workspace-Root"] == str(repo.resolve())
     assert entry["http_headers"]["Authorization"].startswith("Bearer ")
@@ -729,6 +730,7 @@ def test_codex_install_preserves_registered_source_checkout_without_projecting_s
 [mcp_servers.harness-dev]
 command = "./scripts/dogfood"
 args = ["mcp"]
+enabled = true
 required = true
 experimental_environment = "local"
 

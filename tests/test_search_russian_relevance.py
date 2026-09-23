@@ -8,25 +8,18 @@ import pytest
 
 from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
-from harness.retrieval import ProjectSearchScope, search_exact_source_inspection, search_project
-from harness.search_text import contains_russian_case_phrase, matching_term_count
+from harness.retrieval import search_tasks
+from harness.search_text import contains_russian_case_phrase
 from harness.storage import connect_database, initialize_database
 from harness.task_workflow import task_accept, task_start
 
 _RELEVANCE_CASES = (
-    ("задачей", ProjectSearchScope.TASKS, "task:tasks"),
-    ("задачами", ProjectSearchScope.TASKS, "task:tasks"),
-    ("проверкой", ProjectSearchScope.TASKS, "task:checks"),
-    ("проверки", ProjectSearchScope.TASKS, "task:checks"),
-    ("мониторингом", ProjectSearchScope.TASKS, "task:monitoring"),
-    ("мониторинга", ProjectSearchScope.TASKS, "task:monitoring"),
-    ("задачей", ProjectSearchScope.DOCS, "doc:docs/управление-задачами.md"),
-    ("проверкой", ProjectSearchScope.DOCS, "doc:docs/проверка.md"),
-    ("мониторингом", ProjectSearchScope.DOCS, "doc:docs/мониторинг.md"),
-    ("задачей", ProjectSearchScope.CODE, "code:src/check_tasks.py"),
-    ("мониторингом", ProjectSearchScope.CODE, "code:src/healthcheck.py"),
-    ("мониторингом healthcheck", ProjectSearchScope.CODE, "code:src/healthcheck.py"),
-    ("where task validation happens", ProjectSearchScope.CODE, "code:src/check_tasks.py"),
+    ("задачей", "task:tasks"),
+    ("задачами", "task:tasks"),
+    ("проверкой", "task:checks"),
+    ("проверки", "task:checks"),
+    ("мониторингом", "task:monitoring"),
+    ("мониторинга", "task:monitoring"),
 )
 
 _NEGATIVE_QUERIES = ("мониторингом", "проверкой")
@@ -118,80 +111,34 @@ def unrelated_corpus(
         result[0].close()
 
 
-@pytest.mark.parametrize(("query", "scope", "expected"), _RELEVANCE_CASES)
+@pytest.mark.parametrize(("query", "expected"), _RELEVANCE_CASES)
 def test_russian_english_and_mixed_queries_find_the_expected_top_result(
     corpus: tuple[sqlite3.Connection, str, dict[str, str]],
     query: str,
-    scope: ProjectSearchScope,
     expected: str,
 ) -> None:
-    connection, workspace_id, refs = corpus
+    connection, _workspace_id, refs = corpus
     expected_ref = refs.get(expected, expected)
-    hits = search_project(connection, workspace_id, query, scope=scope, limit=5)
-    assert hits, f"No result for {query!r} in {scope}"
+    hits = search_tasks(connection, query, limit=5)
+    assert hits, f"No Task result for {query!r}"
     assert hits[0].ref == expected_ref
 
 
-@pytest.mark.parametrize(
-    "scope", [ProjectSearchScope.TASKS, ProjectSearchScope.DOCS, ProjectSearchScope.CODE]
-)
 @pytest.mark.parametrize("query", _NEGATIVE_QUERIES)
 def test_inflection_does_not_match_a_different_root(
     unrelated_corpus: tuple[sqlite3.Connection, str, dict[str, str]],
     query: str,
-    scope: ProjectSearchScope,
 ) -> None:
-    connection, workspace_id, _refs = unrelated_corpus
-    assert search_project(connection, workspace_id, query, scope=scope, limit=5) == ()
-
-
-def test_exact_filename_still_identifies_the_requested_file(
-    corpus: tuple[sqlite3.Connection, str, dict[str, str]],
-) -> None:
-    connection, workspace_id, _refs = corpus
-    hits = search_project(
-        connection, workspace_id, "check_tasks.py", scope=ProjectSearchScope.CODE, limit=5
-    )
-    assert hits[0].ref == "code:src/check_tasks.py"
-
-
-@pytest.mark.parametrize(("query", "occurrences"), [('"задачами"', 1), ('"задачей"', 0)])
-def test_quoted_exact_coverage_does_not_expand_russian_inflections(
-    corpus: tuple[sqlite3.Connection, str, dict[str, str]],
-    query: str,
-    occurrences: int,
-) -> None:
-    connection, workspace_id, _refs = corpus
-    inspected = search_exact_source_inspection(
-        connection, workspace_id, query, scope=ProjectSearchScope.DOCS
-    )
-    assert inspected.coverage is not None
-    assert inspected.coverage.complete is True
-    assert inspected.coverage.needle_kind == "quoted_literal"
-    assert inspected.coverage.matched_occurrences == occurrences
-
-
-def test_identifier_exact_coverage_remains_case_sensitive(
-    corpus: tuple[sqlite3.Connection, str, dict[str, str]],
-) -> None:
-    connection, workspace_id, _refs = corpus
-    for query, occurrences in (("check_tasks", 1), ("CHECK_TASKS", 0)):
-        inspected = search_exact_source_inspection(
-            connection, workspace_id, query, scope=ProjectSearchScope.CODE
-        )
-        assert inspected.coverage is not None
-        assert inspected.coverage.complete is True
-        assert inspected.coverage.matched_occurrences == occurrences
+    connection, _workspace_id, _refs = unrelated_corpus
+    assert search_tasks(connection, query, limit=5) == ()
 
 
 def test_task_identifier_lookup_is_unchanged_after_natural_queries(
     corpus: tuple[sqlite3.Connection, str, dict[str, str]],
 ) -> None:
-    connection, workspace_id, refs = corpus
+    connection, _workspace_id, refs = corpus
     reference = refs["task:tasks"]
-    hits = search_project(
-        connection, workspace_id, reference, scope=ProjectSearchScope.TASKS, limit=5
-    )
+    hits = search_tasks(connection, reference, limit=5)
     assert hits[0].ref == reference
 
 
@@ -199,9 +146,7 @@ def test_exact_task_title_precedes_case_forms_and_derivations(tmp_path: Path) ->
     connection, workspace_id, refs = _corpus(tmp_path / "corpus")
     try:
         exact = _completed_task(connection, workspace_id, "Задачей")
-        hits = search_project(
-            connection, workspace_id, "задачей", scope=ProjectSearchScope.TASKS, limit=5
-        )
+        hits = search_tasks(connection, "задачей", limit=5)
         assert [hit.ref for hit in hits] == [exact, refs["task:tasks"], refs["task:taskbook"]]
     finally:
         connection.close()
@@ -236,64 +181,12 @@ def test_russian_word_form_recall_preserves_supported_directions(
     connection, workspace_id, _refs = _corpus(tmp_path / "corpus")
     try:
         second_ref = _completed_task(connection, workspace_id, second)
-        first_hits = search_project(
-            connection, workspace_id, first, scope=ProjectSearchScope.TASKS, limit=5
-        )
+        first_hits = search_tasks(connection, first, limit=5)
         assert first_hits[0].ref == second_ref
         first_ref = _completed_task(connection, workspace_id, first)
-        second_hits = search_project(
-            connection, workspace_id, second, scope=ProjectSearchScope.TASKS, limit=5
-        )
+        second_hits = search_tasks(connection, second, limit=5)
         assert second_hits[0].ref == second_ref
         if reverse_supported:
             assert first_ref in {hit.ref for hit in second_hits}
-    finally:
-        connection.close()
-
-
-def test_mixed_query_evidence_contains_the_original_russian_source_words(
-    corpus: tuple[sqlite3.Connection, str, dict[str, str]],
-) -> None:
-    connection, workspace_id, _refs = corpus
-    hits = search_project(
-        connection,
-        workspace_id,
-        "мониторингом healthcheck",
-        scope=ProjectSearchScope.CODE,
-        limit=5,
-    )
-    assert hits[0].ref == "code:src/healthcheck.py"
-    evidence = hits[0].evidence
-    assert evidence is not None
-    assert "def healthcheck" in evidence.snippet
-    assert "Мониторинг серверов" in evidence.snippet
-    assert "мониторингом" not in evidence.snippet.casefold()
-
-
-@pytest.mark.parametrize(
-    ("query_form", "source_form"), [("настоящего", "настоящий"), ("операцией", "операция")]
-)
-def test_case_phrase_fts_and_live_evidence_agree_on_new_endings(
-    tmp_path: Path, query_form: str, source_form: str
-) -> None:
-    root = tmp_path / "corpus"
-    connection, workspace_id, _refs = _corpus(root)
-    try:
-        (root / "repo" / "src" / "wordforms.py").write_text(
-            f'def caseprobe():\n    """{source_form}"""\n    return 1\n', encoding="utf-8"
-        )
-        scan_workspace(connection, workspace_id)
-        assert contains_russian_case_phrase((query_form,), source_form) is True
-        assert matching_term_count((query_form,), source_form) == 1
-        hits = search_project(
-            connection,
-            workspace_id,
-            f"{query_form} caseprobe",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-        assert hits[0].ref == "code:src/wordforms.py"
-        assert hits[0].evidence is not None
-        assert source_form in hits[0].evidence.snippet
     finally:
         connection.close()

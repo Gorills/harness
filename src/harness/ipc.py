@@ -20,32 +20,10 @@ from harness.knowledge import (
     KnowledgeKind,
 )
 from harness.retrieval import (
-    MAX_EXACT_SEARCH_COVERAGE_BYTES,
-    MAX_EXACT_SEARCH_LOCATIONS,
-    MAX_EXACT_SEARCH_NEEDLE_BYTES,
-    MAX_EXACT_SEARCH_PREVIEW_BYTES,
     MAX_PROJECT_CONTEXT_REF_BYTES,
-    MAX_SEARCH_EVIDENCE_SNIPPET_BYTES,
-    MAX_SEARCH_EVIDENCE_SNIPPET_LINES,
-    MAX_SYMBOL_NAVIGATION_BYTES,
-    MAX_SYMBOL_NAVIGATION_RELATIONS,
-    MAX_SYMBOL_RELATION_TEXT_BYTES,
     ProjectContextItem,
-    ProjectExactSearchCoverage,
-    ProjectExactSearchLocation,
-    ProjectSearchEvidence,
     ProjectSearchHit,
     ProjectSearchKind,
-    ProjectSearchScope,
-    ProjectSymbolNavigation,
-    ProjectSymbolRelation,
-)
-from harness.search import (
-    DEFAULT_SEARCH_LIMIT,
-    MAX_SEARCH_LIMIT,
-    MAX_SEARCH_QUERY_BYTES,
-    IndexedPathSearchScope,
-    SearchMatchKind,
 )
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
@@ -77,19 +55,18 @@ _HINT_SOURCE_MAX_LENGTH = 64
 _HINT_PATH_MAX_LENGTH = 4096
 _MAX_WORKSPACE_HINTS = 4
 _DEFAULT_TIMEOUT_SECONDS = 2.0
-_SEARCH_REQUEST_TIMEOUT_SECONDS = 8.0
-_PROJECT_SEARCH_REQUEST_TIMEOUT_SECONDS = 35.0
 _SCAN_REQUEST_TIMEOUT_SECONDS = 40.0
+_SKILL_RECONCILIATION_REQUEST_TIMEOUT_SECONDS = 220.0
 _TASK_REQUEST_TIMEOUT_SECONDS = 90.0
+_PROJECT_RECALL_REQUEST_TIMEOUT_SECONDS = 12.0
 _TASK_ID_MAX_LENGTH = 128
 _INDEX_RELATIVE_PATH_MAX_BYTES = 4096
 _PROJECT_CONTEXT_REF_MAX_BYTES = MAX_PROJECT_CONTEXT_REF_BYTES
 _PROJECT_CONTEXT_MAX_REFS = 10
+_PROJECT_RECALL_MAX_QUERY_BYTES = 256
+_PROJECT_RECALL_MAX_RESULTS = 5
 _HOST_PROFILE_MAX_BYTES = 64
 _HOST_PROFILE_MAX_ITEMS = 8
-_SYMBOL_NAVIGATION_LANGUAGES = frozenset(
-    {"python", "javascript", "typescript", "tsx", "go", "rust", "java"}
-)
 
 
 class IpcError(RuntimeError):
@@ -163,7 +140,6 @@ class WorkspaceStatusResult:
     branch: str | None
     dirty_path_count: int
     indexed_file_count: int
-    content_search_document_count: int
     index_revision: int | None
     last_successful_reconcile_at: str | None
     last_reconcile_kind: str | None
@@ -263,27 +239,6 @@ class ShutdownResult:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkspaceSearchHit:
-    """One bounded mechanical search hit returned over local IPC."""
-
-    relative_path: str
-    kind: IndexedFileKind
-    size_bytes: int
-    match_kind: SearchMatchKind
-
-
-@dataclass(frozen=True, slots=True)
-class WorkspaceSearchResult:
-    """Bounded Workspace-scoped indexed-path search result returned by the daemon."""
-
-    schema_version: int
-    workspace_id: str
-    project_id: str
-    workspace_root: Path
-    results: tuple[WorkspaceSearchHit, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class WorkspaceIndexEntryResult:
     """One exact bounded Structural Index entry returned by the daemon."""
 
@@ -297,19 +252,6 @@ class WorkspaceIndexEntryResult:
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectSearchResult:
-    """Bounded current Project Intelligence search result returned by the daemon."""
-
-    schema_version: int
-    workspace_id: str
-    project_id: str
-    workspace_state: str
-    exact_coverage: ProjectExactSearchCoverage | None
-    symbol_navigation: ProjectSymbolNavigation | None
-    results: tuple[ProjectSearchHit, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ProjectContextResult:
     """Selective Project Intelligence context expansion returned by the daemon."""
 
@@ -317,6 +259,18 @@ class ProjectContextResult:
     workspace_id: str
     project_id: str
     items: tuple[ProjectContextItem, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRecallResult:
+    """Bounded durable Knowledge or Task matches for one Workspace."""
+
+    schema_version: int
+    workspace_id: str
+    project_id: str
+    query: str
+    kind: ProjectSearchKind
+    results: tuple[ProjectSearchHit, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,12 +350,11 @@ class IpcRequest:
     method: str
     workspace_hints: tuple[WorkspaceHint, ...] = ()
     scan_path: Path | None = None
-    search_query: str | None = None
-    search_limit: int | None = None
-    search_scope: IndexedPathSearchScope | None = None
     index_relative_path: str | None = None
-    project_search_scope: ProjectSearchScope | None = None
     context_refs: tuple[str, ...] | None = None
+    recall_query: str | None = None
+    recall_kind: ProjectSearchKind | None = None
+    recall_limit: int | None = None
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
     host_profiles: tuple[str, ...] | None = None
@@ -580,7 +533,7 @@ def request_workspace_skills_reconcile(
     hints: Sequence[WorkspaceHint],
     profiles: Sequence[str],
     *,
-    timeout: float = _SCAN_REQUEST_TIMEOUT_SECONDS,
+    timeout: float = _SKILL_RECONCILIATION_REQUEST_TIMEOUT_SECONDS,
 ) -> WorkspaceSkillsResult:
     """Resolve and reconcile project skills for one Workspace through daemon-owned state."""
     request_id = uuid4().hex
@@ -636,72 +589,34 @@ def request_shutdown(
     return _shutdown_from_response(response, expected_request_id=request_id)
 
 
-def request_workspace_search(
+def request_project_recall(
     socket_path: Path,
     hints: Sequence[WorkspaceHint],
     query: str,
+    kind: ProjectSearchKind,
     *,
-    limit: int = DEFAULT_SEARCH_LIMIT,
-    timeout: float = _SEARCH_REQUEST_TIMEOUT_SECONDS,
-    scope: IndexedPathSearchScope | None = None,
-) -> WorkspaceSearchResult:
-    """Request bounded deterministic indexed-path search for one registered Workspace."""
-    _validate_search_query(query)
-    _validate_search_limit(limit)
-    request_id = uuid4().hex
-    params: dict[str, object] = {
-        "hints": _workspace_hints_to_wire(hints),
-        "query": query,
-        "limit": limit,
-    }
-    if scope is not None:
-        if not isinstance(scope, IndexedPathSearchScope):
-            raise IpcProtocolError("workspace search scope is unsupported")
-        params["scope"] = scope.value
-    response = _request_response(
-        socket_path,
-        {
-            "version": PROTOCOL_VERSION,
-            "request_id": request_id,
-            "method": "workspace_search",
-            "params": params,
-        },
-        timeout=timeout,
-    )
-    return _workspace_search_from_response(response, expected_request_id=request_id)
-
-
-def request_project_search(
-    socket_path: Path,
-    hints: Sequence[WorkspaceHint],
-    query: str,
-    *,
-    scope: ProjectSearchScope,
-    limit: int = DEFAULT_SEARCH_LIMIT,
-    timeout: float = _PROJECT_SEARCH_REQUEST_TIMEOUT_SECONDS,
-) -> ProjectSearchResult:
-    """Request one daemon-owned bounded Project Intelligence search."""
-    _validate_search_query(query)
-    _validate_search_limit(limit)
-    if not isinstance(scope, ProjectSearchScope):
-        raise IpcProtocolError("project search scope is unsupported")
+    limit: int = _PROJECT_RECALL_MAX_RESULTS,
+    timeout: float = _PROJECT_RECALL_REQUEST_TIMEOUT_SECONDS,
+) -> ProjectRecallResult:
+    """Find only durable Knowledge or Task records in the active Git context."""
+    query, kind, limit = _validate_project_recall(query, kind, limit)
     request_id = uuid4().hex
     response = _request_response(
         socket_path,
         {
             "version": PROTOCOL_VERSION,
             "request_id": request_id,
-            "method": "project_search",
+            "method": "project_recall",
             "params": {
                 "hints": _workspace_hints_to_wire(hints),
                 "query": query,
+                "kind": kind.value,
                 "limit": limit,
-                "scope": scope.value,
             },
         },
         timeout=timeout,
     )
-    return _project_search_from_response(response, expected_request_id=request_id)
+    return _project_recall_from_response(response, expected_request_id=request_id)
 
 
 def request_project_context(
@@ -924,30 +839,17 @@ def receive_request(peer: socket.socket) -> IpcRequest:
             host_profiles=_host_profiles_from_params(payload["params"]),
         )
 
-    if method == "workspace_search":
+    if method == "project_recall":
         if set(payload) != {"version", "request_id", "method", "params"}:
-            raise IpcProtocolError("workspace search request fields do not match the IPC schema")
-        hints, query, limit, scope = _workspace_search_from_params(payload["params"])
+            raise IpcProtocolError("project recall request fields do not match the IPC schema")
+        hints, query, kind, limit = _project_recall_from_params(payload["params"])
         return IpcRequest(
             request_id=request_id,
             method=method,
             workspace_hints=hints,
-            search_query=query,
-            search_limit=limit,
-            search_scope=scope,
-        )
-
-    if method == "project_search":
-        if set(payload) != {"version", "request_id", "method", "params"}:
-            raise IpcProtocolError("project search request fields do not match the IPC schema")
-        hints, query, limit, project_scope = _project_search_from_params(payload["params"])
-        return IpcRequest(
-            request_id=request_id,
-            method=method,
-            workspace_hints=hints,
-            search_query=query,
-            search_limit=limit,
-            project_search_scope=project_scope,
+            recall_query=query,
+            recall_kind=kind,
+            recall_limit=limit,
         )
 
     if method == "project_context":
@@ -1083,7 +985,6 @@ def send_workspace_status_response(
                     "branch": status.branch,
                     "dirty_path_count": status.dirty_path_count,
                     "indexed_file_count": status.indexed_file_count,
-                    "content_search_document_count": status.content_search_document_count,
                     "index_revision": status.index_revision,
                     "last_successful_reconcile_at": status.last_successful_reconcile_at,
                     "last_reconcile_kind": status.last_reconcile_kind,
@@ -1261,12 +1162,12 @@ def send_skill_cleanup_response(
     )
 
 
-def send_workspace_search_response(
+def send_project_recall_response(
     peer: socket.socket,
     request_id: str,
-    result: WorkspaceSearchResult,
+    result: ProjectRecallResult,
 ) -> None:
-    """Send the exact success contract for one bounded Workspace search."""
+    """Send only bounded durable identity and preview fields."""
     peer.sendall(
         _encode_json(
             {
@@ -1277,48 +1178,17 @@ def send_workspace_search_response(
                     "schema_version": result.schema_version,
                     "workspace_id": result.workspace_id,
                     "project_id": result.project_id,
-                    "workspace_root": str(result.workspace_root),
+                    "query": result.query,
+                    "kind": result.kind.value,
                     "results": [
                         {
-                            "relative_path": hit.relative_path,
-                            "kind": hit.kind.value,
-                            "size_bytes": hit.size_bytes,
-                            "match_kind": hit.match_kind.value,
+                            "ref": hit.ref,
+                            "title": hit.title,
+                            "short_summary": hit.short_summary,
+                            "freshness": hit.freshness,
                         }
                         for hit in result.results
                     ],
-                },
-            }
-        )
-    )
-
-
-def send_project_search_response(
-    peer: socket.socket,
-    request_id: str,
-    result: ProjectSearchResult,
-) -> None:
-    """Send the strict bounded Project Intelligence search response."""
-    peer.sendall(
-        _encode_json(
-            {
-                "version": PROTOCOL_VERSION,
-                "request_id": request_id,
-                "ok": True,
-                "result": {
-                    "schema_version": result.schema_version,
-                    "workspace_id": result.workspace_id,
-                    "project_id": result.project_id,
-                    "workspace_state": result.workspace_state,
-                    "exact_coverage": (
-                        None if result.exact_coverage is None else result.exact_coverage.to_wire()
-                    ),
-                    "symbol_navigation": (
-                        None
-                        if result.symbol_navigation is None
-                        else result.symbol_navigation.to_wire()
-                    ),
-                    "results": [_project_search_hit_to_wire(hit) for hit in result.results],
                 },
             }
         )
@@ -1554,12 +1424,10 @@ def _validate_host_profiles(values: list[object]) -> tuple[str, ...]:
         raise IpcProtocolError("host profiles must contain between 1 and 8 items")
     profiles: list[str] = []
     for value in values:
-        if (
-            not isinstance(value, str)
-            or not value
-            or "\x00" in value
-            or len(value.encode("utf-8")) > _HOST_PROFILE_MAX_BYTES
-        ):
+        if not isinstance(value, str) or not value or "\x00" in value:
+            raise IpcProtocolError("host profile must be bounded non-empty text")
+        _validate_utf8_input(value, "host profile")
+        if len(value.encode("utf-8")) > _HOST_PROFILE_MAX_BYTES:
             raise IpcProtocolError("host profile must be bounded non-empty text")
         profiles.append(value)
     if len(set(profiles)) != len(profiles):
@@ -1567,47 +1435,43 @@ def _validate_host_profiles(values: list[object]) -> tuple[str, ...]:
     return tuple(profiles)
 
 
-def _workspace_search_from_params(
-    value: object,
-) -> tuple[tuple[WorkspaceHint, ...], str, int, IndexedPathSearchScope]:
-    if not isinstance(value, dict) or set(value) not in (
-        {"hints", "query", "limit"},
-        {"hints", "query", "limit", "scope"},
+def _validate_project_recall(
+    query: object,
+    kind: object,
+    limit: object,
+) -> tuple[str, ProjectSearchKind, int]:
+    if not isinstance(query, str):
+        raise IpcProtocolError("project recall query must be bounded non-empty text")
+    normalized = query.strip()
+    try:
+        query_bytes = len(normalized.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise IpcProtocolError("project recall query must be valid UTF-8 text") from exc
+    if not normalized or "\x00" in normalized or query_bytes > _PROJECT_RECALL_MAX_QUERY_BYTES:
+        raise IpcProtocolError("project recall query must be bounded non-empty text")
+    if not isinstance(kind, str) or kind not in (
+        ProjectSearchKind.KNOWLEDGE,
+        ProjectSearchKind.TASK,
     ):
-        raise IpcProtocolError("workspace search params do not match the IPC schema")
-    hints = _workspace_hints_from_params({"hints": value["hints"]})
-    query = value["query"]
-    limit = value["limit"]
-    _validate_search_query(query)
-    _validate_search_limit(limit)
-    raw_scope = value.get("scope", IndexedPathSearchScope.ALL.value)
-    if not isinstance(raw_scope, str):
-        raise IpcProtocolError("workspace search scope must be text")
-    try:
-        scope = IndexedPathSearchScope(raw_scope)
-    except ValueError as exc:
-        raise IpcProtocolError("workspace search scope is unsupported") from exc
-    return hints, cast(str, query), cast(int, limit), scope
+        raise IpcProtocolError("project recall kind must be knowledge or task")
+    normalized_kind = ProjectSearchKind(kind)
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= _PROJECT_RECALL_MAX_RESULTS
+    ):
+        raise IpcProtocolError("project recall limit must be between 1 and 5")
+    return normalized, normalized_kind, limit
 
 
-def _project_search_from_params(
+def _project_recall_from_params(
     value: object,
-) -> tuple[tuple[WorkspaceHint, ...], str, int, ProjectSearchScope]:
-    if not isinstance(value, dict) or set(value) != {"hints", "query", "limit", "scope"}:
-        raise IpcProtocolError("project search params do not match the IPC schema")
+) -> tuple[tuple[WorkspaceHint, ...], str, ProjectSearchKind, int]:
+    if not isinstance(value, dict) or set(value) != {"hints", "query", "kind", "limit"}:
+        raise IpcProtocolError("project recall params do not match the IPC schema")
     hints = _workspace_hints_from_params({"hints": value["hints"]})
-    query = value["query"]
-    limit = value["limit"]
-    _validate_search_query(query)
-    _validate_search_limit(limit)
-    raw_scope = value["scope"]
-    if not isinstance(raw_scope, str):
-        raise IpcProtocolError("project search scope must be text")
-    try:
-        scope = ProjectSearchScope(raw_scope)
-    except ValueError as exc:
-        raise IpcProtocolError("project search scope is unsupported") from exc
-    return hints, cast(str, query), cast(int, limit), scope
+    query, kind, limit = _validate_project_recall(value["query"], value["kind"], value["limit"])
+    return hints, query, kind, limit
 
 
 def _project_context_from_params(
@@ -1977,9 +1841,17 @@ def _scan_path_from_params(value: object) -> Path:
     return Path(path)
 
 
+def _validate_utf8_input(value: str, label: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise IpcProtocolError(f"{label} must be valid UTF-8 text") from exc
+
+
 def _validate_scan_path(path: str) -> None:
     if not path or len(path) > _HINT_PATH_MAX_LENGTH or "\x00" in path:
         raise IpcProtocolError("workspace scan path must be a non-empty bounded path")
+    _validate_utf8_input(path, "workspace scan path")
     if not Path(path).is_absolute():
         raise IpcProtocolError("workspace scan path must be absolute")
 
@@ -1995,26 +1867,6 @@ def _visibility_from_params(value: object) -> tuple[Path, str]:
     if visibility_mode not in {"normal", "hidden"}:
         raise IpcProtocolError("visibility mode must be normal or hidden")
     return Path(path), visibility_mode
-
-
-def _validate_search_query(value: object) -> None:
-    if not isinstance(value, str) or not value.strip() or "\x00" in value:
-        raise IpcProtocolError("workspace search query must be a non-empty bounded string")
-    try:
-        size = len(value.strip().encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        raise IpcProtocolError("workspace search query must be valid UTF-8 text") from exc
-    if size > MAX_SEARCH_QUERY_BYTES:
-        raise IpcProtocolError(
-            f"workspace search query exceeds {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes"
-        )
-
-
-def _validate_search_limit(value: object) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_SEARCH_LIMIT:
-        raise IpcProtocolError(
-            f"workspace search limit must be an integer between 1 and {MAX_SEARCH_LIMIT}"
-        )
 
 
 def _validate_index_relative_path(value: object) -> None:
@@ -2041,10 +1893,12 @@ def _validate_hint_fields(
 ) -> None:
     if not path or len(path) > _HINT_PATH_MAX_LENGTH or "\x00" in path:
         raise IpcProtocolError("workspace hint path must be a non-empty bounded path")
+    _validate_utf8_input(path, "workspace hint path")
     if not Path(path).is_absolute():
         raise IpcProtocolError("workspace hint path must be absolute")
     if not source or len(source) > _HINT_SOURCE_MAX_LENGTH or "\x00" in source:
         raise IpcProtocolError("workspace hint source must be a non-empty bounded string")
+    _validate_utf8_input(source, "workspace hint source")
     if not isinstance(match_mode, WorkspaceHintMatchMode):
         raise IpcProtocolError("workspace hint uses an unsupported match mode")
 
@@ -2302,7 +2156,6 @@ def _workspace_status_from_response(
         "branch",
         "dirty_path_count",
         "indexed_file_count",
-        "content_search_document_count",
         "index_revision",
         "last_successful_reconcile_at",
         "last_reconcile_kind",
@@ -2313,14 +2166,12 @@ def _workspace_status_from_response(
     schema_version = result["schema_version"]
     dirty_path_count = result["dirty_path_count"]
     indexed_file_count = result["indexed_file_count"]
-    content_search_document_count = result["content_search_document_count"]
     if any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0
         for value in (
             schema_version,
             dirty_path_count,
             indexed_file_count,
-            content_search_document_count,
         )
     ):
         raise IpcProtocolError("daemon workspace status counts have invalid field types")
@@ -2395,7 +2246,6 @@ def _workspace_status_from_response(
         branch=branch,
         dirty_path_count=dirty_path_count,
         indexed_file_count=indexed_file_count,
-        content_search_document_count=content_search_document_count,
         index_revision=index_revision,
         last_successful_reconcile_at=last_successful_reconcile_at,
         last_reconcile_kind=last_reconcile_kind,
@@ -2683,183 +2533,6 @@ def _visibility_from_response(
     )
 
 
-def _workspace_search_from_response(
-    response: dict[str, Any],
-    *,
-    expected_request_id: str,
-) -> WorkspaceSearchResult:
-    result = _success_result(response, expected_request_id=expected_request_id)
-    expected_fields = {
-        "schema_version",
-        "workspace_id",
-        "project_id",
-        "workspace_root",
-        "results",
-    }
-    if set(result) != expected_fields:
-        raise IpcProtocolError("daemon workspace search result does not match the IPC schema")
-
-    schema_version = result["schema_version"]
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version < 0
-    ):
-        raise IpcProtocolError("daemon workspace search schema version has invalid type")
-    workspace_id = _bounded_search_response_string(result["workspace_id"], "workspace_id", 128)
-    project_id = _bounded_search_response_string(result["project_id"], "project_id", 128)
-    workspace_root_value = _bounded_search_response_string(
-        result["workspace_root"],
-        "workspace_root",
-        _HINT_PATH_MAX_LENGTH,
-    )
-    workspace_root = Path(workspace_root_value)
-    if not workspace_root.is_absolute():
-        raise IpcProtocolError("daemon workspace search root must be absolute")
-
-    raw_results = result["results"]
-    if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
-        raise IpcProtocolError("daemon workspace search results exceed the item limit")
-    hits: list[WorkspaceSearchHit] = []
-    for raw_hit in raw_results:
-        if not isinstance(raw_hit, dict) or set(raw_hit) != {
-            "relative_path",
-            "kind",
-            "size_bytes",
-            "match_kind",
-        }:
-            raise IpcProtocolError("daemon workspace search hit does not match the IPC schema")
-        relative_path = _bounded_search_response_string(
-            raw_hit["relative_path"],
-            "relative_path",
-            MAX_MESSAGE_BYTES,
-        )
-        path = Path(relative_path)
-        if path.is_absolute() or ".." in path.parts or "\x00" in relative_path:
-            raise IpcProtocolError("daemon workspace search hit has unsafe relative_path")
-        try:
-            kind = IndexedFileKind(_bounded_search_response_string(raw_hit["kind"], "kind", 16))
-        except ValueError as exc:
-            raise IpcProtocolError("daemon workspace search hit has unsupported kind") from exc
-        size_bytes = raw_hit["size_bytes"]
-        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 0:
-            raise IpcProtocolError("daemon workspace search hit has invalid size_bytes")
-        try:
-            match_kind = SearchMatchKind(
-                _bounded_search_response_string(raw_hit["match_kind"], "match_kind", 32)
-            )
-        except ValueError as exc:
-            raise IpcProtocolError(
-                "daemon workspace search hit has unsupported match_kind"
-            ) from exc
-        hits.append(
-            WorkspaceSearchHit(
-                relative_path=relative_path,
-                kind=kind,
-                size_bytes=size_bytes,
-                match_kind=match_kind,
-            )
-        )
-
-    return WorkspaceSearchResult(
-        schema_version=schema_version,
-        workspace_id=workspace_id,
-        project_id=project_id,
-        workspace_root=workspace_root,
-        results=tuple(hits),
-    )
-
-
-def _project_search_hit_to_wire(hit: ProjectSearchHit) -> dict[str, object]:
-    return {
-        "ref": hit.ref,
-        "kind": hit.kind.value,
-        "title": hit.title,
-        "location": hit.location,
-        "short_summary": hit.short_summary,
-        "match_reason": hit.match_reason,
-        "freshness": hit.freshness,
-        "path": hit.path,
-        "evidence": None if hit.evidence is None else hit.evidence.to_wire(),
-        "evidence_reason": hit.evidence_reason,
-    }
-
-
-def _project_search_hit_from_wire(value: object) -> ProjectSearchHit:
-    fields = {
-        "ref",
-        "kind",
-        "title",
-        "location",
-        "short_summary",
-        "match_reason",
-        "freshness",
-        "path",
-        "evidence",
-        "evidence_reason",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
-        raise IpcProtocolError("daemon project search hit does not match the IPC schema")
-    ref = _bounded_response_string(value["ref"], "ref", _PROJECT_CONTEXT_REF_MAX_BYTES)
-    try:
-        kind = ProjectSearchKind(_bounded_response_string(value["kind"], "kind", 16))
-    except ValueError as exc:
-        raise IpcProtocolError("daemon project search hit has unsupported kind") from exc
-    title = _bounded_response_string(value["title"], "title", 512)
-    location = _bounded_response_string(value["location"], "location", 4096)
-    reason = _bounded_response_string(value["match_reason"], "match_reason", 128)
-    freshness = _bounded_response_string(value["freshness"], "freshness", 64)
-    summary = value["short_summary"]
-    if summary is not None:
-        summary = _bounded_response_string(summary, "short_summary", 1024)
-    path = value["path"]
-    if path is not None:
-        path = _bounded_response_string(path, "path", _INDEX_RELATIVE_PATH_MAX_BYTES)
-    evidence_reason = value["evidence_reason"]
-    if evidence_reason is not None:
-        evidence_reason = _bounded_response_string(evidence_reason, "evidence_reason", 64)
-    return ProjectSearchHit(
-        ref,
-        kind,
-        title,
-        location,
-        cast(str | None, summary),
-        reason,
-        freshness,
-        cast(str | None, path),
-        _project_search_evidence_from_wire(value["evidence"]),
-        cast(str | None, evidence_reason),
-    )
-
-
-def _project_search_evidence_from_wire(value: object) -> ProjectSearchEvidence | None:
-    if value is None:
-        return None
-    fields = {"start_line", "end_line", "snippet", "truncated"}
-    if not isinstance(value, dict) or set(value) != fields:
-        raise IpcProtocolError("daemon project search evidence does not match the IPC schema")
-    start_line = _bounded_nonnegative_int(value["start_line"], "evidence.start_line")
-    end_line = _bounded_nonnegative_int(value["end_line"], "evidence.end_line")
-    if start_line < 1 or end_line < start_line:
-        raise IpcProtocolError("daemon project search evidence has invalid line range")
-    if end_line - start_line + 1 > MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
-        raise IpcProtocolError("daemon project search evidence exceeds line budget")
-    snippet = _bounded_response_string(
-        value["snippet"],
-        "evidence.snippet",
-        MAX_SEARCH_EVIDENCE_SNIPPET_BYTES + 8,
-    )
-    truncated = value["truncated"]
-    if not isinstance(truncated, bool):
-        raise IpcProtocolError("daemon project search evidence truncated flag is invalid")
-    return ProjectSearchEvidence(
-        start_line=start_line,
-        end_line=end_line,
-        snippet=snippet,
-        truncated=truncated,
-    )
-
-
 def _validate_project_context_refs(refs: Sequence[object]) -> tuple[str, ...]:
     if not 1 <= len(refs) <= _PROJECT_CONTEXT_MAX_REFS:
         raise IpcProtocolError(
@@ -2870,6 +2543,7 @@ def _validate_project_context_refs(refs: Sequence[object]) -> tuple[str, ...]:
     for ref in refs:
         if not isinstance(ref, str) or not ref or "\x00" in ref:
             raise IpcProtocolError("project context ref must be non-empty text")
+        _validate_utf8_input(ref, "project context ref")
         if len(ref.encode("utf-8")) > _PROJECT_CONTEXT_REF_MAX_BYTES:
             raise IpcProtocolError("project context ref exceeds byte limit")
         if ref in seen:
@@ -2907,355 +2581,45 @@ def _validate_json_value(value: object, *, depth: int) -> None:
     raise IpcProtocolError("daemon project context data contains unsupported value")
 
 
-def _project_exact_search_coverage_from_wire(
-    value: object,
-) -> ProjectExactSearchCoverage | None:
-    if value is None:
-        return None
-    fields = {
-        "needle",
-        "needle_kind",
-        "case_sensitive",
-        "matched_files",
-        "matched_occurrences",
-        "matched_lines",
-        "scanned_files",
-        "scanned_bytes",
-        "non_text_files",
-        "unavailable_files",
-        "complete",
-        "locations_truncated",
-        "locations",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
-        raise IpcProtocolError("daemon exact search coverage does not match the IPC schema")
-    needle = _bounded_response_string(
-        value["needle"], "exact_coverage.needle", MAX_EXACT_SEARCH_NEEDLE_BYTES
-    )
-    needle_kind = _bounded_response_string(value["needle_kind"], "exact_coverage.needle_kind", 32)
-    if needle_kind not in {"quoted_literal", "identifier", "single_term"}:
-        raise IpcProtocolError("daemon exact search coverage has unsupported needle kind")
-    case_sensitive = value["case_sensitive"]
-    complete = value["complete"]
-    locations_truncated = value["locations_truncated"]
-    if not all(isinstance(item, bool) for item in (case_sensitive, complete, locations_truncated)):
-        raise IpcProtocolError("daemon exact search coverage has invalid boolean fields")
-    counts = tuple(
-        _bounded_nonnegative_int(value[name], f"exact_coverage.{name}")
-        for name in (
-            "matched_files",
-            "matched_occurrences",
-            "matched_lines",
-            "scanned_files",
-            "scanned_bytes",
-            "non_text_files",
-            "unavailable_files",
-        )
-    )
-    raw_locations = value["locations"]
-    if not isinstance(raw_locations, list) or len(raw_locations) > MAX_EXACT_SEARCH_LOCATIONS:
-        raise IpcProtocolError("daemon exact search coverage locations exceed item limit")
-    locations: list[ProjectExactSearchLocation] = []
-    for raw in raw_locations:
-        if not isinstance(raw, dict) or set(raw) != {"path", "line", "column", "preview"}:
-            raise IpcProtocolError("daemon exact search location does not match the IPC schema")
-        path = _bounded_response_string(raw["path"], "exact_coverage.path", 4096)
-        line = _bounded_nonnegative_int(raw["line"], "exact_coverage.line")
-        column = _bounded_nonnegative_int(raw["column"], "exact_coverage.column")
-        if line < 1 or column < 1:
-            raise IpcProtocolError("daemon exact search location has invalid coordinates")
-        preview = _bounded_response_string(
-            raw["preview"],
-            "exact_coverage.preview",
-            MAX_EXACT_SEARCH_PREVIEW_BYTES + 8,
-        )
-        locations.append(ProjectExactSearchLocation(path, line, column, preview))
-    coverage = ProjectExactSearchCoverage(
-        needle=needle,
-        needle_kind=needle_kind,
-        case_sensitive=case_sensitive,
-        matched_files=counts[0],
-        matched_occurrences=counts[1],
-        matched_lines=counts[2],
-        scanned_files=counts[3],
-        scanned_bytes=counts[4],
-        non_text_files=counts[5],
-        unavailable_files=counts[6],
-        complete=complete,
-        locations_truncated=locations_truncated,
-        locations=tuple(locations),
-    )
-    encoded = json.dumps(coverage.to_wire(), ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    if len(encoded) > MAX_EXACT_SEARCH_COVERAGE_BYTES:
-        raise IpcProtocolError("daemon exact search coverage exceeds byte limit")
-    return coverage
-
-
-def _project_symbol_navigation_from_wire(
-    value: object,
-) -> ProjectSymbolNavigation | None:
-    if value is None:
-        return None
-    fields = {
-        "needle",
-        "precise_languages",
-        "candidate_precise_files",
-        "parsed_precise_files",
-        "parse_failures",
-        "parse_skipped_files",
-        "matching_unsupported_files",
-        "definition_count",
-        "call_count",
-        "test_call_count",
-        "import_count",
-        "inheritance_count",
-        "precise_classification_complete",
-        "relations_truncated",
-        "evidence_truncated",
-        "relations",
-    }
-    if not isinstance(value, dict) or set(value) != fields:
-        raise IpcProtocolError("daemon symbol navigation does not match the IPC schema")
-    needle = _bounded_response_string(
-        value["needle"], "symbol_navigation.needle", MAX_EXACT_SEARCH_NEEDLE_BYTES
-    )
-    raw_languages = value["precise_languages"]
-    if (
-        not isinstance(raw_languages, list)
-        or len(raw_languages) > len(_SYMBOL_NAVIGATION_LANGUAGES)
-        or any(not isinstance(item, str) for item in raw_languages)
-    ):
-        raise IpcProtocolError("daemon symbol navigation precise languages are invalid")
-    languages = tuple(
-        _bounded_response_string(item, "symbol_navigation.precise_language", 32)
-        for item in raw_languages
-    )
-    if not set(languages) <= _SYMBOL_NAVIGATION_LANGUAGES:
-        raise IpcProtocolError("daemon symbol navigation precise language is unsupported")
-    if languages != tuple(sorted(set(languages))):
-        raise IpcProtocolError("daemon symbol navigation precise languages are not canonical")
-    count_names = (
-        "candidate_precise_files",
-        "parsed_precise_files",
-        "parse_failures",
-        "parse_skipped_files",
-        "matching_unsupported_files",
-        "definition_count",
-        "call_count",
-        "test_call_count",
-        "import_count",
-        "inheritance_count",
-    )
-    counts = {
-        name: _bounded_nonnegative_int(value[name], f"symbol_navigation.{name}")
-        for name in count_names
-    }
-    boolean_names = (
-        "precise_classification_complete",
-        "relations_truncated",
-        "evidence_truncated",
-    )
-    booleans: dict[str, bool] = {}
-    for name in boolean_names:
-        raw = value[name]
-        if not isinstance(raw, bool):
-            raise IpcProtocolError(f"daemon symbol navigation {name} flag is invalid")
-        booleans[name] = raw
-    raw_relations = value["relations"]
-    if not isinstance(raw_relations, list) or len(raw_relations) > MAX_SYMBOL_NAVIGATION_RELATIONS:
-        raise IpcProtocolError("daemon symbol navigation relations exceed item limit")
-    relations: list[ProjectSymbolRelation] = []
-    relation_fields = {
-        "kind",
-        "path",
-        "line",
-        "column",
-        "scope",
-        "target",
-        "symbol_kind",
-        "in_test",
-        "evidence",
-    }
-    binding_fields = {"resolved_target", "resolution_kind"}
-    definition_fields = {
-        "resolved_definition_path",
-        "resolved_definition_line",
-        "resolved_definition_column",
-        "resolved_definition_kind",
-        "resolution_validation_kind",
-    }
-    allowed_relation_fields = relation_fields | binding_fields | definition_fields
-    import_resolution_kinds = {"python_import_binding", "python_from_import_binding"}
-    resolution_kinds = import_resolution_kinds | {
-        "python_self_method_binding",
-        "python_cls_method_binding",
-        "python_self_inherited_method_binding",
-        "python_cls_inherited_method_binding",
-    }
-    for raw in raw_relations:
-        if not isinstance(raw, dict) or not relation_fields <= set(raw) <= allowed_relation_fields:
-            raise IpcProtocolError("daemon symbol relation does not match the IPC schema")
-        kind = _bounded_response_string(raw["kind"], "symbol_navigation.kind", 32)
-        if kind not in {"definition", "call", "import", "inheritance"}:
-            raise IpcProtocolError("daemon symbol relation kind is unsupported")
-        path = _bounded_response_string(raw["path"], "symbol_navigation.path", 4096)
-        line = _bounded_nonnegative_int(raw["line"], "symbol_navigation.line")
-        column = _bounded_nonnegative_int(raw["column"], "symbol_navigation.column")
-        if line < 1 or column < 1:
-            raise IpcProtocolError("daemon symbol relation has invalid coordinates")
-        scope = raw["scope"]
-        if scope is not None:
-            scope = _bounded_response_string(
-                scope, "symbol_navigation.scope", MAX_SYMBOL_RELATION_TEXT_BYTES + 8
-            )
-        target = _bounded_response_string(
-            raw["target"], "symbol_navigation.target", MAX_SYMBOL_RELATION_TEXT_BYTES + 8
-        )
-        symbol_kind = raw["symbol_kind"]
-        if symbol_kind is not None:
-            symbol_kind = _bounded_response_string(symbol_kind, "symbol_navigation.symbol_kind", 32)
-            if symbol_kind not in {"class", "function", "method", "variable"}:
-                raise IpcProtocolError("daemon symbol relation symbol kind is unsupported")
-        in_test = raw["in_test"]
-        if not isinstance(in_test, bool):
-            raise IpcProtocolError("daemon symbol relation test flag is invalid")
-        resolved_target: str | None = None
-        resolution_kind: str | None = None
-        resolved_definition_path: str | None = None
-        resolved_definition_line: int | None = None
-        resolved_definition_column: int | None = None
-        resolved_definition_kind: str | None = None
-        resolution_validation_kind: str | None = None
-        if binding_fields & raw.keys():
-            if not binding_fields <= raw.keys() or kind != "call":
-                raise IpcProtocolError("daemon symbol relation binding proof is invalid")
-            resolved_target = _bounded_response_string(
-                raw["resolved_target"],
-                "symbol_navigation.resolved_target",
-                MAX_SYMBOL_RELATION_TEXT_BYTES + 8,
-            )
-            resolution_kind = _bounded_response_string(
-                raw["resolution_kind"], "symbol_navigation.resolution_kind", 64
-            )
-            if resolution_kind not in resolution_kinds:
-                raise IpcProtocolError("daemon symbol relation resolution kind is unsupported")
-        if definition_fields & raw.keys():
-            if (
-                not definition_fields <= raw.keys()
-                or resolution_kind not in import_resolution_kinds
-            ):
-                raise IpcProtocolError("daemon symbol relation definition proof is invalid")
-            resolved_definition_path = _bounded_response_string(
-                raw["resolved_definition_path"], "symbol_navigation.resolved_definition_path", 4096
-            )
-            resolved_definition_line = _bounded_nonnegative_int(
-                raw["resolved_definition_line"], "symbol_navigation.resolved_definition_line"
-            )
-            resolved_definition_column = _bounded_nonnegative_int(
-                raw["resolved_definition_column"], "symbol_navigation.resolved_definition_column"
-            )
-            if resolved_definition_line < 1 or resolved_definition_column < 1:
-                raise IpcProtocolError("daemon symbol relation definition coordinates are invalid")
-            resolved_definition_kind = _bounded_response_string(
-                raw["resolved_definition_kind"], "symbol_navigation.resolved_definition_kind", 32
-            )
-            if resolved_definition_kind not in {"class", "function", "variable"}:
-                raise IpcProtocolError("daemon symbol relation definition kind is unsupported")
-            resolution_validation_kind = _bounded_response_string(
-                raw["resolution_validation_kind"],
-                "symbol_navigation.resolution_validation_kind",
-                64,
-            )
-            if resolution_validation_kind not in {
-                "python_workspace_direct_export",
-                "python_workspace_reexport_chain",
-            }:
-                raise IpcProtocolError("daemon symbol relation validation kind is unsupported")
-        relations.append(
-            ProjectSymbolRelation(
-                kind=kind,
-                path=path,
-                line=line,
-                column=column,
-                scope=cast(str | None, scope),
-                target=target,
-                symbol_kind=cast(str | None, symbol_kind),
-                in_test=in_test,
-                evidence=_project_search_evidence_from_wire(raw["evidence"]),
-                resolved_target=resolved_target,
-                resolution_kind=resolution_kind,
-                resolved_definition_path=resolved_definition_path,
-                resolved_definition_line=resolved_definition_line,
-                resolved_definition_column=resolved_definition_column,
-                resolved_definition_kind=resolved_definition_kind,
-                resolution_validation_kind=resolution_validation_kind,
-            )
-        )
-    navigation = ProjectSymbolNavigation(
-        needle=needle,
-        precise_languages=languages,
-        candidate_precise_files=counts["candidate_precise_files"],
-        parsed_precise_files=counts["parsed_precise_files"],
-        parse_failures=counts["parse_failures"],
-        parse_skipped_files=counts["parse_skipped_files"],
-        matching_unsupported_files=counts["matching_unsupported_files"],
-        definition_count=counts["definition_count"],
-        call_count=counts["call_count"],
-        test_call_count=counts["test_call_count"],
-        import_count=counts["import_count"],
-        inheritance_count=counts["inheritance_count"],
-        precise_classification_complete=booleans["precise_classification_complete"],
-        relations_truncated=booleans["relations_truncated"],
-        evidence_truncated=booleans["evidence_truncated"],
-        relations=tuple(relations),
-    )
-    encoded = json.dumps(navigation.to_wire(), ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    if len(encoded) > MAX_SYMBOL_NAVIGATION_BYTES:
-        raise IpcProtocolError("daemon symbol navigation exceeds byte limit")
-    return navigation
-
-
-def _project_search_from_response(
+def _project_recall_from_response(
     response: dict[str, Any],
     *,
     expected_request_id: str,
-) -> ProjectSearchResult:
+) -> ProjectRecallResult:
     result = _success_result(response, expected_request_id=expected_request_id)
-    if set(result) != {
-        "schema_version",
-        "workspace_id",
-        "project_id",
-        "workspace_state",
-        "exact_coverage",
-        "symbol_navigation",
-        "results",
-    }:
-        raise IpcProtocolError("daemon project search result does not match the IPC schema")
+    if set(result) != {"schema_version", "workspace_id", "project_id", "query", "kind", "results"}:
+        raise IpcProtocolError("daemon project recall result does not match the IPC schema")
     schema_version = _bounded_nonnegative_int(result["schema_version"], "schema_version")
     workspace_id = _bounded_response_string(result["workspace_id"], "workspace_id", 128)
     project_id = _bounded_response_string(result["project_id"], "project_id", 128)
-    workspace_state = _bounded_response_string(result["workspace_state"], "workspace_state", 16)
-    if workspace_state != "current":
-        raise IpcProtocolError("daemon project search workspace state is unsupported")
-    exact_coverage = _project_exact_search_coverage_from_wire(result["exact_coverage"])
-    symbol_navigation = _project_symbol_navigation_from_wire(result["symbol_navigation"])
-    raw_results = result["results"]
-    if not isinstance(raw_results, list) or len(raw_results) > MAX_SEARCH_LIMIT:
-        raise IpcProtocolError("daemon project search results exceed the item limit")
-    hits = tuple(_project_search_hit_from_wire(raw) for raw in raw_results)
-    return ProjectSearchResult(
-        schema_version,
-        workspace_id,
-        project_id,
-        workspace_state,
-        exact_coverage,
-        symbol_navigation,
-        hits,
-    )
+    query, kind, _limit = _validate_project_recall(result["query"], result["kind"], 1)
+    raw_hits = result["results"]
+    if not isinstance(raw_hits, list) or len(raw_hits) > _PROJECT_RECALL_MAX_RESULTS:
+        raise IpcProtocolError("daemon project recall results exceed the item limit")
+    hits: list[ProjectSearchHit] = []
+    for raw in raw_hits:
+        if not isinstance(raw, dict) or set(raw) != {"ref", "title", "short_summary", "freshness"}:
+            raise IpcProtocolError("daemon project recall hit does not match the IPC schema")
+        ref = _bounded_response_string(raw["ref"], "ref", 160)
+        if not ref.startswith(f"{kind.value}:"):
+            raise IpcProtocolError("daemon project recall hit has the wrong kind")
+        title = _bounded_response_string(raw["title"], "title", 256)
+        summary = raw["short_summary"]
+        if summary is not None:
+            summary = _bounded_response_string(summary, "short_summary", 384)
+        freshness = _bounded_response_string(raw["freshness"], "freshness", 32)
+        hits.append(
+            ProjectSearchHit(
+                ref=ref,
+                kind=kind,
+                title=title,
+                location=ref,
+                short_summary=summary,
+                match_reason="durable recall",
+                freshness=freshness,
+            )
+        )
+    return ProjectRecallResult(schema_version, workspace_id, project_id, query, kind, tuple(hits))
 
 
 def _project_context_from_response(
@@ -3483,12 +2847,6 @@ def _bounded_response_string(value: object, field: str, maximum: int) -> str:
 def _bounded_scan_response_string(value: object, field: str, maximum: int) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise IpcProtocolError(f"daemon workspace scan has invalid {field}")
-    return value
-
-
-def _bounded_search_response_string(value: object, field: str, maximum: int) -> str:
-    if not isinstance(value, str) or not value or len(value) > maximum:
-        raise IpcProtocolError(f"daemon workspace search has invalid {field}")
     return value
 
 

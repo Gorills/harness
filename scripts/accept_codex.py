@@ -15,11 +15,10 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import anyio
 import codex_exec_jsonl
-import eval_search_behavior
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared._httpx_utils import create_mcp_http_client
@@ -36,8 +35,8 @@ from harness.codex_adapter import (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_TOOLS = (
     "project_status",
-    "project_search",
     "project_context",
+    "project_recall",
     "task_start",
     "task_checkpoint",
 )
@@ -78,8 +77,8 @@ TASK_START_STRUCTURED_KEYS = frozenset(
 )
 EXPECTED_TOOL_INPUT_PROPERTIES = {
     "project_status": frozenset(),
-    "project_search": frozenset({"query", "scope", "limit"}),
     "project_context": frozenset({"refs"}),
+    "project_recall": frozenset({"query", "kind", "limit"}),
     "task_start": frozenset({"title", "stack_hints", "task_id", "expected_revision"}),
     "task_checkpoint": frozenset(
         {
@@ -121,6 +120,11 @@ _GLOBAL_INSTALL_DISCLOSURE = (
     "XDG, Harness, Codex, and Git Workspace roots. Live daemon/host activation is a separate "
     "explicit command.\n"
 )
+
+
+class _McpConnection(TypedDict):
+    url: str
+    headers: dict[str, str]
 
 
 class CodexAcceptanceError(RuntimeError):
@@ -541,7 +545,7 @@ def _verify_project_config(
     path: Path,
     workspace: Path,
     expected_url: str,
-) -> dict[str, object]:
+) -> _McpConnection:
     try:
         value = tomllib.loads(path.read_text(encoding="utf-8"))
         entry = value["mcp_servers"]["harness"]
@@ -558,23 +562,30 @@ def _verify_project_config(
     authorization = headers.get("Authorization")
     if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
         raise CodexAcceptanceError("generated Codex HTTP MCP config has no bearer capability")
+    verified_headers = {
+        "Authorization": authorization,
+        "X-Harness-Workspace-Root": expected_root,
+    }
     expected: dict[str, object] = {
         "url": expected_url,
+        "enabled": True,
         "required": True,
         "startup_timeout_sec": 30,
-        "http_headers": {
-            "Authorization": authorization,
-            "X-Harness-Workspace-Root": expected_root,
-        },
+        "http_headers": verified_headers,
     }
     if entry != expected:
         raise CodexAcceptanceError(
             "generated Codex project config does not match the acceptance runtime"
         )
-    return {"url": entry["url"], "headers": headers}
+    return {"url": expected_url, "headers": verified_headers}
 
 
-def _verify_codex_inspection(payload: object, workspace: Path, expected_url: str) -> None:
+def _verify_codex_inspection(
+    payload: object,
+    workspace: Path,
+    expected_url: str,
+    expected_headers: Mapping[str, str],
+) -> None:
     if not isinstance(payload, dict):
         raise CodexAcceptanceError("codex mcp get did not return an object")
     expected_root = str(workspace.resolve())
@@ -582,17 +593,12 @@ def _verify_codex_inspection(payload: object, workspace: Path, expected_url: str
     if not isinstance(transport, dict):
         raise CodexAcceptanceError("Codex reported no Harness MCP transport")
     headers = transport.get("http_headers")
-    expected_headers = {
-        "Authorization": headers.get("Authorization") if isinstance(headers, dict) else None,
-        "X-Harness-Workspace-Root": expected_root,
-    }
     if (
         payload.get("name") != "harness"
         or transport.get("type") != "streamable_http"
         or transport.get("url") != expected_url
+        or expected_headers.get("X-Harness-Workspace-Root") != expected_root
         or headers != expected_headers
-        or not isinstance(expected_headers["Authorization"], str)
-        or not expected_headers["Authorization"].startswith("Bearer ")
     ):
         raise CodexAcceptanceError("Codex loaded an unexpected Harness MCP transport")
     if payload.get("enabled") is not True or payload.get("disabled_reason") is not None:
@@ -822,20 +828,7 @@ async def _verify_mcp_wire_async(
                 raise CodexAcceptanceError(
                     f"installed MCP resolved the wrong Workspace identity: {status!r}"
                 )
-            searched = _structured_result(
-                "project_search",
-                await client.call_tool(
-                    "project_search", {"query": "pyproject", "scope": "code", "limit": 5}
-                ),
-            )
-            results = searched.get("results")
-            if not isinstance(results, list) or not results or not isinstance(results[0], dict):
-                raise CodexAcceptanceError(
-                    "installed MCP project_search returned no fixture result"
-                )
-            selected_ref = results[0].get("ref")
-            if not isinstance(selected_ref, str):
-                raise CodexAcceptanceError("installed MCP project_search returned no usable ref")
+            selected_ref = "code:pyproject.toml"
             context = _structured_result(
                 "project_context",
                 await client.call_tool("project_context", {"refs": [selected_ref]}),
@@ -863,6 +856,39 @@ async def _verify_mcp_wire_async(
             if not isinstance(task_id, str) or not isinstance(revision, int):
                 raise CodexAcceptanceError(
                     "installed MCP task_start returned invalid Task identity"
+                )
+            recalled = _structured_result(
+                "project_recall",
+                await client.call_tool(
+                    "project_recall",
+                    {"query": "Локальная проверка Codex MCP", "kind": "task", "limit": 5},
+                ),
+            )
+            hits = recalled.get("results")
+            selected_task_ref = f"task:{task_id}"
+            if (
+                recalled.get("kind") != "task"
+                or not isinstance(hits, list)
+                or not any(
+                    isinstance(hit, dict) and hit.get("ref") == selected_task_ref for hit in hits
+                )
+            ):
+                raise CodexAcceptanceError(
+                    "installed MCP project_recall did not find the new Task by title"
+                )
+            recalled_context = _structured_result(
+                "project_context",
+                await client.call_tool("project_context", {"refs": [selected_task_ref]}),
+            )
+            recalled_items = recalled_context.get("items")
+            if (
+                not isinstance(recalled_items, list)
+                or not recalled_items
+                or not isinstance(recalled_items[0], dict)
+                or recalled_items[0].get("ref") != selected_task_ref
+            ):
+                raise CodexAcceptanceError(
+                    "installed MCP project_context could not open the recalled Task"
                 )
             checkpoint = _structured_result(
                 "task_checkpoint",
@@ -951,8 +977,9 @@ def _acceptance_prompt() -> str:
         "pyproject.toml matches the business requirement in README.md. Do not edit files. Use the "
         "project's configured context and continuity mechanisms exactly as you would in normal "
         "work: inspect current state, create a Russian-titled work record with only the affected "
-        "stack hint, then find relevant project material (a found code or doc path may be read "
-        "natively; expand context only for semantic refs), and complete it with a "
+        "stack hint, then find that work record by its title and open the returned Task "
+        "reference. Read README.md and pyproject.toml with native repository tools, open "
+        "the explicit `code:pyproject.toml` context ref, and complete it with a "
         "passed verification. Return one short JSON object with the observed workspace identity, "
         "work-record identity, final revision, and audit result. Never invent a result if a tool "
         "call fails."
@@ -1175,6 +1202,12 @@ def run_acceptance(
                 Path(environment["HARNESS_SKILL_REGISTRY"]),
                 skill_nonces,
             )
+            for workspace in workspaces:
+                _run(
+                    (str(harness), "init", str(workspace)),
+                    cwd=workspace,
+                    environment=environment,
+                )
             wire_calls: tuple[str, ...] = ()
             wire_workspace_ids: list[str] = []
             projected_skill_names: tuple[str, ...] | None = None
@@ -1234,7 +1267,9 @@ def run_acceptance(
                     inspection_payload = json.loads(inspected.stdout)
                 except json.JSONDecodeError as exc:
                     raise CodexAcceptanceError("codex mcp get emitted invalid JSON") from exc
-                _verify_codex_inspection(inspection_payload, workspace, expected_mcp_url)
+                _verify_codex_inspection(
+                    inspection_payload, workspace, expected_mcp_url, mcp_connection["headers"]
+                )
                 _verify_codex_prompt_input(codex, workspace, environment)
 
                 if run_model and workspace == primary_workspace:
@@ -1287,7 +1322,6 @@ def run_acceptance(
                 raise CodexAcceptanceError("Codex generated no project skills")
 
             model_calls: tuple[str, ...] = ()
-            search_behavior: dict[str, Any] | None = None
             if run_model:
                 model_environment = environment.copy()
                 model_environment["CODEX_API_KEY"] = os.environ["CODEX_API_KEY"]
@@ -1329,9 +1363,6 @@ def run_acceptance(
                         f"Codex did not complete every Harness MCP tool; missing {missing!r}; "
                         f"observed item types: {observed_types!r}"
                     )
-                search_behavior = eval_search_behavior.sanitized_search_behavior_metrics(
-                    events, workspace_root=primary_workspace
-                )
             doctor = _run(
                 (str(harness), "doctor"),
                 cwd=primary_workspace,
@@ -1368,7 +1399,6 @@ def run_acceptance(
                 "wire_verified_harness_tool_calls": list(wire_calls),
                 "model_completed_harness_tool_calls": list(model_calls),
                 "model_run": run_model,
-                "search_behavior": search_behavior,
                 "all_five_wire_tools_verified": True,
                 "all_five_model_tools_verified": run_model,
                 "doctor_zero_fail": True,

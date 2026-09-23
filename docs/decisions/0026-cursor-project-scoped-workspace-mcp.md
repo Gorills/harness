@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-27
-- **Amended:** 2026-09-06
+- **Amended:** 2026-09-06, 2026-09-23
 - **Deciders:** Repository architecture baseline
 - **Amends:** [ADR-0024](0024-linux-cursor-multi-host-lifecycle.md)
 
@@ -74,3 +74,13 @@ Automated tests must prove:
 - the overlay launch without `HARNESS_HOST_PROFILE` still exposes the five tools;
 - isolated doctor/skills do not inspect user-global Cursor/Claude MCP or `~/.harness/skills`;
 - Claude-profile overlay refuse still follows `CLAUDE_PROJECT_DIR` or cwd when that hint is absent or unresolvable.
+
+## 2026-09-23 amendment: durable recall replaces project search
+
+ADR-0071 retires `project_search` and later restores optional lookup of durable
+Knowledge and Task records as `project_recall`. The current exact Cursor MCP
+catalog is `project_status`, `project_context`, `project_recall`, `task_start`,
+and `task_checkpoint`. The historical five-tool lists above record the 2026-09-06
+acceptance and must not be used as the current install or doctor expectation.
+Cursor configuration, approval, Workspace identity, and host verification rules
+remain as decided above.

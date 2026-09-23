@@ -297,6 +297,32 @@ def test_reconcile_workspace_skills_fails_closed_on_unsafe_registry(tmp_path: Pa
     assert isinstance(raised.value.__cause__, SkillRegistryError)
 
 
+@pytest.mark.parametrize("stale", [False, True])
+def test_reconcile_manifest_failure_is_not_reported_as_project_policy(
+    tmp_path: Path, stale: bool
+) -> None:
+    root, connection, workspace_id = _registered_workspace(
+        tmp_path, {"package.json": "{PRIVATE-MALFORMED-CONTENT"}
+    )
+    registry = tmp_path / "registry"
+    _write_skill(registry, "web-helper", languages=("javascript",))
+    if stale:
+        (root / "package.json").write_text('{"dependencies": {"react": "1"}}\n')
+    try:
+        with pytest.raises(SkillRuntimeError) as caught:
+            reconcile_workspace_skills(connection, workspace_id, ("codex",), registry_root=registry)
+        assert isinstance(caught.value.__cause__, SkillResolutionError)
+        assert caught.value.operator_message == (
+            "Workspace skill relevance could not be resolved; check project manifests and "
+            "refresh the Workspace with harness scan"
+        )
+        assert "PRIVATE-MALFORMED-CONTENT" not in caught.value.operator_message
+        assert str(root) not in caught.value.operator_message
+        assert not (root / ".agents" / "skills" / "web-helper").exists()
+    finally:
+        connection.close()
+
+
 def test_resolver_selects_only_relevant_legacy_stack(tmp_path: Path) -> None:
     package = {
         "dependencies": {"next": "15.0.0", "pg": "8.0.0"},

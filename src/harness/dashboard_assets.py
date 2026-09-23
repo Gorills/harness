@@ -54,6 +54,8 @@ body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); 
 a { color: inherit; }
 button, input, textarea, select { font: inherit; }
 button, a, summary { -webkit-tap-highlight-color: transparent; }
+form[aria-busy="true"] { cursor: progress; }
+form[aria-busy="true"] button { pointer-events: none; opacity: .65; }
 ::selection { background: rgba(116, 140, 255, 0.28); color: #fff; }
 
 .app-layout {
@@ -215,6 +217,7 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
 .live-indicator { display: inline-flex; align-items: center; gap: 8px; min-height: 28px; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
 .live-indicator[data-state="reconnecting"] .live-dot { background: var(--warning); box-shadow: 0 0 0 3px var(--warning-soft); }
+.live-indicator[data-state="saving"] .live-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: live-pulse 1.4s ease-in-out infinite; }
 .live-indicator[data-state="manual"] .live-dot { background: var(--text-muted); box-shadow: none; }
 .live-indicator[data-state="update"] .live-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); animation: live-pulse 1.4s ease-in-out infinite; }
 .update-link { display: none; border: 0; background: transparent; color: var(--accent-hover); padding: 0; font-size: inherit; font-weight: 700; cursor: pointer; }
@@ -427,6 +430,33 @@ button, a, summary { -webkit-tap-highlight-color: transparent; }
   font-weight: 700;
 }
 .skill-scope-entry { width: 100%; }
+.skill-scope-row { grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 22px 0; }
+.skill-scope-copy h3 { margin: 0; font-size: 16px; }
+.skill-scope-copy span, .skill-empty { font-size: 13px; line-height: 1.5; color: var(--text-secondary); }
+.skill-scope-actions { align-items: flex-start; justify-content: flex-start; }
+.skill-mode-preview { flex: 1 1 240px; border: 1px solid var(--border-strong); border-radius: 8px; }
+.skill-mode-preview[open] { flex-basis: 100%; order: 1; }
+.skill-mode-preview > summary { padding: 10px 14px; cursor: pointer; font-size: 13px; font-weight: 650; }
+.skill-preview-body { padding: 0 14px 14px; }
+.skill-preview-workspace { padding: 12px 0; border-top: 1px solid var(--border); }
+.skill-preview-workspace h5, .skill-delivery-row h4 { margin: 0 0 12px; overflow-wrap: anywhere; font-size: 13px; }
+.skill-catalog { display: grid; gap: 12px; padding: 0; list-style: none; margin: 12px 0; }
+.skill-catalog li { display: grid; gap: 4px; min-width: 0; font-size: 13px; line-height: 1.5; }
+.skill-catalog code, .skill-reasons code { overflow-wrap: anywhere; color: var(--accent-hover); }
+.skill-description { color: var(--text-secondary); }
+.skill-description summary, .skill-baseline > summary, .skill-delivery summary, .skill-scope-copy summary, .skill-preview-workspace summary { cursor: pointer; padding: 7px 0; font-size: 13px; }
+.skill-description p { margin: 6px 0; }
+.skill-delivery { margin: 22px 0; }
+.skill-delivery h3 { font-size: 15px; }
+.skill-delivery-row { border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 12px 0; }
+.skill-delivery-row p, .skill-baseline p { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+.skill-delivery-row[data-skill-status="conflict"], .skill-delivery-row[data-skill-status="error"] { border-color: var(--danger); }
+.skill-warning { color: var(--danger); font-size: 13px; line-height: 1.5; }
+.skill-diagnostic { font-family: var(--font-mono); }
+.skill-reasons { font-size: 12px; line-height: 1.6; padding-left: 18px; }
+.skill-baseline { padding: 12px 0; }
+.skill-scope-panel summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
 .page-intro-actions .management-hint { margin-top: 8px; }
 .action-row { display: flex; flex-wrap: wrap; gap: 9px; }
 .action-row form { margin: 0; }
@@ -779,6 +809,80 @@ a.btn {
 """.strip()
 
 
+DASHBOARD_CSS += """
+.hub-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin: 28px 0 36px; }
+.hub-card { padding: 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; min-width: 0; }
+.hub-card h2 { margin: 22px 0 12px; font-size: 21px; overflow-wrap: anywhere; }
+.hub-card-heading, .hub-links, .hub-counts { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hub-monogram { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-size: 20px; font-weight: 700; }
+.hub-focus { color: var(--text-secondary); font-size: 13px; line-height: 1.6; min-height: 42px; overflow-wrap: anywhere; }
+.hub-counts { justify-content: flex-start; color: var(--text-muted); font-size: 11px; margin: 20px 0; }
+.hub-links { border-top: 1px solid var(--border); padding-top: 16px; font-size: 12px; color: var(--accent-hover); }
+.project-tabs { position: sticky; top: 64px; z-index: 15; background: var(--bg); display: flex; flex-wrap: wrap; gap: 4px 24px; border-bottom: 1px solid var(--border); margin: 0 0 24px; }
+.project-tabs a { display: flex; align-items: center; min-height: 44px; padding: 10px 0; text-decoration: none; white-space: nowrap; color: var(--text-secondary); border-bottom: 2px solid transparent; }
+.project-tabs a[aria-current] { color: var(--accent-hover); border-bottom: 2px solid var(--accent); }
+.project-tabs a:hover { color: var(--text); }
+.project-tabs .return-task { margin-left: auto; color: var(--accent-hover); }
+.project-settings { margin-top: 28px; }
+.project-settings > summary { cursor: pointer; color: var(--text-secondary); padding: 16px 0; }
+.content-frame:has(> .vault-frame) { padding: 0 16px; max-width: none; }
+.content-frame:has(> .vault-frame) > .project-tabs { margin: 0 12px; }
+.vault-frame { display: block; width: 100%; height: calc(100dvh - 72px); min-height: 460px; border: 0; }
+.project-tabs + .vault-frame { height: calc(100dvh - 138px); }
+:root { --text-muted: #939dae; }
+.app-layout { grid-template-columns: 238px minmax(0, 1fr); }
+.content-frame { padding-top: 24px; }
+.page-intro { margin-bottom: 24px; }
+.page-intro h1 { font-size: clamp(26px, 3vw, 36px); }
+.hero-copy { overflow-wrap: anywhere; }
+.project-counts, .task-sections, .workspace-switcher { display: flex; flex-wrap: wrap; gap: 12px 20px; color: var(--text-secondary); font-size: 13px; }
+.task-sections, .workspace-switcher { margin-bottom: 20px; }
+.task-sections a, .workspace-switcher a { display: inline-flex; align-items: center; min-height: 36px; text-decoration: none; }
+.workspace-switcher a[aria-current] { color: var(--accent-hover); font-weight: 700; }
+.task-layout { grid-template-areas: "result actions" "history facts"; }
+.task-summary { grid-area: result; display: grid; gap: 20px; min-width: 0; }
+.task-layout > .action-card { grid-area: actions; }
+.task-layout > .timeline-panel { grid-area: history; }
+.task-layout > .facts-card { grid-area: facts; }
+.facts-card > summary { padding: 20px; cursor: pointer; font-weight: 650; }
+.content-frame > .panel, .content-frame > .focus-panel { margin-bottom: 20px; }
+.focus-panel .panel-body:has(> .action-panel) { grid-template-columns: minmax(0, 1fr) 240px; }
+.focus-panel .task-primary-meta { grid-column: 1 / -1; }
+.focus-content { min-width: 0; }
+.focus-content .text-link { display: inline-flex; margin-top: 14px; }
+.workspace-setting + .workspace-setting { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border); }
+.workspace-setting h3 { overflow-wrap: anywhere; font-size: 14px; }
+.legacy-settings-link { margin-top: 24px; font-size: 13px; color: var(--text-secondary); }
+.metrics { gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.metric { padding: 16px 20px; min-height: 80px; }
+.metric-value { font-size: 26px; }
+.hub-grid { margin: 20px 0 24px; }
+.hub-card { padding: 20px; }
+.hub-card h2 { margin: 14px 0 10px; }
+.hub-card a { text-decoration: none; }
+.hub-card a:hover { text-decoration: underline; }
+.hub-next { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.hub-counts { margin: 14px 0; }
+.hub-focus { min-height: 0; }
+[id] { scroll-margin-top: 160px; }
+@media (max-width: 940px) {
+  .app-layout { grid-template-columns: minmax(0, 1fr); }
+  .task-layout { grid-template-areas: "result" "actions" "history" "facts"; }
+  .project-tabs { gap: 2px 18px; }
+  .project-tabs .return-task { margin-left: 0; }
+}
+@media (max-width: 720px) {
+  .focus-panel .panel-body:has(> .action-panel) { grid-template-columns: minmax(0, 1fr); }
+  .hub-grid { grid-template-columns: minmax(0, 1fr); }
+  .project-tabs { top: 58px; font-size: 12px; gap: 0 16px; }
+  .metric { padding: 12px; }
+  .content-frame:has(> .vault-frame) { padding: 0 4px; }
+  .project-counts { font-size: 12px; }
+}
+@media (prefers-color-scheme: light) { :root { --text-muted: #606b7d; } }
+"""
+
+
 DASHBOARD_JS = r"""
 (() => {
   const body = document.body;
@@ -787,6 +891,12 @@ DASHBOARD_JS = r"""
   let inFlight = false;
   let queued = false;
   let queuedForce = false;
+  let queuedMutationRecovery = false;
+  let mutationInFlight = false;
+  let mutationRefreshQueued = false;
+  let mutationEpoch = 0;
+  let mutationRecoveryInFlight = false;
+  let mutationRecoveryWarning = false;
 
   const fieldHasChanged = (field) => {
     if (field.dataset.recoveredDraft === 'true') {
@@ -960,30 +1070,58 @@ DASHBOARD_JS = r"""
     disconnectEvents();
     eventsUrl = nextUrl;
     source = new EventSource(nextUrl);
-    source.addEventListener('ready', () => setState('live', 'Онлайн'));
+    source.addEventListener('ready', () => {
+      if (!mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning) {
+        setState('live', 'Онлайн');
+      }
+    });
     source.addEventListener('refresh', () => {
+      if (mutationInFlight) {
+        mutationRefreshQueued = true;
+        return;
+      }
+      if (mutationRecoveryInFlight || queuedMutationRecovery) {
+        return;
+      }
       void refreshPage({ force: false });
     });
-    source.onerror = () => setState('reconnecting', 'Переподключение');
+    source.onerror = () => {
+      if (!mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning) {
+        setState('reconnecting', 'Переподключение');
+      }
+    };
   };
 
   const refreshPage = async (options) => {
+    if (mutationInFlight) {
+      mutationRefreshQueued = true;
+      return;
+    }
+    if (mutationRecoveryInFlight) {
+      return;
+    }
     queued = true;
     queuedForce = queuedForce || Boolean(options.force);
+    queuedMutationRecovery = queuedMutationRecovery || Boolean(options.mutationRecovery);
     if (inFlight) {
       return;
     }
     inFlight = true;
+    let mutationRecovery = false;
     try {
       while (queued) {
         queued = false;
         const force = queuedForce;
         queuedForce = false;
+        mutationRecovery = queuedMutationRecovery;
+        queuedMutationRecovery = false;
+        mutationRecoveryInFlight = mutationRecovery;
         if (!force && hasUnsavedInput()) {
           setState('update', 'Есть обновление');
           break;
         }
         setState('update', 'Обновление');
+        const expectedMutationEpoch = mutationEpoch;
         const response = await fetch(`${window.location.pathname}${window.location.search}`, {
           cache: 'no-store',
           credentials: 'same-origin',
@@ -993,6 +1131,9 @@ DASHBOARD_JS = r"""
           throw new Error('dashboard refresh failed');
         }
         const html = await response.text();
+        if (expectedMutationEpoch !== mutationEpoch) {
+          break;
+        }
         if (!force && hasUnsavedInput()) {
           setState('update', 'Есть обновление');
           break;
@@ -1004,19 +1145,165 @@ DASHBOARD_JS = r"""
           throw new Error('dashboard refresh parse failed');
         }
         window.scrollTo(scrollX, scrollY);
+        mutationRecoveryWarning = mutationRecovery;
         connectEvents();
-        setState('live', 'Онлайн');
+        setState(
+          mutationRecovery ? 'update' : 'live',
+          mutationRecovery ? 'Проверьте сохранение' : 'Онлайн'
+        );
+        mutationRecoveryInFlight = false;
       }
     } catch (error) {
-      if (error instanceof Error && error.message === 'dashboard draft target changed') {
-        setState('update', 'Форма изменилась · черновик сохранён');
-      } else {
-        setState('update', 'Есть обновление');
+      if (!mutationInFlight) {
+        if (error instanceof Error && error.message === 'dashboard draft target changed') {
+          mutationRecoveryWarning = mutationRecovery;
+          setState('update', 'Форма изменилась · черновик сохранён');
+        } else if (mutationRecovery) {
+          mutationRecoveryWarning = true;
+          setState('update', 'Не удалось подтвердить сохранение');
+        } else {
+          setState('update', 'Есть обновление');
+        }
       }
     } finally {
+      mutationRecoveryInFlight = false;
       inFlight = false;
       if (queued) {
-        void refreshPage({ force: queuedForce });
+        void refreshPage({
+          force: queuedForce,
+          mutationRecovery: queuedMutationRecovery,
+        });
+      }
+    }
+  };
+
+  const submittedControlValue = (field) => {
+    if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+      return JSON.stringify([field.checked, field.value]);
+    }
+    if (field instanceof HTMLSelectElement) {
+      return JSON.stringify(Array.from(field.options).filter((option) => option.selected).map(
+        (option) => option.value
+      ));
+    }
+    return field.value;
+  };
+
+  const markSubmittedControlsClean = (submitted) => {
+    const previous = [];
+    submitted.forEach(([field, value]) => {
+      if (submittedControlValue(field) !== value) {
+        return;
+      }
+      if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+        previous.push([field, field.defaultChecked, null, field.dataset.recoveredDraft]);
+        field.defaultChecked = field.checked;
+      } else if (field instanceof HTMLSelectElement) {
+        previous.push([
+          field,
+          null,
+          Array.from(field.options).map((option) => option.defaultSelected),
+          field.dataset.recoveredDraft,
+        ]);
+        Array.from(field.options).forEach((option) => { option.defaultSelected = option.selected; });
+      } else {
+        previous.push([field, field.defaultValue, null, field.dataset.recoveredDraft]);
+        field.defaultValue = field.value;
+      }
+      delete field.dataset.recoveredDraft;
+    });
+    return () => {
+      previous.forEach(([field, defaultValue, defaultOptions, recoveredDraft]) => {
+        if (field instanceof HTMLInputElement && ['checkbox', 'radio'].includes(field.type)) {
+          field.defaultChecked = defaultValue;
+        } else if (field instanceof HTMLSelectElement) {
+          Array.from(field.options).forEach((option, index) => {
+            option.defaultSelected = defaultOptions[index];
+          });
+        } else {
+          field.defaultValue = defaultValue;
+        }
+        if (recoveredDraft === undefined) {
+          delete field.dataset.recoveredDraft;
+        } else {
+          field.dataset.recoveredDraft = recoveredDraft;
+        }
+      });
+    };
+  };
+
+  const submitMutation = async (form) => {
+    if (mutationInFlight || mutationRecoveryInFlight || queuedMutationRecovery) {
+      return;
+    }
+    mutationInFlight = true;
+    mutationRecoveryWarning = false;
+    mutationRefreshQueued = false;
+    mutationEpoch += 1;
+    queued = false;
+    queuedForce = false;
+    queuedMutationRecovery = false;
+    form.setAttribute('aria-busy', 'true');
+    setState('saving', 'Сохранение');
+    const fields = Array.from(form.querySelectorAll('textarea, input, select'));
+    const submitted = fields.map((field) => [field, submittedControlValue(field)]);
+    const target = form.getAttribute('action') || `${window.location.pathname}${window.location.search}`;
+    let restoreSubmittedControls = null;
+    let applied = false;
+    let mutationFailed = false;
+    try {
+      const response = await fetch(target, {
+        method: 'POST',
+        body: new URLSearchParams(new FormData(form)),
+        cache: 'no-store',
+        credentials: 'same-origin',
+        headers: { Accept: 'text/html' },
+      });
+      const contentType = response.headers.get('Content-Type') || '';
+      if (!contentType.toLowerCase().startsWith('text/html')) {
+        throw new Error('dashboard mutation response is not HTML');
+      }
+      const html = await response.text();
+      const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+      if (!(nextDocument.querySelector('.app-layout') instanceof HTMLElement)) {
+        throw new Error('dashboard mutation parse failed');
+      }
+      if (response.ok) {
+        restoreSubmittedControls = markSubmittedControlsClean(submitted);
+      }
+      const scrollX = window.scrollX;
+      const scrollY = window.scrollY;
+      if (!applyPage(nextDocument)) {
+        throw new Error('dashboard mutation parse failed');
+      }
+      applied = true;
+      if (response.url) {
+        const responseUrl = new URL(response.url, window.location.href);
+        const nextLocation = `${responseUrl.pathname}${responseUrl.search}`;
+        const currentLocation = `${window.location.pathname}${window.location.search}`;
+        if (responseUrl.origin === window.location.origin && nextLocation !== currentLocation) {
+          window.history.replaceState(null, '', nextLocation);
+        }
+      }
+      window.scrollTo(scrollX, scrollY);
+      connectEvents();
+      setState(response.ok ? 'live' : 'update', response.ok ? 'Онлайн' : 'Проверьте форму');
+      mutationRefreshQueued = false;
+    } catch (_error) {
+      mutationFailed = true;
+      if (!applied && restoreSubmittedControls !== null) {
+        restoreSubmittedControls();
+      }
+      form.removeAttribute('aria-busy');
+      mutationRefreshQueued = false;
+      setState('update', 'Не удалось сохранить');
+    } finally {
+      mutationInFlight = false;
+      if (mutationFailed) {
+        void refreshPage({ force: true, mutationRecovery: true });
+      } else if (mutationRefreshQueued) {
+        mutationRefreshQueued = false;
+        void refreshPage({ force: false });
       }
     }
   };
@@ -1039,7 +1326,25 @@ DASHBOARD_JS = r"""
     }
   });
 
+  document.addEventListener('submit', (event) => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== 'post') {
+      return;
+    }
+    event.preventDefault();
+    void submitMutation(form);
+  });
+
   connectEvents();
+  window.addEventListener('beforeunload', (event) => {
+    const dirtyForm = Array.from(
+      document.querySelectorAll('textarea, input:not([type="hidden"]), select')
+    ).some((field) => field.form?.method.toLowerCase() === 'post' && fieldHasChanged(field));
+    if (mutationInFlight || dirtyForm) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
   window.addEventListener('pagehide', () => disconnectEvents(), { once: true });
 })();
 """.strip()

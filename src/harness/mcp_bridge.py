@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from importlib.metadata import version as distribution_version
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import anyio
 from mcp.server import MCPServer
@@ -49,24 +49,15 @@ from harness.ipc import (
     TaskStartResult,
     WorkspaceTaskSummary,
     request_project_context,
-    request_project_search,
+    request_project_recall,
     request_task_checkpoint,
     request_task_start,
     request_workspace_status,
     request_workspace_task_status,
 )
 from harness.knowledge import KnowledgeAnchorDraft, KnowledgeDraft, KnowledgeKind
-from harness.retrieval import (
-    EVIDENCE_REASON_RESPONSE_BUDGET,
-    MAX_PROJECT_CONTEXT_REF_BYTES,
-    PROJECT_SEARCH_MAX_BYTES,
-    ProjectSearchScope,
-    project_exact_search_coverage_payload,
-    project_search_hit_payload,
-    project_symbol_navigation_payload,
-)
+from harness.retrieval import MAX_PROJECT_CONTEXT_REF_BYTES, ProjectSearchKind
 from harness.runtime_paths import default_runtime_paths
-from harness.search import MAX_SEARCH_QUERY_BYTES
 from harness.tasks import TaskState, TaskWaitReason
 from harness.verification import VerificationDraft, VerificationStatus
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
@@ -80,31 +71,11 @@ _SERVER_INSTRUCTIONS = (
     + TASK_CREATION_INSTRUCTIONS
     + TASK_CONTINUITY_INSTRUCTIONS
     + "Resume by ID; retry errors. "
-    "IDs/literals/Knowledge/Tasks: project_search before broad native work; "
-    "Natural queries allow native search; lexical hits allow fallback. "
-    "Paths allow native reads; context optional. "
-    "Complete untruncated exact_coverage replaces native search. "
+    "Use native repository tools for code and document discovery. "
+    "Optional project_recall finds past Knowledge/Tasks without IDs. "
+    "Paths allow native reads; project_context expands selected refs. "
     + TASK_REVIEW_INSTRUCTIONS
     + "Hidden forbids durable SCM mutations."
-)
-_PROJECT_SEARCH_DESCRIPTION = (
-    "Search current Project Intelligence across local code/doc text and identifiers, durable "
-    "Knowledge, and Task history applicable to the active checkout. Harness reconciles watcher "
-    "lag before retrieval. Explicit "
-    "identifiers and quoted/backticked literals may return exact_coverage with current-source "
-    "locations and aggregate counts. Identifier coverage may also include symbol_navigation: "
-    "current-source precise Python/JS/TS/TSX/Go/Rust/Java syntax definitions/calls/imports/inheritance with relation evidence; "
-    "unsupported matching code remains exact text coverage, not guessed syntax. When "
-    "exact_coverage.complete=true and locations_truncated=false, do not repeat that needle with "
-    "native rg/grep. Code/doc hits may "
-    "include current-source evidence; use it directly. If evidence is absent or more source is "
-    "needed, targeted native read is allowed. If exact coverage is incomplete, targeted native "
-    "search fallback is allowed. Successful data is in structuredContent; results_truncated=true "
-    "means lower-priority hits were omitted to preserve the response budget. project_context is "
-    "not required for those kinds. Use when exact identifiers/literals "
-    "or Knowledge/Task retrieval benefit from it. Natural-language code/doc discovery may use native "
-    "broad search directly, and ordinary lexical hits do not suppress broader native fallback. Skip "
-    "this search when an exact path is already in hand. Search itself does not require a Task."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
@@ -151,12 +122,12 @@ _CODEX_MCP_REFUSAL_INSTRUCTIONS = (
     "project .codex/config.toml created by `harness scan` with X-Harness-Workspace-Root. Restart "
     "Codex after reconciliation. Do not call these tools."
 )
-_SEARCH_DEFAULT_LIMIT = 5
-_SEARCH_HARD_LIMIT = 10
 _CONTEXT_HARD_LIMIT = 10
+_RECALL_HARD_LIMIT = 5
+_RECALL_QUERY_MAX_BYTES = 256
 _STATUS_MAX_BYTES = 10 * 1024
-_SEARCH_MAX_BYTES = PROJECT_SEARCH_MAX_BYTES
 _CONTEXT_MAX_BYTES = 12 * 1024
+_RECALL_MAX_BYTES = 4 * 1024
 _TASK_MAX_BYTES = 4 * 1024
 _CONTEXT_REF_MAX_BYTES = MAX_PROJECT_CONTEXT_REF_BYTES
 _MCP_WIRE_OVERHEAD_BYTES = 1024
@@ -166,15 +137,15 @@ _MCP_EOF_DRAIN_TIMEOUT_SECONDS = 65.0
 _HTTP_WORKSPACE_ROOT_HEADER = "x-harness-workspace-root"
 _TOOL_RESPONSE_MAX_BYTES = {
     "project_status": _STATUS_MAX_BYTES,
-    "project_search": _SEARCH_MAX_BYTES,
     "project_context": _CONTEXT_MAX_BYTES,
+    "project_recall": _RECALL_MAX_BYTES,
     "task_start": _TASK_MAX_BYTES,
     "task_checkpoint": _TASK_MAX_BYTES,
 }
 _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
     "project_status": frozenset(),
-    "project_search": frozenset({"query", "scope", "limit"}),
     "project_context": frozenset({"refs"}),
+    "project_recall": frozenset({"query", "kind", "limit"}),
     "task_start": frozenset({"title", "stack_hints", "task_id", "expected_revision"}),
     "task_checkpoint": frozenset(
         {
@@ -377,14 +348,10 @@ class HarnessMCPServer(MCPServer):
         result = await super().call_tool(name, arguments, context)
         if isinstance(result, CallToolResult):
             if (
-                name == "project_search"
+                name == "project_recall"
                 and result.structured_content is not None
                 and not result.is_error
             ):
-                # The SDK serializes dict results into both TextContent and
-                # structuredContent for backwards compatibility. Harness targets
-                # the current structured-output protocol, so retaining both would
-                # spend roughly half of the search exposure budget on duplication.
                 result = result.model_copy(update={"content": []})
             return _bounded_call_result(name, result)
         return result
@@ -487,7 +454,6 @@ def build_mcp_server(
                 },
                 "index": {
                     "indexed_file_count": status.indexed_file_count,
-                    "content_search_document_count": status.content_search_document_count,
                     "index_revision": status.index_revision,
                     "last_successful_reconcile_at": status.last_successful_reconcile_at,
                     "last_reconcile_kind": status.last_reconcile_kind,
@@ -518,55 +484,6 @@ def build_mcp_server(
             },
             _STATUS_MAX_BYTES,
             "project_status response exceeds model exposure budget",
-        )
-
-    @server.tool(description=_PROJECT_SEARCH_DESCRIPTION)
-    def project_search(
-        ctx: Context[Any, Any],
-        query: Annotated[
-            str,
-            Field(
-                min_length=1,
-                description=(
-                    f"Non-empty text; at most {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes after trimming "
-                    "surrounding whitespace. NUL is not allowed. Quote exact literals."
-                ),
-            ),
-        ],
-        scope: Literal["all", "code", "docs", "knowledge", "tasks"] = "all",
-        limit: Annotated[StrictInt, Field(ge=1, le=_SEARCH_HARD_LIMIT)] = _SEARCH_DEFAULT_LIMIT,
-    ) -> dict[str, Any]:
-        if not 1 <= limit <= _SEARCH_HARD_LIMIT:
-            raise ValueError(f"limit must be between 1 and {_SEARCH_HARD_LIMIT}")
-        # The domain query bound applies after trimming. Forward and expose that same
-        # spelling so accepted padding cannot consume the model response budget.
-        query = query.strip()
-        result = request_project_search(
-            _socket_path(),
-            _workspace_hints(ctx, workspace_transport=workspace_transport),
-            query,
-            limit=limit,
-            scope=ProjectSearchScope(scope),
-        )
-        hits = [project_search_hit_payload(hit) for hit in result.results[:limit]]
-        return _fit_project_search_payload(
-            {
-                "query": query,
-                "scope": scope,
-                "workspace_state": result.workspace_state,
-                "exact_coverage": (
-                    None
-                    if result.exact_coverage is None
-                    else project_exact_search_coverage_payload(result.exact_coverage)
-                ),
-                "symbol_navigation": (
-                    None
-                    if result.symbol_navigation is None
-                    else project_symbol_navigation_payload(result.symbol_navigation)
-                ),
-                "results_truncated": False,
-                "results": hits,
-            }
         )
 
     @server.tool(description=_PROJECT_CONTEXT_DESCRIPTION)
@@ -612,6 +529,54 @@ def build_mcp_server(
             {"items": items},
             _CONTEXT_MAX_BYTES,
             "project_context response exceeds model exposure budget",
+        )
+
+    @server.tool(
+        description=(
+            "Find applicable durable Knowledge or Task records by topic in the active Project. "
+            "Use only when prior durable context is useful; repository code and documentation "
+            "discovery uses native tools. Returns bounded refs and previews, not full content; "
+            "open selected refs with project_context. Query must be non-empty and at most 256 "
+            "UTF-8 bytes after trimming. Limit is 1-5."
+        )
+    )
+    def project_recall(
+        ctx: Context[Any, Any],
+        query: str,
+        kind: Literal["knowledge", "task"],
+        limit: StrictInt = 5,
+    ) -> dict[str, Any]:
+        normalized = query.strip()
+        try:
+            query_bytes = len(normalized.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError("project_recall query must be valid UTF-8 text") from exc
+        if not normalized or "\x00" in normalized or query_bytes > _RECALL_QUERY_MAX_BYTES:
+            raise ValueError("project_recall query must be bounded non-empty text")
+        if not 1 <= limit <= _RECALL_HARD_LIMIT:
+            raise ValueError("project_recall limit must be between 1 and 5")
+        result = request_project_recall(
+            _socket_path(),
+            _workspace_hints(ctx, workspace_transport=workspace_transport),
+            normalized,
+            ProjectSearchKind(kind),
+            limit=limit,
+        )
+        return _fit_recall_payload(
+            {
+                "query": result.query,
+                "kind": result.kind.value,
+                "results_truncated": False,
+                "results": [
+                    {
+                        "ref": hit.ref,
+                        "title": hit.title,
+                        "short_summary": hit.short_summary,
+                        "freshness": hit.freshness,
+                    }
+                    for hit in result.results
+                ],
+            }
         )
 
     @server.tool(description=_TASK_START_DESCRIPTION)
@@ -788,44 +753,23 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
     return payload
 
 
-def _fit_project_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Fit search disclosure against the real structured MCP result envelope."""
-    raw_results = payload.get("results")
-    if not isinstance(raw_results, list):
-        raise ValueError("project_search results must be a list")
-    fitted = {**payload, "results": [dict(hit) for hit in raw_results]}
-    while not _structured_search_result_fits(fitted):
-        results = fitted["results"]
-        evidence_index = next(
-            (
-                index
-                for index in range(len(results) - 1, -1, -1)
-                if results[index].get("evidence") is not None
-            ),
-            None,
-        )
-        if evidence_index is not None:
-            compact_hit = dict(results[evidence_index])
-            compact_hit["evidence"] = None
-            compact_hit["evidence_reason"] = EVIDENCE_REASON_RESPONSE_BUDGET
-            results[evidence_index] = compact_hit
+def _fit_recall_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Preserve refs and titles first when durable previews approach the MCP byte budget."""
+    results = payload["results"]
+    assert isinstance(results, list)
+    while True:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= _RECALL_MAX_BYTES:
+            return payload
+        preview = next((hit for hit in reversed(results) if hit["short_summary"] is not None), None)
+        if preview is not None:
+            preview["short_summary"] = None
             continue
         if results:
             results.pop()
-            fitted["results_truncated"] = True
+            payload["results_truncated"] = True
             continue
-        raise ValueError("project_search response exceeds model exposure budget")
-    return fitted
-
-
-def _structured_search_result_fits(payload: dict[str, Any]) -> bool:
-    return _structured_search_result_size(payload) <= _SEARCH_MAX_BYTES
-
-
-def _structured_search_result_size(payload: dict[str, Any]) -> int:
-    result = CallToolResult(content=[], structured_content=payload)
-    encoded = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
-    return len(encoded) + _MCP_WIRE_OVERHEAD_BYTES
+        raise ValueError("project_recall response exceeds model exposure budget")
 
 
 def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:

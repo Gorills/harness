@@ -340,14 +340,6 @@ def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Pa
         assert "Indexed files:" in status.stdout
         assert str(workspace.resolve()) in status.stdout
 
-        search = _run(
-            [str(harness), "search", "tracked", str(workspace)],
-            cwd=tmp_path,
-            env=env,
-        )
-        assert search.returncode == 0, search.stdout + search.stderr
-        assert "tracked.txt" in search.stdout
-
         inspect = _run(
             [str(harness), "doctor", "--database", str(paths.database)],
             cwd=tmp_path,
@@ -446,11 +438,10 @@ def test_checkout_agent_instructions_require_status_and_proportionate_tracking()
     assert "read-only inspection, and small local edits may proceed without a Task" in normalized
     assert "If work grows beyond that scope, start a Task before continuing" in normalized
     assert "reading the schema and retrying, not bypassing the failure" in normalized
-    assert "Natural-language code/doc discovery may use native search directly" in normalized
-    assert "Lexical hits are localization candidates and allow broader fallback" in normalized
-    assert "An exact path may be read natively" in normalized
-    assert "Search does not itself require a Task" in normalized
-    assert "Complete, untruncated `exact_coverage` replaces native search" in normalized
+    assert "Use native repository tools for code and documentation discovery" in normalized
+    assert "Harness does not provide or require project code/document search" in normalized
+    assert "Explicit code/document refs remain metadata-only" in normalized
+    assert "project_search" not in bootstrap
     assert "Reuse one Task for one requested outcome" in normalized
     assert (
         "diagnosis, implementation, checks, clarifications, continuation, subagents" in normalized
@@ -471,14 +462,9 @@ def test_checkout_agent_instructions_require_status_and_proportionate_tracking()
 
 def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     text = _SERVER_INSTRUCTIONS
-    after_status = text.split("After status", maxsplit=1)[1]
-    task_at = after_status.find("start/resume a Task")
-    search_at = after_status.find("project_search")
-    assert 0 <= task_at < search_at
-    assert "After status use project_search" not in text
-    assert "After status, use project_search" not in text
-    assert "project_search, project_context, then native tools" not in text
-    assert "Paths allow native reads; context optional" in text
+    assert "Use native repository tools for code and document discovery" in text
+    assert "Paths allow native reads; project_context expands selected refs" in text
+    assert "project_search" not in text
     assert "for substantial changes, multi-step work, needed continuity" in text
     assert "Quick questions, reads, and small local edits may proceed without a Task" in text
     assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in text
@@ -1517,8 +1503,8 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     )
     assert [tool["name"] for tool in listed[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]
@@ -1532,8 +1518,8 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     )
     assert [tool["name"] for tool in isolated[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]
@@ -1623,8 +1609,8 @@ def test_production_mcp_stdio_lists_no_tools_for_codex_without_project_root(
     )
     assert [tool["name"] for tool in working[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]

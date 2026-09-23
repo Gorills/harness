@@ -9,13 +9,11 @@ import pytest
 
 import harness.retrieval as retrieval
 from harness.dashboard import read_dashboard_home
-from harness.registry import create_project, register_workspace
+from harness.registry import create_project, get_workspace, register_workspace
 from harness.retrieval import (
     ProjectRetrievalError,
     ProjectSearchHit,
-    ProjectSearchScope,
     read_project_context,
-    search_project,
     search_tasks,
 )
 from harness.storage import connect_database, initialize_database
@@ -175,8 +173,11 @@ def test_historical_deployment_search_and_context_survive_clearing_current_flags
     )
     expected_ref = f"task:{task.task_id}#event:{marked.event.event_id}"
     for query in queries:
-        hits = search_project(
-            connection, workspace_id, query, scope=ProjectSearchScope.TASKS, limit=5
+        hits = search_tasks(
+            connection,
+            query,
+            limit=5,
+            project_id=get_workspace(connection, workspace_id).project_id,
         )
         assert [hit.ref for hit in hits] == [expected_ref]
         assert hits[0].short_summary == expected_status.value
@@ -211,8 +212,11 @@ def test_legacy_deployment_event_keeps_search_and_context_payload(
         "VALUES (?,3,'operator_status_updated',?,'legacy-time')",
         (_FIRST_ID, legacy_status),
     )
-    hits = search_project(
-        connection, workspace_id, legacy_status, scope=ProjectSearchScope.TASKS, limit=5
+    hits = search_tasks(
+        connection,
+        legacy_status,
+        limit=5,
+        project_id=get_workspace(connection, workspace_id).project_id,
     )
     assert [hit.ref for hit in hits] == [f"task:{_FIRST_ID}#event:{cursor.lastrowid}"]
     assert hits[0].short_summary == legacy_status
@@ -247,8 +251,11 @@ def test_long_task_history_does_not_hide_other_matching_tasks(
     )
     for hits in (
         search_tasks(connection, "needle", limit=24),
-        search_project(
-            connection, workspace_id, "needle", scope=ProjectSearchScope.TASKS, limit=24
+        search_tasks(
+            connection,
+            "needle",
+            limit=24,
+            project_id=get_workspace(connection, workspace_id).project_id,
         ),
         read_dashboard_home(path, search_query="needle").task_search_results,
     ):
@@ -407,11 +414,11 @@ def test_ambiguous_task_prefix_returns_each_matching_task_with_project_scope(
     global_hits = read_dashboard_home(path, search_query=prefix).task_search_results
     assert set(_ids(global_hits)) == {_FIRST_ID, _SECOND_ID, _FOREIGN_ID}
     assert len(global_hits) == 3
-    for scope in (ProjectSearchScope.TASKS, ProjectSearchScope.ALL):
-        local_hits = search_project(connection, workspace_id, prefix, scope=scope, limit=24)
-        assert set(_ids(local_hits)) == {_FIRST_ID, _SECOND_ID}
-        assert "Foreign private work" not in str(local_hits)
-        assert search_project(connection, workspace_id, _FOREIGN_ID, scope=scope, limit=24) == ()
+    project_id = get_workspace(connection, workspace_id).project_id
+    local_hits = search_tasks(connection, prefix, limit=24, project_id=project_id)
+    assert set(_ids(local_hits)) == {_FIRST_ID, _SECOND_ID}
+    assert "Foreign private work" not in str(local_hits)
+    assert search_tasks(connection, _FOREIGN_ID, limit=24, project_id=project_id) == ()
     assert len(search_tasks(connection, prefix, limit=1)) == 1
     assert search_tasks(connection, prefix[:9], limit=24) == ()
 
