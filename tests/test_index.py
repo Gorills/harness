@@ -9,7 +9,6 @@ import pytest
 
 import harness.index as index_module
 from harness.index import (
-    MAX_INDEXED_SEARCH_BODY_BYTES,
     IndexedFileKind,
     IndexedFileRecord,
     IndexingError,
@@ -68,6 +67,10 @@ def test_scan_indexes_tracked_and_untracked_and_respects_exclusions(tmp_path: Pa
         (root / "private.txt").write_text("private\n", encoding="utf-8")
         (root / "node_modules").mkdir()
         (root / "node_modules" / "package.js").write_text("generated\n", encoding="utf-8")
+        (root / ".venv" / "lib").mkdir(parents=True)
+        (root / ".venv" / "lib" / "dependency.py").write_text(
+            "PRIVATE_DEPENDENCY = 1\n", encoding="utf-8"
+        )
 
         result = scan_workspace(connection, workspace_id)
         paths = [record.relative_path for record in list_indexed_files(connection, workspace_id)]
@@ -82,6 +85,75 @@ def test_scan_indexes_tracked_and_untracked_and_respects_exclusions(tmp_path: Pa
         assert ".env" not in paths
         assert "tracked.key" not in paths
         assert "node_modules/package.js" not in paths
+        assert ".venv/lib/dependency.py" not in paths
+    finally:
+        connection.close()
+
+
+def test_filesystem_scan_excludes_project_virtual_environments(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    for directory in (".venv", "venv"):
+        package = root / directory / "lib" / "python3.13" / "site-packages" / "dependency.py"
+        package.parent.mkdir(parents=True)
+        package.write_text("PRIVATE_DEPENDENCY = 1\n", encoding="utf-8")
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    project = create_project(connection)
+    workspace = register_workspace(connection, project_id=project.project_id, path=root)
+    try:
+        result = scan_workspace(connection, workspace.workspace_id)
+        paths = {
+            record.relative_path
+            for record in list_indexed_files(connection, workspace.workspace_id)
+        }
+
+        assert result.file_count == 1
+        assert paths == {"app.py"}
+
+        incremental = scan_workspace_paths(
+            connection,
+            workspace.workspace_id,
+            (
+                ".venv/lib/python3.13/site-packages/dependency.py",
+                "venv/lib/python3.13/site-packages/dependency.py",
+            ),
+        )
+        assert (incremental.added, incremental.updated, incremental.removed) == (0, 0, 0)
+        assert {
+            record.relative_path
+            for record in list_indexed_files(connection, workspace.workspace_id)
+        } == {"app.py"}
+    finally:
+        connection.close()
+
+
+def test_filesystem_incremental_scan_respects_directory_harnessignore(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / ".harnessignore").write_text("private/\n", encoding="utf-8")
+    private = root / "private" / "dependency.py"
+    private.parent.mkdir()
+    private.write_text("PRIVATE_DEPENDENCY = 1\n", encoding="utf-8")
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    project = create_project(connection)
+    workspace = register_workspace(connection, project_id=project.project_id, path=root)
+    try:
+        scan_workspace(connection, workspace.workspace_id)
+        incremental = scan_workspace_paths(
+            connection, workspace.workspace_id, ("private/dependency.py",)
+        )
+
+        assert (incremental.added, incremental.updated, incremental.removed) == (0, 0, 0)
+        assert {
+            record.relative_path
+            for record in list_indexed_files(connection, workspace.workspace_id)
+        } == {".harnessignore", "app.py"}
     finally:
         connection.close()
 
@@ -107,6 +179,64 @@ def test_scan_reconciles_add_modify_delete_and_is_idempotent(tmp_path: Path) -> 
         assert fourth.removed == 1
         paths = [record.relative_path for record in list_indexed_files(connection, workspace_id)]
         assert paths == ["added.txt"]
+    finally:
+        connection.close()
+
+
+def test_stale_index_rows_are_deleted_in_bounded_batches(tmp_path: Path) -> None:
+    _root, connection, workspace_id = _registered(tmp_path)
+    stale_paths = tuple(f"generated/{index:04d}.py" for index in range(513))
+    connection.executemany(
+        """
+        INSERT INTO indexed_files(workspace_id, relative_path, kind, size_bytes, content_sha256)
+        VALUES (?, ?, 'file', 0, ?)
+        """,
+        ((workspace_id, path, hashlib.sha256(b"").hexdigest()) for path in stale_paths),
+    )
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+    try:
+        index_module._delete_stale_indexed_files(
+            connection,
+            workspace_id,
+            stale_paths,
+            deadline=None,
+        )
+    finally:
+        connection.set_trace_callback(None)
+
+    delete_statements = {
+        statement
+        for statement in statements
+        if statement.lstrip().startswith("DELETE FROM indexed_files")
+    }
+    assert len(delete_statements) == 3
+    assert connection.execute(
+        "SELECT COUNT(*) FROM indexed_files WHERE workspace_id = ?", (workspace_id,)
+    ).fetchone() == (0,)
+    connection.close()
+
+
+def test_stale_index_cleanup_removes_only_selected_files(tmp_path: Path) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    package = root / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    caller = root / "caller.py"
+    caller.write_text("from pkg import helper\n", encoding="utf-8")
+    _git(root, "add", "caller.py", "pkg/__init__.py")
+    try:
+        scan_workspace(connection, workspace_id)
+        index_module._delete_stale_indexed_files(
+            connection,
+            workspace_id,
+            ("caller.py", "pkg/__init__.py"),
+            deadline=None,
+        )
+        assert connection.execute(
+            "SELECT relative_path FROM indexed_files WHERE workspace_id = ? ORDER BY relative_path",
+            (workspace_id,),
+        ).fetchall() == [("tracked.txt",)]
     finally:
         connection.close()
 
@@ -163,101 +293,6 @@ def test_incremental_scan_hashes_only_selected_paths_and_preserves_full_snapshot
             "tracked.txt",
             "untouched.txt",
         }
-    finally:
-        connection.close()
-
-
-def test_scan_reconciles_bounded_utf8_content_fts_without_indexing_binary(
-    tmp_path: Path,
-) -> None:
-    root, connection, workspace_id = _registered(tmp_path)
-    try:
-        (root / "service.py").write_text(
-            "def rotateRefreshToken():\n    return 'legacy credential'\n",
-            encoding="utf-8",
-        )
-        (root / "binary.bin").write_bytes(b"searchable-prefix\x00private-binary")
-        (root / "oversized.txt").write_bytes(b"x" * (MAX_INDEXED_SEARCH_BODY_BYTES + 1))
-        (root / ".pytest_nutrition_all.out").write_text(
-            "FastAPI endpoints nutrition generated test log\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        assert connection.execute(
-            """
-            SELECT documents.relative_path
-            FROM indexed_content_search
-            JOIN indexed_search_documents AS documents
-                ON documents.id = indexed_content_search.rowid
-            WHERE indexed_content_search MATCH 'legacy'
-              AND documents.workspace_id = ?
-            """,
-            (workspace_id,),
-        ).fetchall() == [("service.py",)]
-        assert connection.execute(
-            """
-            SELECT relative_path FROM indexed_search_documents
-            WHERE workspace_id = ? ORDER BY relative_path
-            """,
-            (workspace_id,),
-        ).fetchall() == [("service.py",), ("tracked.txt",)]
-        assert any(
-            record.relative_path == ".pytest_nutrition_all.out"
-            for record in list_indexed_files(connection, workspace_id)
-        )
-        assert "body" not in {
-            row[1] for row in connection.execute("PRAGMA table_info(indexed_search_documents)")
-        }
-        assert connection.execute(
-            """
-            SELECT indexed_content_search.body
-            FROM indexed_content_search
-            JOIN indexed_search_documents AS documents
-                ON documents.id = indexed_content_search.rowid
-            WHERE documents.relative_path = 'service.py'
-            """
-        ).fetchone() == (None,)
-        assert "legacy credential" not in "\n".join(connection.iterdump())
-
-        connection.execute(
-            """
-            DELETE FROM indexed_content_search
-            WHERE rowid = (
-                SELECT id FROM indexed_search_documents
-                WHERE workspace_id = ? AND relative_path = 'service.py'
-            )
-            """,
-            (workspace_id,),
-        )
-        scan_workspace(connection, workspace_id)
-        assert connection.execute(
-            "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'legacy'"
-        ).fetchall()
-
-        (root / "service.py").write_text(
-            "def rotateRefreshToken():\n    return 'current credential'\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-        assert (
-            connection.execute(
-                "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'legacy'"
-            ).fetchall()
-            == []
-        )
-        assert connection.execute(
-            "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'current'"
-        ).fetchall()
-
-        (root / "service.py").unlink()
-        scan_workspace(connection, workspace_id)
-        assert (
-            connection.execute(
-                "SELECT rowid FROM indexed_content_search WHERE indexed_content_search MATCH 'current'"
-            ).fetchall()
-            == []
-        )
     finally:
         connection.close()
 

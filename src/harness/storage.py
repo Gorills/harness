@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 24
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -1923,6 +1924,68 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             """
         )
         return
+    if target_version == 22:
+        _migrate_operator_control(connection)
+        return
+    if target_version == 23:
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TABLE task_git_origins (
+                task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+                has_git INTEGER NOT NULL CHECK (has_git IN (0,1)),
+                head TEXT,
+                branch TEXT
+            );
+            CREATE TABLE task_git_evidence (
+                checkpoint_id TEXT PRIMARY KEY REFERENCES task_checkpoints(id) ON DELETE CASCADE,
+                has_git INTEGER NOT NULL CHECK (has_git IN (0,1)),
+                complete INTEGER NOT NULL CHECK (complete IN (0,1))
+            );
+            CREATE TABLE task_git_evidence_paths (
+                checkpoint_id TEXT NOT NULL REFERENCES task_git_evidence(checkpoint_id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL CHECK (relative_path <> ''),
+                kind TEXT NOT NULL CHECK (kind IN ('file','symlink','deleted')),
+                content_sha256 TEXT,
+                PRIMARY KEY (checkpoint_id, relative_path),
+                CHECK ((kind = 'deleted' AND content_sha256 IS NULL) OR
+                        (kind <> 'deleted' AND content_sha256 IS NOT NULL AND length(content_sha256) = 64
+                     AND content_sha256 NOT GLOB '*[^0-9a-f]*'))
+            );
+        """,
+        )
+        return
+    if target_version == 24:
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            DROP TRIGGER IF EXISTS knowledge_search_insert;
+            DROP TRIGGER IF EXISTS knowledge_search_delete;
+            DROP TRIGGER IF EXISTS knowledge_search_update;
+            DROP TRIGGER IF EXISTS indexed_resolved_code_relation_search_delete;
+            DROP TRIGGER IF EXISTS indexed_code_relation_search_delete;
+            DROP TRIGGER IF EXISTS indexed_code_unit_search_delete;
+            DROP TRIGGER IF EXISTS indexed_content_search_delete;
+
+            DROP TABLE IF EXISTS indexed_resolved_code_relation_search;
+            DROP TABLE IF EXISTS indexed_code_relation_search;
+            DROP TABLE IF EXISTS indexed_code_unit_search;
+            DROP TABLE IF EXISTS indexed_content_search;
+
+            DROP TABLE IF EXISTS indexed_resolved_code_relations;
+            DROP TABLE IF EXISTS indexed_resolved_relation_workspaces;
+            DROP TABLE IF EXISTS indexed_python_reexports;
+            DROP TABLE IF EXISTS indexed_code_relations;
+            DROP TABLE IF EXISTS indexed_code_units;
+            DROP TABLE IF EXISTS indexed_code_unit_files;
+            DROP TABLE IF EXISTS indexed_search_documents;
+            DROP TABLE IF EXISTS knowledge_search;
+
+            DROP TABLE IF EXISTS workspace_search_index_dirty_paths;
+            DROP TABLE IF EXISTS workspace_search_index_state;
+            """,
+        )
+        return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 
 
@@ -1936,3 +1999,151 @@ def _status(connection: sqlite3.Connection, *, journal_mode: str) -> DatabaseSta
         foreign_keys=foreign_keys_row == (1,),
         fts5_available=fts5_available(connection),
     )
+
+
+def _migrate_operator_control(connection: sqlite3.Connection) -> None:
+    """Preserve old history while adding independent delivery and operator state control."""
+    sequence = connection.execute(
+        "SELECT seq FROM sqlite_sequence WHERE name = 'task_events'"
+    ).fetchone()
+    previous_sequence = 0 if sequence is None else int(sequence[0])
+    for name in ("deploy_test", "deploy_prod"):
+        connection.execute(
+            f"ALTER TABLE tasks ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0 "
+            f"CHECK ({name} IN (0, 1))"
+        )
+    connection.execute(
+        "UPDATE tasks SET deploy_test = operator_status IS 'deploy_test', "
+        "deploy_prod = operator_status IS 'deploy_prod'"
+    )
+    # All task-search triggers reference the event table; remove them before its replacement.
+    triggers = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'task_search_%'"
+    ).fetchall()
+    for (name,) in triggers:
+        connection.execute(f'DROP TRIGGER "{name}"')
+    connection.execute("""
+        CREATE TABLE task_events_v22 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            task_revision INTEGER NOT NULL CHECK (task_revision > 0),
+            event_type TEXT NOT NULL CHECK (event_type IN (
+                'created', 'resumed', 'reopened', 'checkpoint', 'accepted',
+                'operator_feedback', 'operator_comment', 'jira_link_updated',
+                'operator_status_updated', 'cancelled', 'state_changed'
+            )),
+            checkpoint_id TEXT UNIQUE,
+            operator_feedback TEXT CHECK (operator_feedback IS NULL OR
+                (operator_feedback <> '' AND length(CAST(operator_feedback AS BLOB)) <= 1024)),
+            operator_comment TEXT CHECK (operator_comment IS NULL OR
+                (operator_comment <> '' AND length(CAST(operator_comment AS BLOB)) <= 2048)),
+            jira_url TEXT CHECK (jira_url IS NULL OR
+                (jira_url <> '' AND length(CAST(jira_url AS BLOB)) <= 2048)),
+            operator_status TEXT CHECK (operator_status IS NULL OR
+                operator_status IN ('deploy_test', 'deploy_prod')),
+            deploy_test INTEGER CHECK (deploy_test IN (0, 1)),
+            deploy_prod INTEGER CHECK (deploy_prod IN (0, 1)),
+            target_state TEXT CHECK (target_state IN ('working', 'waiting', 'cancelled')),
+            target_wait_reason TEXT CHECK (target_wait_reason IN
+                ('operator_review', 'operator_input', 'external')),
+            created_at TEXT NOT NULL CHECK (created_at <> ''),
+            CHECK ((deploy_test IS NULL AND deploy_prod IS NULL) OR
+                (event_type = 'operator_status_updated' AND deploy_test IS NOT NULL
+                 AND deploy_prod IS NOT NULL AND operator_status IS NULL)),
+            CHECK ((event_type = 'state_changed' AND target_state IS NOT NULL
+                AND ((target_state = 'waiting' AND target_wait_reason IS NOT NULL)
+                    OR (target_state <> 'waiting' AND target_wait_reason IS NULL)))
+                OR (event_type <> 'state_changed' AND target_state IS NULL
+                    AND target_wait_reason IS NULL)),
+            CHECK (
+                (event_type = 'created' AND task_revision = 1 AND checkpoint_id IS NULL
+                    AND operator_feedback IS NULL AND operator_comment IS NULL
+                    AND jira_url IS NULL AND operator_status IS NULL)
+                OR (event_type IN ('resumed', 'reopened', 'accepted', 'cancelled', 'state_changed')
+                    AND task_revision > 1 AND checkpoint_id IS NULL
+                    AND operator_feedback IS NULL AND operator_comment IS NULL
+                    AND jira_url IS NULL AND operator_status IS NULL)
+                OR (event_type = 'checkpoint' AND task_revision > 1 AND checkpoint_id IS NOT NULL
+                    AND operator_feedback IS NULL AND operator_comment IS NULL
+                    AND jira_url IS NULL AND operator_status IS NULL)
+                OR (event_type = 'operator_feedback' AND task_revision > 1
+                    AND checkpoint_id IS NULL AND operator_feedback IS NOT NULL
+                    AND operator_comment IS NULL AND jira_url IS NULL AND operator_status IS NULL)
+                OR (event_type = 'operator_comment' AND task_revision > 1
+                    AND checkpoint_id IS NULL AND operator_feedback IS NULL
+                    AND operator_comment IS NOT NULL AND jira_url IS NULL AND operator_status IS NULL)
+                OR (event_type = 'jira_link_updated' AND task_revision > 1
+                    AND checkpoint_id IS NULL AND operator_feedback IS NULL
+                    AND operator_comment IS NULL AND operator_status IS NULL)
+                OR (event_type = 'operator_status_updated' AND task_revision > 1
+                    AND checkpoint_id IS NULL AND operator_feedback IS NULL
+                    AND operator_comment IS NULL AND jira_url IS NULL)
+            ),
+            FOREIGN KEY (checkpoint_id, task_id, task_revision)
+                REFERENCES task_checkpoints(id, task_id, task_revision) ON DELETE CASCADE
+        )
+    """)
+    connection.execute("""
+        INSERT INTO task_events_v22 (
+            id, task_id, task_revision, event_type, checkpoint_id, operator_feedback,
+            operator_comment, jira_url, operator_status, created_at
+        ) SELECT id, task_id, task_revision, event_type, checkpoint_id, operator_feedback,
+            operator_comment, jira_url, operator_status, created_at FROM task_events ORDER BY id
+    """)
+    connection.execute("DROP TABLE task_events")
+    connection.execute("ALTER TABLE task_events_v22 RENAME TO task_events")
+    connection.execute(
+        "UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'task_events'",
+        (previous_sequence,),
+    )
+    if (
+        connection.execute("SELECT 1 FROM sqlite_sequence WHERE name = 'task_events'").fetchone()
+        is None
+    ):
+        connection.execute(
+            "INSERT INTO sqlite_sequence(name, seq) VALUES ('task_events', ?)", (previous_sequence,)
+        )
+    connection.execute("CREATE INDEX task_events_task_id_idx ON task_events(task_id, id)")
+    connection.execute(
+        "CREATE UNIQUE INDEX task_events_one_created_per_task_idx "
+        "ON task_events(task_id) WHERE event_type = 'created'"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX task_events_one_resumed_per_revision_idx "
+        "ON task_events(task_id, task_revision) WHERE event_type = 'resumed'"
+    )
+    connection.execute(
+        "CREATE UNIQUE INDEX task_events_one_operator_action_per_revision_idx "
+        "ON task_events(task_id, task_revision) WHERE event_type IN "
+        "('accepted', 'operator_feedback', 'operator_comment', 'jira_link_updated', "
+        "'operator_status_updated', 'reopened', 'cancelled', 'state_changed')"
+    )
+    triggers_sql = _TASK_SEARCH_V13_TRIGGERS
+    for prefix in ("NEW", "task_events"):
+        # Two independent phrases also preserve search for either marker when both are set.
+        pattern = (
+            rf"CASE {prefix}\.operator_status\s+"
+            r"WHEN 'deploy_test' THEN 'deploy_test деплой на тест'\s+"
+            r"WHEN 'deploy_prod' THEN 'deploy_prod деплой на прод'\s+"
+            r"(?:ELSE ''\s+)?END"
+        )
+        replacement = (
+            f"(CASE WHEN {prefix}.deploy_test = 1 OR "
+            f"({prefix}.deploy_test IS NULL AND {prefix}.operator_status = 'deploy_test') "
+            "THEN 'deploy_test деплой на тест ' ELSE '' END || "
+            f"CASE WHEN {prefix}.deploy_prod = 1 OR "
+            f"({prefix}.deploy_prod IS NULL AND {prefix}.operator_status = 'deploy_prod') "
+            "THEN 'deploy_prod деплой на прод' ELSE '' END)"
+        )
+        triggers_sql = re.sub(pattern, replacement, triggers_sql)
+    triggers_sql = triggers_sql.replace(
+        "AFTER UPDATE OF jira_url, operator_status ON tasks",
+        "AFTER UPDATE OF jira_url, operator_status, deploy_test, deploy_prod ON tasks",
+    )
+    triggers_sql = triggers_sql.replace(
+        "operator_status, task_id ON task_events",
+        "operator_status, deploy_test, deploy_prod, task_id ON task_events",
+    )
+    _execute_sql_script_in_transaction(connection, triggers_sql)
+    # Rebuild complete FTS fragments using the authoritative-row update trigger.
+    connection.execute("UPDATE tasks SET title = title")

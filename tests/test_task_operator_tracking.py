@@ -15,12 +15,12 @@ from harness.dashboard import (
     render_workspace_page,
 )
 from harness.index import scan_workspace
-from harness.registry import create_project, register_workspace
-from harness.retrieval import ProjectSearchScope, search_project
+from harness.registry import create_project, get_workspace, register_workspace
+from harness.retrieval import search_tasks
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import TaskEventType, list_task_events
 from harness.task_workflow import (
-    task_checkpoint,
+    task_accept,
     task_comment,
     task_reopen,
     task_set_jira_url,
@@ -169,13 +169,11 @@ def test_operator_tracking_reopen_and_task_search_are_one_cas_history(tmp_path: 
             expected_revision=linked.task.revision,
             operator_status=TaskOperatorStatus.DEPLOY_TEST,
         )
-        completed = task_checkpoint(
+        completed = task_accept(
             connection,
             workspace_id,
             started.task_id,
             expected_revision=marked.task.revision,
-            state=TaskState.COMPLETED,
-            summary="Релиз-кандидат собран",
         ).task
         reopened = task_reopen(
             connection,
@@ -196,7 +194,7 @@ def test_operator_tracking_reopen_and_task_search_are_one_cas_history(tmp_path: 
             TaskEventType.OPERATOR_COMMENT,
             TaskEventType.JIRA_LINK_UPDATED,
             TaskEventType.OPERATOR_STATUS_UPDATED,
-            TaskEventType.CHECKPOINT,
+            TaskEventType.ACCEPTED,
             TaskEventType.REOPENED,
         )
 
@@ -206,12 +204,11 @@ def test_operator_tracking_reopen_and_task_search_are_one_cas_history(tmp_path: 
             "feature/HAR-42-dashboard",
             "деплой на тест",
         ):
-            hits = search_project(
+            hits = search_tasks(
                 connection,
-                workspace_id,
                 query,
-                scope=ProjectSearchScope.TASKS,
                 limit=8,
+                project_id=get_workspace(connection, workspace_id).project_id,
             )
             assert hits and hits[0].ref.startswith(f"task:{started.task_id}")
 
@@ -231,13 +228,11 @@ def test_reopen_obeys_one_working_task_and_metadata_validation(tmp_path: Path) -
     _database_path, connection, workspace_id = _database(tmp_path)
     try:
         first = task_start(connection, workspace_id, "Первая задача")
-        completed = task_checkpoint(
+        completed = task_accept(
             connection,
             workspace_id,
             first.task_id,
             expected_revision=first.revision,
-            state=TaskState.COMPLETED,
-            summary="Готово",
         ).task
         second = task_start(connection, workspace_id, "Вторая задача")
 

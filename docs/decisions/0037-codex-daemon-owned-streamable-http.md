@@ -69,3 +69,15 @@ model-selected tool call while command sandbox networking remained restricted.
 - real Codex acceptance requires a completed model-selected HTTP MCP call and rejects any project
   action before `project_status`;
 - disconnected-daemon and invalid-capability checks fail MCP initialization.
+
+## 2026-09-23 amendment: explicitly enable owned Codex MCP entries
+
+A project entry with `required = true` can still be disabled by a user-level
+`[mcp_servers.harness] enabled = false` setting. Codex CLI inspection of a synthetic
+trusted project showed the merged server as disabled while Harness diagnosed the project
+as current. Generated project config now writes `enabled = true` alongside `required = true`
+so the project-scoped integration is usable even when the user-level entry is disabled.
+An owned older entry is reconciled to this exact shape; unknown and user-owned TOML still
+follow the existing ownership refusal rules. The source-checkout `harness-dev` overlay is
+current only when it is explicitly enabled and required. Codex acceptance compares the
+inspected enabled state and the exact generated capability header without logging the bearer.

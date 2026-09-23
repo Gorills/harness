@@ -28,7 +28,6 @@ Examples:
   scripts/dev harness doctor
   scripts/dev harness scan
   scripts/dev harness status
-  scripts/dev harness search indexed_files
   scripts/dev harnessd serve
   scripts/dev stop
   scripts/dev quality

@@ -236,7 +236,7 @@ def test_checkpoint_requires_current_working_task(tmp_path: Path) -> None:
         connection.close()
 
 
-def test_completed_checkpoint_persists_committed_changed_path(tmp_path: Path) -> None:
+def test_review_checkpoint_persists_committed_changed_path(tmp_path: Path) -> None:
     root, _database, connection, workspace_id = _registered(tmp_path)
     try:
         created = create_task_with_baseline(connection, workspace_id, "Complete")
@@ -248,11 +248,13 @@ def test_completed_checkpoint_persists_committed_changed_path(tmp_path: Path) ->
             connection,
             created.task.task_id,
             expected_revision=1,
-            state=TaskState.COMPLETED,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            next_step="Operator accepts",
             summary="Finished task",
         )
 
-        assert result.task.state is TaskState.COMPLETED
+        assert result.task.state is TaskState.WAITING
         assert result.task.revision == 2
         assert result.checkpoint.current_head != result.checkpoint.baseline_head
         assert result.checkpoint.current_dirty_path_count == 0
@@ -278,7 +280,7 @@ def test_stale_checkpoint_is_fully_non_mutating(tmp_path: Path) -> None:
                 connection,
                 created.task.task_id,
                 expected_revision=1,
-                state=TaskState.COMPLETED,
+                state=TaskState.WORKING,
                 summary="Stale overwrite",
             )
 
@@ -306,7 +308,7 @@ def test_mechanical_failure_rolls_back_checkpoint_state_and_event(
                 connection,
                 created.task.task_id,
                 expected_revision=1,
-                state=TaskState.COMPLETED,
+                state=TaskState.WORKING,
                 summary="Should not persist",
             )
 

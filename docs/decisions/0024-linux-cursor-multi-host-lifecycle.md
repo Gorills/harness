@@ -9,6 +9,16 @@
 - **Source-dogfood amendment:** [ADR-0036](0036-source-checkout-global-dogfood.md) replaces the direct checkout MCP launch with an isolated-by-default router and one explicit tool-installed index-only route.
 - **Unavailable-root amendment:** 2026-08-30. Cursor/Codex install and uninstall skip registered Workspace roots that cannot be resolved as directories. That is the same unavailable class doctor already WARNs. Live Workspaces remain fail-closed for ownership and tracked-config collisions. Registry rows are not deleted; `harness doctor` still names them.
 - **Host-retirement amendment:** [ADR-0039](0039-retire-claude-code-host.md) retires Claude Code. Supported hosts are Codex and Cursor; omitted `--host` installs Cursor; `--host all` installs that pair.
+- **Global-refresh amendment (2026-09-20):** the checkout `install-global` helper preserves its
+  default Cursor+Codex profile set but activates it with one `harness install --host all` call, so
+  both adapters are preflighted before either is changed. The combined call retains the established
+  `all` adapter order (Codex, then Cursor), including its observable partial-failure shape. A failed
+  post-install Workspace repair
+  names the phase, Workspace, selected profiles, and bounded underlying cause, states that earlier
+  integration changes may already be present, and gives the exact idempotent retry plus `doctor`
+  commands. The helper preserves the failing lifecycle exit status and does not claim success or
+  start a second host activation after a partial failure. Ownership and collision failures remain
+  fail-closed; this amendment does not add rollback of external host configuration.
 
 ## Context
 

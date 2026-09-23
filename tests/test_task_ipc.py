@@ -467,7 +467,7 @@ def test_task_start_does_not_project_task_hint_only_skill(
             [WorkspaceHint(root, "explicit-root")],
             started.task_id,
             expected_revision=started.revision,
-            state=TaskState.COMPLETED,
+            state=TaskState.WORKING,
             summary="No hint-only skill projection",
             next_step=None,
         )
@@ -559,7 +559,7 @@ def test_task_start_does_not_replace_stack_only_projection(
             [WorkspaceHint(root, "explicit-root")],
             started.task_id,
             expected_revision=started.revision,
-            state=TaskState.COMPLETED,
+            state=TaskState.WORKING,
             summary="Stack-only projection stays",
             next_step=None,
         )
@@ -736,6 +736,8 @@ def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: P
             "task",
             "last_checkpoint",
             "pending_operator_feedback",
+            "head",
+            "branch",
         }
         assert raw_result["pending_operator_feedback"] is None
         assert "First checkpoint" not in json.dumps(raw_status, sort_keys=True)

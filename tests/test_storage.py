@@ -14,6 +14,13 @@ from harness.storage import (
     connect_database_read_only,
     initialize_database,
 )
+from harness.task_checkpoints import (
+    get_latest_task_checkpoint_status,
+    get_task_checkpoint,
+    list_task_checkpoints,
+    list_task_events,
+)
+from harness.tasks import TaskState
 
 
 def test_connect_database_read_only_rejects_writes(tmp_path: Path) -> None:
@@ -213,6 +220,143 @@ def test_initialize_database_is_idempotent(tmp_path: Path) -> None:
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
         assert versions == [(version,) for version in range(1, SCHEMA_VERSION + 1)]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("keep_created_event", [False, True])
+def test_v22_migration_preserves_deleted_event_id_high_water(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_created_event: bool
+) -> None:
+    database = tmp_path / "migration.db"
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 21)
+        initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+            ) VALUES ('task', 'workspace', 'Task', 'working', NULL, 3, 'created', 'updated')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events(id, task_id, task_revision, event_type, created_at)
+            VALUES (1, 'task', 1, 'created', 'created')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_events(
+                id, task_id, task_revision, event_type, operator_comment, created_at
+            ) VALUES (999, 'task', 2, 'operator_comment', 'Removed comment', 'updated')
+            """
+        )
+        connection.execute("DELETE FROM task_events WHERE id = 999")
+        if not keep_created_event:
+            connection.execute("DELETE FROM task_events")
+        expected_events = connection.execute(
+            "SELECT id, task_id, task_revision, event_type FROM task_events ORDER BY id"
+        ).fetchall()
+        connection.commit()
+    finally:
+        connection.close()
+
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        assert (
+            connection.execute(
+                "SELECT id, task_id, task_revision, event_type FROM task_events ORDER BY id"
+            ).fetchall()
+            == expected_events
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO task_events(
+                task_id, task_revision, event_type, operator_comment, created_at
+            ) VALUES ('task', 3, 'operator_comment', 'New comment', 'updated')
+            """
+        )
+        assert cursor.lastrowid == 1000
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        connection.close()
+
+
+def test_v22_migration_preserves_readable_historical_completed_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "migration.db"
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 21)
+        initialize_database(database)
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            """
+            INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir)
+            VALUES ('workspace', 'project', '/repo', '/repo/.git')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(
+                id, workspace_id, title, state, wait_reason, revision, created_at, updated_at
+            ) VALUES ('task', 'workspace', 'Task', 'completed', NULL, 2, 'created', 'updated')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO task_checkpoints(
+                id, task_id, task_revision, state, summary, created_at,
+                baseline_head, current_head, current_branch, current_dirty_path_count
+            ) VALUES ('checkpoint', 'task', 2, 'completed', 'Legacy result', 'updated',
+                ?, ?, 'feature/legacy', 0)
+            """,
+            ("a" * 40, "b" * 40),
+        )
+        connection.execute(
+            "INSERT INTO task_checkpoint_changed_paths(checkpoint_id, relative_path) "
+            "VALUES ('checkpoint', 'src/legacy.py')"
+        )
+        connection.execute(
+            "INSERT INTO task_events(task_id,task_revision,event_type,checkpoint_id,created_at) "
+            "VALUES ('task',2,'checkpoint','checkpoint','updated')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        checkpoint = get_task_checkpoint(connection, "checkpoint")
+        assert checkpoint.state is TaskState.COMPLETED
+        assert checkpoint.summary == "Legacy result"
+        assert checkpoint.current_head == "b" * 40
+        assert checkpoint.current_branch == "feature/legacy"
+        assert checkpoint.changed_paths == ("src/legacy.py",)
+        assert list_task_checkpoints(connection, "task") == (checkpoint,)
+        latest = get_latest_task_checkpoint_status(connection, "task")
+        assert latest is not None
+        assert latest.checkpoint_id == checkpoint.checkpoint_id
+        assert latest.task_revision == 2
+        assert latest.state is TaskState.COMPLETED
+        assert latest.wait_reason is None
+        assert [event.event_type.value for event in list_task_events(connection, "task")] == [
+            "checkpoint"
+        ]
     finally:
         connection.close()
 
@@ -701,27 +845,32 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
-        connection.execute("DROP TABLE indexed_resolved_code_relation_search")
-        connection.execute("DROP TABLE indexed_resolved_code_relations")
-        connection.execute("DROP TABLE indexed_resolved_relation_workspaces")
-        connection.execute("DROP TABLE indexed_python_reexports")
-        connection.execute("DROP TABLE indexed_code_relation_search")
-        connection.execute("DROP TABLE indexed_code_relations")
-        connection.execute("DROP TABLE indexed_code_unit_search")
-        connection.execute("DROP TABLE indexed_code_units")
-        connection.execute("DROP TABLE indexed_code_unit_files")
-        connection.execute("DROP TABLE indexed_content_search")
-        connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_relation_workspaces")
+        connection.execute("DROP TABLE IF EXISTS indexed_python_reexports")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_units")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_files")
+        connection.execute("DROP TABLE IF EXISTS indexed_content_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_search_documents")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
         connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
-        connection.execute("DROP TABLE workspace_search_index_dirty_paths")
-        connection.execute("DROP TABLE workspace_search_index_state")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_dirty_paths")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_state")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
-        connection.execute("DROP TABLE knowledge_search")
+        connection.execute("DROP TABLE IF EXISTS knowledge_search")
         connection.execute("DROP TABLE task_checkpoint_verification")
+        connection.execute("DROP TABLE task_git_evidence_paths")
+        connection.execute("DROP TABLE task_git_evidence")
+        connection.execute("DROP TABLE task_git_origins")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_test")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_prod")
         connection.execute("DELETE FROM schema_migrations WHERE version >= 6")
         connection.commit()
     finally:
@@ -743,5 +892,113 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
         ).fetchall() == [(version,) for version in range(1, SCHEMA_VERSION + 1)]
         assert connection.execute("SELECT COUNT(*) FROM task_checkpoints").fetchone() == (0,)
         assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+    finally:
+        connection.close()
+
+
+_RETIRED_SEARCH_PREFIXES = (
+    "indexed_search_documents",
+    "indexed_content_search",
+    "indexed_code_unit",
+    "indexed_code_relation",
+    "indexed_resolved_code_relation",
+    "indexed_resolved_relation_workspaces",
+    "indexed_python_reexports",
+    "workspace_search_index_",
+    "knowledge_search",
+)
+
+
+def _retired_search_objects(connection: sqlite3.Connection) -> set[str]:
+    return {
+        name
+        for (name,) in connection.execute("SELECT name FROM sqlite_schema")
+        if name.startswith(_RETIRED_SEARCH_PREFIXES)
+    }
+
+
+def test_fresh_v24_schema_keeps_task_lookup_without_project_search_tables(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "fresh.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        assert _retired_search_objects(connection) == set()
+        tables = {
+            name
+            for (name,) in connection.execute("SELECT name FROM sqlite_schema WHERE type = 'table'")
+        }
+        assert {"indexed_files", "task_search", "knowledge_cards"} <= tables
+    finally:
+        connection.close()
+
+
+def test_v24_migration_drops_project_search_projections_and_preserves_durable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "retire-project-search.db"
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 23)
+        initialize_database(database)
+
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("INSERT INTO projects(id) VALUES ('project')")
+        connection.execute(
+            "INSERT INTO workspaces(id, project_id, workspace_root, git_common_dir) "
+            "VALUES ('workspace', 'project', '/repo', '/repo/.git')"
+        )
+        connection.execute(
+            "INSERT INTO indexed_files(workspace_id, relative_path, kind, size_bytes, content_sha256) "
+            "VALUES ('workspace', 'src/app.py', 'file', 8, ?)",
+            ("0" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO indexed_search_documents("
+            "workspace_id, relative_path, corpus, content_sha256, title, path_tokens, identifier_tokens"
+            ") VALUES ('workspace', 'src/app.py', 'code', ?, 'app.py', 'src app py', 'app')",
+            ("0" * 64,),
+        )
+        connection.execute(
+            "INSERT INTO tasks(id, workspace_id, title, state, revision, created_at, updated_at) "
+            "VALUES ('task', 'workspace', 'Preserved task', 'completed', 1, 'now', 'now')"
+        )
+        connection.execute(
+            "INSERT INTO knowledge_cards("
+            "id, project_id, kind, title, body, source_type, created_at, updated_at, freshness"
+            ") VALUES ('card', 'project', 'invariant', 'Preserved card', "
+            "'Durable knowledge', 'operator', 'now', 'now', 'fresh')"
+        )
+        assert _retired_search_objects(connection)
+        assert connection.execute(
+            "SELECT task_id FROM task_search WHERE task_search MATCH 'preserved'"
+        ).fetchall() == [("task",)]
+        assert connection.execute(
+            "SELECT knowledge_id FROM knowledge_search WHERE knowledge_search MATCH 'preserved'"
+        ).fetchall() == [("card",)]
+        connection.commit()
+    finally:
+        connection.close()
+
+    status = initialize_database(database)
+    assert status.schema_version == 24
+
+    connection = connect_database(database)
+    try:
+        assert _retired_search_objects(connection) == set()
+        assert connection.execute(
+            "SELECT relative_path FROM indexed_files WHERE workspace_id = 'workspace'"
+        ).fetchall() == [("src/app.py",)]
+        assert connection.execute("SELECT id, title FROM tasks").fetchall() == [
+            ("task", "Preserved task")
+        ]
+        assert connection.execute("SELECT id, title, body FROM knowledge_cards").fetchall() == [
+            ("card", "Preserved card", "Durable knowledge")
+        ]
+        assert connection.execute(
+            "SELECT task_id FROM task_search WHERE task_search MATCH 'preserved'"
+        ).fetchall() == [("task",)]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         connection.close()

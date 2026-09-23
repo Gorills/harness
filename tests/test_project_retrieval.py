@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import subprocess
@@ -11,13 +12,10 @@ from harness.index import scan_workspace
 from harness.registry import create_project, register_workspace
 from harness.retrieval import (
     ProjectRetrievalRefError,
-    ProjectSearchKind,
-    ProjectSearchScope,
     read_project_context,
-    search_project,
-    search_tasks,
 )
 from harness.storage import connect_database, initialize_database
+from harness.task_baseline import capture_workspace_task_baseline, persist_task_baseline
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -84,15 +82,25 @@ def _task_history(
         (task_id, workspace_id, title),
     )
     checkpoint_id = f"checkpoint-{task_id}"
+    baseline = capture_workspace_task_baseline(connection, workspace_id)
+    persist_task_baseline(connection, task_id, baseline)
     connection.execute(
         """
         INSERT INTO task_checkpoints(
             id, task_id, task_revision, state, wait_reason, summary, next_step,
             created_at, baseline_head, current_head, current_branch, current_dirty_path_count
         ) VALUES (?, ?, 2, 'working', NULL, ?, 'Continue verification', 'checkpoint-time',
-                  NULL, NULL, 'main', 0)
+                  ?, ?, ?, ?)
         """,
-        (checkpoint_id, task_id, summary),
+        (
+            checkpoint_id,
+            task_id,
+            summary,
+            baseline.head,
+            baseline.head,
+            baseline.branch,
+            len(baseline.dirty_paths),
+        ),
     )
     connection.execute(
         """
@@ -125,401 +133,6 @@ def _task_history(
     )
     assert cursor.lastrowid is not None
     return checkpoint_id, cursor.lastrowid
-
-
-def test_project_search_retrieves_scoped_knowledge_tasks_code_and_docs(tmp_path: Path) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        project_id, workspace_id = _workspace(connection, tmp_path / "repo")
-        other_project_id, other_workspace_id = _workspace(connection, tmp_path / "other")
-        _knowledge(
-            connection,
-            knowledge_id="fresh-card",
-            project_id=project_id,
-            title="Refresh token rotation invariant",
-            body="Rotation invalidates the previous refresh credential atomically.",
-        )
-        _knowledge(
-            connection,
-            knowledge_id="stale-card",
-            project_id=project_id,
-            title="Historical refresh token caveat",
-            body="Old rotation behavior retained two credentials.",
-            freshness="needs_revalidation",
-        )
-        _knowledge(
-            connection,
-            knowledge_id="other-card",
-            project_id=other_project_id,
-            title="Other Project refresh secret",
-            body="Must never cross Project retrieval boundaries.",
-        )
-        checkpoint_id, feedback_event_id = _task_history(
-            connection,
-            task_id="rotation-task",
-            workspace_id=workspace_id,
-            title="Rotate session credentials",
-            summary="Refresh token rotation updates durable session state",
-            feedback="Preserve the legacy session marker during refresh migration",
-        )
-        _task_history(
-            connection,
-            task_id="other-task",
-            workspace_id=other_workspace_id,
-            title="Other Project refresh work",
-            summary="Secret unrelated refresh summary",
-            feedback="Secret unrelated feedback",
-        )
-
-        knowledge = search_project(
-            connection,
-            workspace_id,
-            "refresh token rotation",
-            scope=ProjectSearchScope.KNOWLEDGE,
-            limit=5,
-        )
-        assert [hit.ref for hit in knowledge] == ["knowledge:fresh-card", "knowledge:stale-card"]
-        assert knowledge[0].freshness == "fresh"
-        assert knowledge[1].freshness == "needs_revalidation"
-        assert "other-card" not in str(knowledge)
-
-        tasks = search_project(
-            connection,
-            workspace_id,
-            "refresh migration",
-            scope=ProjectSearchScope.TASKS,
-            limit=5,
-        )
-        assert len(tasks) == 1
-        assert tasks[0].kind is ProjectSearchKind.TASK
-        assert tasks[0].ref in {
-            f"task:rotation-task#checkpoint:{checkpoint_id}",
-            f"task:rotation-task#event:{feedback_event_id}",
-        }
-        assert "other-task" not in str(tasks)
-
-        across_projects = search_tasks(connection, "refresh", limit=5)
-        titles = {hit.title for hit in across_projects}
-        assert "Rotate session credentials" in titles
-        assert "Other Project refresh work" in titles
-
-        code = search_project(
-            connection, workspace_id, "refresh token", scope=ProjectSearchScope.CODE, limit=5
-        )
-        docs = search_project(
-            connection, workspace_id, "refresh rotation", scope=ProjectSearchScope.DOCS, limit=5
-        )
-        assert code[0].ref == "code:src/refresh_token.py"
-        assert code[0].kind is ProjectSearchKind.CODE
-        assert code[0].match_reason == "exact filename stem"
-        assert docs[0].ref == "doc:docs/refresh-rotation.md"
-        assert docs[0].kind is ProjectSearchKind.DOC
-
-        all_hits = search_project(
-            connection, workspace_id, "refresh", scope=ProjectSearchScope.ALL, limit=5
-        )
-        assert len(all_hits) <= 5
-        assert {hit.kind for hit in all_hits} >= {
-            ProjectSearchKind.CODE,
-            ProjectSearchKind.DOC,
-            ProjectSearchKind.KNOWLEDGE,
-        }
-    finally:
-        connection.close()
-
-
-def test_project_search_uses_content_for_natural_queries_and_compound_identifiers(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "tests").mkdir()
-        (root / "tests" / "test_refresh_token.py").write_text(
-            "def test_rotateRefreshToken():\n    assert previous_credential_is_invalid()\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        natural = search_project(
-            connection,
-            workspace_id,
-            "where previous credential invalidation happens",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-        compound = search_project(
-            connection,
-            workspace_id,
-            "rotate refresh token",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-        test_query = search_project(
-            connection,
-            workspace_id,
-            "test rotate refresh token",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-
-        assert natural[0].ref == "code:src/refresh_token.py"
-        assert natural[0].match_reason == "dense lexical content (all terms)"
-        assert compound[0].ref == "code:src/refresh_token.py"
-        assert compound[0].match_reason == "code unit definition phrase"
-        assert compound[0].short_summary == "function rotateRefreshToken"
-        assert test_query[0].ref == "code:tests/test_refresh_token.py"
-        assert natural[0].evidence is not None
-        assert "credential" in natural[0].evidence.snippet
-        assert natural[0].short_summary is None
-        assert "bm25" not in repr(natural).casefold()
-    finally:
-        connection.close()
-
-
-def test_project_search_rejects_partial_identifier_matches_for_garbage_query(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        _project_id, workspace_id = _workspace(connection, tmp_path / "repo")
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "nonexistent-xyzzy-token-12345",
-            scope=ProjectSearchScope.ALL,
-            limit=5,
-        )
-
-        assert results == ()
-    finally:
-        connection.close()
-
-
-def test_dense_high_coverage_result_beats_dispersed_all_term_file(tmp_path: Path) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "tests").mkdir()
-        (root / "tests" / "test_model_budget.py").write_text(
-            "# test project search model budget\n",
-            encoding="utf-8",
-        )
-        (root / "src" / "dispersed.py").write_text(
-            ("test\n" + ("padding " * 160) + "\n")
-            + ("project\n" + ("padding " * 160) + "\n")
-            + ("search\n" + ("padding " * 160) + "\n")
-            + ("model\n" + ("padding " * 160) + "\n")
-            + ("exposure\n" + ("padding " * 160) + "\n")
-            + "budget\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "test verifies project search model exposure budget",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-
-        assert results[0].ref == "code:tests/test_model_budget.py"
-        assert results[0].match_reason == "dense lexical content (5/6 terms)"
-        assert results[0].evidence is not None
-        assert "test project search model budget" in results[0].evidence.snippet
-        assert any(hit.ref == "code:src/dispersed.py" for hit in results)
-    finally:
-        connection.close()
-
-
-def test_installation_inflection_finds_install_identifier(tmp_path: Path) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "Makefile").write_text(
-            "install-global-codex:\n\t@echo ready\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "where global Codex installation is implemented",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-
-        assert results[0].ref == "code:Makefile"
-        assert results[0].match_reason == "dense lexical content (all terms)"
-    finally:
-        connection.close()
-
-
-def test_project_search_excludes_generated_test_output_from_code_results(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "src" / "nutrition.py").write_text(
-            "# FastAPI endpoints for nutrition requests.\n",
-            encoding="utf-8",
-        )
-        (root / ".pytest_nutrition_all.out").write_text(
-            "FastAPI endpoints nutrition nutrition nutrition\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "FastAPI endpoints nutrition",
-            scope=ProjectSearchScope.CODE,
-            limit=5,
-        )
-
-        assert results[0].ref == "code:src/nutrition.py"
-        assert all(hit.path != ".pytest_nutrition_all.out" for hit in results)
-    finally:
-        connection.close()
-
-
-def test_project_search_prioritizes_canonical_exact_stem_doc_over_archives(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "docs" / "ARCHITECTURE.md").write_text(
-            "Canonical system design.\n",
-            encoding="utf-8",
-        )
-        archive = root / "epic" / "archive" / "04_architecture_stabilization"
-        archive.mkdir(parents=True)
-        for name in (
-            "ARCHITECTURE.md",
-            "architecture_notes_1.md",
-            "architecture_notes_2.md",
-            "architecture_notes_3.md",
-            "architecture_notes_4.md",
-        ):
-            (archive / name).write_text(
-                "Architecture architecture architecture stabilization notes.\n",
-                encoding="utf-8",
-            )
-        scan_workspace(connection, workspace_id)
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "architecture",
-            scope=ProjectSearchScope.DOCS,
-            limit=5,
-        )
-
-        assert results[0].ref == "doc:docs/ARCHITECTURE.md"
-    finally:
-        connection.close()
-
-
-def test_all_scope_prioritizes_direct_fresh_knowledge_over_general_lexical_hits(
-    tmp_path: Path,
-) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        project_id, workspace_id = _workspace(connection, tmp_path / "repo")
-        _knowledge(
-            connection,
-            knowledge_id="direct-card",
-            project_id=project_id,
-            title="Atomic credential invalidation",
-            body="The previous refresh credential is invalidated in the replacement transaction.",
-        )
-        _knowledge(
-            connection,
-            knowledge_id="incidental-card",
-            project_id=project_id,
-            title="Credential operations",
-            body="General operational notes for credentials.",
-        )
-
-        knowledge_results = search_project(
-            connection,
-            workspace_id,
-            "where atomic credential invalidation happens",
-            scope=ProjectSearchScope.KNOWLEDGE,
-            limit=5,
-        )
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "atomic credential invalidation",
-            scope=ProjectSearchScope.ALL,
-            limit=5,
-        )
-
-        assert [hit.ref for hit in knowledge_results] == [
-            "knowledge:direct-card",
-            "knowledge:incidental-card",
-        ]
-        assert results[0].ref == "knowledge:direct-card"
-        assert results[0].freshness == "fresh"
-        assert any(hit.ref == "code:src/refresh_token.py" for hit in results)
-    finally:
-        connection.close()
-
-
-def test_project_search_matches_common_russian_inflections_in_docs(tmp_path: Path) -> None:
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        root = tmp_path / "repo"
-        _project_id, workspace_id = _workspace(connection, root)
-        (root / "docs" / "search-quality.md").write_text(
-            "Поиск по проектам учитывает релевантность результатов.\n",
-            encoding="utf-8",
-        )
-        scan_workspace(connection, workspace_id)
-
-        results = search_project(
-            connection,
-            workspace_id,
-            "релевантности поиска проекта",
-            scope=ProjectSearchScope.DOCS,
-            limit=5,
-        )
-
-        assert results[0].ref == "doc:docs/search-quality.md"
-        assert results[0].match_reason == "dense lexical content (all terms)"
-    finally:
-        connection.close()
 
 
 def test_project_context_expands_only_selected_refs_and_fails_closed_cross_project(
@@ -592,7 +205,7 @@ def test_project_context_expands_only_selected_refs_and_fails_closed_cross_proje
 
         with pytest.raises(ProjectRetrievalRefError, match="another Project"):
             read_project_context(connection, workspace_id, ("knowledge:other-card",))
-        with pytest.raises(ProjectRetrievalRefError, match="another Project"):
+        with pytest.raises(ProjectRetrievalRefError, match=r"unavailable|another Project"):
             read_project_context(connection, workspace_id, ("task:other-task",))
         with pytest.raises(ProjectRetrievalRefError, match="kind does not match"):
             read_project_context(connection, workspace_id, ("code:docs/refresh-rotation.md",))
@@ -616,6 +229,10 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
             ("large-card", project_id, "T" * 256, "B" * 8192),
         )
         for index in range(8):
+            relative_path = f"deep/{index}/" + "/".join(["p" * 180] * 10)
+            anchor_path = tmp_path / "repo" / relative_path
+            anchor_path.parent.mkdir(parents=True, exist_ok=True)
+            anchor_path.write_bytes(b"anchored content\n")
             connection.execute(
                 """
                 INSERT INTO knowledge_anchors(
@@ -626,9 +243,9 @@ def test_project_context_compacts_maximum_semantic_payloads(tmp_path: Path) -> N
                 (
                     "large-card",
                     workspace_id,
-                    f"deep/{index}/" + ("p" * 1800),
+                    relative_path,
                     f"symbol-{index}",
-                    f"{index:x}" * 64,
+                    hashlib.sha256(anchor_path.read_bytes()).hexdigest(),
                 ),
             )
 

@@ -160,6 +160,7 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
     assert by_id["language-engineering"].portable_files == (
         PurePosixPath("SKILL.md"),
         PurePosixPath("references/c-cpp.md"),
+        PurePosixPath("references/dart.md"),
         PurePosixPath("references/dotnet.md"),
         PurePosixPath("references/gdscript.md"),
         PurePosixPath("references/go.md"),
@@ -249,6 +250,45 @@ def test_builtin_pack_routes_deep_quality_guidance_by_stack_and_intent(tmp_path:
             resolve_skills(definitions, DetectedProjectStack(frozenset(), frozenset(), frozenset()))
         )
         == ()
+    )
+
+
+def test_dart_and_flutter_route_language_and_native_guidance(tmp_path: Path) -> None:
+    registry = tmp_path / "skills"
+    sync_builtin_skills(registry)
+    definitions = load_skill_registry(registry)
+
+    dart_package = DetectedProjectStack(
+        frozenset({"dart"}),
+        frozenset(),
+        frozenset({"pubspec.yaml"}),
+        frozenset({"software-project"}),
+    )
+    dart_resolved = {
+        item.definition.skill_id: item for item in resolve_skills(definitions, dart_package)
+    }
+    assert "language-engineering" in dart_resolved
+    assert "mobile-application" not in dart_resolved
+    assert "language:dart" in dart_resolved["language-engineering"].match_reasons
+
+    flutter_app = DetectedProjectStack(
+        frozenset({"dart"}),
+        frozenset({"flutter"}),
+        frozenset({"pubspec.yaml"}),
+        frozenset({"mobile-app", "software-project"}),
+    )
+    flutter_resolved = {
+        item.definition.skill_id: item for item in resolve_skills(definitions, flutter_app)
+    }
+    assert {"language-engineering", "mobile-application"} <= flutter_resolved.keys()
+    assert "public-frontend" not in flutter_resolved
+    assert (
+        PurePosixPath("references/dart.md")
+        in flutter_resolved["language-engineering"].definition.portable_files
+    )
+    assert (
+        PurePosixPath("references/flutter.md")
+        in flutter_resolved["mobile-application"].definition.portable_files
     )
 
 
@@ -351,43 +391,22 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
     change = _builtin_by_id("complex-change-planning")
     language = _builtin_by_id("language-engineering")
     legacy = _builtin_by_id("legacy-preservation")
-    security_web = dict(_builtin_by_id("secure-by-design").references)["web-backend.md"]
+    security = _builtin_by_id("secure-by-design")
     assert architecture.applies_facets == ("software-project",)
     assert change.applies_facets == ("software-project",)
     assert language.applies_facets == ("software-project",)
     assert language.applies_languages
     assert legacy.applies_facets == ("software-project",)
     assert legacy.task_hints == ()
-    assert "characterization, contract, or golden tests" in legacy.body
-    assert dict(architecture.references)["architecture-decisions.md"]
-    assert (
-        "Record an ADR only for durable decisions"
-        in dict(architecture.references)["architecture-decisions.md"]
-    )
-    assert "measured workload" in dict(architecture.references)["scalability.md"]
-    assert (
-        "independently test the requested behavior"
-        in dict(change.references)["specification-audit.md"]
-    )
-    assert "as if you did not implement it" in dict(change.references)["independent-review.md"]
-    assert "legacy-preservation.md" not in dict(change.references)
-    assert "legacy-preservation" in change.body
-    assert change.description.startswith(
-        "Use when planning a cross-boundary or migration-ordered change"
-    )
-    assert "preserving legacy compatibility" not in change.description
-    assert (
-        "exclude ordinary single-module bugfixes and routine test-only work" in change.description
-    )
-    assert legacy.description.startswith("Use when")
-    assert "established behavior" in legacy.description
-    assert "greenfield-only" in legacy.description
-    testing = _builtin_by_id("testing-strategy")
-    conventions = " ".join(testing.body.split())
-    assert "Do not duplicate facts Harness can derive from manifests" in conventions
-    assert "canonical task runner" in conventions
-    assert "unsafe operations" in conventions
-    assert "Argon2id" in security_web
+    assert set(dict(architecture.references)) == {
+        "architecture-decisions.md",
+        "scalability.md",
+    }
+    assert set(dict(change.references)) == {
+        "independent-review.md",
+        "specification-audit.md",
+    }
+    assert "web-backend.md" in dict(security.references)
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)

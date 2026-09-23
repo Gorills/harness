@@ -80,18 +80,19 @@ def test_codex_project_reconcile_creates_exact_owned_config_and_git_excludes(
     assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
 
     config_text = _config(root).read_text(encoding="utf-8")
-    assert "fully restart Codex and begin a new task" in config_text
+    assert "restart Codex in a new conversation; resume the unfinished Harness Task" in config_text
     value = tomllib.loads(config_text)
     instructions = value.pop("developer_instructions")
     assert "project_status" in instructions
     assert "deferred" in instructions
-    assert "initial visible tool list" in instructions
-    assert "existing instruction snapshots do not refresh" in instructions
+    assert "deferred/omitted Harness tools" in instructions
+    assert "After config changes restart Codex/new conversation" in instructions
     assert HIDDEN_INSTRUCTION_BODY not in instructions
     assert value == {
         "mcp_servers": {
             "harness": {
                 "url": "http://127.0.0.1:17375/mcp",
+                "enabled": True,
                 "required": True,
                 "startup_timeout_sec": 30,
                 "http_headers": {
@@ -133,47 +134,34 @@ def test_codex_project_reconcile_binds_a_directory_without_git(tmp_path: Path) -
 
 
 def test_codex_bootstrap_is_small_and_front_loads_deferred_tool_discovery() -> None:
-    assert len(CODEX_BOOTSTRAP_INSTRUCTION_BODY.encode("utf-8")) < 1024
-    first_512 = CODEX_BOOTSTRAP_INSTRUCTION_BODY[:512]
-    assert "must be the first repository action" in first_512
-    assert "Before running any shell command" in first_512
-    assert "project_status" in first_512
-    assert "deferred" in first_512
-    assert "initial visible tool list" in first_512
-    assert "only action allowed before `project_status`" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Before broad repository exploration" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "before diagnosis or" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "never skip" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Do not skip Task because work looks small or the path is known" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "may skip search, not Task" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Natural-language code/doc discovery may use native search directly" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "lexical hits do not block broad fallback" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Complete untruncated exact_coverage replaces native search" in (
-        CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    )
-    assert "discussion only" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "waiver" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "Checkpoint each logical stage" in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    assert "before changes and checkpoint progress" not in CODEX_BOOTSTRAP_INSTRUCTION_BODY
-
-
-def test_codex_bootstrap_matches_canonical_workflow() -> None:
     text = CODEX_BOOTSTRAP_INSTRUCTION_BODY
-    after_status = text.split("After successful `project_status`", maxsplit=1)[1]
-    task_at = after_status.find("start or resume a Harness Task")
-    search_at = after_status.find("`project_search`")
-    assert 0 <= task_at < search_at
-    assert "After successful `project_status`, use `project_search`" not in text
-    assert "expand selected refs with" not in text
-    assert "then use native tools. Start or resume a Harness Task" not in text
-    assert "a code/doc path may be read natively" in text
-    assert "Natural-language code/doc discovery may use native search directly" in text
-    assert "lexical hits do not block broad fallback" in text
     assert len(text.encode("utf-8")) < 1024
+    for required in (
+        "must be the first repository action",
+        "Before shell/read/search/browser/change",
+        "deferred/omitted Harness tools",
+        "discovery alone may precede status",
+        "restart Codex/new conversation",
+        "substantial changes",
+        "multi-step work",
+        "needed continuity",
+        "explicit request",
+        "Quick questions, reads, and small local edits may proceed without a Task",
+        "Same outcome: one Task",
+        "New Task only for a distinct outcome",
+        "Resume by explicit ID",
+        "task_id+expected_revision",
+        "ready => waiting(operator_review)",
+        "Only the operator completes Tasks",
+        "Use native repository tools for code and documentation discovery",
+        "Harness provides no project code/document search",
+        "older Task/Knowledge without ID, optionally use `project_recall`",
+        "open selected refs with `project_context`",
+    ):
+        assert required in text
+    assert "Small work or known paths still need a Task" not in text
+    assert "before diagnosis/edits" not in text
+    assert "project_search" not in text
 
 
 def test_codex_owned_config_reconciles_hidden_developer_instructions(tmp_path: Path) -> None:
@@ -223,6 +211,28 @@ def test_codex_project_reconcile_updates_only_marker_owned_config(tmp_path: Path
 
 
 @pytest.mark.parametrize("hidden", [False, True])
+def test_codex_project_reconcile_migrates_owned_http_config_without_enabled(
+    tmp_path: Path,
+    hidden: bool,
+) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    path = _config(root)
+    original = path.read_text(encoding="utf-8")
+    assert original.count("enabled = true\n") == 1
+    path.write_text(original.replace("enabled = true\n", "", 1), encoding="utf-8")
+
+    diagnostic = adapter.project_registration_diagnostic(root, hidden=hidden)
+    assert diagnostic.state is HostRegistrationState.STALE_OWNED
+    assert diagnostic.preflight_error is None
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    assert (
+        tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]["harness"]["enabled"] is True
+    )
+
+
+@pytest.mark.parametrize("hidden", [False, True])
 def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
     tmp_path: Path,
     hidden: bool,
@@ -268,6 +278,9 @@ def test_codex_project_reconcile_migrates_exact_legacy_owned_config(
         codex_module._TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
         codex_module._LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+        codex_module._PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     ],
 )
 @pytest.mark.parametrize("hidden", [False, True])
@@ -446,6 +459,7 @@ def test_codex_tracked_source_checkout_overlay_is_preserved(
                 f"command = {json.dumps(command)}",
                 f"args = {json.dumps(args)}",
                 "startup_timeout_sec = 30",
+                "enabled = true",
                 "required = true",
                 'experimental_environment = "local"',
                 "",
@@ -476,6 +490,53 @@ def test_codex_tracked_source_checkout_overlay_is_preserved(
     assert hidden.preflight_error is not None
     with pytest.raises(HostIntegrationError, match=r"tracked \.codex/config\.toml requires"):
         adapter.reconcile_project(root, hidden=True)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "server_settings",
+    [
+        ("required = true", "enabled = false"),
+        ("required = false", "enabled = true"),
+        ("required = true",),
+    ],
+)
+def test_codex_tracked_source_checkout_overlay_must_be_enabled_and_required(
+    tmp_path: Path,
+    server_settings: tuple[str, ...],
+) -> None:
+    root = _repository(tmp_path / "repo")
+    path = _config(root)
+    path.parent.mkdir()
+    path.write_text(
+        "\n".join(
+            (
+                f"developer_instructions = {json.dumps(CODEX_BOOTSTRAP_INSTRUCTION_BODY)}",
+                "",
+                "[mcp_servers.harness-dev]",
+                'command = "./scripts/dogfood"',
+                'args = ["mcp"]',
+                *server_settings,
+                'experimental_environment = "local"',
+                "",
+                "[mcp_servers.harness-dev.env]",
+                'HARNESS_WORKSPACE_ROOT = "."',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    original = path.read_bytes()
+    _git(root, "add", ".codex/config.toml")
+
+    adapter = _adapter()
+    diagnostic = adapter.project_registration_diagnostic(root)
+    assert diagnostic.state is HostRegistrationState.FOREIGN
+    assert diagnostic.preflight_error is not None
+    with pytest.raises(
+        HostIntegrationError, match="exact Harness Codex bootstrap and local MCP placement"
+    ):
+        adapter.reconcile_project(root)
     assert path.read_bytes() == original
 
 
@@ -832,7 +893,8 @@ def test_installed_codex_cli_loads_generated_trusted_project_mcp(tmp_path: Path)
     assert untrusted.returncode != 0
 
     (codex_home / "config.toml").write_text(
-        f'[projects.{json.dumps(str(root))}]\ntrust_level = "trusted"\n',
+        f'[projects.{json.dumps(str(root))}]\ntrust_level = "trusted"\n'
+        "[mcp_servers.harness]\nenabled = false\n",
         encoding="utf-8",
     )
     completed = subprocess.run(
@@ -856,3 +918,56 @@ def test_installed_codex_cli_loads_generated_trusted_project_mcp(tmp_path: Path)
         "Authorization": "Bearer test-capability",
         "X-Harness-Workspace-Root": str(root),
     }
+
+
+def test_installed_codex_cli_dev_overlay_overrides_user_disabled_server(tmp_path: Path) -> None:
+    codex = shutil.which("codex")
+    if codex is None:
+        pytest.skip("Codex CLI is not installed")
+    root = _repository(tmp_path / "repo")
+    path = _config(root)
+    path.parent.mkdir()
+    path.write_text(
+        "\n".join(
+            (
+                f"developer_instructions = {json.dumps(CODEX_BOOTSTRAP_INSTRUCTION_BODY)}",
+                "",
+                "[mcp_servers.harness-dev]",
+                'command = "./scripts/dogfood"',
+                'args = ["mcp"]',
+                "enabled = true",
+                "required = true",
+                'experimental_environment = "local"',
+                "",
+                "[mcp_servers.harness-dev.env]",
+                'HARNESS_WORKSPACE_ROOT = "."',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    _git(root, "add", ".codex/config.toml")
+    assert _adapter().project_registration_state(root) is HostRegistrationState.CURRENT
+
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        f'[projects.{json.dumps(str(root))}]\ntrust_level = "trusted"\n'
+        "[mcp_servers.harness-dev]\nenabled = false\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ, CODEX_HOME=str(codex_home), HOME=str(tmp_path / "home"))
+    completed = subprocess.run(
+        [codex, "mcp", "get", "harness-dev", "--json"],
+        cwd=root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    observed = json.loads(completed.stdout)
+    assert observed["enabled"] is True
+    assert observed["transport"]["type"] == "stdio"

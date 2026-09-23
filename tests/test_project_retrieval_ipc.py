@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -9,16 +11,17 @@ from threading import Event
 import pytest
 
 from harness.daemon import serve_daemon
+from harness.git_applicability import WorkspaceApplicability
 from harness.index import scan_workspace
 from harness.ipc import (
     IpcProtocolError,
     IpcRemoteError,
     request_project_context,
-    request_project_search,
+    request_project_recall,
+    request_workspace_status,
 )
 from harness.registry import create_project, register_workspace
-from harness.retrieval import ProjectSearchKind, ProjectSearchScope
-from harness.search_currentness import SearchCurrentnessTimeoutError, SearchCurrentnessUnstableError
+from harness.retrieval import ProjectSearchKind
 from harness.storage import connect_database, initialize_database
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
@@ -77,94 +80,189 @@ def _start(database: Path, socket_path: Path) -> tuple[Event, ThreadPoolExecutor
     return stop, executor, future
 
 
-@pytest.mark.parametrize(
-    ("error_type", "code", "message"),
-    [
-        (
-            SearchCurrentnessTimeoutError,
-            "search_timeout",
-            "Project search exceeded its execution deadline; retry after pending indexing settles",
-        ),
-        (
-            SearchCurrentnessUnstableError,
-            "search_workspace_changed",
-            "Workspace changed repeatedly during Project search; retry after edits settle",
-        ),
-    ],
-)
-def test_search_currentness_errors_have_bounded_actionable_ipc_contracts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: type[Exception],
-    code: str,
-    message: str,
-) -> None:
-    root, database, _project_id, _workspace_id = _seed(tmp_path)
+def _send_raw(socket_path: Path, method: str, params: dict[str, object]) -> dict[str, object]:
+    raw = {
+        "version": 1,
+        "request_id": method,
+        "method": method,
+        "params": params,
+    }
+    encoded = (json.dumps(raw, separators=(",", ":")) + "\n").encode("utf-8")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(3)
+        client.connect(str(socket_path))
+        client.sendall(encoded)
+        response = bytearray()
+        while not response.endswith(b"\n"):
+            response.extend(client.recv(4096))
+    parsed = json.loads(response)
+    assert isinstance(parsed, dict)
+    return parsed
 
-    def fail_search(*_args: object, **_kwargs: object) -> None:
-        raise error_type("private source path and index details must stay hidden")
 
-    monkeypatch.setattr("harness.daemon.read_project_search", fail_search)
+def test_raw_surrogate_inputs_are_rejected_and_daemon_stays_live(tmp_path: Path) -> None:
+    root, database, _project_id, workspace_id = _seed(tmp_path)
     socket_path = tmp_path / "runtime" / "harness.sock"
     stop, executor, future = _start(database, socket_path)
+    hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
+    hint = {"path": str(root), "source": "test", "match_mode": "location"}
+    invalid = "\ud800"
+    cases: tuple[tuple[str, dict[str, object]], ...] = (
+        ("project_recall", {"hints": [hint], "query": invalid, "kind": "knowledge", "limit": 1}),
+        ("project_context", {"hints": [hint], "refs": [invalid]}),
+        ("workspace_skills_reconcile", {"hints": [hint], "profiles": [invalid]}),
+        ("skill_cleanup", {"profiles": [invalid]}),
+        ("scan_workspace", {"path": str(root / invalid)}),
+        ("workspace_status", {"hints": [{**hint, "path": str(root / invalid)}]}),
+        ("workspace_status", {"hints": [{**hint, "source": invalid}]}),
+    )
     try:
-        with pytest.raises(IpcRemoteError) as error:
-            request_project_search(
-                socket_path,
-                (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),),
-                "rotation",
-                scope=ProjectSearchScope.CODE,
-            )
-        assert error.value.code == code
-        assert str(error.value) == f"{code}: {message}"
+        for method, params in cases:
+            rejected = _send_raw(socket_path, method, params)
+            assert rejected["ok"] is False, method
+            error = rejected["error"]
+            assert isinstance(error, dict)
+            assert error["code"] == "invalid_request", method
+            assert request_workspace_status(socket_path, hints).workspace_id == workspace_id
+            assert not future.done(), method
     finally:
         stop.set()
         executor.shutdown(wait=True)
         future.result()
 
 
-def test_project_retrieval_round_trips_through_strict_daemon_ipc(tmp_path: Path) -> None:
-    root, database, project_id, workspace_id = _seed(tmp_path)
+def test_recall_scans_past_newer_hidden_cards_before_limit(tmp_path: Path) -> None:
+    root, database, project_id, _workspace_id = _seed(tmp_path)
+    connection = connect_database(database)
+    try:
+        for index in range(300):
+            knowledge_id = f"a{index:03d}"
+            connection.execute(
+                """INSERT INTO knowledge_cards(
+                    id, project_id, kind, title, body, source_type, created_at, updated_at, freshness
+                ) VALUES (?, ?, 'invariant', 'Refresh rotation decoy',
+                          'Previous token invalid', 'operator', 'z', 'z', 'fresh')""",
+                (knowledge_id, project_id),
+            )
+            connection.execute(
+                """INSERT INTO knowledge_anchors(
+                    knowledge_id, workspace_id, relative_path, symbol, fingerprint_kind,
+                    content_sha256
+                ) VALUES (?, ?, 'docs/rotation.md', '', 'file', ?)""",
+                (knowledge_id, _workspace_id, "0" * 64),
+            )
+    finally:
+        connection.close()
+    socket_path = tmp_path / "runtime" / "harness.sock"
+    stop, executor, future = _start(database, socket_path)
+    try:
+        hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
+        result = request_project_recall(
+            socket_path, hints, "refresh rotation", ProjectSearchKind.KNOWLEDGE, limit=1
+        )
+        assert [hit.ref for hit in result.results] == ["knowledge:card"]
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_recall_ipc_timeout_allows_valid_slow_applicability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, _project_id, _workspace_id = _seed(tmp_path)
+    original = WorkspaceApplicability.knowledge_visible
+
+    def delayed(self: WorkspaceApplicability, card: object) -> bool:
+        time.sleep(2.2)
+        return original(self, card)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(WorkspaceApplicability, "knowledge_visible", delayed)
+    socket_path = tmp_path / "runtime" / "harness.sock"
+    stop, executor, future = _start(database, socket_path)
+    try:
+        hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
+        result = request_project_recall(
+            socket_path, hints, "refresh rotation", ProjectSearchKind.KNOWLEDGE, limit=1
+        )
+        assert [hit.ref for hit in result.results] == ["knowledge:card"]
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_knowledge_recall_deadline_is_explicit_and_daemon_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, database, _project_id, workspace_id = _seed(tmp_path)
+    import harness.retrieval as retrieval
+
+    calls = 0
+
+    def expired_clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else 5.0
+
+    monkeypatch.setattr(retrieval, "monotonic", expired_clock)
     socket_path = tmp_path / "runtime" / "harness.sock"
     stop, executor, future = _start(database, socket_path)
     hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
     try:
-        searched = request_project_search(
-            socket_path,
-            hints,
-            "refresh rotation",
-            scope=ProjectSearchScope.KNOWLEDGE,
-            limit=3,
-        )
-        assert searched.project_id == project_id
-        assert searched.workspace_id == workspace_id
-        assert searched.results[0].ref == "knowledge:card"
-        assert searched.results[0].kind is ProjectSearchKind.KNOWLEDGE
-        assert searched.results[0].evidence is None
+        with pytest.raises(IpcRemoteError) as error:
+            request_project_recall(
+                socket_path, hints, "refresh rotation", ProjectSearchKind.KNOWLEDGE, limit=1
+            )
+        assert error.value.code == "recall_timeout"
+        assert request_workspace_status(socket_path, hints).workspace_id == workspace_id
+        assert not future.done()
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
 
-        docs = request_project_search(
-            socket_path,
-            hints,
-            "rotation",
-            scope=ProjectSearchScope.DOCS,
-            limit=1,
-        )
-        assert docs.workspace_state == "current"
-        assert docs.exact_coverage is not None
-        assert docs.exact_coverage.complete is True
-        assert docs.exact_coverage.matched_occurrences == 1
-        assert docs.exact_coverage.locations[0].path == "docs/rotation.md"
-        assert docs.results[0].ref == "doc:docs/rotation.md"
-        assert docs.results[0].evidence is not None
-        assert docs.results[0].evidence.snippet.strip() == "rotation"
-        assert docs.results[0].evidence_reason is None
-        assert set(docs.results[0].evidence.to_wire()) == {
-            "start_line",
-            "end_line",
-            "snippet",
-            "truncated",
-        }
 
+def test_project_recall_returns_only_durable_preview_and_validates_input(tmp_path: Path) -> None:
+    root, database, project_id, _workspace_id = _seed(tmp_path)
+    socket_path = tmp_path / "runtime" / "harness.sock"
+    stop, executor, future = _start(database, socket_path)
+    hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
+    try:
+        result = request_project_recall(
+            socket_path, hints, "refresh rotation", ProjectSearchKind.KNOWLEDGE
+        )
+        assert result.project_id == project_id
+        assert result.query == "refresh rotation"
+        assert result.kind is ProjectSearchKind.KNOWLEDGE
+        assert len(result.results) == 1
+        hit = result.results[0]
+        assert hit.ref == "knowledge:card"
+        assert hit.title == "Refresh rotation invariant"
+        assert hit.short_summary is None
+        assert hit.freshness == "fresh"
+        assert "Previous token becomes invalid" not in repr(result)
+
+        with pytest.raises(IpcProtocolError, match="kind"):
+            request_project_recall(socket_path, hints, "refresh", ProjectSearchKind.CODE)
+        with pytest.raises(IpcProtocolError, match="limit"):
+            request_project_recall(
+                socket_path, hints, "refresh", ProjectSearchKind.KNOWLEDGE, limit=6
+            )
+        with pytest.raises(IpcProtocolError, match="query"):
+            request_project_recall(socket_path, hints, " " * 4, ProjectSearchKind.KNOWLEDGE)
+    finally:
+        stop.set()
+        executor.shutdown(wait=True)
+        future.result()
+
+
+def test_project_context_round_trips_through_strict_daemon_ipc(tmp_path: Path) -> None:
+    root, database, project_id, _workspace_id = _seed(tmp_path)
+    socket_path = tmp_path / "runtime" / "harness.sock"
+    stop, executor, future = _start(database, socket_path)
+    hints = (WorkspaceHint(root, "test", WorkspaceHintMatchMode.LOCATION),)
+    try:
         context = request_project_context(
             socket_path, hints, ("knowledge:card", "doc:docs/rotation.md")
         )

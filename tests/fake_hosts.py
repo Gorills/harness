@@ -53,8 +53,8 @@ if args[:3] == ["mcp", "list-tools", "harness"]:
         raise SystemExit(1)
     for name in (
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ):

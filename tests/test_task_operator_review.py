@@ -138,7 +138,7 @@ def test_operator_feedback_resumes_same_task_and_is_pending_only_for_that_revisi
         connection.close()
 
 
-def test_accept_requires_operator_review_wait_and_completes_with_cas(tmp_path: Path) -> None:
+def test_accept_completes_with_cas_and_allows_explicit_operator_reaccept(tmp_path: Path) -> None:
     connection, workspace_id = _database(tmp_path)
     try:
         waiting = _waiting_for_review(connection, workspace_id)
@@ -163,13 +163,14 @@ def test_accept_requires_operator_review_wait_and_completes_with_cas(tmp_path: P
         assert accepted.event.event_type is TaskEventType.ACCEPTED
         assert accepted.event.operator_feedback is None
 
-        with pytest.raises(TaskTransitionError, match="operator review action"):
-            task_accept(
-                connection,
-                workspace_id,
-                accepted.task.task_id,
-                expected_revision=accepted.task.revision,
-            )
+        reaccepted = task_accept(
+            connection,
+            workspace_id,
+            accepted.task.task_id,
+            expected_revision=accepted.task.revision,
+        )
+        assert reaccepted.task.state is TaskState.COMPLETED
+        assert reaccepted.task.revision == accepted.task.revision + 1
     finally:
         connection.close()
 

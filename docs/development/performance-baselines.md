@@ -26,10 +26,16 @@ not assert elapsed milliseconds. It does assert the recorded structural baseline
 
 | Path | IPC round trips | Git subprocesses |
 | --- | ---: | ---: |
-| `project_status` | 2 | 13 |
+| `project_status` | 2 | 7 |
 | idle watcher token | 0 | 0 |
 | single-path incremental reconcile | 0 | 6 |
 | authoritative no-op scan | 0 | 6 |
+
+The status baseline now includes an active Git snapshot for Task applicability. Runtime identity
+reads batch the root, common directory, and Git directory in one command; shared applicability
+validation replaces duplicate identity checks. The two IPC responses compare HEAD and branch
+before exposing Task state to the model. This reduces the former 13-command status baseline to
+seven commands while checking Git state around the Task read.
 
 The original idle watcher baseline was two Git subprocesses per 0.5-second poll. The current gate
 requires zero: idle sampling walks local metadata and escalates to Git confirmation only after a

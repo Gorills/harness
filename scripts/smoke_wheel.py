@@ -196,8 +196,8 @@ async def _cross_host_mcp_async(
         names = [tool.name for tool in listed.tools]
         expected = [
             "project_status",
-            "project_search",
             "project_context",
+            "project_recall",
             "task_start",
             "task_checkpoint",
         ]
@@ -228,8 +228,12 @@ async def _cross_host_mcp_async(
                 ],
             },
         )
-        if checkpoint.is_error:
+        if checkpoint.is_error or checkpoint.structured_content is None:
             raise RuntimeError("installed Cursor-profile task_checkpoint failed")
+        knowledge_ids = checkpoint.structured_content.get("knowledge_ids")
+        if not isinstance(knowledge_ids, list) or len(knowledge_ids) != 1:
+            raise RuntimeError("installed Cursor-profile checkpoint omitted Knowledge identity")
+        knowledge_ref = f"knowledge:{knowledge_ids[0]}"
 
     parameters = StdioServerParameters(
         command=str(harness),
@@ -262,16 +266,12 @@ async def _cross_host_mcp_async(
         current = status.structured_content["current_task"]
         if current is None or current["task_id"] != task_id:
             raise RuntimeError("Cursor did not continue the Cursor-started Task")
-        knowledge = await client.call_tool(
-            "project_search",
-            {"query": "wheel host continuity", "scope": "knowledge", "limit": 5},
-        )
+        knowledge = await client.call_tool("project_context", {"refs": [knowledge_ref]})
         if knowledge.is_error or knowledge.structured_content is None:
-            raise RuntimeError("Cursor could not retrieve cross-host Knowledge")
-        if not any(
-            item["ref"].startswith("knowledge:") for item in knowledge.structured_content["results"]
-        ):
-            raise RuntimeError("Cursor Knowledge search did not return the persisted card")
+            raise RuntimeError("Cursor could not retrieve cross-host Knowledge context")
+        items = knowledge.structured_content.get("items")
+        if not isinstance(items, list) or not items or items[0].get("ref") != knowledge_ref:
+            raise RuntimeError("Cursor Knowledge context did not return the persisted card")
 
     parameters = StdioServerParameters(
         command=str(harness),
@@ -418,7 +418,6 @@ def main() -> int:
             "status",
             "init",
             "scan",
-            "search",
             "skills",
             "mcp",
         ):
@@ -451,14 +450,6 @@ def main() -> int:
                     f"{init_help.stdout!r}"
                 )
 
-        search_help = _run((str(harness), "search", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--socket", "--limit", "bounded path or identifier query"):
-            if expected not in search_help.stdout:
-                raise RuntimeError(
-                    f"installed harness search --help did not contain {expected!r}: "
-                    f"{search_help.stdout!r}"
-                )
-
         backup_help = _run((str(harness), "backup", "--help"), cwd=workspace, env=isolated_env)
         for expected in ("--database", "consistent SQLite snapshot", "existing files are never"):
             if expected not in backup_help.stdout:
@@ -484,7 +475,7 @@ def main() -> int:
                 )
 
         serve_help = _run((str(harnessd), "serve", "--help"), cwd=workspace, env=isolated_env)
-        for expected in ("--database", "--socket", "canonical per-user", "search", "scan"):
+        for expected in ("--database", "--socket", "canonical per-user", "scan"):
             if expected not in serve_help.stdout:
                 raise RuntimeError(
                     f"installed harnessd serve --help did not contain {expected!r}: "
@@ -784,8 +775,8 @@ if args[:3] == ["mcp", "list-tools", "harness"]:
         raise SystemExit(1)
     for name in (
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ):

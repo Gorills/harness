@@ -15,6 +15,7 @@ from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from harness.git_applicability import WorkspaceApplicability
 from harness.git_workspace import (
     GitWorkingTreeStatus,
     GitWorkspaceError,
@@ -39,7 +40,7 @@ from harness.ipc import (
     IpcMessageTooLargeError,
     IpcProtocolError,
     ProjectContextResult,
-    ProjectSearchResult,
+    ProjectRecallResult,
     RuntimeDiagnosticsResult,
     SkillCleanupResult,
     StatusResult,
@@ -51,8 +52,6 @@ from harness.ipc import (
     VisibilityResult,
     WorkspaceIndexEntryResult,
     WorkspaceScanResult,
-    WorkspaceSearchHit,
-    WorkspaceSearchResult,
     WorkspaceSkillsResult,
     WorkspaceStatusResult,
     WorkspaceTaskCheckpointSummary,
@@ -63,7 +62,7 @@ from harness.ipc import (
     send_dashboard_url_response,
     send_error_response,
     send_project_context_response,
-    send_project_search_response,
+    send_project_recall_response,
     send_runtime_diagnostics_response,
     send_shutdown_response,
     send_skill_cleanup_response,
@@ -73,7 +72,6 @@ from harness.ipc import (
     send_visibility_response,
     send_workspace_index_entry_response,
     send_workspace_scan_response,
-    send_workspace_search_response,
     send_workspace_skills_response,
     send_workspace_status_response,
     send_workspace_task_status_response,
@@ -91,23 +89,16 @@ from harness.registry import (
     workspace_layout_compatible,
 )
 from harness.retrieval import (
+    ProjectRecallDeadlineError,
     ProjectRetrievalError,
     ProjectRetrievalRefError,
-    ProjectSearchScope,
-    exact_coverage_response_reserve,
+    ProjectSearchKind,
     read_project_context,
-    search_exact_source_inspection,
-    search_project,
-    symbol_navigation_response_reserve,
+    recall_knowledge,
+    search_tasks,
 )
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
-from harness.search import IndexedPathSearchScope, SearchError, search_indexed_paths
-from harness.search_currentness import (
-    SearchCurrentnessTimeoutError,
-    SearchCurrentnessUnstableError,
-    ensure_workspace_search_index_current,
-    workspace_search_state_is_unchanged,
-)
+from harness.search import SearchError
 from harness.skill_runtime import (
     SkillRuntimeError,
     cleanup_projected_skills,
@@ -173,8 +164,12 @@ _CLIENT_TIMEOUT_SECONDS = 2.0
 _ACCEPT_POLL_SECONDS = 0.2
 _ERROR_MESSAGE_MAX_LENGTH = 1024
 _SCAN_DEADLINE_SECONDS = 30.0
-_PROJECT_SEARCH_CURRENTNESS_SECONDS = 25.0
+_SKILL_INDEX_REFRESH_DEADLINE_SECONDS = 180.0
 _MAX_CLIENT_WORKERS = 8
+
+
+class _WorkspaceSkillIndexRefreshDeadlineError(IndexingError):
+    """Raised when post-lock index refresh exhausts the skill lifecycle deadline."""
 
 
 class WorkspaceIndexEntryNotFoundError(RuntimeError):
@@ -283,9 +278,6 @@ def read_workspace_status(
             raise WorkspaceResolutionError("workspace registry identity changed during status read")
         project = get_project(connection, workspace.project_id)
         indexed_file_count = _indexed_file_count(connection, workspace.workspace_id)
-        content_search_document_count = _content_search_document_count(
-            connection, workspace.workspace_id
-        )
         index_revision, last_successful_reconcile_at, last_reconcile_kind = (
             _index_reconcile_provenance(connection, workspace.workspace_id)
         )
@@ -305,7 +297,6 @@ def read_workspace_status(
         branch=git_status.branch,
         dirty_path_count=git_status.dirty_path_count,
         indexed_file_count=indexed_file_count,
-        content_search_document_count=content_search_document_count,
         index_revision=index_revision,
         last_successful_reconcile_at=last_successful_reconcile_at,
         last_reconcile_kind=last_reconcile_kind,
@@ -325,23 +316,22 @@ def read_workspace_task_status(
         ]
     ).resolve(hints)
     workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
-    if not workspace_layout_compatible(workspace, runtime_identity.layout):
-        raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
-        )
-
+    applicability = WorkspaceApplicability(connection, workspace.workspace_id)
     connection.execute("BEGIN")
     try:
         current_workspace = get_workspace(connection, workspace.workspace_id)
         if current_workspace != workspace:
             raise WorkspaceResolutionError("workspace registry identity changed during Task status")
-        task = get_relevant_task(connection, workspace.workspace_id)
+        task = get_relevant_task(connection, workspace.workspace_id, applicability=applicability)
         checkpoint = (
             get_latest_task_checkpoint_status(connection, task.task_id)
             if task is not None
             else None
         )
+        if checkpoint is not None and not applicability.checkpoint_visible(
+            checkpoint.checkpoint_id
+        ):
+            checkpoint = None
         verification = (
             list_checkpoint_verification(connection, checkpoint.checkpoint_id)
             if checkpoint is not None
@@ -352,14 +342,12 @@ def read_workspace_task_status(
             if task is not None and task.state is TaskState.WORKING
             else None
         )
+        applicability.validate()
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-
-    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during Task status")
 
     task_summary = (
         None
@@ -392,142 +380,57 @@ def read_workspace_task_status(
         task=task_summary,
         last_checkpoint=checkpoint_summary,
         pending_operator_feedback=pending_operator_feedback,
+        head=applicability.head,
+        branch=applicability.branch,
     )
 
 
-def read_workspace_search(
+def read_project_recall_result(
     connection: sqlite3.Connection,
     hints: Sequence[WorkspaceHint],
     query: str,
+    kind: ProjectSearchKind,
     limit: int,
-    scope: IndexedPathSearchScope = IndexedPathSearchScope.ALL,
-) -> WorkspaceSearchResult:
-    """Resolve one registered Workspace and search its current Structural Index snapshot."""
-    registered = list_workspaces(connection)
-    resolution = WorkspaceResolver(
-        [
-            WorkspaceCandidate(workspace_id=workspace.workspace_id, root=workspace.workspace_root)
-            for workspace in registered
-        ]
-    ).resolve(hints)
-    workspace = get_workspace(connection, resolution.workspace_id)
-
-    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
-    if not workspace_layout_compatible(workspace, runtime_identity.layout):
-        raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
-        )
-
+) -> ProjectRecallResult:
+    """Find only durable records applicable to one live Workspace snapshot."""
+    workspace = _resolve_retrieval_workspace(connection, hints)
+    applicability = WorkspaceApplicability(connection, workspace.workspace_id)
     connection.execute("BEGIN")
     try:
         current_workspace = get_workspace(connection, workspace.workspace_id)
         if current_workspace != workspace:
-            raise WorkspaceResolutionError("workspace registry identity changed during search")
+            raise WorkspaceResolutionError(
+                "workspace registry identity changed during Project recall"
+            )
         project = get_project(connection, workspace.project_id)
-        search_results = search_indexed_paths(
-            connection,
-            workspace.workspace_id,
-            query,
-            limit=limit,
-            scope=scope,
-        )
+        if kind is ProjectSearchKind.KNOWLEDGE:
+            hits = recall_knowledge(
+                connection, project.project_id, query, limit=limit, applicability=applicability
+            )
+        elif kind is ProjectSearchKind.TASK:
+            hits = search_tasks(
+                connection,
+                query,
+                limit=limit,
+                project_id=project.project_id,
+                applicability=applicability,
+            )
+        else:
+            raise ProjectRetrievalError("Project recall kind is unsupported")
+        applicability.validate()
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-
-    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during search")
-
-    return WorkspaceSearchResult(
+    return ProjectRecallResult(
         schema_version=SCHEMA_VERSION,
         workspace_id=workspace.workspace_id,
         project_id=project.project_id,
-        workspace_root=workspace.workspace_root,
-        results=tuple(
-            WorkspaceSearchHit(
-                relative_path=result.relative_path,
-                kind=result.kind,
-                size_bytes=result.size_bytes,
-                match_kind=result.match_kind,
-            )
-            for result in search_results
-        ),
+        query=query,
+        kind=kind,
+        results=hits,
     )
-
-
-def read_project_search(
-    connection: sqlite3.Connection,
-    hints: Sequence[WorkspaceHint],
-    query: str,
-    limit: int,
-    scope: ProjectSearchScope,
-    scan_lock: Lock,
-) -> ProjectSearchResult:
-    """Resolve one Workspace and read one current Project Intelligence search snapshot."""
-    workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
-    deadline = monotonic() + _PROJECT_SEARCH_CURRENTNESS_SECONDS
-    project = get_project(connection, workspace.project_id)
-    for _attempt in range(2):
-        currentness = ensure_workspace_search_index_current(
-            connection,
-            workspace,
-            scan_lock,
-            deadline=deadline,
-        )
-        connection.execute("BEGIN")
-        try:
-            current_workspace = get_workspace(connection, workspace.workspace_id)
-            if current_workspace != workspace:
-                raise WorkspaceResolutionError(
-                    "workspace registry identity changed during Project search"
-                )
-            project = get_project(connection, workspace.project_id)
-            exact_inspection = search_exact_source_inspection(
-                connection,
-                workspace.workspace_id,
-                query,
-                scope=scope,
-            )
-            exact_coverage = exact_inspection.coverage
-            symbol_navigation = exact_inspection.symbol_navigation
-            hits = search_project(
-                connection,
-                workspace.workspace_id,
-                query,
-                scope=scope,
-                limit=limit,
-                response_reserve_bytes=(
-                    exact_coverage_response_reserve(exact_coverage)
-                    + symbol_navigation_response_reserve(symbol_navigation)
-                ),
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
-        if workspace_search_state_is_unchanged(
-            connection,
-            workspace,
-            currentness,
-            deadline=deadline,
-        ):
-            if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-                raise WorkspaceResolutionError(
-                    "workspace Git identity changed during Project search"
-                )
-            return ProjectSearchResult(
-                schema_version=SCHEMA_VERSION,
-                workspace_id=workspace.workspace_id,
-                project_id=project.project_id,
-                workspace_state="current",
-                exact_coverage=exact_coverage,
-                symbol_navigation=symbol_navigation,
-                results=hits,
-            )
-    raise SearchCurrentnessUnstableError("Workspace changed repeatedly during Project search")
 
 
 def read_project_context_result(
@@ -536,7 +439,8 @@ def read_project_context_result(
     refs: tuple[str, ...],
 ) -> ProjectContextResult:
     """Resolve one Workspace and expand only selected refs from one consistent Project snapshot."""
-    workspace, runtime_identity = _resolve_retrieval_workspace(connection, hints)
+    workspace = _resolve_retrieval_workspace(connection, hints)
+    applicability = WorkspaceApplicability(connection, workspace.workspace_id)
     connection.execute("BEGIN")
     try:
         current_workspace = get_workspace(connection, workspace.workspace_id)
@@ -545,14 +449,15 @@ def read_project_context_result(
                 "workspace registry identity changed during Project context"
             )
         project = get_project(connection, workspace.project_id)
-        items = read_project_context(connection, workspace.workspace_id, refs)
+        items = read_project_context(
+            connection, workspace.workspace_id, refs, applicability=applicability
+        )
+        applicability.validate()
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         raise
-    if inspect_workspace_runtime_identity(workspace.workspace_root) != runtime_identity:
-        raise WorkspaceResolutionError("workspace Git identity changed during Project context")
     return ProjectContextResult(
         schema_version=SCHEMA_VERSION,
         workspace_id=workspace.workspace_id,
@@ -563,7 +468,7 @@ def read_project_context_result(
 
 def _resolve_retrieval_workspace(
     connection: sqlite3.Connection, hints: Sequence[WorkspaceHint]
-) -> tuple[WorkspaceRecord, object]:
+) -> WorkspaceRecord:
     registered = list_workspaces(connection)
     resolution = WorkspaceResolver(
         [
@@ -571,13 +476,7 @@ def _resolve_retrieval_workspace(
             for item in registered
         ]
     ).resolve(hints)
-    workspace = get_workspace(connection, resolution.workspace_id)
-    runtime_identity = inspect_workspace_runtime_identity(workspace.workspace_root)
-    if not workspace_layout_compatible(workspace, runtime_identity.layout):
-        raise WorkspaceResolutionError(
-            f"registered workspace Git identity changed: {workspace.workspace_root}"
-        )
-    return workspace, runtime_identity
+    return get_workspace(connection, resolution.workspace_id)
 
 
 def read_workspace_index_entry(
@@ -1037,36 +936,19 @@ def _serve_client(
         )
         return
     if (
-        request.method == "workspace_search"
-        and request.search_query is not None
-        and request.search_limit is not None
-        and request.search_scope is not None
+        request.method == "project_recall"
+        and request.recall_query is not None
+        and request.recall_kind is not None
+        and request.recall_limit is not None
     ):
-        _serve_workspace_search(
+        _serve_project_recall(
             client,
             database,
             request.request_id,
             request.workspace_hints,
-            request.search_query,
-            request.search_limit,
-            request.search_scope,
-        )
-        return
-    if (
-        request.method == "project_search"
-        and request.search_query is not None
-        and request.search_limit is not None
-        and request.project_search_scope is not None
-    ):
-        _serve_project_search(
-            client,
-            database,
-            request.request_id,
-            request.workspace_hints,
-            request.search_query,
-            request.search_limit,
-            request.project_search_scope,
-            scan_lock,
+            request.recall_query,
+            request.recall_kind,
+            request.recall_limit,
         )
         return
     if request.method == "project_context" and request.context_refs is not None:
@@ -1289,89 +1171,17 @@ def _serve_workspace_task_status(
         )
 
 
-def _serve_workspace_search(
+def _serve_project_recall(
     client: socket.socket,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
     query: str,
+    kind: ProjectSearchKind,
     limit: int,
-    scope: IndexedPathSearchScope,
 ) -> None:
     try:
-        result = read_workspace_search(database, hints, query, limit, scope)
-    except WorkspaceResolutionError as exc:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="workspace_resolution_error",
-            message=str(exc),
-        )
-        return
-    except GitWorkspaceError as exc:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="workspace_git_error",
-            message=str(exc),
-        )
-        return
-    except RegistryError:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="registry_error",
-            message="daemon could not read Workspace registry state",
-        )
-        return
-    except IndexingError as exc:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="index_error",
-            message=str(exc),
-        )
-        return
-    except SearchError as exc:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="search_error",
-            message=str(exc),
-        )
-        return
-    except sqlite3.DatabaseError:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="database_error",
-            message="daemon could not search Workspace index",
-        )
-        return
-
-    try:
-        send_workspace_search_response(client, request_id, result)
-    except IpcMessageTooLargeError:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="response_too_large",
-            message="Workspace search result exceeds IPC byte limit",
-        )
-
-
-def _serve_project_search(
-    client: socket.socket,
-    database: sqlite3.Connection,
-    request_id: str,
-    hints: Sequence[WorkspaceHint],
-    query: str,
-    limit: int,
-    scope: ProjectSearchScope,
-    scan_lock: Lock,
-) -> None:
-    try:
-        result = read_project_search(database, hints, query, limit, scope, scan_lock)
+        result = read_project_recall_result(database, hints, query, kind, limit)
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client, request_id=request_id, code="workspace_resolution_error", message=str(exc)
@@ -1380,57 +1190,38 @@ def _serve_project_search(
     except GitWorkspaceError as exc:
         _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
         return
-    except RegistryError:
+    except SearchError:
         _try_send_error(
             client,
             request_id=request_id,
-            code="registry_error",
-            message="daemon could not read Workspace registry state",
+            code="recall_query_error",
+            message="Project recall query has no searchable tokens",
         )
         return
-    except SearchError as exc:
-        _try_send_error(client, request_id=request_id, code="search_error", message=str(exc))
-        return
-    except (SearchCurrentnessTimeoutError, ScanDeadlineExceededError):
+    except ProjectRecallDeadlineError:
         _try_send_error(
             client,
             request_id=request_id,
-            code="search_timeout",
-            message="Project search exceeded its execution deadline; retry after pending indexing settles",
+            code="recall_timeout",
+            message="Project recall exceeded its time limit",
         )
         return
-    except SearchCurrentnessUnstableError:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="search_workspace_changed",
-            message="Workspace changed repeatedly during Project search; retry after edits settle",
-        )
-        return
-    except (ProjectRetrievalError, KnowledgeError, TaskError, IndexingError):
+    except (RegistryError, ProjectRetrievalError, KnowledgeError, TaskError, sqlite3.DatabaseError):
         _try_send_error(
             client,
             request_id=request_id,
             code="retrieval_error",
-            message="daemon could not read Project Intelligence",
-        )
-        return
-    except sqlite3.DatabaseError:
-        _try_send_error(
-            client,
-            request_id=request_id,
-            code="database_error",
-            message="daemon could not search Project Intelligence",
+            message="daemon could not recall Project records",
         )
         return
     try:
-        send_project_search_response(client, request_id, result)
+        send_project_recall_response(client, request_id, result)
     except IpcMessageTooLargeError:
         _try_send_error(
             client,
             request_id=request_id,
             code="response_too_large",
-            message="Project search result exceeds IPC byte limit",
+            message="Project recall result exceeds IPC byte limit",
         )
 
 
@@ -1901,12 +1692,17 @@ def _serve_workspace_skills(
     scan_lock: Lock,
 ) -> None:
     try:
-        deadline = monotonic() + _SCAN_DEADLINE_SECONDS
-        remaining = deadline - monotonic()
+        lock_deadline = monotonic() + _SCAN_DEADLINE_SECONDS
+        remaining = lock_deadline - monotonic()
         if remaining <= 0 or not scan_lock.acquire(timeout=remaining):
             raise ScanDeadlineExceededError("Workspace skill reconciliation deadline exceeded")
         try:
             workspace = _resolve_task_workspace(database, hints)
+            try:
+                refresh_deadline = monotonic() + _SKILL_INDEX_REFRESH_DEADLINE_SECONDS
+                scan_workspace(database, workspace.workspace_id, deadline=refresh_deadline)
+            except ScanDeadlineExceededError as exc:
+                raise _WorkspaceSkillIndexRefreshDeadlineError from exc
             result = reconcile_workspace_skills(database, workspace.workspace_id, profiles)
         finally:
             scan_lock.release()
@@ -1938,7 +1734,37 @@ def _serve_workspace_skills(
     except GitWorkspaceError as exc:
         _try_send_error(client, request_id=request_id, code="workspace_git_error", message=str(exc))
         return
-    except (RegistryError, SkillRuntimeError):
+    except SkillRuntimeError as exc:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message=exc.operator_message,
+        )
+        return
+    except _WorkspaceSkillIndexRefreshDeadlineError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message=(
+                "Workspace index refresh exceeded the daemon deadline; exclude generated "
+                "dependency or cache directories and retry the install"
+            ),
+        )
+        return
+    except IndexingError:
+        _try_send_error(
+            client,
+            request_id=request_id,
+            code="skill_integration_error",
+            message=(
+                "Workspace index could not be refreshed before skill reconciliation; "
+                "run harness scan"
+            ),
+        )
+        return
+    except RegistryError:
         _try_send_error(
             client,
             request_id=request_id,
@@ -2044,22 +1870,6 @@ def _indexed_file_count(connection: sqlite3.Connection, workspace_id: str) -> in
     ).fetchone()
     if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
         raise sqlite3.DatabaseError("invalid indexed file count")
-    return row[0]
-
-
-def _content_search_document_count(connection: sqlite3.Connection, workspace_id: str) -> int:
-    row = connection.execute(
-        """
-        SELECT COUNT(*)
-        FROM indexed_search_documents AS documents
-        JOIN indexed_content_search
-            ON documents.id = indexed_content_search.rowid
-        WHERE documents.workspace_id = ?
-        """,
-        (workspace_id,),
-    ).fetchone()
-    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
-        raise sqlite3.DatabaseError("invalid content search document count")
     return row[0]
 
 

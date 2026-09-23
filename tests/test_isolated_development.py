@@ -340,14 +340,6 @@ def test_isolated_cli_autostart_does_not_touch_canonical_user_state(tmp_path: Pa
         assert "Indexed files:" in status.stdout
         assert str(workspace.resolve()) in status.stdout
 
-        search = _run(
-            [str(harness), "search", "tracked", str(workspace)],
-            cwd=tmp_path,
-            env=env,
-        )
-        assert search.returncode == 0, search.stdout + search.stderr
-        assert "tracked.txt" in search.stdout
-
         inspect = _run(
             [str(harness), "doctor", "--database", str(paths.database)],
             cwd=tmp_path,
@@ -433,51 +425,56 @@ def test_checkout_codex_config_is_generated_not_tracked_stdio() -> None:
     assert "harness-dev" not in config["mcp_servers"]
 
 
-def test_checkout_agent_instructions_require_harness_before_native_tools() -> None:
+def test_checkout_agent_instructions_require_status_and_proportionate_tracking() -> None:
     instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
     bootstrap = instructions.split("## Isolated development", maxsplit=1)[0]
+    normalized = " ".join(bootstrap.split())
 
     assert "`project_status` must be the first repository action" in bootstrap
     assert "deferred or omitted from the initial visible tool list" in bootstrap
-    assert "only allowed\n  pre-status action" in bootstrap
-    assert "After status, start or resume a Harness Task" in bootstrap
-    assert "Natural-language code/doc discovery may use native repository search" in bootstrap
-    assert "Ordinary lexical code/doc hits are candidate localization only" in bootstrap
-    assert "before diagnosis or edits" in bootstrap
-    assert "read the tool schema and retry" in bootstrap
-    assert "Checkpoint each logical stage" in bootstrap
-    assert "targeted native read/search is allowed" in bootstrap
-    assert "already has an exact path" in bootstrap
-    assert "skipping search does not skip Task" in bootstrap
-    assert "Do not skip a Task because" in bootstrap
-    assert "Complexity is not a Task gate" in bootstrap
-    assert "explicit operator waiver" in bootstrap
-    assert "не создавай таску" in bootstrap
-    assert "это обсуждение" in bootstrap
-    assert "ends the waiver" in bootstrap
-    assert "discussion only" in bootstrap
-    assert "before changes and checkpoint meaningful" not in bootstrap
-    assert "After status, use `project_search`" not in bootstrap
-    assert "skip Task for trivial" not in bootstrap
-    assert "simple changes need no Task" not in bootstrap
+    assert "only allowed pre-status action" in normalized
+    assert "start or resume a Harness Task for substantial changes, multi-step work" in normalized
+    assert "work needing durable continuity, or an explicit operator request" in normalized
+    assert "read-only inspection, and small local edits may proceed without a Task" in normalized
+    assert "If work grows beyond that scope, start a Task before continuing" in normalized
+    assert "reading the schema and retrying, not bypassing the failure" in normalized
+    assert "Use native repository tools for code and documentation discovery" in normalized
+    assert "Harness does not provide or require project code/document search" in normalized
+    assert "Explicit code/document refs remain metadata-only" in normalized
+    assert "project_search" not in bootstrap
+    assert "Reuse one Task for one requested outcome" in normalized
+    assert (
+        "diagnosis, implementation, checks, clarifications, continuation, subagents" in normalized
+    )
+    assert "Every existing-Task mutation carries its current `expected_revision`" in normalized
+    assert "Checkpoint each logical stage of tracked work" in normalized
+    assert "`waiting` with `operator_review`" in normalized
+    assert "Only the operator accepts/completes or cancels a Task" in normalized
+    assert "must not automatically close it" in normalized
+    assert "A ready audit also awaits operator acceptance" in normalized
+    assert "Respect an explicit operator request not to create a Task" in normalized
+    assert "fresh host conversation" in normalized
+    assert "same unfinished Harness Task" in normalized
+    assert "Do not skip a Task because" not in bootstrap
+    assert "Complexity is not a Task gate" not in bootstrap
+    assert "skipping search does not skip Task" not in bootstrap
 
 
 def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     text = _SERVER_INSTRUCTIONS
-    after_status = text.split("After status", maxsplit=1)[1]
-    task_at = after_status.find("start/resume a Task")
-    search_at = after_status.find("project_search")
-    assert 0 <= task_at < search_at
-    assert "After status use project_search" not in text
-    assert "After status, use project_search" not in text
-    assert "project_search, project_context, then native tools" not in text
-    assert "code/doc path may be read natively" in text
-    assert "project_context is not required for those kinds" in text
-    assert "Do not skip Task because work looks small or the path is known" in text
-    assert "may skip search, not Task" in text
+    assert "Use native repository tools for code and document discovery" in text
+    assert "Paths allow native reads; project_context expands selected refs" in text
+    assert "project_search" not in text
+    assert "for substantial changes, multi-step work, needed continuity" in text
+    assert "Quick questions, reads, and small local edits may proceed without a Task" in text
+    assert "Same outcome: one Task across diagnosis, implementation, checks and follow-ups" in text
+    assert "New Task only for a distinct outcome" in text
+    assert "ready => waiting(operator_review)" in text
+    assert "Only the operator completes Tasks" in text
+    assert "Small work or known paths still need a Task" not in text
+    assert "may skip search, not Task" not in text
     assert "discussion only" not in text
     assert "waiver" not in text
-    assert "project_context only for selected semantic refs." not in text
     assert len(text.encode("utf-8")) < 1024
 
 
@@ -1162,9 +1159,7 @@ def test_install_global_dry_run_restores_saved_canonical_xdg(tmp_path: Path) -> 
     fields = _plan_fields(result.stdout)
     fake_bin = Path(env["FAKE_UV_BIN_DIR"])
     assert fields["hosts"] == "cursor,codex"
-    assert fields["lifecycle_commands"] == (
-        f"{fake_bin / 'harness'} install --host cursor; {fake_bin / 'harness'} install --host codex"
-    )
+    assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host all"
     assert fields["HARNESS_DEV_ROOT"] == ""
     assert fields["XDG_STATE_HOME"] == str(original_state)
     assert fields["XDG_RUNTIME_DIR"] == str(original_runtime)
@@ -1216,6 +1211,62 @@ def test_install_global_doctor_only_dry_run_does_not_reinstall(tmp_path: Path) -
     assert fields["mode"] == "doctor-only"
     log = Path(env["UV_LOG"]).read_text(encoding="utf-8")
     assert "tool install" not in log
+
+
+def test_install_global_explicit_combined_hosts_use_one_joint_preflight(tmp_path: Path) -> None:
+    env = _install_global_env(tmp_path)
+    result = _run(
+        [str(INSTALL_GLOBAL_SCRIPT), "--dry-run", "--host", "cursor,codex"],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    fields = _plan_fields(result.stdout)
+    fake_bin = Path(env["FAKE_UV_BIN_DIR"])
+    assert fields["hosts"] == "cursor,codex"
+    assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host all"
+
+
+def test_install_global_reports_partial_activation_and_preserves_failure_status(
+    tmp_path: Path,
+) -> None:
+    env = _install_global_env(tmp_path)
+    fake_uv = Path(env["HARNESS_DEV_UV"])
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$UV_LOG"\n'
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "uv 0.12.5"; exit 0; fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then\n'
+        '  printf "%s\\n" "$FAKE_UV_BIN_DIR"; exit 0\n'
+        "fi\n"
+        'if [ "$1" = "python" ] && [ "$2" = "install" ]; then exit 0; fi\n'
+        'if [ "$1" = "tool" ] && [ "$2" = "install" ]; then exit 0; fi\n'
+        "exit 91\n",
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    installed = Path(env["FAKE_UV_BIN_DIR"]) / "harness"
+    lifecycle_log = tmp_path / "harness.log"
+    env["HARNESS_LIFECYCLE_LOG"] = str(lifecycle_log)
+    installed.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$HARNESS_LIFECYCLE_LOG"\n'
+        'if [ "$1" = "install" ]; then exit 17; fi\n'
+        'if [ "$1" = "doctor" ]; then exit 88; fi\n'
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    installed.chmod(0o755)
+
+    result = _run([str(INSTALL_GLOBAL_SCRIPT)], cwd=REPO_ROOT, env=env)
+
+    assert result.returncode == 17
+    assert lifecycle_log.read_text(encoding="utf-8").splitlines() == ["install --host all"]
+    assert "package refresh succeeded, but host activation is incomplete" in result.stderr
+    assert f"Retry: {installed} install --host all" in result.stderr
+    assert f"Then verify: {installed} doctor" in result.stderr
+    assert "Global Harness package now uses" not in result.stdout
 
 
 def test_install_global_does_not_pass_checkout_imports_to_installed_runtime(
@@ -1452,8 +1503,8 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     )
     assert [tool["name"] for tool in listed[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]
@@ -1467,8 +1518,8 @@ def test_production_mcp_stdio_lists_no_tools_in_overlay_checkout(tmp_path: Path)
     )
     assert [tool["name"] for tool in isolated[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]
@@ -1558,8 +1609,8 @@ def test_production_mcp_stdio_lists_no_tools_for_codex_without_project_root(
     )
     assert [tool["name"] for tool in working[0]["result"]["tools"]] == [
         "project_status",
-        "project_search",
         "project_context",
+        "project_recall",
         "task_start",
         "task_checkpoint",
     ]

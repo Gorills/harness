@@ -63,7 +63,8 @@ from harness.skills import SkillRegistryError, default_skill_registry, validate_
 from harness.storage import SCHEMA_VERSION, DatabaseError, connect_database_read_only
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
-_SHUTDOWN_TIMEOUT_SECONDS = 3.0
+# Cleanup unlinks the socket only after IPC workers, watcher scan, dashboard, and MCP HTTP stop.
+_SHUTDOWN_TIMEOUT_SECONDS = 40.0
 _SHUTDOWN_POLL_SECONDS = 0.05
 _SUPPORTED_HOSTS = ("codex", "cursor")
 
@@ -241,17 +242,31 @@ def install_harness(
             selected=selected,
             selected_states={adapter.profile: adapter.registration_state() for adapter in selected},
         )
-        profiles_after_install = tuple(
-            profile for profile in _SUPPORTED_HOSTS if profile in active_after_install
-        )
-        if live_workspaces and profiles_after_install:
-            _reconcile_remaining_profiles(paths, live_workspaces, profiles_after_install)
-            for hidden_root in _hidden_project_representative_roots(paths):
-                request_set_visibility(paths.socket, hidden_root, "hidden")
-    except (HostIntegrationError, IpcError) as exc:
+    except HostIntegrationError as exc:
         raise InstallationError(
-            "Harness project integration could not be reconciled after host installation"
+            _post_install_failure(
+                phase="active host profile resolution",
+                host=host,
+                profiles=tuple(adapter.profile for adapter in selected),
+                cause=exc,
+            )
         ) from exc
+    profiles_after_install = tuple(
+        profile for profile in _SUPPORTED_HOSTS if profile in active_after_install
+    )
+    if live_workspaces and profiles_after_install:
+        _reconcile_remaining_profiles(
+            paths,
+            live_workspaces,
+            profiles_after_install,
+            install_host=host,
+        )
+        _restore_hidden_visibility_after_install(
+            paths,
+            _hidden_project_representative_roots(paths),
+            profiles_after_install,
+            host=host,
+        )
     overall = (
         IntegrationChange.CHANGED
         if any(
@@ -615,6 +630,8 @@ def _reconcile_remaining_profiles(
     paths: RuntimePaths,
     workspaces: tuple[WorkspaceRecord, ...],
     profiles: tuple[str, ...],
+    *,
+    install_host: str | None = None,
 ) -> SkillCleanupResult:
     removed = 0
     exclude_changed = 0
@@ -623,17 +640,51 @@ def _reconcile_remaining_profiles(
         if find_isolated_development_root(workspace.workspace_root) == workspace.workspace_root:
             skipped += 1
             continue
-        result = request_workspace_skills_reconcile(
-            paths.socket,
-            (
-                WorkspaceHint(
-                    path=workspace.workspace_root,
-                    source="uninstall-workspace-root",
-                    match_mode=WorkspaceHintMatchMode.ROOT,
-                ),
+        hints = (
+            WorkspaceHint(
+                path=workspace.workspace_root,
+                source="lifecycle-workspace-root",
+                match_mode=WorkspaceHintMatchMode.ROOT,
             ),
-            profiles,
         )
+        attempts = 2 if install_host is not None else 1
+        result = None
+        for attempt in range(attempts):
+            try:
+                result = request_workspace_skills_reconcile(
+                    paths.socket,
+                    hints,
+                    profiles,
+                )
+                break
+            except IpcRemoteError as exc:
+                if attempt + 1 < attempts and exc.code == "skill_integration_timeout":
+                    continue
+                if install_host is None:
+                    raise
+                raise InstallationError(
+                    _post_install_failure(
+                        phase="project skill reconciliation",
+                        host=install_host,
+                        profiles=profiles,
+                        cause=exc,
+                        workspace=workspace,
+                    )
+                ) from exc
+            except IpcError as exc:
+                if install_host is None:
+                    raise
+                raise InstallationError(
+                    _post_install_failure(
+                        phase="project skill reconciliation",
+                        host=install_host,
+                        profiles=profiles,
+                        cause=exc,
+                        workspace=workspace,
+                    )
+                ) from exc
+        if result is None:  # pragma: no cover - every failed attempt raises above
+            raise AssertionError("Workspace skill reconciliation produced no result")
         removed += result.removed
         exclude_changed += int(result.exclude_changed)
     return SkillCleanupResult(
@@ -644,6 +695,61 @@ def _reconcile_remaining_profiles(
         removed=removed,
         exclude_changed_count=exclude_changed,
     )
+
+
+def _post_install_failure(
+    *,
+    phase: str,
+    host: str,
+    profiles: tuple[str, ...],
+    cause: Exception,
+    workspace: WorkspaceRecord | None = None,
+    workspace_root: Path | None = None,
+) -> str:
+    profile_text = ", ".join(profiles) if profiles else "none"
+    location = ""
+    if workspace is not None:
+        workspace_id = _bounded_diagnostic_text(workspace.workspace_id, limit=128)
+        root = _bounded_diagnostic_text(str(workspace.workspace_root), limit=512)
+        location = f" for Workspace {workspace_id} ({root})"
+    elif workspace_root is not None:
+        root = _bounded_diagnostic_text(str(workspace_root), limit=512)
+        location = f" for Workspace root {root}"
+    cause_text = _bounded_diagnostic_text(str(cause), limit=512)
+    return (
+        f"Harness post-install {phase} failed{location} with profiles [{profile_text}]: "
+        f"{cause_text}. Host integration may be partially updated. "
+        f"Retry: harness install --host {host}. Then verify: harness doctor"
+    )
+
+
+def _bounded_diagnostic_text(value: str, *, limit: int) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3] + "..."
+
+
+def _restore_hidden_visibility_after_install(
+    paths: RuntimePaths,
+    hidden_roots: tuple[Path, ...],
+    profiles: tuple[str, ...],
+    *,
+    host: str,
+) -> None:
+    for hidden_root in hidden_roots:
+        try:
+            request_set_visibility(paths.socket, hidden_root, "hidden")
+        except IpcError as exc:
+            raise InstallationError(
+                _post_install_failure(
+                    phase="Hidden visibility restoration",
+                    host=host,
+                    profiles=profiles,
+                    cause=exc,
+                    workspace_root=hidden_root,
+                )
+            ) from exc
 
 
 def _empty_cleanup() -> SkillCleanupResult:

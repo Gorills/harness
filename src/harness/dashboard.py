@@ -5,6 +5,8 @@ import re
 import secrets
 import sqlite3
 import stat
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from html import escape
@@ -50,6 +52,13 @@ from harness.dashboard_i18n import (
     FEEDBACK_PLACEHOLDER,
     FEEDBACK_SUBMIT,
     FEEDBACK_SUMMARY,
+    FORM_DRAFT_LABEL,
+    FORM_DRAFT_SAVED,
+    FORM_DRAFT_UNAVAILABLE,
+    FORM_ERROR_BACK,
+    FORM_ERROR_CONFLICT,
+    FORM_ERROR_INVALID,
+    FORM_ERROR_TITLE,
     GIT_UNAVAILABLE,
     HOME_SEARCH_LABEL,
     HOME_SEARCH_PLACEHOLDER,
@@ -61,16 +70,15 @@ from harness.dashboard_i18n import (
     JIRA_PLACEHOLDER,
     JIRA_SAVE,
     LIVE_CONNECTING,
+    LIVE_MANUAL,
     LIVE_REFRESH,
-    MANAGE_SKILL_SCOPE,
-    MANAGE_SKILL_SCOPE_HINT,
     METRIC_ACTIVE,
-    METRIC_INDEX,
     METRIC_PROJECTS,
     METRIC_REVIEW,
     METRICS_LABEL,
     MODE,
     NAVIGATION,
+    NAVIGATION_UNAVAILABLE,
     NEXT,
     NEXT_STEP,
     NO_ACTIONS,
@@ -80,15 +88,12 @@ from harness.dashboard_i18n import (
     OPEN_NAVIGATION,
     OPEN_TASK,
     OPEN_WORKSPACE,
+    OPERATOR_STATE_WORKING,
     OPERATOR_STATUS,
     OPERATOR_STATUS_DEPLOY_PROD,
     OPERATOR_STATUS_DEPLOY_TEST,
-    OPERATOR_STATUS_NONE,
-    OPERATOR_STATUS_SAVE,
     PAGE_PROJECTS,
-    PAGE_PROJECTS_LEAD,
     PROJECT,
-    PROJECT_MANAGEMENT,
     PROJECT_OVERVIEW,
     PROJECTS_NAV,
     RECENT_TASKS,
@@ -100,34 +105,19 @@ from harness.dashboard_i18n import (
     SEARCH_PLACEHOLDER,
     SEARCH_SECTION,
     SECTION_WORKSPACES,
-    SKILL_SCOPE,
-    SKILL_SCOPE_AUTO,
-    SKILL_SCOPE_AUTO_HINT,
-    SKILL_SCOPE_BACKEND,
-    SKILL_SCOPE_CI,
-    SKILL_SCOPE_CONTAINERS,
-    SKILL_SCOPE_DATABASE,
-    SKILL_SCOPE_DEPLOYMENT,
-    SKILL_SCOPE_EXCLUDED,
-    SKILL_SCOPE_EXCLUDED_HINT,
-    SKILL_SCOPE_FRONTEND,
-    SKILL_SCOPE_GODOT,
-    SKILL_SCOPE_HINT,
-    SKILL_SCOPE_INCLUDED,
-    SKILL_SCOPE_INCLUDED_HINT,
-    SKILL_SCOPE_MOBILE,
-    SKILL_SCOPE_OBSERVABILITY,
     SKIP_TO_CONTENT,
     STACK_HINTS,
     STATE,
     TASK,
-    TASK_FACTS,
     TASK_FOCUS,
     TASK_OVERVIEW,
     TIMELINE,
     UNAVAILABLE_HEADING,
-    UNAVAILABLE_TITLE,
     UPDATED,
+    VERIFICATION_EMPTY,
+    VERIFICATION_NO_REPORT,
+    VERIFICATION_OLDER,
+    VERIFICATION_TITLE,
     VISIBILITY,
     VISIBILITY_HINT_HIDDEN,
     VISIBILITY_HINT_NORMAL,
@@ -138,7 +128,6 @@ from harness.dashboard_i18n import (
     WORKSPACE_FALLBACK,
     WORKSPACE_HOME,
     WORKSPACE_OVERVIEW,
-    WORKSPACE_RELOCATION,
     WORKSPACE_RELOCATION_HINT,
     WORKSPACE_RELOCATION_LABEL,
     WORKSPACE_RELOCATION_PLACEHOLDER,
@@ -148,17 +137,21 @@ from harness.dashboard_i18n import (
     document_title,
     event_count_label,
     event_label,
-    match_kind_label,
     more_paths_label,
-    omitted_events_label,
     operator_status_label,
     project_crumb,
     task_crumb,
     task_state_label,
+    verification_report_label,
+    verification_source_label,
+    verification_status_label,
     visibility_label,
     wait_reason_label,
     workspace_count_label,
 )
+from harness.dashboard_skill_view import render_skill_policy
+from harness.dashboard_skills import DashboardSkillsSnapshot, read_dashboard_skills
+from harness.git_applicability import WorkspaceApplicability
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
@@ -183,9 +176,9 @@ from harness.registry import (
     relocate_workspace,
     workspace_layout_compatible,
 )
-from harness.retrieval import ProjectSearchHit, ProjectSearchScope, search_project, search_tasks
+from harness.retrieval import ProjectSearchHit, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
-from harness.search import IndexedPathSearchResult, SearchError, search_indexed_paths
+from harness.search import SearchError
 from harness.skill_policy import (
     MANAGED_PROJECT_SKILL_FACETS,
     ProjectSkillFacetMode,
@@ -194,7 +187,11 @@ from harness.skill_policy import (
     get_project_skill_policy,
     set_project_skill_facet_mode,
 )
-from harness.skill_runtime import SkillRuntimeError, reconcile_workspace_skills
+from harness.skill_runtime import (
+    SkillRuntimeError,
+    active_skill_profiles_for_runtime,
+    reconcile_workspace_skills,
+)
 from harness.storage import DatabaseError, connect_database
 from harness.task_checkpoints import (
     TaskCheckpointError,
@@ -202,6 +199,7 @@ from harness.task_checkpoints import (
     TaskEventRecord,
     TaskEventType,
     get_latest_task_checkpoint_status,
+    get_task_checkpoint,
     list_task_checkpoints,
     list_task_events,
 )
@@ -209,10 +207,13 @@ from harness.task_workflow import (
     task_accept,
     task_cancel,
     task_comment,
+    task_delete,
     task_feedback,
     task_reopen,
+    task_set_deployment,
     task_set_jira_url,
     task_set_operator_status,
+    task_set_state,
 )
 from harness.tasks import (
     TaskConflictError,
@@ -231,6 +232,8 @@ from harness.tasks import (
     get_task,
     get_task_stack_hints,
 )
+from harness.vault_process import VaultProcess
+from harness.verification import VerificationError, VerificationRecord, list_checkpoint_verification
 from harness.visibility import set_project_visibility
 
 _DASHBOARD_URL_FILENAME = "dashboard.url"
@@ -239,7 +242,7 @@ _DASHBOARD_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,64}$")
 _DASHBOARD_START_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_STOP_TIMEOUT_SECONDS = 2.0
 _DASHBOARD_FORM_MAX_BYTES = 8192
-_DASHBOARD_FORM_MAX_FIELDS = 5
+_DASHBOARD_FORM_MAX_FIELDS = 6
 _DASHBOARD_SEARCH_LIMIT = 24
 _DASHBOARD_RECENT_TASK_LIMIT = 24
 # Pin live Tasks so review/waiting/working stay visible at the top of the bounded list.
@@ -248,11 +251,13 @@ _DASHBOARD_RECENT_TASK_ORDER_SQL = (
     "tasks.updated_at DESC, tasks.id DESC"
 )
 _DASHBOARD_TIMELINE_EVENT_LIMIT = 60
+_DASHBOARD_MAX_HISTORY_PAGE = 2**31 - 1
 _DASHBOARD_CHANGED_PATH_LIMIT = 24
 _DASHBOARD_SSE_POLL_SECONDS = 1.0
 _DASHBOARD_SSE_HEARTBEAT_SECONDS = 10.0
 _DASHBOARD_SSE_SESSION_SECONDS = 30.0
 _DASHBOARD_SSE_MAX_CLIENTS = 8
+_DASHBOARD_LIVE_STATUS_WORKERS = 8
 _DASHBOARD_RESPONSE_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -323,6 +328,8 @@ class DashboardWorkspaceRow:
     dirty_path_count: int | None
     indexed_file_count: int
     live_error: str | None
+    active_task_count: int = 0
+    review_task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +349,8 @@ class DashboardHomePage:
     recent_tasks: tuple[DashboardTaskRow, ...]
     search_query: str | None
     task_search_results: tuple[ProjectSearchHit, ...]
+    page: int = 1
+    task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,17 +360,19 @@ class DashboardProjectDetail:
     project: ProjectRecord
     workspaces: tuple[DashboardWorkspaceRow, ...]
     skill_policy: ProjectSkillPolicy
+    skills: DashboardSkillsSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class DashboardWorkspaceDetail:
-    """One Workspace, recent durable Tasks, and optional bounded indexed-path search."""
+    """One Workspace, recent durable Tasks, and optional Task-history lookup."""
 
     workspace: DashboardWorkspaceRow
     recent_tasks: tuple[DashboardTaskRow, ...]
     search_query: str | None
-    search_results: tuple[IndexedPathSearchResult, ...]
     task_search_results: tuple[ProjectSearchHit, ...]
+    page: int = 1
+    task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -376,6 +387,9 @@ class DashboardTaskDetail:
     checkpoints: tuple[TaskCheckpointRecord, ...]
     events: tuple[TaskEventRecord, ...]
     event_count: int
+    latest_checkpoint: TaskCheckpointRecord | None = None
+    page: int = 1
+    checkpoint_verification: tuple[VerificationRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +404,10 @@ class DashboardActionRequest:
     comment: str | None = None
     jira_url: str | None = None
     operator_status: TaskOperatorStatus | None = None
+    state: TaskState | None = None
+    wait_reason: TaskWaitReason | None = None
+    deploy_test: bool = False
+    deploy_prod: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -430,10 +448,12 @@ class _DashboardPageRequest:
     identity: str | None
     search_query: str | None
     redirect_target: str
+    page: int = 1
+    settings: bool = False
 
 
-def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
-    """Read a consistent persisted Projects overview plus fail-closed live Git summaries."""
+def _read_dashboard_navigation_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
+    """Read persisted Workspace summaries needed by global dashboard navigation."""
     connection = connect_database(database_path)
     try:
         connection.execute("BEGIN")
@@ -447,13 +467,19 @@ def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspa
             raise
     finally:
         connection.close()
-    return tuple(_with_live_workspace_status(row) for row in rows)
+    return rows
+
+
+def read_dashboard_workspace_rows(database_path: Path) -> tuple[DashboardWorkspaceRow, ...]:
+    """Read a consistent persisted Projects overview plus fail-closed live Git summaries."""
+    return _with_live_workspace_statuses(_read_dashboard_navigation_rows(database_path))
 
 
 def _load_recent_dashboard_tasks(
     connection: sqlite3.Connection,
     *,
     workspace_id: str | None = None,
+    page: int = 1,
 ) -> tuple[DashboardTaskRow, ...]:
     if workspace_id is None:
         rows = connection.execute(
@@ -462,9 +488,9 @@ def _load_recent_dashboard_tasks(
             FROM tasks
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (_DASHBOARD_RECENT_TASK_LIMIT,),
+            (_DASHBOARD_RECENT_TASK_LIMIT, (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT),
         ).fetchall()
     else:
         rows = connection.execute(
@@ -474,9 +500,13 @@ def _load_recent_dashboard_tasks(
             INNER JOIN workspaces ON workspaces.id = tasks.workspace_id
             WHERE tasks.workspace_id = ?
             ORDER BY {_DASHBOARD_RECENT_TASK_ORDER_SQL}
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (workspace_id, _DASHBOARD_RECENT_TASK_LIMIT),
+            (
+                workspace_id,
+                _DASHBOARD_RECENT_TASK_LIMIT,
+                (page - 1) * _DASHBOARD_RECENT_TASK_LIMIT,
+            ),
         ).fetchall()
     loaded = tuple((get_task(connection, task_id), project_id) for task_id, project_id in rows)
     recorded_branches = _read_recorded_git_branches(
@@ -493,10 +523,34 @@ def _load_recent_dashboard_tasks(
     )
 
 
+def _history_page(page: int, total: int, page_size: int) -> int:
+    if (
+        isinstance(page, bool)
+        or not isinstance(page, int)
+        or not 1 <= page <= _DASHBOARD_MAX_HISTORY_PAGE
+    ):
+        raise SearchError("dashboard history page must be a positive bounded integer")
+    return min(page, max(1, (total + page_size - 1) // page_size))
+
+
+def _dashboard_task_count(
+    connection: sqlite3.Connection,
+    workspace_id: str | None = None,
+) -> int:
+    where = "" if workspace_id is None else " WHERE workspace_id = ?"
+    params = () if workspace_id is None else (workspace_id,)
+    row = connection.execute("SELECT COUNT(*) FROM tasks" + where, params).fetchone()
+    if row is None or isinstance(row[0], bool) or not isinstance(row[0], int) or row[0] < 0:
+        raise sqlite3.DatabaseError("invalid dashboard Task count")
+    return row[0]
+
+
 def read_dashboard_home(
     database_path: Path,
     *,
     search_query: str | None = None,
+    page: int = 1,
+    include_live_status: bool = True,
 ) -> DashboardHomePage:
     """Read the loopback home page: Projects, recent Tasks, and optional Task search."""
     connection = connect_database(database_path)
@@ -507,7 +561,9 @@ def read_dashboard_home(
             persisted = tuple(
                 _read_workspace_row_persisted(connection, item) for item in workspaces
             )
-            recent_tasks = _load_recent_dashboard_tasks(connection)
+            task_count = _dashboard_task_count(connection)
+            page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
+            recent_tasks = _load_recent_dashboard_tasks(connection, page=page)
             results = (
                 ()
                 if search_query is None
@@ -521,16 +577,20 @@ def read_dashboard_home(
     finally:
         connection.close()
     return DashboardHomePage(
-        workspaces=tuple(_with_live_workspace_status(row) for row in persisted),
+        workspaces=(_with_live_workspace_statuses(persisted) if include_live_status else persisted),
         recent_tasks=recent_tasks,
         search_query=search_query,
         task_search_results=results,
+        page=page,
+        task_count=task_count,
     )
 
 
 def read_dashboard_project_detail(
     database_path: Path,
     project_id: str,
+    *,
+    include_skills: bool = False,
 ) -> DashboardProjectDetail:
     """Read one Project and its Workspace summaries from the daemon-owned database."""
     connection = connect_database(database_path)
@@ -539,8 +599,29 @@ def read_dashboard_project_detail(
         try:
             project = get_project(connection, project_id)
             skill_policy = get_project_skill_policy(connection, project_id)
+            skills = (
+                read_dashboard_skills(connection, project_id, database_path=database_path)
+                if include_skills
+                else None
+            )
             workspaces = list_workspaces(connection, project_id=project_id)
-            rows = tuple(_read_workspace_row_persisted(connection, item) for item in workspaces)
+            rows = []
+            for item in workspaces:
+                try:
+                    applicability = WorkspaceApplicability(connection, item.workspace_id)
+                except GitWorkspaceError:
+                    row = _read_workspace_row_persisted(connection, item, tasks_available=False)
+                    rows.append(
+                        replace(
+                            _with_live_workspace_status(row),
+                            live_error="Workspace applicability unavailable",
+                        )
+                    )
+                    continue
+                row = _read_workspace_row_persisted(connection, item, applicability=applicability)
+                row = _with_applicability_live_workspace_status(row, applicability)
+                applicability.validate()
+                rows.append(row)
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -550,8 +631,9 @@ def read_dashboard_project_detail(
         connection.close()
     return DashboardProjectDetail(
         project=project,
-        workspaces=tuple(_with_live_workspace_status(row) for row in rows),
+        workspaces=tuple(rows),
         skill_policy=skill_policy,
+        skills=skills,
     )
 
 
@@ -560,36 +642,51 @@ def read_dashboard_workspace_detail(
     workspace_id: str,
     *,
     search_query: str | None = None,
+    page: int = 1,
 ) -> DashboardWorkspaceDetail:
-    """Read one Workspace detail page with bounded Task history and optional path search."""
+    """Read one Workspace detail page with the operator Task archive and optional Task search."""
     connection = connect_database(database_path)
     try:
+        try:
+            applicability: WorkspaceApplicability | None = WorkspaceApplicability(
+                connection, workspace_id
+            )
+        except GitWorkspaceError:
+            applicability = None
         connection.execute("BEGIN")
         try:
             workspace = get_workspace(connection, workspace_id)
-            row = _read_workspace_row_persisted(connection, workspace)
-            recent_tasks = _load_recent_dashboard_tasks(connection, workspace_id=workspace_id)
-            results = (
+            row = _read_workspace_row_persisted(
+                connection,
+                workspace,
+                applicability=applicability,
+                tasks_available=applicability is not None,
+            )
+            task_count = (
+                _dashboard_task_count(connection, workspace_id) if applicability is not None else 0
+            )
+            page = _history_page(page, task_count, _DASHBOARD_RECENT_TASK_LIMIT)
+            recent_tasks = (
                 ()
-                if search_query is None
-                else search_indexed_paths(
-                    connection,
-                    workspace_id,
-                    search_query,
-                    limit=_DASHBOARD_SEARCH_LIMIT,
-                )
+                if applicability is None
+                else _load_recent_dashboard_tasks(connection, workspace_id=workspace_id, page=page)
             )
             task_results = (
                 ()
-                if search_query is None
-                else search_project(
+                if search_query is None or applicability is None
+                else search_tasks(
                     connection,
-                    workspace_id,
                     search_query,
-                    scope=ProjectSearchScope.TASKS,
                     limit=_DASHBOARD_SEARCH_LIMIT,
+                    project_id=workspace.project_id,
                 )
             )
+            if applicability is not None:
+                row = _with_applicability_live_workspace_status(row, applicability)
+            if applicability is None:
+                row = replace(row, live_error="Workspace applicability unavailable")
+            if applicability is not None:
+                applicability.validate()
             connection.execute("COMMIT")
         except Exception:
             if connection.in_transaction:
@@ -598,15 +695,22 @@ def read_dashboard_workspace_detail(
     finally:
         connection.close()
     return DashboardWorkspaceDetail(
-        workspace=_with_live_workspace_status(row),
+        workspace=row,
         recent_tasks=recent_tasks,
         search_query=search_query,
-        search_results=results,
         task_search_results=task_results,
+        page=page,
+        task_count=task_count,
     )
 
 
-def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTaskDetail:
+def read_dashboard_task_detail(
+    database_path: Path,
+    task_id: str,
+    *,
+    page: int = 1,
+    include_live_status: bool = True,
+) -> DashboardTaskDetail:
     """Read one Task's immutable timeline and the live summary for its owning Workspace."""
     connection = connect_database(database_path)
     try:
@@ -617,16 +721,6 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
             row = _read_workspace_row_persisted(connection, workspace)
             stack_hints = get_task_stack_hints(connection, task_id)
             baseline_git_branch = _read_task_baseline_branch(connection, task_id)
-            checkpoints = list_task_checkpoints(
-                connection,
-                task_id,
-                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
-            )
-            events = list_task_events(
-                connection,
-                task_id,
-                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
-            )
             count_row = connection.execute(
                 "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
                 (task_id,),
@@ -635,13 +729,44 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
                 count_row is None
                 or isinstance(count_row[0], bool)
                 or not isinstance(count_row[0], int)
-                or count_row[0] < len(events)
+                or count_row[0] < 0
             ):
                 raise sqlite3.DatabaseError("invalid dashboard Task event count")
             event_count = count_row[0]
+            page = _history_page(page, event_count, _DASHBOARD_TIMELINE_EVENT_LIMIT)
+            events = list_task_events(
+                connection,
+                task_id,
+                limit=_DASHBOARD_TIMELINE_EVENT_LIMIT,
+                offset=(page - 1) * _DASHBOARD_TIMELINE_EVENT_LIMIT,
+            )
+            checkpoints = tuple(
+                get_task_checkpoint(connection, event.checkpoint_id)
+                for event in events
+                if event.checkpoint_id is not None
+            )
+            if any(checkpoint.task_id != task_id for checkpoint in checkpoints):
+                raise TaskCheckpointError("dashboard checkpoint crossed Task ownership")
+            latest = list_task_checkpoints(connection, task_id, limit=1)
+            latest_checkpoint = latest[0] if latest else None
+            verification_checkpoint_ids = dict.fromkeys(
+                checkpoint.checkpoint_id
+                for checkpoint in (
+                    *checkpoints,
+                    *((latest_checkpoint,) if latest_checkpoint is not None else ()),
+                )
+            )
+            try:
+                checkpoint_verification = tuple(
+                    record
+                    for checkpoint_id in verification_checkpoint_ids
+                    for record in list_checkpoint_verification(connection, checkpoint_id)
+                )
+            except VerificationError as exc:
+                raise sqlite3.DatabaseError("invalid dashboard checkpoint verification") from exc
             git_branch = (
-                DashboardGitBranch(captured=True, name=checkpoints[-1].current_branch)
-                if checkpoints
+                DashboardGitBranch(captured=True, name=latest_checkpoint.current_branch)
+                if latest_checkpoint is not None
                 else baseline_git_branch
             )
             connection.execute("COMMIT")
@@ -652,7 +777,7 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
     finally:
         connection.close()
     return DashboardTaskDetail(
-        workspace=_with_live_workspace_status(row),
+        workspace=_with_live_workspace_status(row) if include_live_status else row,
         task=task,
         git_branch=git_branch,
         baseline_git_branch=baseline_git_branch,
@@ -660,22 +785,52 @@ def read_dashboard_task_detail(database_path: Path, task_id: str) -> DashboardTa
         checkpoints=checkpoints,
         events=events,
         event_count=event_count,
+        latest_checkpoint=latest_checkpoint,
+        page=page,
+        checkpoint_verification=checkpoint_verification,
     )
 
 
 def _read_workspace_row_persisted(
     connection: sqlite3.Connection,
     workspace: WorkspaceRecord,
+    *,
+    applicability: WorkspaceApplicability | None = None,
+    tasks_available: bool = True,
 ) -> DashboardWorkspaceRow:
     if get_workspace(connection, workspace.workspace_id) != workspace:
         raise sqlite3.DatabaseError("workspace registry changed during dashboard read")
     project = get_project(connection, workspace.project_id)
-    task = get_relevant_task(connection, workspace.workspace_id)
-    if task is None:
-        task = get_latest_task(connection, workspace.workspace_id)
+    task = (
+        get_relevant_task(connection, workspace.workspace_id, applicability=applicability)
+        if tasks_available
+        else None
+    )
+    if task is None and tasks_available:
+        task = get_latest_task(connection, workspace.workspace_id, applicability=applicability)
     checkpoint = (
         get_latest_task_checkpoint_status(connection, task.task_id) if task is not None else None
     )
+    if (
+        checkpoint is not None
+        and applicability is not None
+        and not applicability.checkpoint_visible(checkpoint.checkpoint_id)
+    ):
+        checkpoint = None
+    counts = connection.execute(
+        """
+        SELECT COALESCE(SUM(state IN ('working', 'waiting')), 0),
+               COALESCE(SUM(state = 'waiting' AND wait_reason = 'operator_review'), 0)
+        FROM tasks WHERE workspace_id = ?
+        """,
+        (workspace.workspace_id,),
+    ).fetchone()
+    if not tasks_available:
+        counts = (0, 0)
+    if counts is None or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
+    ):
+        raise sqlite3.DatabaseError("invalid dashboard Workspace Task counts")
     return DashboardWorkspaceRow(
         project_id=workspace.project_id,
         workspace_id=workspace.workspace_id,
@@ -704,6 +859,8 @@ def _read_workspace_row_persisted(
         dirty_path_count=None,
         indexed_file_count=_indexed_file_count(connection, workspace.workspace_id),
         live_error=None,
+        active_task_count=counts[0],
+        review_task_count=counts[1],
     )
 
 
@@ -744,6 +901,61 @@ def _with_live_workspace_status(row: DashboardWorkspaceRow) -> DashboardWorkspac
         dirty_path_count=dirty_path_count,
         live_error=live_error,
     )
+
+
+def _with_applicability_live_workspace_status(
+    row: DashboardWorkspaceRow,
+    applicability: WorkspaceApplicability,
+) -> DashboardWorkspaceRow:
+    """Add live status inside an applicability proof without repeating its identity checks."""
+    if applicability.workspace != WorkspaceRecord(
+        workspace_id=row.workspace_id,
+        project_id=row.project_id,
+        workspace_root=row.workspace_root,
+        git_common_dir=row.git_common_dir,
+    ):
+        raise GitWorkspaceError("dashboard applicability belongs to another Workspace")
+    try:
+        if applicability.has_git:
+            status = inspect_git_working_tree_status(row.workspace_root)
+            return replace(
+                row,
+                branch=status.branch,
+                dirty_path_count=status.dirty_path_count,
+                live_error=None,
+            )
+        return replace(row, branch=None, dirty_path_count=0, live_error=None)
+    except GitWorkspaceError:
+        return replace(
+            row,
+            branch=None,
+            dirty_path_count=None,
+            live_error="Git status unavailable",
+        )
+
+
+def _with_live_workspace_statuses(
+    rows: tuple[DashboardWorkspaceRow, ...],
+) -> tuple[DashboardWorkspaceRow, ...]:
+    if len(rows) <= 1:
+        return tuple(_with_live_workspace_status(row) for row in rows)
+    workers = min(_DASHBOARD_LIVE_STATUS_WORKERS, len(rows))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return tuple(pool.map(_with_live_workspace_status, rows))
+
+
+def _without_live_git(row: DashboardWorkspaceRow) -> DashboardWorkspaceRow:
+    if row.branch is None and row.dirty_path_count is None and row.live_error is None:
+        return row
+    return replace(row, branch=None, dirty_path_count=None, live_error=None)
+
+
+def _fingerprint_home(home: DashboardHomePage) -> DashboardHomePage:
+    return replace(home, workspaces=tuple(_without_live_git(row) for row in home.workspaces))
+
+
+def _fingerprint_task_detail(detail: DashboardTaskDetail) -> DashboardTaskDetail:
+    return replace(detail, workspace=_without_live_git(detail.workspace))
 
 
 def _read_task_baseline_branch(
@@ -839,7 +1051,33 @@ def mutate_dashboard_task(
     """Delegate one dashboard action to the authoritative Task domain workflow."""
     connection = connect_database(database_path)
     try:
-        if request.action == "accept":
+        if request.action == "delete_task":
+            task_delete(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+            )
+        elif request.action == "set_state":
+            assert request.state is not None
+            task_set_state(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                state=request.state,
+                wait_reason=request.wait_reason,
+            )
+        elif request.action == "set_deployment":
+            task_set_deployment(
+                connection,
+                request.workspace_id,
+                request.task_id,
+                expected_revision=request.expected_revision,
+                deploy_test=request.deploy_test,
+                deploy_prod=request.deploy_prod,
+            )
+        elif request.action == "accept":
             task_accept(
                 connection,
                 request.workspace_id,
@@ -920,6 +1158,7 @@ def mutate_dashboard_skill_policy(
     request: DashboardSkillPolicyRequest,
 ) -> tuple[str, ...]:
     """Persist one Project scope override and reconcile skills without rescanning source."""
+    profiles = active_skill_profiles_for_runtime(database_path)
     connection = connect_database(database_path)
     try:
         set_project_skill_facet_mode(
@@ -929,7 +1168,6 @@ def mutate_dashboard_skill_policy(
             request.mode,
         )
         workspaces = list_workspaces(connection, project_id=request.project_id)
-        profiles = tuple(sorted(load_host_integration_state_for_database(database_path).profiles))
         if not profiles:
             return ()
         retry: list[str] = []
@@ -962,15 +1200,7 @@ def mutate_dashboard_registry(
         connection.close()
 
 
-def _parse_dashboard_action_form(
-    payload: bytes,
-) -> (
-    DashboardActionRequest
-    | DashboardVisibilityRequest
-    | DashboardSkillPolicyRequest
-    | DashboardProjectDeleteRequest
-    | DashboardWorkspaceRelocationRequest
-):
+def _parse_dashboard_form_fields(payload: bytes) -> dict[str, str]:
     try:
         encoded = payload.decode("ascii")
         parsed = parse_qs(
@@ -985,7 +1215,19 @@ def _parse_dashboard_action_form(
         raise TaskValidationError("dashboard action form is malformed") from exc
     if any(len(values) != 1 for values in parsed.values()):
         raise TaskValidationError("dashboard action form fields must be singular")
-    fields = {name: values[0] for name, values in parsed.items()}
+    return {name: values[0] for name, values in parsed.items()}
+
+
+def _parse_dashboard_action_form(
+    payload: bytes,
+) -> (
+    DashboardActionRequest
+    | DashboardVisibilityRequest
+    | DashboardSkillPolicyRequest
+    | DashboardProjectDeleteRequest
+    | DashboardWorkspaceRelocationRequest
+):
+    fields = _parse_dashboard_form_fields(payload)
     action = fields.get("action")
     if action == "delete_project":
         expected = {"action", "project_id", "confirmation"}
@@ -1079,10 +1321,21 @@ def _parse_dashboard_action_form(
         expected.add("jira_url")
     elif action == "set_operator_status":
         expected.add("operator_status")
+    elif action == "set_state":
+        expected.update(("state", "wait_reason"))
+    elif action == "delete_task":
+        expected.add("confirmation")
+    elif action == "set_deployment":
+        expected.update(("deploy_test", "deploy_prod"))
+        fields.setdefault("deploy_test", "0")
+        fields.setdefault("deploy_prod", "0")
     if (
         action
         not in {
             "accept",
+            "set_state",
+            "delete_task",
+            "set_deployment",
             "feedback",
             "cancel",
             "reopen",
@@ -1107,7 +1360,10 @@ def _parse_dashboard_action_form(
         or not revision_text.isdigit()
     ):
         raise TaskValidationError("dashboard action identity fields are invalid")
-    expected_revision = int(revision_text)
+    try:
+        expected_revision = int(revision_text)
+    except ValueError as exc:
+        raise TaskValidationError("dashboard action expected_revision is invalid") from exc
     if expected_revision <= 0:
         raise TaskValidationError("dashboard action expected_revision must be positive")
     operator_status_text = fields.get("operator_status")
@@ -1116,8 +1372,27 @@ def _parse_dashboard_action_form(
         "",
         TaskOperatorStatus.DEPLOY_TEST.value,
         TaskOperatorStatus.DEPLOY_PROD.value,
+        TaskOperatorStatus.DEPLOY_BOTH.value,
     }:
         raise TaskValidationError("dashboard operator status is unsupported")
+    state = None
+    wait_reason = None
+    if action == "set_state":
+        try:
+            state = TaskState(fields["state"])
+            wait_reason = TaskWaitReason(fields["wait_reason"]) if fields["wait_reason"] else None
+        except ValueError as exc:
+            raise TaskValidationError("dashboard Task state is unsupported") from exc
+        if state is TaskState.WAITING and wait_reason is None:
+            raise TaskValidationError("waiting requires a reason")
+        if state is not TaskState.WAITING:
+            wait_reason = None
+    if action == "delete_task" and fields["confirmation"] != task_id:
+        raise TaskValidationError("Task deletion requires exact Task confirmation")
+    if action == "set_deployment" and any(
+        fields[name] not in {"0", "1"} for name in ("deploy_test", "deploy_prod")
+    ):
+        raise TaskValidationError("dashboard deployment flag is invalid")
     return DashboardActionRequest(
         action=action,
         workspace_id=workspace_id,
@@ -1129,6 +1404,10 @@ def _parse_dashboard_action_form(
         operator_status=(
             None if not operator_status_text else TaskOperatorStatus(operator_status_text)
         ),
+        state=state,
+        wait_reason=wait_reason,
+        deploy_test=fields.get("deploy_test") == "1",
+        deploy_prod=fields.get("deploy_prod") == "1",
     )
 
 
@@ -1209,102 +1488,32 @@ def _render_visibility_form(
     )
 
 
-_SKILL_SCOPE_LABELS: dict[str, str] = {
-    "backend-service": SKILL_SCOPE_BACKEND,
-    "web-frontend": SKILL_SCOPE_FRONTEND,
-    "mobile-app": SKILL_SCOPE_MOBILE,
-    "database-backed": SKILL_SCOPE_DATABASE,
-    "godot-project": SKILL_SCOPE_GODOT,
-    "containerized": SKILL_SCOPE_CONTAINERS,
-    "observability": SKILL_SCOPE_OBSERVABILITY,
-    "ci-pipeline": SKILL_SCOPE_CI,
-    "deployment-ops": SKILL_SCOPE_DEPLOYMENT,
-}
-
-
 def _render_skill_policy(
     project_id: str,
     policy: ProjectSkillPolicy,
     *,
     action: str,
+    snapshot: DashboardSkillsSnapshot | None = None,
 ) -> str:
-    included = set(policy.included_facets)
-    excluded = set(policy.excluded_facets)
-    rows: list[str] = []
-    for facet in MANAGED_PROJECT_SKILL_FACETS:
-        if facet in excluded:
-            current = ProjectSkillFacetMode.EXCLUDED
-            state_label = SKILL_SCOPE_EXCLUDED
-            state_hint = SKILL_SCOPE_EXCLUDED_HINT
-        elif facet in included:
-            current = ProjectSkillFacetMode.INCLUDED
-            state_label = SKILL_SCOPE_INCLUDED
-            state_hint = SKILL_SCOPE_INCLUDED_HINT
-        else:
-            current = ProjectSkillFacetMode.AUTO
-            state_label = SKILL_SCOPE_AUTO
-            state_hint = SKILL_SCOPE_AUTO_HINT
-        buttons: list[str] = []
-        for mode, label in (
-            (ProjectSkillFacetMode.AUTO, SKILL_SCOPE_AUTO),
-            (ProjectSkillFacetMode.INCLUDED, SKILL_SCOPE_INCLUDED),
-            (ProjectSkillFacetMode.EXCLUDED, SKILL_SCOPE_EXCLUDED),
-        ):
-            if mode is current:
-                buttons.append(
-                    '<span class="skill-scope-current" aria-current="true">'
-                    + escape(label)
-                    + "</span>"
-                )
-                continue
-            buttons.append(
-                f'<form method="post" action="{escape(action, quote=True)}">'
-                + _hidden_input("action", "set_skill_scope")
-                + _hidden_input("project_id", project_id)
-                + _hidden_input("facet", facet)
-                + _hidden_input("mode", mode.value)
-                + '<button class="btn" type="submit" aria-label="'
-                + escape(f"{label}: {_SKILL_SCOPE_LABELS[facet]}", quote=True)
-                + f'">{escape(label)}</button>'
-                + "</form>"
-            )
-        rows.append(
-            '<div class="skill-scope-row" data-mode="'
-            + escape(current.value, quote=True)
-            + '"><div class="skill-scope-copy">'
-            + f"<strong>{escape(_SKILL_SCOPE_LABELS[facet])}</strong>"
-            + f"<span>{escape(state_label)} · {escape(state_hint)}</span></div>"
-            + '<div class="skill-scope-actions">'
-            + "".join(buttons)
-            + "</div></div>"
-        )
+    return render_skill_policy(project_id, policy, action=action, snapshot=snapshot)
+
+
+def _draft_marker(form_values: Mapping[str, str], name: str) -> str:
+    return ' data-recovered-draft="true"' if name in form_values else ""
+
+
+def _textarea_value(value: str) -> str:
+    # Character references preserve an initial newline and CR across HTML parsing.
+    return escape(value).replace("\r", "&#13;").replace("\n", "&#10;")
+
+
+def _render_project_delete_form(
+    project_id: str, *, action: str, form_values: Mapping[str, str] | None = None
+) -> str:
+    form_values = {} if form_values is None else form_values
+    opened = " open" if "confirmation" in form_values else ""
     return (
-        '<section class="panel skill-scope-panel" id="skill-scope"><div class="panel-head"><div>'
-        + f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
-        + f"<h2>{escape(SKILL_SCOPE)}</h2></div></div>"
-        + '<div class="panel-body">'
-        + f'<p class="management-hint skill-scope-hint">{escape(SKILL_SCOPE_HINT)}</p>'
-        + '<div class="skill-scope-list">'
-        + "".join(rows)
-        + "</div></div></section>"
-    )
-
-
-def _render_skill_scope_entry(project_url: str, *, primary: bool) -> str:
-    classes = "btn btn-primary skill-scope-entry" if primary else "btn skill-scope-entry"
-    return (
-        f'<a class="{classes}" href="'
-        + escape(f"{project_url}#skill-scope", quote=True)
-        + '">'
-        + escape(MANAGE_SKILL_SCOPE)
-        + ' <span aria-hidden="true">→</span></a>'
-        + f'<p class="management-hint">{escape(MANAGE_SKILL_SCOPE_HINT)}</p>'
-    )
-
-
-def _render_project_delete_form(project_id: str, *, action: str) -> str:
-    return (
-        '<details class="management-disclosure danger-zone">'
+        f'<details class="management-disclosure danger-zone"{opened}>'
         f"<summary>{escape(DELETE_PROJECT_SUMMARY)}</summary>"
         f'<p class="management-hint">{escape(DELETE_PROJECT_HINT)}</p>'
         f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
@@ -1315,15 +1524,22 @@ def _render_project_delete_form(project_id: str, *, action: str) -> str:
         + "</label>"
         + f'<input id="delete-confirm-{escape(project_id, quote=True)}" '
         f'name="confirmation" type="text" required autocomplete="off" '
+        + f'value="{escape(form_values.get("confirmation", ""), quote=True)}"'
+        + _draft_marker(form_values, "confirmation")
+        + " "
         f'placeholder="{escape(DELETE_PROJECT_CONFIRM_VALUE, quote=True)}">'
         + f'<button class="btn btn-danger" type="submit">{escape(DELETE_PROJECT)}</button>'
         + "</form></details>"
     )
 
 
-def _render_workspace_relocation_form(workspace_id: str, *, action: str) -> str:
+def _render_workspace_relocation_form(
+    workspace_id: str, *, action: str, form_values: Mapping[str, str] | None = None
+) -> str:
+    form_values = {} if form_values is None else form_values
+    opened = " open" if "new_path" in form_values else ""
     return (
-        '<details class="management-disclosure">'
+        f'<details class="management-disclosure"{opened}>'
         f"<summary>{escape(WORKSPACE_RELOCATION_SUMMARY)}</summary>"
         f'<p class="management-hint">{escape(WORKSPACE_RELOCATION_HINT)}</p>'
         f'<form method="post" action="{escape(action, quote=True)}" class="feedback-form">'
@@ -1334,6 +1550,9 @@ def _render_workspace_relocation_form(workspace_id: str, *, action: str) -> str:
         + "</label>"
         + f'<input id="relocate-{escape(workspace_id, quote=True)}" name="new_path" '
         f'type="text" required maxlength="2048" autocomplete="off" '
+        + f'value="{escape(form_values.get("new_path", ""), quote=True)}"'
+        + _draft_marker(form_values, "new_path")
+        + " "
         f'placeholder="{escape(WORKSPACE_RELOCATION_PLACEHOLDER, quote=True)}">'
         + f'<button class="btn" type="submit">{escape(WORKSPACE_RELOCATION_SUBMIT)}</button>'
         + "</form></details>"
@@ -1364,7 +1583,12 @@ def _render_task_actions(
     jira_url: str | None = None,
     operator_status: str | None = None,
     detailed: bool = False,
+    form_values: Mapping[str, str] | None = None,
 ) -> str:
+    form_values = {} if form_values is None else form_values
+    feedback_open = " open" if "feedback" in form_values else ""
+    comment_open = " open" if "comment" in form_values else ""
+    jira_open = " open" if "jira_url" in form_values else ""
     forms: list[str] = []
     if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.OPERATOR_REVIEW.value:
         forms.append(
@@ -1374,12 +1598,14 @@ def _render_task_actions(
             '<form method="post" action="">'
             + _task_action_fields(workspace_id, task_id, revision, "cancel")
             + f'<button class="btn btn-danger" type="submit">{escape(CANCEL)}</button></form></div>'
-            f'<details class="feedback-disclosure"><summary>{escape(FEEDBACK_SUMMARY)}</summary>'
+            f'<details class="feedback-disclosure"{feedback_open}><summary>{escape(FEEDBACK_SUMMARY)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "feedback")
             + f'<label for="feedback-{escape(task_id, quote=True)}">{escape(FEEDBACK_LABEL)}</label>'
             f'<textarea id="feedback-{escape(task_id, quote=True)}" name="feedback" rows="4" maxlength="1024" '
-            f'required placeholder="{escape(FEEDBACK_PLACEHOLDER, quote=True)}"></textarea>'
+            f'required placeholder="{escape(FEEDBACK_PLACEHOLDER, quote=True)}"'
+            + _draft_marker(form_values, "feedback")
+            + f">{_textarea_value(form_values.get('feedback', ''))}</textarea>"
             f'<button class="btn" type="submit">{escape(FEEDBACK_SUBMIT)}</button></form></details>'
         )
     elif state in {TaskState.WORKING.value, TaskState.WAITING.value}:
@@ -1396,32 +1622,67 @@ def _render_task_actions(
             "</form></div>"
         )
     if detailed:
-        status_options = []
-        for value, label in (
-            ("", OPERATOR_STATUS_NONE),
-            (TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
-            (TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
-        ):
-            selected = " selected" if (operator_status or "") == value else ""
-            status_options.append(
-                f'<option value="{escape(value, quote=True)}"{selected}>{escape(label)}</option>'
+        selected_state = form_values.get("state", state)
+        selected_reason = form_values.get("wait_reason", wait_reason or "operator_input")
+        options = "".join(
+            f'<option value="{value}"'
+            + (" selected" if selected_state == value else "")
+            + f">{escape(label)}</option>"
+            for value, label in (
+                ("working", OPERATOR_STATE_WORKING),
+                ("waiting", "Отложить"),
+                ("completed", "Принять и завершить"),
+                ("cancelled", "Отменить"),
             )
+        )
+        reasons = "".join(
+            f'<option value="{value}"'
+            + (" selected" if selected_reason == value else "")
+            + f">{escape(label)}</option>"
+            for value, label in (
+                ("operator_input", "Решение оператора"),
+                ("operator_review", "Приёмка оператором"),
+                ("external", "Внешняя зависимость"),
+            )
+        )
         forms.append(
-            f'<details class="feedback-disclosure"><summary>{escape(COMMENT_SUMMARY)}</summary>'
+            '<details class="feedback-disclosure"'
+            + (" open" if "state" in form_values or "wait_reason" in form_values else "")
+            + "><summary>Изменить состояние</summary>"
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "set_state")
+            + '<label>Состояние задачи<select name="state"'
+            + _draft_marker(form_values, "state")
+            + ">"
+            + options
+            + "</select></label>"
+            + '<label>Причина ожидания (для отложенной задачи)<select name="wait_reason"'
+            + _draft_marker(form_values, "wait_reason")
+            + ">"
+            + reasons
+            + "</select></label>"
+            + '<button class="btn" type="submit">Сохранить состояние</button></form></details>'
+        )
+        forms.append(
+            f'<details class="feedback-disclosure"{comment_open}><summary>{escape(COMMENT_SUMMARY)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "comment")
             + f'<label for="comment-{escape(task_id, quote=True)}">{escape(COMMENT_LABEL)}</label>'
             f'<textarea id="comment-{escape(task_id, quote=True)}" name="comment" rows="4" '
-            f'maxlength="2048" required placeholder="{escape(COMMENT_PLACEHOLDER, quote=True)}"></textarea>'
+            f'maxlength="2048" required placeholder="{escape(COMMENT_PLACEHOLDER, quote=True)}"'
+            + _draft_marker(form_values, "comment")
+            + f">{_textarea_value(form_values.get('comment', ''))}</textarea>"
             f'<button class="btn" type="submit">{escape(COMMENT_SUBMIT)}</button></form></details>'
         )
         forms.append(
-            f'<details class="feedback-disclosure"><summary>{escape(JIRA)}</summary>'
+            f'<details class="feedback-disclosure"{jira_open}><summary>{escape(JIRA)}</summary>'
             '<form method="post" action="" class="feedback-form">'
             + _task_action_fields(workspace_id, task_id, revision, "set_jira")
             + f'<label for="jira-{escape(task_id, quote=True)}">{escape(JIRA_LABEL)}</label>'
             f'<input id="jira-{escape(task_id, quote=True)}" name="jira_url" type="url" '
-            f'maxlength="2048" value="{escape(jira_url or "", quote=True)}" '
+            f'maxlength="2048" value="{escape(form_values.get("jira_url", jira_url or ""), quote=True)}" '
+            + _draft_marker(form_values, "jira_url")
+            + " "
             f'placeholder="{escape(JIRA_PLACEHOLDER, quote=True)}">'
             f'<button class="btn" type="submit">{escape(JIRA_SAVE)}</button></form>'
             + (
@@ -1434,18 +1695,309 @@ def _render_task_actions(
             )
             + "</details>"
         )
+        checkboxes = []
+        for name, marker, label in (
+            ("deploy_test", TaskOperatorStatus.DEPLOY_TEST.value, OPERATOR_STATUS_DEPLOY_TEST),
+            ("deploy_prod", TaskOperatorStatus.DEPLOY_PROD.value, OPERATOR_STATUS_DEPLOY_PROD),
+        ):
+            checked = (
+                form_values[name] == "1"
+                if name in form_values
+                else operator_status in {marker, TaskOperatorStatus.DEPLOY_BOTH.value}
+            )
+            checkboxes.append(
+                f'<label class="checkbox-row"><input type="checkbox" name="{name}" value="1"'
+                + (" checked" if checked else "")
+                + _draft_marker(form_values, name)
+                + f"> {escape(label)}</label>"
+            )
         forms.append(
+            '<details class="feedback-disclosure"'
+            + (" open" if "deploy_test" in form_values or "deploy_prod" in form_values else "")
+            + "><summary>Отметки деплоя</summary>"
             '<form method="post" action="" class="feedback-form">'
-            + _task_action_fields(workspace_id, task_id, revision, "set_operator_status")
-            + f'<label for="operator-status-{escape(task_id, quote=True)}">'
-            + escape(OPERATOR_STATUS)
-            + "</label>"
-            + f'<select id="operator-status-{escape(task_id, quote=True)}" name="operator_status">'
-            + "".join(status_options)
-            + "</select>"
-            + f'<button class="btn" type="submit">{escape(OPERATOR_STATUS_SAVE)}</button></form>'
+            + _task_action_fields(workspace_id, task_id, revision, "set_deployment")
+            + "".join(checkboxes)
+            + '<button class="btn" type="submit">Сохранить отметки</button></form></details>'
+        )
+        forms.append(
+            '<details class="feedback-disclosure"><summary>Удалить задачу</summary>'
+            "<p>Задача, её история и созданные в ней знания будут удалены навсегда. "
+            "Файлы репозитория сохранятся.</p>"
+            '<form method="post" action="" class="feedback-form">'
+            + _task_action_fields(workspace_id, task_id, revision, "delete_task")
+            + '<label class="checkbox-row"><input type="checkbox" name="confirmation" value="'
+            + escape(task_id, quote=True)
+            + '" required> Подтверждаю удаление задачи и её знаний</label>'
+            + '<button class="btn btn-danger" type="submit">Удалить навсегда</button></form></details>'
         )
     return '<div class="action-panel">' + "".join(forms) + "</div>" if forms else ""
+
+
+_RECOVERABLE_TASK_FIELDS = {
+    "accept": None,
+    "feedback": "feedback",
+    "cancel": None,
+    "reopen": None,
+    "comment": "comment",
+    "set_jira": "jira_url",
+    "set_operator_status": "operator_status",
+    "set_state": "state",
+    "set_deployment": "deploy_test",
+    "delete_task": "confirmation",
+}
+
+
+def _recoverable_form_fields(payload: bytes) -> dict[str, str]:
+    """Recover only singular, known form schemas, never arbitrary failed request fields."""
+    try:
+        fields = _parse_dashboard_form_fields(payload)
+    except TaskValidationError:
+        return {}
+    action = fields.get("action", "")
+    if action in _RECOVERABLE_TASK_FIELDS:
+        expected = {"action", "workspace_id", "task_id", "expected_revision"}
+        editable = _RECOVERABLE_TASK_FIELDS[action]
+        if editable is not None:
+            expected.add(editable)
+        if action == "set_state":
+            expected.add("wait_reason")
+        if action == "set_deployment":
+            expected.add("deploy_prod")
+            fields.setdefault("deploy_test", "0")
+            fields.setdefault("deploy_prod", "0")
+        revision = fields.get("expected_revision", "")
+        if not revision.isascii() or not revision.isdigit() or not revision.strip("0"):
+            return {}
+    else:
+        expected = {
+            "relocate_workspace": {"action", "workspace_id", "new_path"},
+            "delete_project": {"action", "project_id", "confirmation"},
+            "set_visibility": {"action", "project_id", "visibility_mode"},
+            "set_skill_scope": {"action", "project_id", "facet", "mode"},
+        }.get(action, set())
+    if set(fields) != expected:
+        return {}
+    if any(
+        not value or len(value) > 128 or "\x00" in value
+        for name, value in fields.items()
+        if name in {"task_id", "workspace_id", "project_id"}
+    ):
+        return {}
+    return fields
+
+
+def _recovery_target_on_page(
+    page: _DashboardPageRequest, *, workspace_id: str, project_id: str, task_id: str | None = None
+) -> bool:
+    return (
+        page.kind == "projects"
+        or (page.kind == "task" and page.identity == task_id)
+        or (page.kind == "workspace" and page.identity == workspace_id)
+        or (page.kind == "project" and page.identity == project_id)
+    )
+
+
+def _render_recovery_controls(
+    database_path: Path, page: _DashboardPageRequest, fields: dict[str, str]
+) -> str:
+    action = fields.get("action", "")
+    if action in _RECOVERABLE_TASK_FIELDS:
+        if page.kind == "task" and page.identity != fields["task_id"]:
+            return ""
+        detail = read_dashboard_task_detail(database_path, fields["task_id"])
+        task = detail.task
+        if fields["workspace_id"] != task.workspace_id or not _recovery_target_on_page(
+            page,
+            workspace_id=task.workspace_id,
+            project_id=detail.workspace.project_id,
+            task_id=task.task_id,
+        ):
+            return ""
+        reviewing = (
+            task.state is TaskState.WAITING and task.wait_reason is TaskWaitReason.OPERATOR_REVIEW
+        )
+        terminal = task.state in {TaskState.COMPLETED, TaskState.CANCELLED}
+        if (
+            (action == "feedback" and not reviewing)
+            or (action == "cancel" and terminal)
+            or (action == "reopen" and not terminal)
+            or (
+                action == "set_operator_status"
+                and fields["operator_status"]
+                not in {
+                    "",
+                    TaskOperatorStatus.DEPLOY_TEST.value,
+                    TaskOperatorStatus.DEPLOY_PROD.value,
+                }
+            )
+        ):
+            return ""
+        last_summary = "" if detail.latest_checkpoint is None else detail.latest_checkpoint.summary
+        return (
+            f"<h2>{escape(task.title)}</h2><p>{_state_pill(task.state.value, None if task.wait_reason is None else task.wait_reason.value)} "
+            f"{escape(REVISION)} {task.revision}</p><p>{escape(last_summary)}</p>"
+            + _render_latest_verification(detail)
+            + _render_task_actions(
+                workspace_id=task.workspace_id,
+                task_id=task.task_id,
+                state=task.state.value,
+                wait_reason=None if task.wait_reason is None else task.wait_reason.value,
+                revision=task.revision,
+                jira_url=task.jira_url,
+                operator_status=None
+                if task.operator_status is None
+                else task.operator_status.value,
+                detailed=True,
+                form_values=fields,
+            )
+        )
+    if action == "relocate_workspace":
+        if page.kind != "workspace" or page.identity != fields["workspace_id"]:
+            return ""
+        connection = connect_database(database_path)
+        try:
+            workspace = get_workspace(connection, fields["workspace_id"])
+        finally:
+            connection.close()
+        return _render_workspace_relocation_form(
+            workspace.workspace_id, action=page.redirect_target, form_values=fields
+        )
+    if action in {"delete_project", "set_skill_scope", "set_visibility"}:
+        connection = connect_database(database_path)
+        try:
+            project = get_project(connection, fields["project_id"])
+            if page.kind == "workspace" and action == "set_visibility":
+                if (
+                    page.identity is None
+                    or get_workspace(connection, page.identity).project_id != project.project_id
+                ):
+                    return ""
+            elif page.kind != "project" or page.identity != project.project_id:
+                return ""
+        finally:
+            connection.close()
+        if action == "delete_project":
+            return _render_project_delete_form(
+                project.project_id, action=page.redirect_target, form_values=fields
+            )
+        if action == "set_visibility":
+            return _render_visibility_form(
+                project.project_id, project.visibility_mode, action=page.redirect_target
+            )
+        project_detail = read_dashboard_project_detail(
+            database_path, project.project_id, include_skills=True
+        )
+        return _render_skill_policy(
+            project.project_id,
+            project_detail.skill_policy,
+            action=page.redirect_target,
+            snapshot=project_detail.skills,
+        )
+    return ""
+
+
+def _render_dashboard_form_error(
+    database_path: Path,
+    base_path: str,
+    page: _DashboardPageRequest,
+    *,
+    status: int,
+    payload: bytes = b"",
+) -> str:
+    fields = _recoverable_form_fields(payload) if payload else {}
+    controls = ""
+    if fields:
+        try:
+            controls = _render_recovery_controls(database_path, page, fields)
+        except (
+            OSError,
+            sqlite3.DatabaseError,
+            DatabaseError,
+            TaskError,
+            RegistryError,
+            ProjectSkillPolicyError,
+            DashboardError,
+            TaskCheckpointError,
+            VerificationError,
+        ):
+            # The original status and a copyable draft remain useful even if the target disappeared.
+            pass
+    values = [
+        fields[name]
+        for name in (
+            "feedback",
+            "comment",
+            "jira_url",
+            "operator_status",
+            "state",
+            "wait_reason",
+            "deploy_test",
+            "deploy_prod",
+            "new_path",
+            "confirmation",
+        )
+        if name in fields
+    ]
+    message = FORM_ERROR_CONFLICT if status == 409 else FORM_ERROR_INVALID
+    content = (
+        '<section class="panel form-recovery"><div class="panel-body">'
+        f'<div class="form-error" role="alert"><h1>{escape(FORM_ERROR_TITLE)}</h1>'
+        f"<p>{escape(message)}</p></div>"
+    )
+    if values:
+        content += f"<p>{escape(FORM_DRAFT_SAVED if controls else FORM_DRAFT_UNAVAILABLE)}</p>"
+    content += controls
+    if values and not controls:
+        content += (
+            f'<label for="recovery-draft">{escape(FORM_DRAFT_LABEL)}</label>'
+            '<textarea id="recovery-draft" class="recovery-draft" rows="6" readonly '
+            'data-recovered-draft="true">' + _textarea_value("\n".join(values)) + "</textarea>"
+        )
+    content += (
+        f'<p><a class="btn" href="{escape(page.redirect_target, quote=True)}">'
+        f"{escape(FORM_ERROR_BACK)}</a></p></div></section>"
+    )
+    navigation_rows = None
+    try:
+        navigation_rows = _read_dashboard_navigation_rows(database_path)
+    except (
+        OSError,
+        sqlite3.DatabaseError,
+        DatabaseError,
+        TaskError,
+        RegistryError,
+        DashboardError,
+    ):
+        pass
+    project_id = page.identity if page.kind == "project" else None
+    workspace_id = page.identity if page.kind == "workspace" else None
+    task_id = page.identity if page.kind == "task" else None
+    if task_id is not None:
+        try:
+            connection = connect_database(database_path)
+            try:
+                workspace_id = get_task(connection, task_id).workspace_id
+            finally:
+                connection.close()
+        except (OSError, sqlite3.DatabaseError, DatabaseError, TaskError):
+            pass
+    for row in navigation_rows or ():
+        if row.workspace_id == workspace_id:
+            project_id = row.project_id
+            break
+    return _render_shell(
+        base_path=base_path,
+        page_title=document_title(FORM_ERROR_TITLE),
+        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (FORM_ERROR_TITLE, None)),
+        events_url="",
+        content=content,
+        navigation_rows=navigation_rows,
+        current_project_id=project_id,
+        current_workspace_id=workspace_id,
+        current_task_id=task_id,
+        current_section="settings" if page.settings else "tasks" if workspace_id else "overview",
+    )
 
 
 def _state_pill(state: str | None, wait_reason: str | None = None) -> str:
@@ -1479,12 +2031,15 @@ def _events_url(
     snapshot: str,
     identity: str | None = None,
     search_query: str | None = None,
+    page: int = 1,
 ) -> str:
     params: list[tuple[str, str]] = [("view", view), ("snapshot", snapshot)]
     if identity is not None:
-        params.append((f"{view}_id", identity))
+        params.append(("project_id" if view == "project_settings" else f"{view}_id", identity))
     if search_query is not None:
         params.append(("q", search_query))
+    if page != 1:
+        params.append(("page", str(page)))
     return f"{base_path}events?{urlencode(params)}"
 
 
@@ -1527,39 +2082,54 @@ def _group_navigation_rows(
 
 
 def _render_project_navigation(
-    rows: tuple[DashboardWorkspaceRow, ...],
+    rows: tuple[DashboardWorkspaceRow, ...] | None,
     *,
     base_path: str,
     current_project_id: str | None,
     current_workspace_id: str | None,
     current_task_id: str | None,
+    current_section: str,
 ) -> str:
-    overview_current = current_project_id is None and current_workspace_id is None
+    overview_current = (
+        current_project_id is None
+        and current_workspace_id is None
+        and current_section == "overview"
+    )
     parts = [
         f'<nav class="project-navigation" aria-label="{escape(PROJECTS_NAV, quote=True)}">',
         f'<a class="overview-link{" is-current" if overview_current else ""}" '
         f'href="{escape(base_path, quote=True)}"'
         + (' aria-current="page"' if overview_current else "")
         + f'><span class="nav-overview-icon" aria-hidden="true">⌂</span><span>{escape(ALL_PROJECTS)}</span></a>',
+        f'<a class="overview-link{" is-current" if current_project_id == "all" else ""}" '
+        f'href="{base_path}vault/all/"'
+        + (' aria-current="page"' if current_project_id == "all" else "")
+        + ">Личное хранилище</a>",
         f'<p class="nav-label">{escape(PROJECTS_NAV)}</p>',
     ]
+    if rows is None:
+        parts.append(f'<p class="nav-empty">{escape(NAVIGATION_UNAVAILABLE)}</p></nav>')
+        return "".join(parts)
     for project_id, project_rows in _group_navigation_rows(rows):
         project_current = project_id == current_project_id or (
             current_workspace_id is not None
             and any(item.workspace_id == current_workspace_id for item in project_rows)
         )
-        nav_workspace = _attention_workspace(project_rows)
-        workspace_url = _url(base_path, "workspaces", nav_workspace.workspace_id)
+        workspace_url = _url(base_path, "projects", project_id)
         project_name = _project_display_name(rows, project_id)
-        link_current = (
-            current_workspace_id == nav_workspace.workspace_id and current_task_id is None
-        )
+        link_current = project_current and current_section == "overview"
+        review_count = sum(item.review_task_count for item in project_rows)
         parts.append(
             f'<section class="nav-project{" is-context" if project_current else ""}">'
             f'<a class="nav-project-link" href="{escape(workspace_url, quote=True)}"'
             + (' aria-current="page"' if link_current else "")
             + f'><span class="nav-project-name">{escape(project_name)}</span>'
-            f'<span class="nav-project-id mono">{escape(nav_workspace.workspace_id[:8])}</span></a>'
+            + (
+                f'<span class="nav-project-id">{review_count} на проверке</span>'
+                if review_count
+                else ""
+            )
+            + "</a>"
             "</section>"
         )
     if not rows:
@@ -1575,10 +2145,12 @@ def _render_shell(
     breadcrumbs: tuple[tuple[str, str | None], ...],
     events_url: str,
     content: str,
-    navigation_rows: tuple[DashboardWorkspaceRow, ...] = (),
+    navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = (),
     current_project_id: str | None = None,
     current_workspace_id: str | None = None,
     current_task_id: str | None = None,
+    interactive: bool = True,
+    current_section: str = "overview",
 ) -> str:
     breadcrumb_html: list[str] = []
     for label, href in breadcrumbs:
@@ -1594,9 +2166,29 @@ def _render_shell(
         current_project_id=current_project_id,
         current_workspace_id=current_workspace_id,
         current_task_id=current_task_id,
+        current_section=current_section,
     )
+    project_navigation = ""
+    if current_project_id is not None and current_project_id != "all":
+        project_navigation = _render_project_tabs(
+            current_project_id,
+            tuple(row for row in navigation_rows or () if row.project_id == current_project_id),
+            base_path,
+            section=current_section,
+            workspace_id=current_workspace_id,
+            task_id=current_task_id,
+        )
     css_url = f"{base_path}assets/dashboard.css"
     js_url = f"{base_path}assets/dashboard.js"
+    live_state = "reconnecting" if events_url else "manual"
+    live_copy = LIVE_CONNECTING if events_url else LIVE_MANUAL
+    refresh_control = (
+        f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button>'
+        if interactive
+        else ""
+    )
+    if not interactive:
+        live_copy = "Личное хранилище"
     return (
         '<!doctype html><html lang="ru"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1611,44 +2203,53 @@ def _render_shell(
         f"<strong>{escape(BRAND)}</strong><small>{escape(WORKSPACE_HOME)}</small></span></a>"
         f"{navigation}"
         '<div class="sidebar-footer">'
-        '<span class="live-indicator" data-live-indicator data-state="reconnecting">'
+        f'<span class="live-indicator" data-live-indicator data-state="{live_state}">'
         '<span class="live-dot" aria-hidden="true"></span>'
-        f'<span class="live-copy" data-live-copy>{escape(LIVE_CONNECTING)}</span>'
-        f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button>'
+        f'<span class="live-copy" data-live-copy>{escape(live_copy)}</span>'
+        f"{refresh_control}"
         '</span></div></aside><div class="app-stage"><header class="context-header">'
-        '<details class="mobile-navigation"><summary>'
+        f'<details class="mobile-navigation"><summary aria-label="{escape(OPEN_NAVIGATION, quote=True)}">'
         f'<span class="brand-mark" aria-hidden="true">H</span><span>{escape(OPEN_NAVIGATION)}</span>'
         '<span class="mobile-chevron" aria-hidden="true">⌄</span></summary>'
         f'<div class="mobile-navigation-panel">{navigation}</div></details>'
         f'<nav class="breadcrumbs" aria-label="{escape(NAVIGATION, quote=True)}"><ol>'
         f"{''.join(breadcrumb_html)}</ol></nav>"
         '<span class="header-live-indicator live-indicator" data-header-live-indicator '
-        'data-state="reconnecting"><span class="live-dot" aria-hidden="true"></span>'
-        f'<span class="live-copy">{escape(LIVE_CONNECTING)}</span>'
-        f'<button class="update-link" type="button" data-refresh-now="true">{escape(LIVE_REFRESH)}</button></span>'
+        f'data-state="{live_state}"><span class="live-dot" aria-hidden="true"></span>'
+        f'<span class="live-copy">{escape(live_copy)}</span>'
+        f"{refresh_control}</span>"
         '</header><main id="main"><div class="content-frame">'
-        f"{content}</div></main></div></div>"
-        f'<script defer src="{escape(js_url, quote=True)}"></script>'
-        "</body></html>"
+        f"{project_navigation}{content}</div></main></div></div>"
+        + (f'<script defer src="{escape(js_url, quote=True)}"></script>' if interactive else "")
+        + "</body></html>"
+    )
+
+
+def _render_navigation_error(title: str, message: str) -> str:
+    return _render_shell(
+        base_path="/",
+        page_title=document_title(title),
+        breadcrumbs=((BREADCRUMB_PROJECTS, "/"), (title, None)),
+        events_url="",
+        content=(
+            '<section class="panel"><div class="panel-body">'
+            f"<h1>{escape(title)}</h1><p>{escape(message)}</p>"
+            f'<a class="btn btn-primary" href="/">{escape(ALL_PROJECTS)}</a>'
+            '<a class="btn" href="/vault/all/">Личное хранилище</a></div></section>'
+        ),
+        navigation_rows=None,
+        current_section="error",
     )
 
 
 def _render_metrics(rows: tuple[DashboardWorkspaceRow, ...]) -> str:
     project_count = len({row.project_id for row in rows})
-    active_count = sum(
-        row.task_state in {TaskState.WORKING.value, TaskState.WAITING.value} for row in rows
-    )
-    review_count = sum(
-        row.task_state == TaskState.WAITING.value
-        and row.task_wait_reason == TaskWaitReason.OPERATOR_REVIEW.value
-        for row in rows
-    )
-    indexed_count = sum(row.indexed_file_count for row in rows)
+    active_count = sum(row.active_task_count for row in rows)
+    review_count = sum(row.review_task_count for row in rows)
     metrics = (
         (METRIC_PROJECTS, project_count),
         (METRIC_ACTIVE, active_count),
         (METRIC_REVIEW, review_count),
-        (METRIC_INDEX, indexed_count),
     )
     return (
         f'<section class="metrics" aria-label="{escape(METRICS_LABEL, quote=True)}">'
@@ -1732,15 +2333,100 @@ def _render_workspace_card(row: DashboardWorkspaceRow, base_path: str) -> str:
     )
 
 
+def _render_project_hub_cards(rows: tuple[DashboardWorkspaceRow, ...], base_path: str) -> str:
+    cards = []
+    for project_id, project_rows in _group_navigation_rows(rows):
+        name = _project_display_name(rows, project_id)
+        workspace = _attention_workspace(project_rows)
+        cards.append(
+            '<article class="hub-card"><div class="hub-card-heading">'
+            f'<span class="hub-monogram" aria-hidden="true">{escape(name[:1].upper())}</span>'
+            f"{_state_pill(workspace.task_state, workspace.task_wait_reason)}</div>"
+            f'<h2><a href="{_url(base_path, "projects", project_id)}">{escape(name)}</a></h2>'
+            + (
+                '<p class="hub-focus"><a href="'
+                + _url(base_path, "tasks", workspace.task_id)
+                + '">'
+                + escape(workspace.task_title or NO_TASK)
+                + "</a></p>"
+                if workspace.task_id
+                else f'<p class="hub-focus">{escape(NO_TASK)}</p>'
+            )
+            + (
+                f'<p class="hub-next">{escape(workspace.next_step)}</p>'
+                if workspace.next_step
+                else ""
+            )
+            + '<div class="hub-counts">'
+            f"<span>Активных: {sum(row.active_task_count for row in project_rows)}</span>"
+            f"<span>{sum(row.review_task_count for row in project_rows)} на проверке</span></div>"
+            '<footer class="hub-links">'
+            f'<a href="{_url(base_path, "workspaces", workspace.workspace_id)}">Задачи →</a>'
+            f'<a href="{_url(base_path, "vault", project_id)}">Заметки и доступы →</a>'
+            "</footer></article>"
+        )
+    return '<section class="hub-grid" aria-label="Проекты">' + "".join(cards) + "</section>"
+
+
+def _render_project_tabs(
+    project_id: str,
+    rows: tuple[DashboardWorkspaceRow, ...],
+    base_path: str,
+    *,
+    section: str,
+    workspace_id: str | None = None,
+    task_id: str | None = None,
+) -> str:
+    if workspace_id is None and rows:
+        workspace_id = _attention_workspace(rows).workspace_id
+    project_url = _url(base_path, "projects", project_id)
+    vault_url = _url(base_path, "vault", project_id)
+    context = {}
+    if workspace_id is not None:
+        context["workspace"] = workspace_id
+    if task_id is not None:
+        context["task"] = task_id
+    if context:
+        vault_url += "?" + urlencode(context)
+    links = [("overview", "Обзор", project_url)]
+    if workspace_id is not None:
+        links.append(("tasks", "Задачи", _url(base_path, "workspaces", workspace_id)))
+    links.extend(
+        (
+            ("vault", "Заметки и доступы", vault_url),
+            ("settings", "Настройки", project_url + "settings/"),
+        )
+    )
+    tabs = "".join(
+        f'<a href="{escape(href, quote=True)}"'
+        + (
+            ' aria-current="page"'
+            if key == section and not (key == "tasks" and task_id)
+            else ' aria-current="true"'
+            if key == section
+            else ""
+        )
+        + f">{label}</a>"
+        for key, label, href in links
+    )
+    return_task = (
+        f'<a class="return-task" href="{_url(base_path, "tasks", task_id)}">Вернуться к задаче</a>'
+        if section == "vault" and task_id
+        else ""
+    )
+    return '<nav class="project-tabs" aria-label="Разделы проекта">' + tabs + return_task + "</nav>"
+
+
 def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> str:
-    """Render the loopback home: daemon-wide Task search and recent Tasks."""
+    """Project hub with direct navigation and the existing global Task search/history."""
     rows = home.workspaces
     content = (
         '<section class="page-intro"><div>'
         f'<p class="eyebrow">{escape(PAGE_PROJECTS)}</p>'
-        f"<h1>{escape(WORKSPACE_HOME)}</h1>"
-        f'<p class="hero-copy">{escape(PAGE_PROJECTS_LEAD)}</p></div></section>'
+        "<h1>Мои проекты</h1>"
+        '<p class="hero-copy">Задачи, заметки и доступы — всё под рукой.</p></div></section>'
         + _render_metrics(rows)
+        + _render_project_hub_cards(rows, base_path)
         + '<section class="panel search-panel"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(HOME_SEARCH_LABEL)}</h2>'
         '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
@@ -1753,8 +2439,7 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             action=base_path,
             base_path=base_path,
         )
-        + '</div></section><section class="panel"><div class="panel-head"><div>'
-        f'<p class="panel-kicker">{escape(RECENT_TASKS_HOME)}</p>'
+        + '</div></section><section class="panel" id="history"><div class="panel-head"><div>'
         f"<h2>{escape(RECENT_TASKS_HOME)}</h2></div></div>"
         '<div class="panel-body">'
         + (
@@ -1768,8 +2453,23 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
                 show_project=True,
             )
         )
+        + _render_history_pagination(
+            base_path,
+            page=home.page,
+            total=home.task_count,
+            page_size=_DASHBOARD_RECENT_TASK_LIMIT,
+            search_query=home.search_query,
+        )
         + "</div></section>"
     )
+    if not rows:
+        content = (
+            '<section class="page-intro"><h1>Мои проекты</h1></section>'
+            '<section class="panel"><div class="panel-body empty-state">'
+            f"<h2>{escape(EMPTY_WORKSPACES_TITLE)}</h2><p>{escape(EMPTY_WORKSPACES_HINT)}</p>"
+            f'<a class="btn" href="{base_path}vault/all/">Открыть личное хранилище</a>'
+            "</div></section>"
+        )
     return _render_shell(
         base_path=base_path,
         page_title=document_title(PAGE_PROJECTS),
@@ -1778,7 +2478,8 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             base_path,
             view="projects",
             search_query=home.search_query,
-            snapshot=_snapshot_fingerprint(home),
+            page=home.page,
+            snapshot=_snapshot_fingerprint(_fingerprint_home(home)),
         ),
         content=content,
         navigation_rows=rows,
@@ -1790,12 +2491,14 @@ def render_project_page(
     *,
     base_path: str,
     navigation_rows: tuple[DashboardWorkspaceRow, ...] | None = None,
+    settings: bool = False,
 ) -> str:
     rows = detail.workspaces
     project_id = detail.project.project_id
     nav_rows = rows if navigation_rows is None else navigation_rows
     project_name = _project_display_name(nav_rows, project_id)
-    visibility_action = f"{base_path}projects/{quote(project_id, safe='')}/"
+    project_url = _url(base_path, "projects", project_id)
+    visibility_action = project_url + "settings/"
     workspace_html = (
         '<section class="project-section"><header class="project-section-head">'
         f'<div><p class="project-kicker">{escape(SECTION_WORKSPACES)}</p>'
@@ -1812,32 +2515,55 @@ def render_project_page(
     content = (
         '<section class="page-intro compact"><div>'
         f'<p class="eyebrow">{escape(PROJECT_OVERVIEW)}</p>'
-        f"<h1>{escape(project_name)}</h1>"
-        f'<p class="hero-copy identity-line">{escape(project_id)}</p></div>'
-        '<div class="page-intro-actions">'
-        f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
-        + _render_visibility_form(
-            project_id,
-            detail.project.visibility_mode,
-            action=visibility_action,
-        )
-        + _render_project_delete_form(project_id, action=visibility_action)
-        + "</div></section>"
-        + _render_metrics(rows)
-        + _render_skill_policy(
-            project_id,
-            detail.skill_policy,
-            action=visibility_action,
-        )
+        f"<h1>{escape(project_name)}</h1></div>"
+        '<div class="project-counts">'
+        f"<span>Активные задачи: {sum(row.active_task_count for row in rows)}</span>"
+        f"<span>Ожидают проверки: {sum(row.review_task_count for row in rows)}</span>"
+        "</div></section>"
         + workspace_html
+        + f'<p class="legacy-settings-link" id="skill-scope"><a href="{visibility_action}#skill-scope">'
+        "Области разработки и настройки проекта</a></p>"
     )
+    if settings:
+        content = (
+            '<section class="page-intro compact"><div><p class="eyebrow">'
+            f"{escape(project_name)}</p><h1>Настройки проекта</h1></div></section>"
+            '<section class="panel"><div class="panel-head"><h2>Режим проекта</h2></div>'
+            '<div class="panel-body">'
+            + _render_visibility_form(
+                project_id, detail.project.visibility_mode, action=visibility_action
+            )
+            + "</div></section>"
+            + _render_skill_policy(
+                project_id, detail.skill_policy, action=visibility_action, snapshot=detail.skills
+            )
+            + '<section class="panel"><div class="panel-head"><h2>Папки проекта</h2></div><div class="panel-body">'
+            + "".join(
+                '<section class="workspace-setting">'
+                f'<h3><a href="{_url(base_path, "workspaces", row.workspace_id)}">'
+                f"{escape(str(row.workspace_root))}</a></h3>"
+                + _render_workspace_relocation_form(
+                    row.workspace_id, action=_url(base_path, "workspaces", row.workspace_id)
+                )
+                + "</section>"
+                for row in rows
+            )
+            + '</div></section><section class="panel"><div class="panel-body">'
+            f'<p class="section-note">ID проекта: {escape(project_id)}</p>'
+            + _render_project_delete_form(project_id, action=visibility_action)
+            + "</div></section>"
+        )
     return _render_shell(
         base_path=base_path,
-        page_title=document_title(project_name),
-        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (project_name, None)),
+        page_title=document_title(f"Настройки · {project_name}" if settings else project_name),
+        breadcrumbs=(
+            ((BREADCRUMB_PROJECTS, base_path), (project_name, project_url), ("Настройки", None))
+            if settings
+            else ((BREADCRUMB_PROJECTS, base_path), (project_name, None))
+        ),
         events_url=_events_url(
             base_path,
-            view="project",
+            view="project_settings" if settings else "project",
             identity=project_id,
             snapshot=_snapshot_fingerprint(
                 detail if navigation_rows is None else (detail, navigation_rows)
@@ -1846,6 +2572,7 @@ def render_project_page(
         content=content,
         navigation_rows=nav_rows,
         current_project_id=project_id,
+        current_section="settings" if settings else "overview",
     )
 
 
@@ -1876,10 +2603,10 @@ def _render_recent_tasks(
         )
         project_html = ""
         if show_project:
-            workspace_url = _url(base_path, "workspaces", task.workspace_id)
+            project_url = _url(base_path, "projects", row.project_id)
             project_name = _project_display_name(navigation_rows, row.project_id)
             project_html = (
-                f'<span><a href="{escape(workspace_url, quote=True)}">'
+                f'<span><a href="{escape(project_url, quote=True)}">'
                 f"{escape(project_name)}</a></span>"
             )
         parts.append(
@@ -1899,12 +2626,43 @@ def _render_recent_tasks(
     return "".join(parts)
 
 
+def _render_history_pagination(
+    url: str,
+    *,
+    page: int,
+    total: int,
+    page_size: int,
+    search_query: str | None = None,
+    anchor: str = "history",
+) -> str:
+    pages = max(1, (total + page_size - 1) // page_size)
+    if pages == 1:
+        return ""
+
+    def link(target: int, label: str, relation: str) -> str:
+        params = [] if search_query is None else [("q", search_query)]
+        params.append(("page", str(target)))
+        href = f"{url}?{urlencode(params)}#{anchor}"
+        return (
+            f'<a class="btn" rel="{relation}" href="{escape(href, quote=True)}">{escape(label)}</a>'
+        )
+
+    previous = link(page - 1, "Предыдущая", "prev") if page > 1 else ""
+    following = link(page + 1, "Следующая", "next") if page < pages else ""
+    return (
+        '<nav class="action-row" aria-label="Страницы истории">'
+        + previous
+        + f'<span class="section-note">Страница {page} из {pages} · Записей: {total}</span>'
+        + following
+        + "</nav>"
+    )
+
+
 def _render_search(
     *,
     query: str,
     submitted: bool,
     task_results: tuple[ProjectSearchHit, ...],
-    path_results: tuple[IndexedPathSearchResult, ...] = (),
     placeholder: str,
     label: str,
     action: str | None = None,
@@ -1912,7 +2670,7 @@ def _render_search(
 ) -> str:
     result_html = ""
     if submitted:
-        if task_results or path_results:
+        if task_results:
             hits = []
             for task_hit in task_results:
                 task_id = task_hit.ref.removeprefix("task:").partition("#")[0]
@@ -1925,14 +2683,6 @@ def _render_search(
                     '</div><div class="search-hit-meta">задача · '
                     + escape(task_hit.match_reason)
                     + "</div></div>"
-                )
-            for path_hit in path_results:
-                hits.append(
-                    '<div class="search-hit"><div class="search-hit-path">'
-                    + escape(path_hit.relative_path)
-                    + '</div><div class="search-hit-meta">'
-                    + escape(match_kind_label(path_hit.match_kind.value))
-                    + f" · {path_hit.size_bytes} B</div></div>"
                 )
             result_html = (
                 '<div class="search-results" aria-live="polite">' + "".join(hits) + "</div>"
@@ -1958,6 +2708,16 @@ def _render_workspace_current_task(
     base_path: str,
     actions: str,
 ) -> str:
+    if row.live_error is not None:
+        return (
+            '<section class="panel focus-panel"><div class="panel-body" role="status">'
+            "<h2>Папка проекта недоступна</h2>"
+            "<p>Проверьте доступ к папке. Если проект перемещён, укажите новый путь.</p>"
+            + _render_workspace_relocation_form(
+                row.workspace_id, action=_url(base_path, "workspaces", row.workspace_id)
+            )
+            + "</div></section>"
+        )
     if row.task_id is None:
         return (
             '<section class="panel focus-panel"><div class="panel-head">'
@@ -1989,8 +2749,28 @@ def _render_workspace_current_task(
         '<div class="panel-body"><div class="task-primary-meta">'
         f'<span class="mono">{escape(row.task_id[:10])}</span>'
         f'<span>{escape(BRANCH)} <strong class="mono">{escape(branch)}</strong></span>{markers}</div>'
-        f'{next_step}<a class="text-link" href="{escape(task_url, quote=True)}">{escape(OPEN_TASK)} '
-        f'<span aria-hidden="true">→</span></a>{actions}</div></section>'
+        f'<div class="focus-content">{next_step}<a class="text-link" href="{escape(task_url, quote=True)}">{escape(OPEN_TASK)} '
+        f'<span aria-hidden="true">→</span></a></div>{actions}</div></section>'
+    )
+
+
+def _render_workspace_switcher(
+    rows: tuple[DashboardWorkspaceRow, ...], current: DashboardWorkspaceRow, base_path: str
+) -> str:
+    workspaces = tuple(row for row in rows if row.project_id == current.project_id)
+    if len(workspaces) < 2:
+        return ""
+    return (
+        '<nav class="workspace-switcher" aria-label="Папки проекта"><span>Папка:</span>'
+        + "".join(
+            f'<a href="{_url(base_path, "workspaces", row.workspace_id)}"'
+            + (' aria-current="page"' if row.workspace_id == current.workspace_id else "")
+            + f' title="{escape(str(row.workspace_root), quote=True)}">'
+            + escape(row.workspace_root.name)
+            + "</a>"
+            for row in workspaces
+        )
+        + "</nav>"
     )
 
 
@@ -2021,31 +2801,35 @@ def render_workspace_page(
     project_name = _project_display_name(navigation, row.project_id)
     content = (
         '<section class="page-intro compact"><div>'
-        f'<p class="eyebrow">{escape(WORKSPACE_OVERVIEW)}</p>'
-        f"<h1>{escape(workspace_name)}</h1>"
+        f'<p class="eyebrow">{escape(project_name)}</p>'
+        "<h1>Задачи</h1>"
         f'<p class="hero-copy">{escape(str(row.workspace_root))}</p></div>'
-        '<div class="page-intro-actions">'
-        f'<p class="panel-kicker">{escape(SKILL_SCOPE)}</p>'
-        + _render_skill_scope_entry(project_url, primary=True)
-        + "</div></section>"
-        '<section class="panel search-panel"><div class="panel-head"><div>'
+        "</section>"
+        + _render_workspace_switcher(navigation, row, base_path)
+        + _render_workspace_current_task(row, base_path=base_path, actions=actions)
+        + '<section class="panel search-panel"><div class="panel-head"><div>'
         f'<p class="panel-kicker">{escape(SEARCH_SECTION)}</p><h2>{escape(SEARCH_LABEL)}</h2>'
         '</div><span class="search-shortcut" aria-hidden="true">/</span></div><div class="panel-body">'
         + _render_search(
             query=detail.search_query or "",
             submitted=detail.search_query is not None,
             task_results=detail.task_search_results,
-            path_results=detail.search_results,
             placeholder=SEARCH_PLACEHOLDER,
             label=SEARCH_LABEL,
             base_path=base_path,
         )
         + '</div></section><section class="workspace-layout"><div class="workspace-main">'
-        + _render_workspace_current_task(row, base_path=base_path, actions=actions)
-        + '<section class="panel"><div class="panel-head"><div>'
-        f'<p class="panel-kicker">{escape(RECENT_TASKS)}</p><h2>{escape(RECENT_TASKS)}</h2></div></div>'
+        + '<section class="panel" id="history"><div class="panel-head"><div>'
+        f"<h2>{escape(RECENT_TASKS)}</h2></div></div>"
         '<div class="panel-body">'
         + _render_recent_tasks(detail.recent_tasks, base_path)
+        + _render_history_pagination(
+            workspace_url,
+            page=detail.page,
+            total=detail.task_count,
+            page_size=_DASHBOARD_RECENT_TASK_LIMIT,
+            search_query=detail.search_query,
+        )
         + '</div></section></div><aside class="workspace-aside"><section class="panel sticky-panel">'
         f'<div class="panel-head"><div><p class="panel-kicker">{escape(WORKSPACE_STATE)}</p>'
         f'<h2>{escape(WORKSPACE_OVERVIEW)}</h2></div></div><div class="panel-body">'
@@ -2057,28 +2841,23 @@ def render_workspace_page(
         f'<div class="fact"><dt>{escape(VISIBILITY)}</dt><dd>{escape(visibility_label(row.visibility_mode))}</dd></div>'
         f'<div class="fact"><dt>{escape(TASK)}</dt><dd class="mono">{escape(_display_task(row))}</dd></div>'
         '</dl><div class="settings-divider"></div>'
-        + _render_visibility_form(row.project_id, row.visibility_mode, action=workspace_url)
-        + '<div class="settings-divider"></div>'
-        + f'<p class="panel-kicker">{escape(WORKSPACE_RELOCATION)}</p>'
-        + _render_workspace_relocation_form(row.workspace_id, action=workspace_url)
-        + '<div class="settings-divider"></div>'
-        + f'<p class="panel-kicker">{escape(PROJECT_MANAGEMENT)}</p>'
-        + _render_skill_scope_entry(project_url, primary=False)
-        + _render_project_delete_form(row.project_id, action=project_url)
+        + f'<a class="text-link" href="{project_url}settings/">Настройки проекта и папок</a>'
         + "</div></section></aside></section>"
     )
     return _render_shell(
         base_path=base_path,
-        page_title=document_title(workspace_name),
+        page_title=document_title(f"Задачи · {workspace_name}"),
         breadcrumbs=(
             (BREADCRUMB_PROJECTS, base_path),
-            (project_name, None),
+            (project_name, project_url),
+            ("Задачи", None),
         ),
         events_url=_events_url(
             base_path,
             view="workspace",
             identity=row.workspace_id,
             search_query=detail.search_query,
+            page=detail.page,
             snapshot=_snapshot_fingerprint(
                 detail if navigation_rows is None else (detail, navigation_rows)
             ),
@@ -2087,6 +2866,7 @@ def render_workspace_page(
         navigation_rows=navigation,
         current_project_id=row.project_id,
         current_workspace_id=row.workspace_id,
+        current_section="tasks",
     )
 
 
@@ -2094,10 +2874,50 @@ def _timeline_event_label(event: TaskEventRecord) -> str:
     return event_label(event.event_type)
 
 
-def _render_timeline(detail: DashboardTaskDetail) -> str:
+def _render_verification(records: tuple[VerificationRecord, ...]) -> str:
+    items = []
+    for record in records:
+        items.append(
+            '<li class="verification-item"><div class="verification-head">'
+            f"<strong>{escape(record.name)}</strong>"
+            f'<span class="verification-status" data-status="{record.status.value}">'
+            f"{escape(verification_status_label(record.status))}</span></div>"
+            f'<p class="section-note">{escape(verification_source_label(record.source))}</p>'
+            f'<pre class="verification-evidence">{escape(record.evidence)}</pre></li>'
+        )
+    return '<ul class="verification-list">' + "".join(items) + "</ul>" if items else ""
+
+
+def _render_latest_verification(detail: DashboardTaskDetail) -> str:
+    checkpoint = detail.latest_checkpoint
+    if checkpoint is None:
+        body = f'<p class="section-note">{escape(VERIFICATION_NO_REPORT)}</p>'
+    else:
+        body = (
+            '<p class="section-note">'
+            + escape(verification_report_label(checkpoint.task_revision, checkpoint.created_at))
+            + "</p>"
+        )
+        if checkpoint.task_revision < detail.task.revision:
+            body += f'<p class="section-note">{escape(VERIFICATION_OLDER)}</p>'
+        records = tuple(
+            record
+            for record in detail.checkpoint_verification
+            if record.checkpoint_id == checkpoint.checkpoint_id
+        )
+        body += _render_verification(records) or (
+            f'<p class="section-note">{escape(VERIFICATION_EMPTY)}</p>'
+        )
+    return (
+        '<section class="panel verification-panel"><div class="panel-head">'
+        f"<h2>{escape(VERIFICATION_TITLE)}</h2></div>"
+        f'<div class="panel-body">{body}</div></section>'
+    )
+
+
+def _render_timeline(detail: DashboardTaskDetail, *, base_path: str = "/") -> str:
     checkpoints = {item.checkpoint_id: item for item in detail.checkpoints}
     visible_events = detail.events
-    truncated_count = detail.event_count - len(visible_events)
     items: list[str] = ['<div class="timeline">']
     for event in reversed(visible_events):
         content: list[str] = []
@@ -2113,6 +2933,15 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
                 )
             )
             content.append(f'<div class="timeline-summary">{escape(checkpoint.summary)}</div>')
+            content.append(
+                _render_verification(
+                    tuple(
+                        record
+                        for record in detail.checkpoint_verification
+                        if record.checkpoint_id == checkpoint.checkpoint_id
+                    )
+                )
+            )
             if checkpoint.next_step is not None:
                 content.append(
                     f"<div><strong>{escape(NEXT)}:</strong> {escape(checkpoint.next_step)}</div>"
@@ -2126,6 +2955,13 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
                 if remaining:
                     chips += f'<span class="path-chip">{escape(more_paths_label(remaining))}</span>'
                 content.append(f'<div class="path-chips">{chips}</div>')
+        if event.target_state is not None:
+            content.append(
+                _state_pill(
+                    event.target_state.value,
+                    None if event.target_wait_reason is None else event.target_wait_reason.value,
+                )
+            )
         if event.operator_feedback is not None:
             content.append(
                 f'<blockquote class="feedback-quote">{escape(event.operator_feedback)}</blockquote>'
@@ -2159,13 +2995,16 @@ def _render_timeline(detail: DashboardTaskDetail) -> str:
             f'<span class="timeline-time">r{event.task_revision} · {escape(event.created_at)}</span>'
             f"</div>{content_html}</article>"
         )
-    if truncated_count:
-        items.append(
-            '<div class="timeline-item"><div class="timeline-content">'
-            f"{escape(omitted_events_label(truncated_count))}"
-            "</div></div>"
-        )
     items.append("</div>")
+    items.append(
+        _render_history_pagination(
+            _url(base_path, "tasks", detail.task.task_id),
+            page=detail.page,
+            total=detail.event_count,
+            page_size=_DASHBOARD_TIMELINE_EVENT_LIMIT,
+            anchor="timeline",
+        )
+    )
     return "".join(items)
 
 
@@ -2199,7 +3038,7 @@ def render_task_page(
         if not detail.stack_hints
         else " · ".join(escape(item) for item in detail.stack_hints)
     )
-    latest_checkpoint = detail.checkpoints[-1] if detail.checkpoints else None
+    latest_checkpoint = detail.latest_checkpoint
     latest_update = ""
     if latest_checkpoint is not None:
         next_step = (
@@ -2220,21 +3059,25 @@ def render_task_page(
         f'<h1 class="task-title">{escape(task.title)}</h1>'
         '<div class="task-intro-meta">'
         f"{_state_pill(task.state.value, wait_reason)}"
-        f'<span class="mono">{escape(task.task_id)}</span>'
+        f'<span class="mono" title="{escape(task.task_id, quote=True)}">{escape(task.task_id[:10])}</span>'
         f"<span>{escape(REVISION)} {task.revision}</span>"
         f'<span>{escape(BRANCH)} <strong class="mono">{escape(_display_recorded_branch(detail.git_branch))}</strong></span>'
-        '</div></div></section><section class="task-layout"><div class="task-main">'
+        '</div></div></section><nav class="task-sections" aria-label="Разделы задачи">'
+        '<a href="#task-result">Результат и проверки</a><a href="#task-actions">Действия</a>'
+        '<a href="#timeline">История</a></nav>'
+        '<section class="task-layout"><div class="task-summary" id="task-result">'
         + latest_update
-        + '<section class="panel timeline-panel"><div class="panel-head"><div>'
-        f'<p class="panel-kicker">{escape(TIMELINE)}</p><h2>{escape(TIMELINE)}</h2></div>'
+        + _render_latest_verification(detail)
+        + "</div>"
+        f'<section class="panel action-card" id="task-actions"><div class="panel-head">'
+        f'<h2>{escape(ACTIONS)}</h2></div><div class="panel-body">{actions if actions else no_actions}</div></section>'
+        + '<section class="panel timeline-panel" id="timeline"><div class="panel-head"><div>'
+        f"<h2>{escape(TIMELINE)}</h2></div>"
         f'<p class="section-note">{escape(event_count_label(detail.event_count))}</p></div>'
         '<div class="panel-body">'
-        + _render_timeline(detail)
-        + '</div></section></div><aside class="task-aside">'
-        f'<section class="panel action-card"><div class="panel-head"><div><p class="panel-kicker">{escape(ACTIONS)}</p>'
-        f'<h2>{escape(ACTIONS)}</h2></div></div><div class="panel-body">{actions if actions else no_actions}</div></section>'
-        f'<section class="panel facts-card"><div class="panel-head"><div><p class="panel-kicker">{escape(TASK_FACTS)}</p>'
-        f"<h2>{escape(TASK_FACTS)}</h2></div></div>"
+        + _render_timeline(detail, base_path=base_path)
+        + "</div></section>"
+        '<details class="panel facts-card"><summary>Данные задачи</summary>'
         '<div class="panel-body"><dl class="fact-list">'
         f'<div class="fact"><dt>{escape(WORKSPACE)}</dt>'
         f'<dd><a href="{escape(workspace_url, quote=True)}">{escape(workspace_name)}</a></dd></div>'
@@ -2258,13 +3101,16 @@ def render_task_page(
         f'<div class="fact"><dt>{escape(STACK_HINTS)}</dt><dd class="mono">{stack}</dd></div>'
         f'<div class="fact"><dt>{escape(CREATED)}</dt><dd>{escape(task.created_at)}</dd></div>'
         f'<div class="fact"><dt>{escape(UPDATED)}</dt><dd>{escape(task.updated_at)}</dd></div>'
-        "</dl></div></section></aside></section>"
+        f'<div class="fact"><dt>ID</dt><dd class="mono">{escape(task.task_id)}</dd></div>'
+        "</dl></div></details></section>"
     )
     task_breadcrumbs: list[tuple[str, str | None]] = [
         (BREADCRUMB_PROJECTS, base_path),
-        (project_name, workspace_url),
+        (project_name, project_url),
+        ("Задачи", workspace_url),
         (task_crumb(task.task_id), None),
     ]
+    fingerprinted = _fingerprint_task_detail(detail)
     return _render_shell(
         base_path=base_path,
         page_title=document_title(task.title),
@@ -2273,8 +3119,9 @@ def render_task_page(
             base_path,
             view="task",
             identity=task.task_id,
+            page=detail.page,
             snapshot=_snapshot_fingerprint(
-                detail if navigation_rows is None else (detail, navigation_rows)
+                fingerprinted if navigation_rows is None else (fingerprinted, navigation_rows)
             ),
         ),
         content=content,
@@ -2282,6 +3129,7 @@ def render_task_page(
         current_project_id=row.project_id,
         current_workspace_id=row.workspace_id,
         current_task_id=task.task_id,
+        current_section="tasks",
     )
 
 
@@ -2329,15 +3177,52 @@ def _parse_search_query(query: str) -> str | None:
     return value
 
 
+def _parse_history_query(query: str, *, allow_search: bool) -> tuple[str | None, int]:
+    if not query:
+        return None, 1
+    try:
+        parsed = parse_qs(
+            query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            encoding="utf-8",
+            errors="strict",
+            max_num_fields=2,
+        )
+    except (UnicodeError, ValueError) as exc:
+        raise SearchError("dashboard history query is malformed") from exc
+    allowed = {"q", "page"} if allow_search else {"page"}
+    if set(parsed) - allowed:
+        if not allow_search:
+            raise DashboardError("dashboard Task history accepts only a page field")
+        raise SearchError("dashboard history query has unexpected fields")
+    if any(len(values) != 1 for values in parsed.values()):
+        raise SearchError("dashboard history query fields must be singular")
+    page = 1
+    if "page" in parsed:
+        raw_page = parsed["page"][0]
+        if not raw_page.isascii() or not raw_page.isdecimal() or len(raw_page) > 10:
+            raise SearchError("dashboard history page is invalid")
+        page = _history_page(int(raw_page), _DASHBOARD_MAX_HISTORY_PAGE, 1)
+    search_query = _parse_search_query(urlencode({"q": parsed["q"][0]})) if "q" in parsed else None
+    return search_query, page
+
+
 def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPageRequest:
     if path == base_path:
-        search_query = _parse_search_query(query)
+        search_query, page = _parse_history_query(query, allow_search=True)
         redirect = path + (f"?{query}" if query else "")
-        return _DashboardPageRequest("projects", None, search_query, redirect)
+        return _DashboardPageRequest("projects", None, search_query, redirect, page)
     if not path.startswith(base_path):
         raise DashboardError("dashboard path is outside the dashboard route")
     relative = path[len(base_path) :]
     parts = relative.split("/")
+    if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["settings", ""]:
+        if query:
+            raise DashboardError("dashboard settings route does not accept query fields")
+        return _DashboardPageRequest(
+            "project", _decode_identity_component(parts[1]), None, path, settings=True
+        )
     if (
         len(parts) != 3
         or parts[2] != ""
@@ -2351,29 +3236,37 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
         raise DashboardError("dashboard page route is not recognized")
     identity = _decode_identity_component(parts[1])
     if parts[0] == "workspaces":
-        search_query = _parse_search_query(query)
+        search_query, page = _parse_history_query(query, allow_search=True)
+    elif parts[0] == "tasks":
+        search_query, page = _parse_history_query(query, allow_search=False)
     else:
         if query:
             raise DashboardError("dashboard detail route does not accept query fields")
         search_query = None
+        page = 1
     redirect = path + (f"?{query}" if query else "")
     kind = {"projects": "project", "workspaces": "workspace", "tasks": "task"}[parts[0]]
-    return _DashboardPageRequest(kind, identity, search_query, redirect)
+    return _DashboardPageRequest(kind, identity, search_query, redirect, page)
 
 
 def _render_page(database_path: Path, base_path: str, request: _DashboardPageRequest) -> str:
     if request.kind == "projects":
         return render_projects_page(
-            read_dashboard_home(database_path, search_query=request.search_query),
+            read_dashboard_home(
+                database_path, search_query=request.search_query, page=request.page
+            ),
             base_path=base_path,
         )
-    navigation_rows = read_dashboard_workspace_rows(database_path)
+    navigation_rows = _read_dashboard_navigation_rows(database_path)
     assert request.identity is not None
     if request.kind == "project":
         return render_project_page(
-            read_dashboard_project_detail(database_path, request.identity),
+            read_dashboard_project_detail(
+                database_path, request.identity, include_skills=request.settings
+            ),
             base_path=base_path,
             navigation_rows=navigation_rows,
+            settings=request.settings,
         )
     if request.kind == "workspace":
         return render_workspace_page(
@@ -2381,20 +3274,21 @@ def _render_page(database_path: Path, base_path: str, request: _DashboardPageReq
                 database_path,
                 request.identity,
                 search_query=request.search_query,
+                page=request.page,
             ),
             base_path=base_path,
             navigation_rows=navigation_rows,
         )
     if request.kind == "task":
         return render_task_page(
-            read_dashboard_task_detail(database_path, request.identity),
+            read_dashboard_task_detail(database_path, request.identity, page=request.page),
             base_path=base_path,
             navigation_rows=navigation_rows,
         )
     raise DashboardError("dashboard page kind is unsupported")
 
 
-def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
+def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str, int]:
     try:
         parsed = parse_qs(
             query,
@@ -2402,7 +3296,7 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
             strict_parsing=True,
             encoding="utf-8",
             errors="strict",
-            max_num_fields=4,
+            max_num_fields=5,
         )
     except (UnicodeError, ValueError) as exc:
         raise DashboardError("dashboard event query is malformed") from exc
@@ -2414,8 +3308,19 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
     if len(snapshot) != 64 or any(character not in "0123456789abcdef" for character in snapshot):
         raise DashboardError("dashboard event snapshot is invalid")
     view = parsed["view"][0]
+    page = 1
+    if "page" in parsed:
+        if len(parsed["page"]) != 1:
+            raise DashboardError("dashboard event history page must be singular")
+        try:
+            _search_query, page = _parse_history_query(
+                urlencode({"page": parsed["page"][0]}),
+                allow_search=False,
+            )
+        except SearchError as exc:
+            raise DashboardError("dashboard event history page is invalid") from exc
     if view == "projects":
-        if set(parsed) - {"view", "snapshot", "q"}:
+        if set(parsed) - {"view", "snapshot", "q", "page"}:
             raise DashboardError("Projects event query has unexpected fields")
         search_query: str | None = None
         if "q" in parsed:
@@ -2426,13 +3331,15 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
                 "\x00" in search_query or len(search_query.encode("utf-8")) > 256
             ):
                 raise DashboardError("dashboard event search query is invalid")
-        return view, None, search_query, snapshot
-    if view not in {"project", "workspace", "task"}:
+        return view, None, search_query, snapshot, page
+    if view not in {"project", "project_settings", "workspace", "task"}:
         raise DashboardError("dashboard event view is unsupported")
-    identity_key = f"{view}_id"
+    identity_key = "project_id" if view == "project_settings" else f"{view}_id"
     allowed = {"view", "snapshot", identity_key}
     if view == "workspace":
         allowed.add("q")
+    if view in {"workspace", "task"}:
+        allowed.add("page")
     if set(parsed) - allowed or identity_key not in parsed or len(parsed[identity_key]) != 1:
         raise DashboardError("dashboard event query does not match the expected schema")
     identity = parsed[identity_key][0]
@@ -2447,7 +3354,7 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str]:
             "\x00" in search_query or len(search_query.encode("utf-8")) > 256
         ):
             raise DashboardError("dashboard event search query is invalid")
-    return view, identity, search_query, snapshot
+    return view, identity, search_query, snapshot, page
 
 
 def _view_fingerprint(
@@ -2455,26 +3362,44 @@ def _view_fingerprint(
     view: str,
     identity: str | None,
     search_query: str | None,
+    page: int = 1,
 ) -> str:
     if view == "projects":
-        value: object = read_dashboard_home(database_path, search_query=search_query)
-    elif view == "project":
+        value: object = _fingerprint_home(
+            read_dashboard_home(
+                database_path,
+                search_query=search_query,
+                page=page,
+                include_live_status=False,
+            )
+        )
+    elif view in {"project", "project_settings"}:
         assert identity is not None
-        value = read_dashboard_project_detail(database_path, identity)
+        value = read_dashboard_project_detail(
+            database_path, identity, include_skills=view == "project_settings"
+        )
     elif view == "workspace":
         assert identity is not None
         value = read_dashboard_workspace_detail(
             database_path,
             identity,
             search_query=search_query,
+            page=page,
         )
     elif view == "task":
         assert identity is not None
-        value = read_dashboard_task_detail(database_path, identity)
+        value = _fingerprint_task_detail(
+            read_dashboard_task_detail(
+                database_path,
+                identity,
+                page=page,
+                include_live_status=False,
+            )
+        )
     else:
         raise DashboardError("unsupported dashboard fingerprint view")
     if view != "projects":
-        value = (value, read_dashboard_workspace_rows(database_path))
+        value = (value, _read_dashboard_navigation_rows(database_path))
     return _snapshot_fingerprint(value)
 
 
@@ -2499,6 +3424,8 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
     stop_event: ClassVar[Event]
     sse_slots: ClassVar[BoundedSemaphore]
     workspace_invalidations: ClassVar[SimpleQueue[str] | None]
+    vault_process: ClassVar[VaultProcess]
+    vault_frame_origin = ""
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -2506,6 +3433,9 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_html(404, "")
             return
         path = _normalize_legacy_capability_path(parsed.path, self.access_token)
+        if path.startswith("/vault/"):
+            self._serve_vault(path, parsed.query)
+            return
         if path == f"{self.route_path}assets/dashboard.css" and not parsed.query:
             self._send_bytes(200, "text/css; charset=utf-8", DASHBOARD_CSS.encode("utf-8"))
             return
@@ -2518,39 +3448,153 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         if path == f"{self.route_path}events":
             try:
-                view, identity, search_query, snapshot = _parse_sse_view(parsed.query)
+                view, identity, search_query, snapshot, history_page = _parse_sse_view(parsed.query)
             except DashboardError:
                 self._send_html(400, "")
                 return
-            self._serve_events(view, identity, search_query, snapshot)
+            self._serve_events(view, identity, search_query, snapshot, history_page)
             return
         try:
             page = _parse_page_request(self.route_path, path, parsed.query)
             html = _render_page(self.database_path, self.route_path, page)
         except SearchError:
-            self._send_html(400, "")
+            self._send_html(
+                400,
+                _render_navigation_error(
+                    "Поиск недоступен", "Сократите запрос и попробуйте ещё раз."
+                ),
+            )
             return
         except (TaskNotFoundError, RegistryError):
-            self._send_html(404, "")
+            self._send_html(
+                404,
+                _render_navigation_error(
+                    "Страница не найдена",
+                    "Проект или задача больше недоступны. Выберите проект из списка.",
+                ),
+            )
             return
         except DashboardError:
-            self._send_html(404, "")
+            self._send_html(
+                404,
+                _render_navigation_error(
+                    "Страница не найдена", "Проверьте ссылку или выберите проект из списка."
+                ),
+            )
             return
         except (
             OSError,
             sqlite3.DatabaseError,
             DatabaseError,
+            GitWorkspaceError,
             ProjectSkillPolicyError,
             TaskError,
             TaskCheckpointError,
         ):
             self._send_html(
                 503,
-                f"<!doctype html><title>{escape(UNAVAILABLE_TITLE)}</title>"
-                f"<h1>{escape(UNAVAILABLE_HEADING)}</h1>",
+                _render_navigation_error(
+                    UNAVAILABLE_HEADING, "Обновите страницу или вернитесь к списку проектов."
+                ),
             )
             return
         self._send_html(200, html)
+
+    def _serve_vault(self, path: str, query: str = "") -> None:
+        parts = path.split("/")
+        if len(parts) != 4 or parts[-1]:
+            self._send_html(
+                404,
+                _render_navigation_error("Страница не найдена", "Проверьте ссылку на хранилище."),
+            )
+            return
+        try:
+            project_id = _decode_identity_component(parts[2])
+            try:
+                context = parse_qs(
+                    query,
+                    keep_blank_values=True,
+                    strict_parsing=True,
+                    errors="strict",
+                    max_num_fields=2,
+                )
+            except (ValueError, UnicodeError) as exc:
+                raise DashboardError("invalid vault navigation context") from exc
+            if set(context) - {"workspace", "task"} or any(
+                len(values) != 1 or not values[0] or len(values[0]) > 128
+                for values in context.values()
+            ):
+                raise DashboardError("invalid vault navigation context")
+            workspace_id = context.get("workspace", [None])[0]
+            task_id = context.get("task", [None])[0]
+            rows = _read_dashboard_navigation_rows(self.database_path)
+            workspaces: tuple[DashboardWorkspaceRow, ...]
+            if project_id == "all":
+                if context:
+                    raise DashboardError("global vault has no project context")
+                name = ALL_PROJECTS
+                workspaces = ()
+            else:
+                detail = read_dashboard_project_detail(self.database_path, project_id)
+                workspaces = detail.workspaces
+                name = _project_display_name(rows, project_id)
+            if workspace_id is not None and not any(
+                row.workspace_id == workspace_id for row in workspaces
+            ):
+                raise DashboardError("vault workspace is outside the project")
+            if task_id is not None:
+                connection = connect_database(self.database_path)
+                try:
+                    task = get_task(connection, task_id)
+                finally:
+                    connection.close()
+                if task.workspace_id != workspace_id:
+                    raise DashboardError("vault task is outside the workspace")
+            origin = self.vault_process.origin(self.expected_origin)
+            self.vault_frame_origin = origin
+            fragment = urlencode({"project": project_id, "name": name})
+            content = (
+                f'<iframe class="vault-frame" title="Личное хранилище проекта" '
+                f'src="{escape(origin + "/#" + fragment, quote=True)}" '
+                'allow="clipboard-write" referrerpolicy="no-referrer"></iframe>'
+            )
+            html = _render_shell(
+                base_path="/",
+                page_title=document_title(name),
+                breadcrumbs=(
+                    ((BREADCRUMB_PROJECTS, "/"), ("Личное хранилище", None))
+                    if project_id == "all"
+                    else (
+                        (BREADCRUMB_PROJECTS, "/"),
+                        (name, _url("/", "projects", project_id)),
+                        ("Заметки и доступы", None),
+                    )
+                ),
+                events_url="",
+                content=content,
+                navigation_rows=rows,
+                current_project_id=project_id,
+                current_workspace_id=workspace_id,
+                current_task_id=task_id,
+                current_section="vault",
+                interactive=False,
+            )
+            self._send_html(200, html)
+        except (RegistryError, DashboardError, TaskNotFoundError):
+            self._send_html(
+                404,
+                _render_navigation_error(
+                    "Переход недоступен",
+                    "Откройте заметки заново из проекта. Записи доступны в личном хранилище.",
+                ),
+            )
+        except Exception:
+            self._send_html(
+                503,
+                _render_navigation_error(
+                    "Хранилище недоступно", "Обновите страницу или вернитесь к списку проектов."
+                ),
+            )
 
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
@@ -2570,7 +3614,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_html(403, _action_rejected_html())
             return
         if self.headers.get("Transfer-Encoding") is not None:
-            self._send_html(400, "")
+            self._send_form_error(400, page)
             return
         content_type = self.headers.get("Content-Type", "").partition(";")[0].strip().lower()
         if content_type != "application/x-www-form-urlencoded":
@@ -2586,7 +3630,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         payload = self.rfile.read(content_length)
         if len(payload) != content_length:
-            self._send_html(400, "")
+            self._send_form_error(400, page)
             return
         try:
             request = _parse_dashboard_action_form(payload)
@@ -2618,6 +3662,10 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     self.workspace_invalidations.put(request.workspace_id)
                 redirect_target = page.redirect_target
             else:
+                if request.action == "delete_task" and (
+                    page.kind != "task" or page.identity != request.task_id
+                ):
+                    raise TaskValidationError("Task deletion target does not match its page")
                 mutate_dashboard_task(
                     self.database_path,
                     request,
@@ -2626,9 +3674,14 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                 request,
                 (DashboardProjectDeleteRequest, DashboardWorkspaceRelocationRequest),
             ):
-                redirect_target = page.redirect_target
+                redirect_target = (
+                    _url(self.route_path, "workspaces", request.workspace_id)
+                    if isinstance(request, DashboardActionRequest)
+                    and request.action == "delete_task"
+                    else page.redirect_target
+                )
         except TaskValidationError:
-            self._send_html(400, "")
+            self._send_form_error(400, page, payload)
             return
         except (
             TaskNotFoundError,
@@ -2643,13 +3696,24 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             GitWorkspaceError,
             HostIntegrationStateError,
             ProjectSkillPolicyError,
+            SkillRuntimeError,
         ):
-            self._send_html(409, "")
+            self._send_form_error(409, page, payload)
             return
         except (OSError, sqlite3.DatabaseError, DatabaseError):
             self._send_html(503, "")
             return
         self._send_redirect(redirect_target)
+
+    def _send_form_error(
+        self, status: int, page: _DashboardPageRequest, payload: bytes = b""
+    ) -> None:
+        self._send_html(
+            status,
+            _render_dashboard_form_error(
+                self.database_path, self.route_path, page, status=status, payload=payload
+            ),
+        )
 
     def _serve_events(
         self,
@@ -2657,6 +3721,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         identity: str | None,
         search_query: str | None,
         expected_snapshot: str,
+        page: int = 1,
     ) -> None:
         if not self.sse_slots.acquire(blocking=False):
             self._send_html(503, "")
@@ -2671,11 +3736,13 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     view,
                     identity,
                     search_query,
+                    page,
                 )
             except (
                 OSError,
                 sqlite3.DatabaseError,
                 DatabaseError,
+                GitWorkspaceError,
                 ProjectSkillPolicyError,
                 RegistryError,
                 TaskError,
@@ -2702,6 +3769,29 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     data_version = current_data_version
                     self._write_sse("event: refresh\ndata: changed\n\n")
                 if monotonic() >= heartbeat_at:
+                    if view in {"workspace", "project", "project_settings"}:
+                        try:
+                            refreshed_snapshot = _view_fingerprint(
+                                self.database_path,
+                                view,
+                                identity,
+                                search_query,
+                                page,
+                            )
+                        except (
+                            GitWorkspaceError,
+                            RegistryError,
+                            TaskError,
+                            SearchError,
+                            OSError,
+                            sqlite3.DatabaseError,
+                            DatabaseError,
+                        ):
+                            self._write_sse("event: refresh\ndata: changed\n\n")
+                            return
+                        if refreshed_snapshot != current_snapshot:
+                            current_snapshot = refreshed_snapshot
+                            self._write_sse("event: refresh\ndata: changed\n\n")
                     self._write_sse(": heartbeat\n\n")
                     heartbeat_at = monotonic() + _DASHBOARD_SSE_HEARTBEAT_SECONDS
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -2745,6 +3835,8 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
 
     def _send_security_headers(self) -> None:
         for name, value in _DASHBOARD_RESPONSE_HEADERS.items():
+            if name == "Content-Security-Policy" and self.vault_frame_origin:
+                value += f"; frame-src {self.vault_frame_origin}"
             self.send_header(name, value)
 
     def log_message(self, _format: str, *args: object) -> None:
@@ -2918,6 +4010,7 @@ class DashboardServerManager:
         self._started_event: Event | None = None
         self._url: str | None = None
         self._failure: BaseException | None = None
+        self._vault_process = VaultProcess(database_path)
 
     def is_running(self) -> bool:
         """Return whether the daemon-owned dashboard listener is currently healthy and running."""
@@ -2936,6 +4029,7 @@ class DashboardServerManager:
             return self._url
         self.close()
 
+        self._vault_process = VaultProcess(self._database_path)
         access_token = load_or_create_dashboard_access_token(self._database_path)
         stop_event = Event()
         started_event = Event()
@@ -2964,6 +4058,7 @@ class DashboardServerManager:
             handler = cast(type[_DashboardRequestHandler], server.RequestHandlerClass)
             handler.expected_host = f"{DASHBOARD_HOST}:{port}"
             handler.expected_origin = f"http://{DASHBOARD_HOST}:{port}"
+            handler.vault_process = self._vault_process
             thread = Thread(
                 target=self._run_server,
                 args=(server, stop_event, started_event),
@@ -3025,6 +4120,7 @@ class DashboardServerManager:
 
     def close(self) -> None:
         """Stop only the dashboard server owned by this manager."""
+        self._vault_process.close()
         server = self._server
         thread = self._thread
         stop_event = self._stop_event

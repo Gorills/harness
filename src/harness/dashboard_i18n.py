@@ -1,9 +1,36 @@
 from __future__ import annotations
 
 from harness.registry import VisibilityMode
-from harness.search import SearchMatchKind
 from harness.task_checkpoints import TaskEventType
 from harness.tasks import TaskOperatorStatus, TaskState, TaskWaitReason
+from harness.verification import VerificationSource, VerificationStatus
+
+VERIFICATION_TITLE = "Проверки последнего отчёта"
+VERIFICATION_EMPTY = "В последнем отчёте проверки не указаны."
+VERIFICATION_NO_REPORT = "Отчётов с результатами пока нет."
+VERIFICATION_OLDER = (
+    "После этого отчёта задача обновлялась. Результаты относятся к указанному отчёту."
+)
+
+
+def verification_status_label(status: VerificationStatus) -> str:
+    return {
+        VerificationStatus.PASSED: "Пройдена",
+        VerificationStatus.FAILED: "Ошибка",
+        VerificationStatus.NOT_RUN: "Не запускалась",
+    }[status]
+
+
+def verification_source_label(source: VerificationSource) -> str:
+    return {
+        VerificationSource.AGENT_REPORTED: "Сообщено агентом",
+        VerificationSource.OBSERVED: "Наблюдение",
+    }[source]
+
+
+def verification_report_label(revision: int, created_at: str) -> str:
+    return f"Отчёт r{revision} · {created_at}"
+
 
 SKIP_TO_CONTENT = "К содержимому"
 BRAND = "Harness"
@@ -16,8 +43,10 @@ PROJECT_OVERVIEW = "Обзор проекта"
 WORKSPACE_OVERVIEW = "Папка"
 TASK_OVERVIEW = "Карточка задачи"
 LIVE_CONNECTING = "Подключаемся"
+LIVE_MANUAL = "Обновление вручную"
 LIVE_REFRESH = "Обновить"
 NAVIGATION = "Навигация"
+NAVIGATION_UNAVAILABLE = "Навигация временно недоступна"
 BREADCRUMB_PROJECTS = "Все проекты"
 PAGE_PROJECTS = "Проекты"
 PAGE_PROJECTS_LEAD = "Поиск по всем задачам и последние обновления."
@@ -35,25 +64,38 @@ EMPTY_WORKSPACES_HINT = "В нужной папке выполните harness i
 EMPTY_PROJECT_WORKSPACES_TITLE = "Пока нет папок"
 EMPTY_PROJECT_WORKSPACES_HINT = "У этого проекта ещё нет зарегистрированной папки."
 PROJECT_MANAGEMENT = "Управление проектом"
-SKILL_SCOPE = "Области разработки"
+SKILL_SCOPE = "Скиллы проекта"
 MANAGE_SKILL_SCOPE = "Управление скиллами проекта"
-MANAGE_SKILL_SCOPE_HINT = "Включить или скрыть области разработки для всех папок проекта."
+MANAGE_SKILL_SCOPE_HINT = "Состав и доставка скиллов во все папки проекта."
 SKILL_SCOPE_HINT = (
-    "Базовые quality skills всегда включены. Авто подхватывает область по файлам, "
-    "Включить — сразу, даже в пустой папке, Не использовать — скрывает область."
+    "Настройка действует для всех папок проекта и будущих скиллов выбранной области. "
+    "Раскройте действие, чтобы проверить, что добавится и что уберётся. "
+    "Агент сам выбирает, какие из доступных инструкций использовать."
 )
 SKILL_SCOPE_AUTO = "Авто"
-SKILL_SCOPE_INCLUDED = "Включить"
-SKILL_SCOPE_EXCLUDED = "Не использовать"
-SKILL_SCOPE_AUTO_HINT = (
-    "Skills этой области добавляются только когда Harness обнаруживает её в стеке."
-)
-SKILL_SCOPE_INCLUDED_HINT = (
-    "Skills этой области проецируются сразу, даже если файлов стека ещё нет."
-)
-SKILL_SCOPE_EXCLUDED_HINT = (
-    "Skills этой области не проецируются в проект, даже если стек обнаружен."
-)
+SKILL_SCOPE_INCLUDED = "Добавлять в проект"
+SKILL_SCOPE_EXCLUDED = "Исключить из проекта"
+SKILL_SCOPE_AUTO_HINT = "Состав определяется обнаруженным стеком каждой папки."
+SKILL_SCOPE_INCLUDED_HINT = "Область выбрана вручную, даже если файлов стека ещё нет."
+SKILL_SCOPE_EXCLUDED_HINT = "Специализированные скиллы этой области исключены из отбора."
+SKILL_SUMMARIES = {
+    "testing-strategy": "Проверки по риску изменения, без лишних тестов для косметики.",
+    "secure-by-design": "Защита затронутых границ доступа, входных и чувствительных данных.",
+    "container-infrastructure": "Сборка образов, контейнерное окружение и ограничения ресурсов.",
+    "observability": "Полезные логи, метрики и трассировки с ограниченным объёмом данных.",
+    "ci-release": "Надёжность CI, права задач и существующие правила выпуска.",
+    "public-frontend": "Качество web-страниц; SEO только для публичных индексируемых страниц.",
+    "frontend-design": "Композиция, состояния и визуальная проверка web и mobile интерфейсов.",
+    "server-application": "HTTP-контракты, фоновые задачи и внешние интеграции.",
+    "mobile-application": "Мобильный lifecycle, Flutter, Expo / React Native и native-доставка.",
+    "godot-development": "Gameplay, ввод, интерфейс и производительность Godot.",
+    "deployment-operations": "Развёртывание и эксплуатация Linux-сервисов и edge-конфигурации.",
+    "project-architecture": "Границы модулей, владение данными и существенные архитектурные решения.",
+    "language-engineering": "Правила языка, runtime и существующих инструментов проекта.",
+    "data-integrity": "Транзакции, миграции и сохранность долговечных данных.",
+    "complex-change-planning": "Планирование и независимая проверка сложных изменений.",
+    "legacy-preservation": "Совместимость существующих контрактов и безопасная миграция.",
+}
 SKILL_SCOPE_BACKEND = "Backend"
 SKILL_SCOPE_FRONTEND = "Frontend"
 SKILL_SCOPE_MOBILE = "Mobile"
@@ -134,8 +176,8 @@ TASK = "Задача"
 ACTIONS = "Действия"
 NO_ACTIONS = "Сейчас действий нет"
 SEARCH_SECTION = "Поиск"
-SEARCH_PLACEHOLDER = "Задача, ветка, Jira, комментарий или путь"
-SEARCH_LABEL = "Поиск по задачам и индексу"
+SEARCH_PLACEHOLDER = "Задача, ветка, Jira или комментарий"
+SEARCH_LABEL = "Поиск по задачам"
 SEARCH = "Найти"
 NO_SEARCH_HITS_TITLE = "Ничего не нашлось"
 RECENT_TASKS = "Задачи"
@@ -165,10 +207,6 @@ UNAVAILABLE_HEADING = "Дашборд недоступен"
 WAIT_OPERATOR_REVIEW = "ревью"
 WAIT_OPERATOR_INPUT = "ввод оператора"
 WAIT_EXTERNAL = "внешнее"
-MATCH_EXACT_PATH = "точный путь"
-MATCH_EXACT_FILENAME = "имя файла"
-MATCH_IDENTIFIER = "идентификатор"
-MATCH_SUBSTRING = "подстрока пути"
 EM_DASH = "—"
 
 _TASK_STATE_LABELS = {
@@ -186,12 +224,6 @@ _WAIT_REASON_LABELS = {
     TaskWaitReason.OPERATOR_INPUT.value: WAIT_OPERATOR_INPUT,
     TaskWaitReason.EXTERNAL.value: WAIT_EXTERNAL,
 }
-_MATCH_KIND_LABELS = {
-    SearchMatchKind.EXACT_PATH.value: MATCH_EXACT_PATH,
-    SearchMatchKind.EXACT_FILENAME.value: MATCH_EXACT_FILENAME,
-    SearchMatchKind.IDENTIFIER_TOKENS.value: MATCH_IDENTIFIER,
-    SearchMatchKind.PATH_SUBSTRING.value: MATCH_SUBSTRING,
-}
 _EVENT_LABELS = {
     TaskEventType.CREATED: EVENT_CREATED,
     TaskEventType.RESUMED: EVENT_RESUMED,
@@ -202,12 +234,26 @@ _EVENT_LABELS = {
     TaskEventType.OPERATOR_COMMENT: EVENT_COMMENT,
     TaskEventType.JIRA_LINK_UPDATED: EVENT_JIRA_UPDATED,
     TaskEventType.OPERATOR_STATUS_UPDATED: EVENT_OPERATOR_STATUS_UPDATED,
+    TaskEventType.STATE_CHANGED: "Состояние изменено оператором",
     TaskEventType.CANCELLED: EVENT_CANCELLED,
 }
 _OPERATOR_STATUS_LABELS = {
     TaskOperatorStatus.DEPLOY_TEST.value: OPERATOR_STATUS_DEPLOY_TEST,
     TaskOperatorStatus.DEPLOY_PROD.value: OPERATOR_STATUS_DEPLOY_PROD,
+    TaskOperatorStatus.DEPLOY_BOTH.value: "Деплой на тест · Деплой на прод",
 }
+
+
+FORM_ERROR_TITLE = "Не удалось сохранить изменения"
+FORM_ERROR_INVALID = "Проверьте введённые значения и отправьте форму ещё раз."
+FORM_ERROR_CONFLICT = (
+    "Данные изменились или действие сейчас недоступно. "
+    "Проверьте актуальное состояние перед повторной отправкой."
+)
+FORM_ERROR_BACK = "Вернуться к странице"
+FORM_DRAFT_SAVED = "Введённые данные сохранены в форме."
+FORM_DRAFT_UNAVAILABLE = "Форма больше недоступна. Ваш текст сохранён ниже — его можно скопировать."
+FORM_DRAFT_LABEL = "Сохранённый ввод"
 
 
 def ru_plural(count: int, one: str, few: str, many: str) -> str:
@@ -239,10 +285,6 @@ def wait_reason_label(reason: str | None) -> str:
     if reason is None:
         return EM_DASH
     return _WAIT_REASON_LABELS.get(reason, reason)
-
-
-def match_kind_label(kind: str) -> str:
-    return _MATCH_KIND_LABELS.get(kind, kind)
 
 
 def event_label(event_type: TaskEventType) -> str:
@@ -285,3 +327,6 @@ def task_crumb(task_id: str) -> str:
 
 def document_title(label: str) -> str:
     return f"{label} · {BRAND}"
+
+
+OPERATOR_STATE_WORKING = "В работе"

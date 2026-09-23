@@ -37,11 +37,12 @@ def test_runtime_identity_caps_rev_parse_to_remaining_deadline(
             "--show-toplevel": f"{normalized_repository}\n".encode(),
             "--git-common-dir": b".git\n",
             "--git-dir": b".git\n",
+            "--absolute-git-dir": f"{normalized_repository / '.git'}\n".encode(),
         }
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=outputs[command[-1]],
+            stdout=b"".join(outputs[argument] for argument in command[2:]),
             stderr=b"",
         )
 
@@ -51,7 +52,7 @@ def test_runtime_identity_caps_rev_parse_to_remaining_deadline(
     identity = inspect_git_workspace_runtime_identity(repository, deadline=10.25)
 
     assert identity.layout.workspace_root == normalized_repository
-    assert observed_timeouts == [0.25, 0.25, 0.25]
+    assert observed_timeouts == [0.25]
 
 
 def test_runtime_identity_rejects_expired_deadline_before_git(

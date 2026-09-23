@@ -7,12 +7,73 @@ import pytest
 
 import harness.installation as installation
 import harness.storage as storage
+from harness.builtin_skills import BuiltinSkillSyncResult
+from harness.codex_adapter import CodexAdapter
+from harness.cursor_adapter import (
+    CursorAdapter,
+    CursorProjectRuntimeResult,
+    CursorProjectRuntimeStatus,
+)
+from harness.host_adapters import HostRegistrationState, IntegrationChange
 from harness.installation import InstallationError
-from harness.ipc import IpcRemoteError, RuntimeDiagnosticsResult, ShutdownResult, StatusResult
+from harness.ipc import (
+    IpcRemoteError,
+    IpcTransportError,
+    RuntimeDiagnosticsResult,
+    ShutdownResult,
+    StatusResult,
+    WorkspaceSkillsResult,
+)
 from harness.registry import WorkspaceRecord
 from harness.runtime_identity import RuntimeIdentity
 from harness.runtime_paths import RuntimePaths
 from harness.storage import SCHEMA_VERSION, initialize_database
+
+
+def test_install_and_restore_shutdown_waits_cover_owned_listener_stop_budgets() -> None:
+    from harness.daemon import _CLIENT_TIMEOUT_SECONDS
+    from harness.dashboard import _DASHBOARD_STOP_TIMEOUT_SECONDS
+    from harness.entrypoints import _RECOVERY_SHUTDOWN_TIMEOUT_SECONDS
+    from harness.mcp_http_server import _STOP_TIMEOUT_SECONDS as mcp_http_stop_timeout
+    from harness.watcher import DEFAULT_WATCH_SCAN_DEADLINE_SECONDS
+
+    owned_stop_budget = (
+        _CLIENT_TIMEOUT_SECONDS
+        + DEFAULT_WATCH_SCAN_DEADLINE_SECONDS
+        + _DASHBOARD_STOP_TIMEOUT_SECONDS
+        + mcp_http_stop_timeout
+    )
+    assert installation._SHUTDOWN_TIMEOUT_SECONDS >= owned_stop_budget
+    assert _RECOVERY_SHUTDOWN_TIMEOUT_SECONDS >= owned_stop_budget
+
+
+def test_install_all_keeps_established_codex_then_cursor_adapter_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovered: list[str] = []
+    codex = CodexAdapter(executable=Path("/codex"), python_executable=Path("/python"))
+    cursor = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+
+    def discover_codex(**_kwargs: object) -> CodexAdapter:
+        discovered.append("codex")
+        return codex
+
+    def discover_cursor(**_kwargs: object) -> CursorAdapter:
+        discovered.append("cursor")
+        return cursor
+
+    monkeypatch.setattr(installation, "discover_codex_adapter", discover_codex)
+    monkeypatch.setattr(installation, "discover_cursor_adapter", discover_cursor)
+
+    selected = installation._selected_adapters(
+        "all",
+        environment={},
+        python_executable=Path("/python"),
+        codex_cli_required=True,
+    )
+
+    assert discovered == ["codex", "cursor"]
+    assert [adapter.profile for adapter in selected] == ["codex", "cursor"]
 
 
 def _diagnostics(
@@ -237,6 +298,291 @@ def test_install_refuses_daemon_schema_newer_than_current_package(
 
     with pytest.raises(InstallationError, match="schema newer"):
         installation._ensure_current_daemon(paths, None)
+
+
+def test_post_install_skill_timeout_retries_once_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = WorkspaceRecord("workspace-1", "project-1", root, root / ".git")
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    calls = 0
+
+    monkeypatch.setattr(installation, "find_isolated_development_root", lambda _root: None)
+
+    def reconcile(*_args: object, **_kwargs: object) -> WorkspaceSkillsResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise IpcRemoteError(
+                "skill_integration_timeout",
+                "Workspace skill reconciliation exceeded the daemon execution deadline",
+            )
+        return WorkspaceSkillsResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id=workspace.workspace_id,
+            selected_skill_ids=(),
+            materialized=0,
+            removed=0,
+            unchanged=0,
+            exclude_changed=False,
+        )
+
+    monkeypatch.setattr(installation, "request_workspace_skills_reconcile", reconcile)
+
+    result = installation._reconcile_remaining_profiles(
+        paths,
+        (workspace,),
+        ("codex", "cursor"),
+        install_host="all",
+    )
+
+    assert calls == 2
+    assert result.cleaned_workspace_count == 1
+
+
+def test_install_retries_post_mutation_skill_lock_timeout_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = WorkspaceRecord("workspace-install", "project-install", root, root / ".git")
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    adapter = CursorAdapter(home=tmp_path / "home", python_executable=Path("/python"))
+    events: list[str] = []
+    reconcile_calls = 0
+
+    monkeypatch.setattr(installation, "_require_runtime_prerequisites", lambda: None)
+    monkeypatch.setattr(installation, "_selected_adapters", lambda *_args, **_kwargs: (adapter,))
+    monkeypatch.setattr(installation, "_runtime_paths", lambda _environment: paths)
+    monkeypatch.setattr(installation, "_require_safe_database_state", lambda _paths: None)
+    monkeypatch.setattr(installation, "_active_profiles", lambda **_kwargs: {"cursor"})
+    monkeypatch.setattr(installation, "_registered_workspaces", lambda _paths: (workspace,))
+    monkeypatch.setattr(installation, "_live_hidden_workspace_roots", lambda _paths: frozenset())
+    monkeypatch.setattr(installation, "_hidden_project_representative_roots", lambda _paths: ())
+    monkeypatch.setattr(installation, "find_isolated_development_root", lambda _root: None)
+    monkeypatch.setattr(
+        installation, "_skill_registry_path", lambda _environment: tmp_path / "skills"
+    )
+    monkeypatch.setattr(
+        installation,
+        "sync_builtin_skills",
+        lambda _path: BuiltinSkillSyncResult(0, 0, 0, 0, 0, 0, ()),
+    )
+    monkeypatch.setattr(
+        installation,
+        "_ensure_current_daemon",
+        lambda *_args: _diagnostics(python="/python"),
+    )
+
+    def add_profiles(*_args: object) -> IntegrationChange:
+        events.append("intent")
+        return IntegrationChange.CHANGED
+
+    monkeypatch.setattr(
+        installation,
+        "add_host_profiles",
+        add_profiles,
+    )
+    monkeypatch.setattr(
+        CursorAdapter,
+        "registration_state",
+        lambda _self: HostRegistrationState.CURRENT,
+    )
+    monkeypatch.setattr(CursorAdapter, "preflight_project_reconcile", lambda *_args: None)
+
+    def register_mcp(_self: CursorAdapter) -> IntegrationChange:
+        events.append("register")
+        return IntegrationChange.CHANGED
+
+    def reconcile_project(_self: CursorAdapter, _root: Path) -> IntegrationChange:
+        events.append("project")
+        return IntegrationChange.CHANGED
+
+    def enable_and_verify(
+        _self: CursorAdapter,
+        workspace_root: Path,
+        *,
+        environment: object = None,
+    ) -> CursorProjectRuntimeResult:
+        del environment
+        events.append("verify")
+        return CursorProjectRuntimeResult(
+            workspace_root=workspace_root,
+            status=CursorProjectRuntimeStatus.VERIFIED,
+            tools=(),
+            detail="verified",
+        )
+
+    monkeypatch.setattr(CursorAdapter, "register_mcp", register_mcp)
+    monkeypatch.setattr(CursorAdapter, "reconcile_project", reconcile_project)
+    monkeypatch.setattr(CursorAdapter, "enable_and_verify_project_mcp", enable_and_verify)
+
+    def reconcile(*_args: object, **_kwargs: object) -> WorkspaceSkillsResult:
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        events.append(f"skills-{reconcile_calls}")
+        if reconcile_calls == 1:
+            raise IpcRemoteError("skill_integration_timeout", "scan lock deadline exceeded")
+        return WorkspaceSkillsResult(
+            schema_version=SCHEMA_VERSION,
+            workspace_id=workspace.workspace_id,
+            selected_skill_ids=(),
+            materialized=0,
+            removed=0,
+            unchanged=0,
+            exclude_changed=False,
+        )
+
+    monkeypatch.setattr(installation, "request_workspace_skills_reconcile", reconcile)
+
+    result = installation.install_harness(host="cursor")
+
+    assert result.host_profile == "cursor"
+    assert events == ["intent", "register", "project", "verify", "skills-1", "skills-2"]
+
+
+def test_post_install_nontransient_skill_failure_is_contextual_and_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = WorkspaceRecord("workspace-2", "project-2", root, root / ".git")
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    calls = 0
+
+    monkeypatch.setattr(installation, "find_isolated_development_root", lambda _root: None)
+
+    def reconcile(*_args: object, **_kwargs: object) -> WorkspaceSkillsResult:
+        nonlocal calls
+        calls += 1
+        raise IpcRemoteError(
+            "skill_integration_error", "daemon could not reconcile Workspace skills"
+        )
+
+    monkeypatch.setattr(installation, "request_workspace_skills_reconcile", reconcile)
+
+    with pytest.raises(InstallationError) as caught:
+        installation._reconcile_remaining_profiles(
+            paths,
+            (workspace,),
+            ("codex", "cursor"),
+            install_host="all",
+        )
+
+    message = str(caught.value)
+    assert calls == 1
+    assert "post-install project skill reconciliation" in message
+    assert f"Workspace {workspace.workspace_id} ({root})" in message
+    assert "profiles [codex, cursor]" in message
+    assert "skill_integration_error" in message
+    assert "Retry: harness install --host all" in message
+    assert isinstance(caught.value.__cause__, IpcRemoteError)
+
+
+def test_post_install_skill_timeout_stops_after_one_retry_with_partial_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = WorkspaceRecord("workspace-timeout", "project-timeout", root, root / ".git")
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    calls = 0
+
+    monkeypatch.setattr(installation, "find_isolated_development_root", lambda _root: None)
+
+    def reconcile(*_args: object, **_kwargs: object) -> WorkspaceSkillsResult:
+        nonlocal calls
+        calls += 1
+        raise IpcRemoteError(
+            "skill_integration_timeout",
+            "Workspace skill reconciliation exceeded the daemon execution deadline",
+        )
+
+    monkeypatch.setattr(installation, "request_workspace_skills_reconcile", reconcile)
+
+    with pytest.raises(InstallationError) as caught:
+        installation._reconcile_remaining_profiles(
+            paths,
+            (workspace,),
+            ("codex", "cursor"),
+            install_host="all",
+        )
+
+    assert calls == 2
+    assert "Host integration may be partially updated" in str(caught.value)
+    assert "Retry: harness install --host all" in str(caught.value)
+
+
+def test_post_install_transport_timeout_is_contextual_and_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    workspace = WorkspaceRecord("workspace-3", "project-3", root, root / ".git")
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    calls = 0
+
+    monkeypatch.setattr(installation, "find_isolated_development_root", lambda _root: None)
+
+    def reconcile(*_args: object, **_kwargs: object) -> WorkspaceSkillsResult:
+        nonlocal calls
+        calls += 1
+        raise IpcTransportError("local IPC request timed out")
+
+    monkeypatch.setattr(installation, "request_workspace_skills_reconcile", reconcile)
+
+    with pytest.raises(InstallationError, match="local IPC request timed out"):
+        installation._reconcile_remaining_profiles(
+            paths,
+            (workspace,),
+            ("cursor",),
+            install_host="cursor",
+        )
+
+    assert calls == 1
+
+
+def test_post_install_visibility_failure_names_separate_phase_and_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "hidden"
+    paths = RuntimePaths(tmp_path / "state" / "harness.db", tmp_path / "run" / "harness.sock")
+    error = IpcRemoteError("skill_integration_error", "hidden projection could not be reconciled")
+    monkeypatch.setattr(
+        installation,
+        "request_set_visibility",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(error),
+    )
+
+    with pytest.raises(InstallationError) as caught:
+        installation._restore_hidden_visibility_after_install(
+            paths,
+            (root,),
+            ("codex", "cursor"),
+            host="all",
+        )
+
+    message = str(caught.value)
+    assert "post-install Hidden visibility restoration" in message
+    assert f"Workspace root {root}" in message
+    assert "profiles [codex, cursor]" in message
+    assert caught.value.__cause__ is error
+
+
+def test_post_install_cause_is_single_line_and_bounded() -> None:
+    message = installation._post_install_failure(
+        phase="project skill reconciliation",
+        host="cursor",
+        profiles=("cursor",),
+        cause=IpcTransportError("first line\n" + "x" * 800),
+    )
+
+    cause_text = message.split(": ", 1)[1].split(". Host integration", 1)[0]
+    assert "\n" not in message
+    assert len(cause_text) == 512
+    assert cause_text.endswith("...")
 
 
 def test_registered_workspaces_lists_rows_from_older_supported_schema(

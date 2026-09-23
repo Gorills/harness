@@ -24,7 +24,7 @@ from harness.registry import (
 )
 from harness.storage import connect_database, initialize_database
 from harness.task_checkpoints import TaskEventType, list_task_events
-from harness.task_workflow import task_checkpoint, task_start
+from harness.task_workflow import task_accept, task_checkpoint, task_start
 from harness.tasks import TaskRecord, TaskState, TaskWaitReason, get_task
 
 
@@ -277,8 +277,13 @@ def test_dashboard_relocates_workspace_without_losing_identity_or_files(tmp_path
         with urlopen(workspace_url, timeout=2) as response:
             body = response.read().decode("utf-8")
         assert str(moved) in body
-        assert "Проект перенесён в другую папку" in body
-        assert "harness scan" in body
+        assert "Настройки проекта и папок" in body
+        with urlopen(
+            base_url + f"projects/{workspace.project_id}/settings/", timeout=2
+        ) as response:
+            settings = response.read().decode("utf-8")
+        assert "Проект перенесён в другую папку" in settings
+        assert "harness scan" in settings
     finally:
         manager.close()
 
@@ -298,16 +303,16 @@ def test_dashboard_project_deletion_requires_confirmation_and_preserves_files(
         parsed = urlsplit(base_url)
         origin = f"http://127.0.0.1:{parsed.port}"
         project_url = base_url + f"projects/{quote(project_id, safe='')}/"
-        with urlopen(project_url, timeout=2) as response:
+        with urlopen(project_url + "settings/", timeout=2) as response:
             body = response.read().decode("utf-8")
         assert "Удаление проекта" in body
         assert "Файлы на диске останутся" in body
         workspace_url = base_url + f"workspaces/{quote(workspace_id, safe='')}/"
         with urlopen(workspace_url, timeout=2) as workspace_response:
             workspace_body = workspace_response.read().decode("utf-8")
-        assert "Удаление проекта" in workspace_body
-        assert f'action="/projects/{quote(project_id, safe="")}/"' in workspace_body
-        assert "Файлы на диске останутся" in workspace_body
+        assert "Удаление проекта" not in workspace_body
+        assert f'href="/projects/{quote(project_id, safe="")}/settings/"' in workspace_body
+        assert f'action="/projects/{quote(project_id, safe="")}/settings/"' in body
 
         fields: dict[str, str | int] = {
             "action": "delete_project",
@@ -487,13 +492,11 @@ def test_dashboard_operator_tracking_and_reopen_use_same_origin_revision_cas(
 
         connection = connect_database(database)
         try:
-            completed = task_checkpoint(
+            completed = task_accept(
                 connection,
                 workspace_id,
                 task.task_id,
                 expected_revision=task.revision,
-                state=TaskState.COMPLETED,
-                summary="Done",
             ).task
         finally:
             connection.close()
@@ -524,7 +527,7 @@ def test_dashboard_operator_tracking_and_reopen_use_same_origin_revision_cas(
                 TaskEventType.JIRA_LINK_UPDATED,
                 TaskEventType.OPERATOR_STATUS_UPDATED,
                 TaskEventType.OPERATOR_COMMENT,
-                TaskEventType.CHECKPOINT,
+                TaskEventType.ACCEPTED,
                 TaskEventType.REOPENED,
             )
         finally:
@@ -611,9 +614,13 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         assert 'name="visibility_mode"' not in body
         with urlopen(workspace_url, timeout=2) as response:
             workspace_body = response.read().decode("utf-8")
-        assert ">Скрытый<" in workspace_body
-        assert f'action="{urlsplit(workspace_url).path}"' in workspace_body
-        assert "Cursor не блокирует git-команды агента" not in workspace_body
+        settings_url = url + f"projects/{quote(project_id, safe='')}/settings/"
+        assert ">Скрытый<" not in workspace_body
+        with urlopen(settings_url, timeout=2) as response:
+            settings_body = response.read().decode("utf-8")
+        assert ">Скрытый<" in settings_body
+        assert f'action="{urlsplit(settings_url).path}"' in settings_body
+        assert "Cursor не блокирует git-команды агента" not in settings_body
 
         fields: dict[str, str | int] = {
             "action": "set_visibility",
@@ -636,7 +643,7 @@ def test_dashboard_visibility_toggle_projects_hidden_rules(tmp_path: Path) -> No
         )
         assert gitignore_after == gitignore_before
 
-        with urlopen(workspace_url, timeout=2) as response:
+        with urlopen(settings_url, timeout=2) as response:
             hidden_workspace = response.read().decode("utf-8")
         assert ">Обычный<" in hidden_workspace
         assert "Cursor не блокирует git-команды агента" in hidden_workspace
@@ -762,5 +769,67 @@ def test_dashboard_visibility_collision_leaves_mode_unchanged(tmp_path: Path) ->
         finally:
             connection.close()
         assert collision.read_text(encoding="utf-8") == "# user rule\n"
+    finally:
+        manager.close()
+
+
+def test_operator_state_deployment_and_delete_are_explicit_same_origin_cas(tmp_path: Path) -> None:
+    root, database, workspace_id = _database(tmp_path)
+    task = _review_task(database, workspace_id, title="Remove accidental work")
+    manager = DashboardServerManager(database)
+    try:
+        base_url = manager.get_url()
+        task_url = base_url + "tasks/" + task.task_id + "/"
+        origin = f"http://{urlsplit(base_url).netloc}"
+        fields: dict[str, str | int] = {
+            "action": "set_deployment",
+            "workspace_id": workspace_id,
+            "task_id": task.task_id,
+            "expected_revision": task.revision,
+            "deploy_test": "1",
+            "deploy_prod": "1",
+        }
+        assert _post(task_url, fields, origin="http://other.invalid")[0] == 403
+        assert _post(task_url, fields, origin=origin)[0] == 303
+        connection = connect_database(database)
+        try:
+            current = get_task(connection, task.task_id)
+            assert current.deploy_test and current.deploy_prod
+        finally:
+            connection.close()
+        fields = {
+            "action": "set_state",
+            "workspace_id": workspace_id,
+            "task_id": task.task_id,
+            "expected_revision": current.revision,
+            "state": "completed",
+            "wait_reason": "operator_input",
+        }
+        assert _post(task_url, fields, origin=origin)[0] == 303
+        deletion: dict[str, str | int] = {
+            "action": "delete_task",
+            "workspace_id": workspace_id,
+            "task_id": task.task_id,
+            "expected_revision": current.revision,
+            "confirmation": task.task_id,
+        }
+        status, _headers, recovery = _post(task_url, deletion, origin=origin)
+        assert status == 409
+        assert f'name="confirmation" value="{task.task_id}" checked'.encode() not in recovery
+        deletion["expected_revision"] = current.revision + 1
+        assert _post(base_url, deletion, origin=origin)[0] == 400
+        deletion["confirmation"] = "wrong task"
+        assert _post(task_url, deletion, origin=origin)[0] == 400
+        deletion["confirmation"] = task.task_id
+        status, headers, _body = _post(task_url, deletion, origin=origin)
+        assert status == 303
+        assert headers["Location"].endswith("/workspaces/" + workspace_id + "/")
+        connection = connect_database(database)
+        try:
+            assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (0,)
+            assert connection.execute("SELECT COUNT(*) FROM task_events").fetchone() == (0,)
+        finally:
+            connection.close()
+        assert (root / "tracked.txt").read_text() == "baseline\n"
     finally:
         manager.close()

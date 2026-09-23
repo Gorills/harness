@@ -26,7 +26,6 @@ from harness.dashboard import (
     mutate_dashboard_skill_policy,
     mutate_dashboard_task,
 )
-from harness.host_integration_state import HostIntegrationState
 from harness.index import scan_workspace
 from harness.ipc import TaskCheckpointRequestData, TaskStartRequestData
 from harness.registry import create_project, get_workspace, register_workspace
@@ -42,6 +41,7 @@ from harness.skills import (
     resolve_workspace_skills,
 )
 from harness.storage import connect_database, initialize_database
+from harness.task_workflow import task_accept
 from harness.tasks import (
     TaskRecord,
     TaskRevisionConflictError,
@@ -274,14 +274,9 @@ def test_task_terminal_transition_does_not_change_project_skills(tmp_path: Path)
     try:
         before = _ids(resolve_workspace_skills(connection, workspace_id, definitions))
         working = _start(connection, root, "Mobile slice", ("expo",))
-        completed = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.COMPLETED,
-            summary="Shipped mobile work",
-            next_step=None,
-        )
+        completed = task_accept(
+            connection, workspace_id, working.task_id, expected_revision=working.revision
+        ).task
         assert completed.state is TaskState.COMPLETED
         mutate_dashboard_task(
             database,
@@ -391,16 +386,16 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
         )
         assert status == 303
         assert _drain(invalidations) == []
-        get_status, html = _get_text(project_url)
+        get_status, html = _get_text(project_url + "settings/")
         assert get_status == 200
-        assert "Области разработки" in html
-        assert "<strong>Frontend</strong><span" in html
+        assert "Скиллы проекта" in html
+        assert "<h3>Frontend</h3><span" in html
         assert 'data-mode="excluded"' in html
         assert 'name="facet" value="web-frontend"' in html
         assert 'name="mode" value="auto"' in html
         assert 'name="mode" value="included"' in html
-        assert 'aria-label="Авто: Frontend"' in html
-        assert 'aria-label="Включить: Frontend"' in html
+        assert 'aria-label="Применить: Frontend — Авто"' in html
+        assert 'aria-label="Применить: Frontend — Добавлять в проект"' in html
     finally:
         manager.close()
 
@@ -432,8 +427,8 @@ def test_dashboard_skill_scope_reconciles_each_workspace_and_retries_only_failur
 
     monkeypatch.setattr(
         dashboard_module,
-        "load_host_integration_state_for_database",
-        lambda _database: HostIntegrationState(profiles=frozenset({"codex"})),
+        "active_skill_profiles_for_runtime",
+        lambda _database: ("codex",),
     )
     reconciled: list[tuple[str, tuple[str, ...]]] = []
 
@@ -502,7 +497,7 @@ def test_failed_task_mutation_does_not_change_project_skills(tmp_path: Path) -> 
             workspace_hints=_hints(root),
             task_id=working.task_id,
             expected_revision=working.revision + 7,
-            state=TaskState.COMPLETED,
+            state=TaskState.WORKING,
             summary="stale",
             next_step=None,
             wait_reason=None,
@@ -534,14 +529,9 @@ def test_reconcile_failure_does_not_rollback_committed_task(
     registry = _polyglot_registry(tmp_path)
     try:
         working = _start(connection, root, "Mobile slice", ("expo",))
-        completed = _checkpoint(
-            connection,
-            root,
-            working,
-            TaskState.COMPLETED,
-            summary="Committed before projection",
-            next_step=None,
-        )
+        completed = task_accept(
+            connection, workspace_id, working.task_id, expected_revision=working.revision
+        ).task
         committed_revision = completed.revision
 
         def fail_projection(*_args: object, **_kwargs: object) -> None:

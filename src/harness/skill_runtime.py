@@ -10,6 +10,7 @@ from typing import Final
 from harness.cursor_adapter import find_isolated_development_root
 from harness.git_workspace import GitWorkspaceError, inspect_workspace_runtime_identity
 from harness.host_adapters import (
+    HostIntegrationError,
     codex_skill_projection_surface,
     cursor_skill_projection_surface,
 )
@@ -24,9 +25,13 @@ from harness.skill_policy import ProjectSkillPolicyError
 from harness.skills import (
     SkillDefinition,
     SkillError,
+    SkillProjectionCollisionError,
+    SkillProjectionError,
     SkillProjectionInspection,
     SkillProjectionResult,
     SkillProjectionSurface,
+    SkillRegistryError,
+    SkillResolutionError,
     apply_skill_projection,
     default_skill_registry,
     inspect_skill_projection,
@@ -41,9 +46,59 @@ _SUPPORTED_PROFILES: Final[frozenset[str]] = frozenset({"codex", "cursor"})
 _DEFAULT_DEVELOPMENT_PROFILES: Final[tuple[str, ...]] = ("codex", "cursor")
 _DEVELOPMENT_PROFILES_ENV: Final[str] = "HARNESS_DEV_SKILL_PROFILES"
 
+_SKILL_FAILURE_CATEGORIES: Final[frozenset[str]] = frozenset(
+    {
+        "generic",
+        "policy",
+        "resolution",
+        "projection",
+        "projection_collision",
+        "registry",
+        "workspace_identity",
+    }
+)
+
 
 class SkillRuntimeError(RuntimeError):
     """Raised when daemon-owned project skill integration cannot be reconciled safely."""
+
+    def __init__(self, message: str, *, failure_category: str = "generic") -> None:
+        super().__init__(message)
+        self._failure_category = (
+            failure_category if failure_category in _SKILL_FAILURE_CATEGORIES else "generic"
+        )
+
+    @property
+    def operator_message(self) -> str:
+        """Return bounded operator guidance without exposing nested exception details."""
+        if self._failure_category == "policy":
+            return "Project skill policy could not be resolved; review the Project skill settings"
+        if self._failure_category == "resolution":
+            return (
+                "Workspace skill relevance could not be resolved; check project manifests and "
+                "refresh the Workspace with harness scan"
+            )
+        if self._failure_category == "projection":
+            return (
+                "Workspace skill projection could not be updated safely; inspect project "
+                "permissions and Git-local excludes"
+            )
+        if self._failure_category == "projection_collision":
+            return (
+                "Workspace skill projection conflicts with tracked or user-owned content; "
+                "inspect .agents/skills and Git tracking"
+            )
+        if self._failure_category == "registry":
+            return (
+                "Harness skill registry is invalid or unsafe; rerun harness install and inspect "
+                "the skill registry"
+            )
+        if self._failure_category == "workspace_identity":
+            return (
+                "Registered Workspace identity changed; run harness doctor and re-register the "
+                "Workspace"
+            )
+        return "Workspace skill integration could not be reconciled safely; run harness doctor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +205,7 @@ def reconcile_workspace_skills(
             plan_skill_projection(workspace.workspace_root, resolved, surfaces)
         )
     except (SkillError, ProjectSkillPolicyError) as exc:
-        raise SkillRuntimeError("Workspace skill integration could not be reconciled") from exc
+        raise _reconcile_failure(exc) from exc
     _validate_workspace_identity(workspace)
     return WorkspaceSkillReconcileResult(
         workspace_id=workspace.workspace_id,
@@ -208,10 +263,17 @@ def cleanup_projected_skills(
     for workspace in workspaces:
         try:
             _validate_workspace_identity(workspace)
+            if (
+                not os.environ.get("HARNESS_DEV_ROOT")
+                and find_isolated_development_root(workspace.workspace_root)
+                == workspace.workspace_root
+            ):
+                skipped += 1
+                continue
             projection = apply_skill_projection(
                 plan_skill_projection(workspace.workspace_root, (), surfaces)
             )
-        except (GitWorkspaceError, SkillRuntimeError, SkillError):
+        except (GitWorkspaceError, HostIntegrationError, SkillRuntimeError, SkillError):
             skipped += 1
             continue
         cleaned += 1
@@ -250,4 +312,25 @@ def _validate_workspace_identity(
     except GitWorkspaceError:
         raise
     if not workspace_layout_compatible(workspace, identity.layout):
-        raise SkillRuntimeError("registered Workspace identity changed")
+        raise SkillRuntimeError(
+            "registered Workspace identity changed", failure_category="workspace_identity"
+        )
+
+
+def _reconcile_failure(exc: SkillError | ProjectSkillPolicyError) -> SkillRuntimeError:
+    if isinstance(exc, SkillProjectionCollisionError):
+        category = "projection_collision"
+    elif isinstance(exc, SkillRegistryError):
+        category = "registry"
+    elif isinstance(exc, ProjectSkillPolicyError):
+        category = "policy"
+    elif isinstance(exc, SkillResolutionError):
+        category = "resolution"
+    elif isinstance(exc, SkillProjectionError):
+        category = "projection"
+    else:
+        category = "generic"
+    return SkillRuntimeError(
+        "Workspace skill integration could not be reconciled",
+        failure_category=category,
+    )

@@ -56,7 +56,10 @@ not wanted.
    to add specialized Skills when evidence appears on an Auto surface.
 7. Filesystem indexing walks the bound tree with the same default directory/file excludes
    as Git `ls-files` extras, plus `.harnessignore` as bounded glob lines. It does not follow
-   directory symlinks. Watcher Git control sampling is skipped until Git is attached.
+   directory symlinks. Project-local `.venv/` and `venv/` dependency trees are default generated
+   directory exclusions for both Git and filesystem Workspaces; indexing installed dependencies
+   would add no project-source value and can exhaust the bounded scan deadline. Watcher Git control
+   sampling is skipped until Git is attached.
 
 ## Consequences
 
@@ -81,4 +84,5 @@ Automated tests must prove:
   `workspace_id`;
 - Hidden is refused for a filesystem Workspace;
 - overlapping init roots fail closed;
+- project-local `.venv/` and `venv/` trees are excluded from filesystem indexing;
 - schema v21 persists included facets and cannot store include+exclude for one facet.

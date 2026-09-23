@@ -61,6 +61,34 @@ only from the proprietary CLI during foreground commands and was unavailable to 
    discovery boundary; current official Codex behavior may detect them live, and restart remains
    the fallback.
 
+## Lifecycle currentness amendment (2026-09-20)
+
+The daemon's explicit Workspace skill-reconciliation IPC, used by install and remaining-profile
+repair, refreshes the authoritative index under the existing scan lock before resolving Skills.
+It cannot rely on watcher startup timing: an indexed manifest may have changed or disappeared
+while the daemon was stopped, and a new manifest may introduce a relevant surface. The refresh
+uses a fresh dedicated 180-second index deadline after acquiring the existing 30-second scan lock;
+the IPC transport timeout is 220 seconds. This preserves finite bounds while ensuring watcher lock
+contention cannot consume the index-repair budget and allowing a one-time cleanup to update shared
+FTS indexes populated by many registered Workspaces. Failure to refresh stops projection;
+currentness/hash checks in the resolver remain intact. The retryable lock-acquisition timeout is
+distinct from a refresh failure after the lock is acquired.
+
+Skill-resolution failures (including manifest parsing/currentness) are not classified as invalid
+Project policy. Their operator guidance points to manifests and `harness scan`; durable policy
+validation retains separate guidance. Neither category exposes raw manifest content or nested
+exception text. This does not change the operator's Include/Exclude choices or allow invalid
+manifests to be ignored.
+
+Regression coverage must exercise changed, removed, and newly added manifests without a watcher
+refresh, malformed-manifest refusal, and bounded refresh failure before any projection.
+
+Large exclusion repairs delete stale derived file rows in bounded SQL batches. This keeps the
+first scan after a generated-tree exclusion within the dedicated lifecycle deadline instead of
+issuing one top-level delete statement per stale path. If the post-lock refresh still exhausts the
+deadline, install reports bounded guidance to exclude generated dependency/cache directories; the
+message remains distinct from the retryable timeout waiting to acquire the shared scan lock.
+
 ## Consequences
 
 - Greenfield Task hints and later relevant-Task identity or hint changes now converge to native

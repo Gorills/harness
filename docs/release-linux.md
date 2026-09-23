@@ -110,12 +110,17 @@ Use separate runtime and evidence layers:
 | Current checkout | `scripts/dev quality` | Locked dependencies, static checks, core/IPC/HTTP contracts, performance counters, and installed-wheel lifecycle in temporary fixtures |
 | Real Codex CLI, temporary wheel | `scripts/dev python scripts/accept_codex.py --preflight-only --evidence /tmp/harness-codex-preflight.json` | Real CLI config discovery and prompt bootstrap, five SDK wire calls, two independent Workspaces, doctor and cleanup |
 | Global package, temporary state | `make accept-global-codex` | The tool-installed executable passes that Codex preflight without adding synthetic Projects to canonical state |
-| Live activation | `make install-global HOST=cursor,codex`, then `make doctor-global` | Reconciles the explicitly selected real host profiles and registered Workspaces; requires a full host restart and new Task afterwards |
+| Live activation | `make install-global HOST=cursor,codex`, then `make doctor-global` | Reconciles the explicitly selected real host profiles and registered Workspaces; requires a full host restart and fresh host conversation, then resume of the same unfinished Harness Task |
 | Proprietary host behavior | Fresh Cursor and Codex sessions in two Workspaces | Natural tool use, native Skill selection, correct roots, and Task continuity across restarts/host switches |
 
 Global-package acceptance and live activation require explicit operator authorization for checkout agents. Paid Codex model
 acceptance additionally uses the disclosure and invocation-scoped key described below. A passing
 wire probe does not prove the proprietary client loaded or called the tools.
+
+Checkout source and documentation edits do not activate generated host configuration. After actual
+configuration reconciliation, a fresh host conversation receives the updated instruction snapshot;
+the durable Harness Task continues across that restart for the same unfinished user outcome.
+Completed/cancelled Tasks are not automatically reopened.
 
 Keep the installed daemon available to real projects while running checkout tests through
 `scripts/dev`. Tests own temporary Git repositories, database/socket/skill roots, and separate
@@ -177,18 +182,6 @@ scripts/dev python scripts/accept_codex.py --run-model \
   --evidence /tmp/harness-codex-cli-acceptance.json
 ```
 
-To classify existing Codex `exec --json` JSONL for search-vs-native-grep behavior without a model
-or daemon, pass `--workspace-root` so absolute `rg`/`cat` paths under that root classify as
-repo-relative (`accept_codex --run-model` uses the primary Workspace the same way). The CLI writes
-the full classifier payload including redacted evidence; `accept_codex --run-model` attaches
-metrics-only `search_behavior` (no evidence/argv) to its report:
-
-```bash
-scripts/dev python scripts/eval_search_behavior.py events.jsonl \
-  --workspace-root /path/to/workspace \
-  --output /tmp/harness-search-behavior.json
-```
-
 The runner builds and installs the exact current wheel under one temporary directory, uses two
 temporary Git Workspaces containing only fixture README/pyproject text, isolates Harness state and
 skills, and uses the official MCP SDK to connect to the exact configured Streamable HTTP endpoint and call all five
@@ -223,15 +216,17 @@ concurrently winning daemon; termination and kill waits are bounded.
 1. Run `make install-global HOST=codex`, then `harness init` in each new project folder
    (or `harness scan` to reconcile a folder that is already registered).
 2. Trust each Workspace through Codex's own UI, fully quit and reopen the Codex client under test,
-   and create a new Task; an existing Task keeps its original instruction snapshot.
+   and start a fresh host conversation to load the updated instruction snapshot.
 3. From each Workspace root, require `codex mcp get harness --json` to show the loopback
    Streamable HTTP URL, bearer authorization, and exact absolute
    `X-Harness-Workspace-Root`. Confirm no user-level `~/.codex/config.toml` Harness server was
    added and no capability appears in logs or acceptance evidence.
-4. In each fresh Codex Task, confirm `project_status` is the first project action (before shell
+4. In each fresh Codex conversation, confirm `project_status` is the first project action (before shell
    commands, repository reads/searches, browser inspection, or changes; only Harness tool
-   discovery may precede it); then call all five Harness tools and confirm it returns
-   the correct distinct Workspace ID/root for simultaneous repositories and linked worktrees.
+   discovery may precede it), then resume the same unfinished Harness Task by explicit `task_id`
+   and current revision, or create one for a separate user outcome. Call all five Harness tools
+   and confirm the correct distinct Workspace ID/root for simultaneous repositories and linked
+   worktrees.
 5. Start/checkpoint a Task and Knowledge in one Codex process; restart Codex and then switch to a
    supported second host. Require the same Task ID/revision and Knowledge to remain available.
 6. Repeat discovery/tool/root checks in the current Codex IDE extension and ChatGPT desktop local

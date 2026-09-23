@@ -9,29 +9,29 @@ These rules apply to every coding agent and human contributor in this repository
   Harness MCP tools even when they are deferred or omitted from the initial visible tool list and
   call `project_status`. Tool discovery needed to locate and call Harness is the only allowed
   pre-status action; initial omission is not unavailability.
-- After status, start or resume a Harness Task before diagnosis or edits, including
-  read-only investigation. A failed Harness call is a blocker: read the tool schema and retry;
-  do not continue without a Task. Use `project_search` before broad native repository
-  exploration when the query has an explicit identifier or quoted literal, or when retrieving
-  Knowledge/Task history. Natural-language code/doc discovery may use native repository search
-  directly. Ordinary lexical code/doc hits are candidate localization only and never forbid a
-  broader native fallback. Skip `project_search` when an exact path is already in hand (operator
-  message, open file, git status, or a prior search hit); skipping search does not skip Task.
-  `project_context` is only for selected refs when it adds semantic information;
-  if a code or doc search hit already has an exact path, targeted native read/search is allowed
-  immediately. Checkpoint each logical stage. A new operator work request (diagnosis, edits, or
-  implementation) or a shift from diagnosis to implementation requires completing or waiting the
-  current Task, then a new `task_start`.
-- Do not skip a Task because the work looks small, the path is already known, search was
-  unhelpful, the operator seemed annoyed by ceremony, the previous message was discussion, or
-  you plan to create a Task after finishing. Complexity is not a Task gate.
-- An explicit operator waiver ("don't create a task", "не создавай таску", "discussion only",
-  "это обсуждение") applies only to that discussion phase: no diagnosis, no edits, no broad
-  exploration. A later implement, fix, or investigate request ends the waiver and requires
-  `task_start` before that work. If discussion needs investigation, say so and wait; do not
-  stretch the waiver and do not start a Task against it.
-- After Harness project configuration changes, fully restart the host and begin a new Task; an
-  existing Task retains its startup instruction snapshot.
+- After status, start or resume a Harness Task for substantial changes, multi-step work,
+  work needing durable continuity, or an explicit operator request for a Task. Quick questions,
+  read-only inspection, and small local edits may proceed without a Task when durable tracking
+  adds no useful continuity. If work grows beyond that scope, start a Task before continuing.
+  Do not add a justification field or ask permission merely to decide whether tracking is useful.
+  A failed Harness call requires reading the schema and retrying, not bypassing the failure.
+- Use native repository tools for code and documentation discovery. Harness does not provide or
+  require project code/document search. `project_context` remains available for explicitly known
+  Knowledge and Task references when their durable context is useful. Explicit code/document
+  refs remain metadata-only compatibility inputs.
+- Reuse one Task for one requested outcome across diagnosis, implementation, checks,
+  clarifications, continuation, subagents, and host restarts. Resume by explicit `task_id`; do not
+  infer write targets or merge Tasks by title. Every existing-Task mutation carries its current
+  `expected_revision`. Checkpoint each logical stage of tracked work. Keep authorized unfinished
+  work `working`; use `waiting` with its reason for a dependency. When the result is ready, use
+  `waiting` with `operator_review`. Only the operator accepts/completes or cancels a Task; agents
+  must not automatically close it. A ready audit also awaits operator acceptance.
+- Respect an explicit operator request not to create a Task. Do not turn discussion into
+  implementation without authorization or create placeholder Tasks for messages/tool calls.
+- After Harness project configuration changes, fully restart the host and begin a fresh host
+  conversation; existing instruction snapshots do not refresh. Resume the same unfinished Harness
+  Task for the same outcome after `project_status`. A new host conversation is not a new durable
+  Task. Terminal Tasks require the existing separate operator-reopen flow.
 
 ## Isolated development
 
@@ -46,7 +46,7 @@ and skips checkout host/skill reconciliation.
 - `uv run --frozen harness …` without `scripts/dev-env.sh` uses checkout code against the global daemon. Never do that in this repository.
 - Do not read or write canonical per-user state (`~/.local/state/harness`, the per-user
   `harness.sock`) during ordinary isolated checkout work. When a human has explicitly enabled
-  `scripts/dogfood` global mode, its MCP/Search/Task/Knowledge operations intentionally use that
+  `scripts/dogfood` global mode, its MCP/Task/Knowledge operations intentionally use that
   canonical state through the tool-installed runtime; do not enable or disable the mode without
   explicit user authorization.
 - Do not run `harness install` or `harness uninstall` from this environment. Those commands mutate user-global host MCP and are refused while `HARNESS_DEV_ROOT` is set.
@@ -122,7 +122,7 @@ Keep review language aligned with the actual engineering domain.
 - Hooks are optional observability/enhancement only and must not be required for correctness.
 - `visibility_mode=hidden` is fail-closed: agents may edit/research but must not perform durable SCM mutations, and Harness-owned project artifacts must remain untracked/ignored without changing `.gitignore` or tracked instruction files. Hidden is human-selected; model-facing tools may read the effective mode but may not change it. Hidden host admission uses Harness-owned adapter/profile identity, never self-reported `clientInfo`; unsupported profiles fail closed. Mode transitions and admissions sharing a Git common directory must serialize; never report `hidden` effective while an already-admitted Normal-capability agent can retain SCM-write authority. Do not claim Hidden enforcement from prompt text or `.git/info/exclude` alone.
 - Workspaces sharing one Git common directory share one effective visibility mode in v1; do not introduce per-worktree Hidden/Normal divergence without a separately verified isolation mechanism.
-- Host adapters may discover/configure hosts, resolve workspace hints, project native skills/rules/local settings, enforce supported Hidden-mode policy, clean up owned artifacts, and run host-specific doctor checks. They may not contain search/task/index/knowledge business logic.
+- Host adapters may discover/configure hosts, resolve workspace hints, project native skills/rules/local settings, enforce supported Hidden-mode policy, clean up owned artifacts, and run host-specific doctor checks. They may not contain task/index/knowledge business logic.
 - Use the official MCP SDK in production. Raw JSON-RPC is allowed only for independent wire-level tests.
 
 ## Host integrations
@@ -151,7 +151,7 @@ Host configuration formats and discovery paths change. Before modifying an adapt
 The implementation test strategy must include:
 
 - unit tests for domain logic;
-- integration tests for SQLite/index/search/task behavior;
+- integration tests for SQLite/index/task behavior;
 - real subprocess MCP stdio wire tests;
 - exact model-visible contract and negative-disclosure tests;
 - response-size/budget tests;

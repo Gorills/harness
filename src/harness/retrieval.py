@@ -1,64 +1,48 @@
 from __future__ import annotations
 
-import json
-import keyword
 import re
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
-from itertools import pairwise
-from pathlib import Path
+from time import monotonic
 
+from harness.git_applicability import WorkspaceApplicability
 from harness.index import (
-    MAX_EXACT_SEARCH_FILE_BYTES,
-    ExactSearchReadStatus,
-    IndexedFileKind,
-    SearchEvidenceReadStatus,
     get_indexed_file,
-    read_current_exact_search_text,
-    read_current_search_text,
 )
 from harness.knowledge import (
     KnowledgeCardRecord,
     KnowledgeError,
     KnowledgeFreshness,
-    KnowledgeSourceType,
     get_knowledge_card,
 )
-from harness.registry import WorkspaceRecord, get_project, get_workspace
+from harness.registry import get_project, get_workspace
 from harness.search import (
     MAX_SEARCH_LIMIT,
     MAX_SEARCH_QUERY_BYTES,
-    IndexedPathSearchScope,
     SearchError,
-    search_indexed_paths,
 )
 from harness.search_text import (
     AnalyzedSearchQuery,
     analyze_search_query,
+    contains_russian_case_phrase,
     contains_term_phrase,
     is_document_path,
-    is_generated_text_output_path,
     matching_term_count,
-    matching_terms,
-    query_term_prefixes,
-)
-from harness.symbol_navigation import (
-    MAX_SYMBOL_PARSE_BYTES,
-    PythonModuleExportAnalysis,
-    SyntaxRelation,
-    analyze_precise_symbol_relations,
-    analyze_python_module_exports,
-    is_precise_symbol_path,
-    precise_symbol_language,
-    python_workspace_module_candidate_paths,
 )
 from harness.task_checkpoints import TaskCheckpointError, get_task_checkpoint, list_task_events
-from harness.tasks import TaskNotFoundError, get_relevant_task, get_task, get_task_stack_hints
+from harness.tasks import (
+    TaskNotFoundError,
+    TaskOperatorStatus,
+    get_relevant_task,
+    get_task,
+    get_task_stack_hints,
+)
 from harness.verification import list_checkpoint_verification
 
 _DEFAULT_CANDIDATE_LIMIT = 96
 _MAX_CANDIDATE_LIMIT = 384
+_KNOWLEDGE_RECALL_DEADLINE_SECONDS = 4.0
 _SUMMARY_MAX_BYTES = 384
 _CONTEXT_HISTORY_LIMIT = 4
 _CONTEXT_TEXT_MAX_BYTES = 1024
@@ -70,77 +54,13 @@ _CONTEXT_STACK_HINT_LIMIT = 8
 _CONTEXT_CHANGED_PATH_LIMIT = 16
 _CONTEXT_CHANGED_PATH_BYTES = 2048
 MAX_PROJECT_CONTEXT_REF_BYTES = 4096 + len("code:")
-_FILE_CANDIDATE_LIMIT = 96
-_MAX_HIGH_COVERAGE_QUERY_TERMS = 8
-_MIN_HIGH_COVERAGE_QUERY_TERMS = 3
-_DENSE_CONTENT_NEAR_TOKENS = 128
-MAX_SEARCH_EVIDENCE_SNIPPET_LINES = 48
-MAX_SEARCH_EVIDENCE_SNIPPET_BYTES = 3072
-MAX_SEARCH_EVIDENCE_HITS = 3
-MAX_EXACT_SEARCH_NEEDLE_BYTES = 256
-MAX_EXACT_SEARCH_LOCATIONS = 24
-MAX_EXACT_SEARCH_PREVIEW_BYTES = 160
-MAX_EXACT_SEARCH_SCAN_BYTES = 64 * 1024 * 1024
-MAX_EXACT_SEARCH_COVERAGE_BYTES = 4 * 1024
-MAX_SYMBOL_NAVIGATION_RELATIONS = 16
-MAX_SYMBOL_NAVIGATION_BYTES = 5 * 1024
-MAX_SYMBOL_RELATION_TEXT_BYTES = 512
-MAX_SYMBOL_IMPORT_VALIDATION_BYTES = 4 * 1024 * 1024
-MAX_PYTHON_REEXPORT_EDGES = 4
-PROJECT_SEARCH_MAX_BYTES = 12 * 1024
-_SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES = 768
-EVIDENCE_REASON_CHANGED_SINCE_INDEX = "changed_since_index"
-EVIDENCE_REASON_NOT_RELOCATED = "current_match_not_relocated"
-EVIDENCE_REASON_PATH_ONLY = "path_only"
-EVIDENCE_REASON_RESPONSE_BUDGET = "response_budget"
 
-_QUALITY_EXACT_PATH = 0
-_QUALITY_EXACT_FILENAME = 1
-_QUALITY_EXACT_FILENAME_STEM = 2
-_QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 3
-_QUALITY_DENSE_CONTENT = 4
-_QUALITY_ALL_TERMS = 5
-_QUALITY_PARTIAL = 6
-_QUALITY_STALE_OFFSET = 3
-
-_CODE_RELATION_INTENT_TERMS = {
-    "call": frozenset(
-        {
-            "call",
-            "calls",
-            "caller",
-            "callers",
-            "called",
-            "invoke",
-            "invokes",
-            "persist",
-            "persists",
-            "save",
-            "saves",
-            "store",
-            "stores",
-            "write",
-            "writes",
-        }
-    ),
-    "import": frozenset(
-        {"import", "imports", "imported", "importer", "dependency", "dependencies"}
-    ),
-    "inheritance": frozenset(
-        {
-            "inherit",
-            "inherits",
-            "inherited",
-            "inheritance",
-            "extends",
-            "extend",
-            "implements",
-            "implement",
-            "implementation",
-        }
-    ),
-}
-_CODE_RELATION_QUESTION_TERMS = frozenset({"who", "where"})
+_QUALITY_TITLE_OR_IDENTIFIER_PHRASE = 4
+_QUALITY_RUSSIAN_CASE_PHRASE = 5
+_QUALITY_ALL_TERMS = 7
+_QUALITY_PARTIAL = 8
+_QUALITY_EXACT_TASK_ID = 0
+_QUALITY_TASK_ID_PREFIX = 1
 
 
 class ProjectRetrievalError(RuntimeError):
@@ -151,12 +71,8 @@ class ProjectRetrievalRefError(ProjectRetrievalError):
     """Raised when a selected context ref is invalid or outside the active Project."""
 
 
-class ProjectSearchScope(StrEnum):
-    ALL = "all"
-    CODE = "code"
-    DOCS = "docs"
-    KNOWLEDGE = "knowledge"
-    TASKS = "tasks"
+class ProjectRecallDeadlineError(ProjectRetrievalError):
+    """Raised when authoritative Knowledge cannot be fully scanned in time."""
 
 
 class ProjectSearchKind(StrEnum):
@@ -164,167 +80,6 @@ class ProjectSearchKind(StrEnum):
     DOC = "doc"
     KNOWLEDGE = "knowledge"
     TASK = "task"
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectSearchEvidence:
-    start_line: int
-    end_line: int
-    snippet: str
-    truncated: bool
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "start_line": self.start_line,
-            "end_line": self.end_line,
-            "snippet": self.snippet,
-            "truncated": self.truncated,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectExactSearchLocation:
-    path: str
-    line: int
-    column: int
-    preview: str
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "path": self.path,
-            "line": self.line,
-            "column": self.column,
-            "preview": self.preview,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectExactSearchCoverage:
-    needle: str
-    needle_kind: str
-    case_sensitive: bool
-    matched_files: int
-    matched_occurrences: int
-    matched_lines: int
-    scanned_files: int
-    scanned_bytes: int
-    non_text_files: int
-    unavailable_files: int
-    complete: bool
-    locations_truncated: bool
-    locations: tuple[ProjectExactSearchLocation, ...]
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "needle": self.needle,
-            "needle_kind": self.needle_kind,
-            "case_sensitive": self.case_sensitive,
-            "matched_files": self.matched_files,
-            "matched_occurrences": self.matched_occurrences,
-            "matched_lines": self.matched_lines,
-            "scanned_files": self.scanned_files,
-            "scanned_bytes": self.scanned_bytes,
-            "non_text_files": self.non_text_files,
-            "unavailable_files": self.unavailable_files,
-            "complete": self.complete,
-            "locations_truncated": self.locations_truncated,
-            "locations": [location.to_wire() for location in self.locations],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectSymbolRelation:
-    kind: str
-    path: str
-    line: int
-    column: int
-    scope: str | None
-    target: str
-    symbol_kind: str | None
-    in_test: bool
-    evidence: ProjectSearchEvidence | None
-    resolved_target: str | None = None
-    resolution_kind: str | None = None
-    resolution_module: str | None = None
-    resolved_definition_path: str | None = None
-    resolved_definition_line: int | None = None
-    resolved_definition_column: int | None = None
-    resolved_definition_kind: str | None = None
-    resolution_validation_kind: str | None = None
-
-    def to_wire(self) -> dict[str, object]:
-        payload: dict[str, object] = {
-            "kind": self.kind,
-            "path": self.path,
-            "line": self.line,
-            "column": self.column,
-            "scope": self.scope,
-            "target": self.target,
-            "symbol_kind": self.symbol_kind,
-            "in_test": self.in_test,
-            "evidence": None if self.evidence is None else self.evidence.to_wire(),
-        }
-        if self.resolved_target is not None:
-            payload["resolved_target"] = self.resolved_target
-        if self.resolution_kind is not None:
-            payload["resolution_kind"] = self.resolution_kind
-        if self.resolved_definition_path is not None:
-            payload["resolved_definition_path"] = self.resolved_definition_path
-        if self.resolved_definition_line is not None:
-            payload["resolved_definition_line"] = self.resolved_definition_line
-        if self.resolved_definition_column is not None:
-            payload["resolved_definition_column"] = self.resolved_definition_column
-        if self.resolved_definition_kind is not None:
-            payload["resolved_definition_kind"] = self.resolved_definition_kind
-        if self.resolution_validation_kind is not None:
-            payload["resolution_validation_kind"] = self.resolution_validation_kind
-        return payload
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectSymbolNavigation:
-    needle: str
-    precise_languages: tuple[str, ...]
-    candidate_precise_files: int
-    parsed_precise_files: int
-    parse_failures: int
-    parse_skipped_files: int
-    matching_unsupported_files: int
-    definition_count: int
-    call_count: int
-    test_call_count: int
-    import_count: int
-    inheritance_count: int
-    precise_classification_complete: bool
-    relations_truncated: bool
-    evidence_truncated: bool
-    relations: tuple[ProjectSymbolRelation, ...]
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "needle": self.needle,
-            "precise_languages": list(self.precise_languages),
-            "candidate_precise_files": self.candidate_precise_files,
-            "parsed_precise_files": self.parsed_precise_files,
-            "parse_failures": self.parse_failures,
-            "parse_skipped_files": self.parse_skipped_files,
-            "matching_unsupported_files": self.matching_unsupported_files,
-            "definition_count": self.definition_count,
-            "call_count": self.call_count,
-            "test_call_count": self.test_call_count,
-            "import_count": self.import_count,
-            "inheritance_count": self.inheritance_count,
-            "precise_classification_complete": self.precise_classification_complete,
-            "relations_truncated": self.relations_truncated,
-            "evidence_truncated": self.evidence_truncated,
-            "relations": [relation.to_wire() for relation in self.relations],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectExactSearchInspection:
-    coverage: ProjectExactSearchCoverage | None
-    symbol_navigation: ProjectSymbolNavigation | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,10 +91,6 @@ class ProjectSearchHit:
     short_summary: str | None
     match_reason: str
     freshness: str
-    path: str | None = None
-    evidence: ProjectSearchEvidence | None = None
-    evidence_reason: str | None = None
-    evidence_line: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,362 +109,116 @@ class _RankedProjectHit:
     relevance_boost: int = 0
 
 
-@dataclass(frozen=True, slots=True)
-class _PythonIndexedModuleFile:
-    path: str
-    size_bytes: int
-    content_sha256: str
-
-
-def search_project(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: str,
-    *,
-    scope: ProjectSearchScope = ProjectSearchScope.ALL,
-    limit: int,
-    response_reserve_bytes: int = 0,
-) -> tuple[ProjectSearchHit, ...]:
-    """Search bounded Project Intelligence while keeping filesystem search Workspace-local."""
-    workspace = get_workspace(connection, workspace_id)
-    project = get_project(connection, workspace.project_id)
-    normalized = _normalize_query(query)
-    analyzed = analyze_search_query(normalized)
-    _validate_limit(limit)
-    if not isinstance(scope, ProjectSearchScope):
-        raise SearchError("project search scope is unsupported")
-    if not analyzed.terms:
-        if scope in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS} and (
-            _exact_search_needle(normalized) is not None
-        ):
-            # Literal punctuation has exact source coverage but no lexical candidate channel.
-            return ()
-        raise SearchError("project search query has no searchable tokens")
-
-    if scope is ProjectSearchScope.CODE:
-        hits = _project_hits(
-            _file_hits(
-                connection,
-                workspace_id,
-                analyzed,
-                IndexedPathSearchScope.CODE,
-                limit,
-            )
-        )
-    elif scope is ProjectSearchScope.DOCS:
-        hits = _project_hits(
-            _file_hits(
-                connection,
-                workspace_id,
-                analyzed,
-                IndexedPathSearchScope.DOCS,
-                limit,
-            )
-        )
-    elif scope is ProjectSearchScope.KNOWLEDGE:
-        hits = _project_hits(
-            _knowledge_hits(
-                connection,
-                project.project_id,
-                analyzed,
-                limit,
-                active_workspace_id=workspace_id,
-                include_unanchored_agent_asserted=True,
-            )
-        )
-    elif scope is ProjectSearchScope.TASKS:
-        hits = _project_hits(
-            _task_hits(
-                connection,
-                analyzed,
-                limit,
-                project_id=project.project_id,
-                active_workspace_id=workspace_id,
-            )
-        )
-    else:
-        channels = (
-            _knowledge_hits(
-                connection,
-                project.project_id,
-                analyzed,
-                limit,
-                active_workspace_id=workspace_id,
-            ),
-            _file_hits(
-                connection,
-                workspace_id,
-                analyzed,
-                IndexedPathSearchScope.CODE,
-                limit,
-            ),
-            _file_hits(
-                connection,
-                workspace_id,
-                analyzed,
-                IndexedPathSearchScope.DOCS,
-                limit,
-            ),
-            _task_hits(
-                connection,
-                analyzed,
-                limit,
-                project_id=project.project_id,
-                active_workspace_id=workspace_id,
-            ),
-        )
-        hits = _fuse_ranked_channels(channels, limit)
-    return _attach_current_source_evidence(
-        connection,
-        workspace,
-        analyzed,
-        hits,
-        response_reserve_bytes=response_reserve_bytes,
-    )
-
-
-def search_exact_source_inspection(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: str,
-    *,
-    scope: ProjectSearchScope,
-) -> ProjectExactSearchInspection:
-    """Inspect exhaustive exact source and precise syntax relations in one current-source pass."""
-    if scope not in {ProjectSearchScope.ALL, ProjectSearchScope.CODE, ProjectSearchScope.DOCS}:
-        return ProjectExactSearchInspection(None, None)
-    needle = _exact_search_needle(query)
-    if needle is None:
-        return ProjectExactSearchInspection(None, None)
-    needle_text, needle_kind = needle
-    symbol_needle = (
-        needle_text
-        if scope is not ProjectSearchScope.DOCS
-        and _is_identifier_exact_needle(needle_text)
-        and needle_kind != "quoted_literal"
-        else None
-    )
-    symbol_candidate_text = None if symbol_needle is None else symbol_needle.rsplit(".", 1)[-1]
-    workspace = get_workspace(connection, workspace_id)
-    rows = connection.execute(
-        """
-        SELECT
-            files.relative_path,
-            files.kind,
-            files.size_bytes,
-            files.content_sha256
-        FROM indexed_files AS files
-        WHERE files.workspace_id = ?
-        ORDER BY files.relative_path
-        """,
-        (workspace_id,),
-    ).fetchall()
-
-    matched_files = 0
-    matched_occurrences = 0
-    matched_lines = 0
-    scanned_files = 0
-    scanned_bytes = 0
-    non_text_files = 0
-    unavailable_files = 0
-    locations: list[ProjectExactSearchLocation] = []
-    locations_truncated = False
-    budget_exhausted = False
-
-    precise_languages: set[str] = set()
-    candidate_precise_files = 0
-    parsed_precise_files = 0
-    parse_failures = 0
-    parse_skipped_files = 0
-    matching_unsupported_files = 0
-    syntax_relations: list[SyntaxRelation] = []
-
-    for raw_path, raw_kind, raw_size, file_sha in rows:
-        if (
-            not isinstance(raw_path, str)
-            or not isinstance(raw_kind, str)
-            or isinstance(raw_size, bool)
-            or not isinstance(raw_size, int)
-            or raw_size < 0
-            or not isinstance(file_sha, str)
-        ):
-            raise ProjectRetrievalError(
-                "exact source coverage crossed invalid Structural Index state"
-            )
-        if raw_kind != IndexedFileKind.FILE.value or is_generated_text_output_path(raw_path):
-            continue
-        is_doc = is_document_path(raw_path)
-        if scope is ProjectSearchScope.CODE and is_doc:
-            continue
-        if scope is ProjectSearchScope.DOCS and not is_doc:
-            continue
-        if budget_exhausted or scanned_bytes + raw_size > MAX_EXACT_SEARCH_SCAN_BYTES:
-            budget_exhausted = True
-            unavailable_files += 1
-            continue
-        read = read_current_exact_search_text(
-            workspace,
-            raw_path,
-            expected_content_sha256=file_sha,
-        )
-        scanned_files += 1
-        scanned_bytes += min(raw_size, MAX_EXACT_SEARCH_FILE_BYTES + 1)
-        if read.status is ExactSearchReadStatus.NON_TEXT:
-            non_text_files += 1
-            continue
-        if read.status is not ExactSearchReadStatus.OK or read.text is None:
-            unavailable_files += 1
-            continue
-        file_occurrences = 0
-        file_matched_lines = 0
-        for line_number, line in enumerate(read.text.splitlines(), start=1):
-            line_occurrences = _literal_columns(line, needle_text)
-            if not line_occurrences:
-                continue
-            file_matched_lines += 1
-            file_occurrences += len(line_occurrences)
-            preview = _truncate_utf8(line.strip(), MAX_EXACT_SEARCH_PREVIEW_BYTES)
-            for column in line_occurrences:
-                if len(locations) < MAX_EXACT_SEARCH_LOCATIONS:
-                    locations.append(
-                        ProjectExactSearchLocation(
-                            path=raw_path,
-                            line=line_number,
-                            column=column,
-                            preview=preview,
-                        )
-                    )
-                else:
-                    locations_truncated = True
-        if file_occurrences:
-            matched_files += 1
-            matched_occurrences += file_occurrences
-            matched_lines += file_matched_lines
-        if symbol_needle is not None and not is_doc:
-            if (
-                is_precise_symbol_path(raw_path)
-                and symbol_candidate_text is not None
-                and symbol_candidate_text in read.text
-            ):
-                candidate_precise_files += 1
-                language = precise_symbol_language(raw_path)
-                if language is None:
-                    raise ProjectRetrievalError("precise symbol path has no parser language")
-                precise_languages.add(language)
-                analysis = analyze_precise_symbol_relations(
-                    raw_path,
-                    read.text,
-                    symbol_needle,
-                )
-                if analysis.status == "ok":
-                    parsed_precise_files += 1
-                    syntax_relations.extend(analysis.relations)
-                elif analysis.status == "too_large":
-                    parse_skipped_files += 1
-                else:
-                    parse_failures += 1
-            elif file_occurrences and not is_precise_symbol_path(raw_path):
-                matching_unsupported_files += 1
-
-    coverage = _fit_exact_coverage_to_budget(
-        ProjectExactSearchCoverage(
-            needle=needle_text,
-            needle_kind=needle_kind,
-            case_sensitive=True,
-            matched_files=matched_files,
-            matched_occurrences=matched_occurrences,
-            matched_lines=matched_lines,
-            scanned_files=scanned_files,
-            scanned_bytes=scanned_bytes,
-            non_text_files=non_text_files,
-            unavailable_files=unavailable_files,
-            complete=not budget_exhausted and unavailable_files == 0,
-            locations_truncated=locations_truncated,
-            locations=tuple(locations),
-        )
-    )
-    navigation = None
-    if symbol_needle is not None and (
-        candidate_precise_files > 0 or matching_unsupported_files > 0
-    ):
-        navigation = _build_symbol_navigation(
-            symbol_needle,
-            syntax_relations,
-            precise_languages=tuple(sorted(precise_languages)),
-            candidate_precise_files=candidate_precise_files,
-            parsed_precise_files=parsed_precise_files,
-            parse_failures=parse_failures,
-            parse_skipped_files=parse_skipped_files,
-            matching_unsupported_files=matching_unsupported_files,
-            source_scan_complete=(not budget_exhausted and unavailable_files == 0),
-        )
-        navigation = _validate_python_workspace_exports(
-            workspace,
-            rows,
-            navigation,
-        )
-    return ProjectExactSearchInspection(coverage, navigation)
-
-
-def search_exact_source_coverage(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: str,
-    *,
-    scope: ProjectSearchScope,
-) -> ProjectExactSearchCoverage | None:
-    """Compatibility wrapper for callers that only need exact current-source coverage."""
-    return search_exact_source_inspection(
-        connection,
-        workspace_id,
-        query,
-        scope=scope,
-    ).coverage
-
-
-def symbol_navigation_response_reserve(navigation: ProjectSymbolNavigation | None) -> int:
-    if navigation is None:
-        return 0
-    encoded = json.dumps(
-        project_symbol_navigation_payload(navigation),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return len(encoded) + 128
-
-
-def exact_coverage_response_reserve(coverage: ProjectExactSearchCoverage | None) -> int:
-    if coverage is None:
-        return 0
-    encoded = json.dumps(
-        project_exact_search_coverage_payload(coverage),
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return len(encoded) + 128
-
-
 def search_tasks(
     connection: sqlite3.Connection,
     query: str,
     *,
     limit: int,
+    project_id: str | None = None,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[ProjectSearchHit, ...]:
-    """Search durable Task history across every registered Project on this daemon."""
+    """Search durable Task history, optionally filtered to the active Git context."""
     normalized = _normalize_query(query)
     analyzed = analyze_search_query(normalized)
     if not analyzed.terms:
-        raise SearchError("project search query has no searchable tokens")
+        raise SearchError("Task search query has no searchable tokens")
     _validate_limit(limit)
-    return _project_hits(_task_hits(connection, analyzed, limit))
+    if applicability is not None and applicability.workspace.project_id != project_id:
+        raise ProjectRetrievalError("Task recall Project does not match active Workspace")
+    return _project_hits(
+        _task_hits(
+            connection,
+            analyzed,
+            limit,
+            project_id=project_id,
+            active_workspace_id=(None if applicability is None else applicability.workspace_id),
+            applicability=applicability,
+        )
+    )
+
+
+def recall_knowledge(
+    connection: sqlite3.Connection,
+    project_id: str,
+    query: str,
+    *,
+    limit: int,
+    applicability: WorkspaceApplicability,
+) -> tuple[ProjectSearchHit, ...]:
+    """Find durable Knowledge from authoritative cards in the active Git context."""
+    if applicability.workspace.project_id != project_id:
+        raise ProjectRetrievalError("Knowledge recall Project does not match active Workspace")
+    analyzed = analyze_search_query(_normalize_query(query))
+    if not analyzed.terms:
+        raise SearchError("Knowledge recall query has no searchable tokens")
+    _validate_limit(limit)
+    deadline = monotonic() + _KNOWLEDGE_RECALL_DEADLINE_SECONDS
+    # Stream every authoritative card. A fixed newest-card window silently hides older
+    # Knowledge, so a deadline failure must be explicit instead of returning partial hits.
+    candidates = connection.execute(
+        "SELECT id, title, body FROM knowledge_cards WHERE project_id = ? "
+        "ORDER BY created_at DESC, id DESC",
+        (project_id,),
+    )
+    ranked: list[tuple[tuple[int, int, str], ProjectSearchHit]] = []
+    for knowledge_id, title, body in candidates:
+        if monotonic() >= deadline:
+            raise ProjectRecallDeadlineError("Knowledge recall deadline exceeded")
+        if not all(isinstance(value, str) for value in (knowledge_id, title, body)):
+            raise ProjectRetrievalError("Knowledge recall candidate has invalid persisted types")
+        matched = matching_term_count(analyzed.terms, title, body)
+        if not matched:
+            continue
+        title_match = contains_term_phrase(analyzed.terms, title) or contains_russian_case_phrase(
+            analyzed.terms, title
+        )
+        rank = (0 if title_match else 1, len(analyzed.terms) - matched, knowledge_id)
+        if len(ranked) >= limit and rank >= ranked[-1][0]:
+            continue
+        card = get_knowledge_card(connection, knowledge_id)
+        if card.project_id != project_id:
+            raise ProjectRetrievalError("Knowledge recall crossed Project ownership")
+        if not applicability.knowledge_visible(card):
+            continue
+        ranked.append(
+            (
+                rank,
+                ProjectSearchHit(
+                    ref=f"knowledge:{card.knowledge_id}",
+                    kind=ProjectSearchKind.KNOWLEDGE,
+                    title=card.title,
+                    location=f"knowledge:{card.knowledge_id}",
+                    short_summary=None,
+                    match_reason="durable Knowledge",
+                    freshness=card.freshness.value,
+                ),
+            )
+        )
+        ranked.sort(key=lambda item: item[0])
+        if len(ranked) > limit:
+            ranked.pop()
+    if monotonic() >= deadline:
+        raise ProjectRecallDeadlineError("Knowledge recall deadline exceeded")
+    return tuple(hit for _, hit in ranked)
 
 
 def read_project_context(
     connection: sqlite3.Connection,
     workspace_id: str,
     refs: tuple[str, ...],
+    *,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[ProjectContextItem, ...]:
     """Expand only explicitly selected refs and fail closed on cross-Project identities."""
+    if applicability is None:
+        applicability = WorkspaceApplicability(connection, workspace_id)
+        resolved_items = read_project_context(
+            connection, workspace_id, refs, applicability=applicability
+        )
+        applicability.validate()
+        return resolved_items
+    if applicability.workspace_id != workspace_id:
+        raise ProjectRetrievalError("applicability Workspace mismatch")
     workspace = get_workspace(connection, workspace_id)
     project = get_project(connection, workspace.project_id)
     items: list[ProjectContextItem] = []
@@ -750,6 +255,10 @@ def read_project_context(
                 raise ProjectRetrievalRefError("selected Knowledge ref does not exist") from exc
             if card.project_id != project.project_id:
                 raise ProjectRetrievalRefError("selected Knowledge ref belongs to another Project")
+            if not applicability.knowledge_visible(card):
+                raise ProjectRetrievalRefError(
+                    "selected Knowledge ref is unavailable in the active Git context"
+                )
             items.append(
                 ProjectContextItem(
                     ref=ref,
@@ -759,829 +268,24 @@ def read_project_context(
             )
             continue
         if ref.startswith("task:"):
-            items.append(_task_context(connection, project.project_id, ref))
+            task_id = ref.removeprefix("task:").partition("#")[0]
+            if not applicability.task_visible(task_id):
+                raise ProjectRetrievalRefError(
+                    "selected Task ref is unavailable in the active Git context"
+                )
+            fragment = ref.partition("#")[2]
+            if fragment.startswith("checkpoint:") and not applicability.checkpoint_visible(
+                fragment.removeprefix("checkpoint:")
+            ):
+                raise ProjectRetrievalRefError(
+                    "selected checkpoint is unavailable in the active Git context"
+                )
+            items.append(
+                _task_context(connection, project.project_id, ref, applicability=applicability)
+            )
             continue
         raise ProjectRetrievalRefError("selected Project context ref kind is unsupported")
     return tuple(items)
-
-
-def _file_hits(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: AnalyzedSearchQuery,
-    scope: IndexedPathSearchScope,
-    limit: int,
-) -> tuple[_RankedProjectHit, ...]:
-    path_results = list(
-        search_indexed_paths(
-            connection,
-            workspace_id,
-            query.normalized,
-            limit=MAX_SEARCH_LIMIT,
-            scope=scope,
-        )
-    )
-    effective_path_query = " ".join(query.terms)
-    if effective_path_query.casefold() != query.normalized.casefold():
-        seen_paths = {result.relative_path for result in path_results}
-        for result in search_indexed_paths(
-            connection,
-            workspace_id,
-            effective_path_query,
-            limit=MAX_SEARCH_LIMIT,
-            scope=scope,
-        ):
-            if result.relative_path not in seen_paths:
-                path_results.append(result)
-                seen_paths.add(result.relative_path)
-
-    ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    path_quality = {
-        "exact_path": _QUALITY_EXACT_PATH,
-        "exact_filename": _QUALITY_EXACT_FILENAME,
-        "identifier_tokens": _QUALITY_ALL_TERMS,
-        "path_substring": _QUALITY_PARTIAL,
-    }
-    for result in path_results:
-        is_doc = is_document_path(result.relative_path)
-        kind = ProjectSearchKind.DOC if is_doc else ProjectSearchKind.CODE
-        prefix = "doc" if is_doc else "code"
-        ref = f"{prefix}:{result.relative_path}"
-        ranked_by_ref[ref] = _RankedProjectHit(
-            hit=ProjectSearchHit(
-                ref=ref,
-                kind=kind,
-                title=Path(result.relative_path).name,
-                location=result.relative_path,
-                short_summary=None,
-                match_reason=result.match_kind.value,
-                freshness="indexed_snapshot",
-                path=result.relative_path,
-            ),
-            quality=path_quality[result.match_kind.value],
-            matched_terms=matching_term_count(query.terms, result.relative_path),
-            lexical_score=float(path_quality[result.match_kind.value]),
-            relevance_boost=_path_relevance_penalty(result.relative_path, query.terms),
-        )
-
-    for candidate in _indexed_content_hits(connection, workspace_id, query, scope, limit):
-        previous = ranked_by_ref.get(candidate.hit.ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[candidate.hit.ref] = candidate
-
-    if scope is IndexedPathSearchScope.CODE:
-        for candidate in _indexed_code_unit_hits(connection, workspace_id, query, limit):
-            previous = ranked_by_ref.get(candidate.hit.ref)
-            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-                ranked_by_ref[candidate.hit.ref] = candidate
-        for candidate in _indexed_resolved_code_relation_hits(
-            connection, workspace_id, query, limit
-        ):
-            previous = ranked_by_ref.get(candidate.hit.ref)
-            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-                ranked_by_ref[candidate.hit.ref] = candidate
-        for candidate in _indexed_code_relation_hits(connection, workspace_id, query, limit):
-            previous = ranked_by_ref.get(candidate.hit.ref)
-            if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-                ranked_by_ref[candidate.hit.ref] = candidate
-
-    ranked = sorted(ranked_by_ref.values(), key=_ranked_hit_key)
-    return tuple(ranked[:limit])
-
-
-def _indexed_code_unit_hits(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: AnalyzedSearchQuery,
-    limit: int,
-) -> tuple[_RankedProjectHit, ...]:
-    candidate_limit = min(
-        _FILE_CANDIDATE_LIMIT,
-        max(24, limit * 8, len(query.terms) * 16),
-    )
-    rows = connection.execute(
-        """
-        SELECT
-            units.relative_path,
-            units.name,
-            units.qualified_name,
-            units.symbol_kind,
-            units.line,
-            bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
-            manifests.content_sha256,
-            files.kind,
-            files.content_sha256
-        FROM indexed_code_unit_search
-        JOIN indexed_code_units AS units
-            ON units.id = indexed_code_unit_search.rowid
-        JOIN indexed_code_unit_files AS manifests
-            ON manifests.workspace_id = units.workspace_id
-           AND manifests.relative_path = units.relative_path
-        JOIN indexed_files AS files
-            ON files.workspace_id = units.workspace_id
-           AND files.relative_path = units.relative_path
-        WHERE indexed_code_unit_search MATCH ?
-          AND units.workspace_id = ?
-          AND manifests.status = 'ok'
-        ORDER BY bm25(indexed_code_unit_search, 8.0, 6.0, 5.0, 2.0),
-                 units.relative_path, units.line, units.column
-        LIMIT ?
-        """,
-        (query.all_fts_expression, workspace_id, candidate_limit),
-    ).fetchall()
-    ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    for row in rows:
-        (
-            relative_path,
-            name,
-            qualified_name,
-            symbol_kind,
-            line,
-            raw_score,
-            manifest_sha256,
-            raw_kind,
-            indexed_sha256,
-        ) = row
-        if (
-            not isinstance(relative_path, str)
-            or not isinstance(name, str)
-            or not isinstance(qualified_name, str)
-            or not isinstance(symbol_kind, str)
-            or isinstance(line, bool)
-            or not isinstance(line, int)
-            or line <= 0
-            or not isinstance(raw_score, (int, float))
-            or not isinstance(manifest_sha256, str)
-            or not isinstance(indexed_sha256, str)
-            or raw_kind != IndexedFileKind.FILE.value
-            or is_document_path(relative_path)
-            or is_generated_text_output_path(relative_path)
-        ):
-            raise ProjectRetrievalError(
-                "indexed code-unit search crossed authoritative index state"
-            )
-        if manifest_sha256 != indexed_sha256:
-            continue
-        phrase_match = contains_term_phrase(query.terms, name) or contains_term_phrase(
-            query.terms, qualified_name
-        )
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if phrase_match else _QUALITY_DENSE_CONTENT
-        reason = (
-            "code unit definition phrase" if phrase_match else "code unit definition (all terms)"
-        )
-        ref = f"code:{relative_path}"
-        candidate = _RankedProjectHit(
-            hit=ProjectSearchHit(
-                ref=ref,
-                kind=ProjectSearchKind.CODE,
-                title=Path(relative_path).name,
-                location=relative_path,
-                short_summary=_truncate_utf8(
-                    f"{symbol_kind} {qualified_name}",
-                    _SUMMARY_MAX_BYTES,
-                ),
-                match_reason=reason,
-                freshness="indexed_snapshot",
-                path=relative_path,
-                evidence_line=line,
-            ),
-            quality=quality,
-            matched_terms=len(query.terms),
-            lexical_score=float(raw_score),
-            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 1,
-        )
-        previous = ranked_by_ref.get(ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[ref] = candidate
-    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
-
-
-def _indexed_resolved_code_relation_hits(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: AnalyzedSearchQuery,
-    limit: int,
-) -> tuple[_RankedProjectHit, ...]:
-    plan = _code_relation_query_plan(query)
-    if plan is None:
-        return ()
-    fts_expression, relation_kinds, target_terms, explicit_intent = plan
-    if "call" not in relation_kinds:
-        return ()
-    candidate_limit = min(
-        _FILE_CANDIDATE_LIMIT,
-        max(24, limit * 8, len(target_terms) * 16),
-    )
-    rows = connection.execute(
-        """
-        SELECT
-            relations.relative_path,
-            relations.scope,
-            relations.resolved_target,
-            relations.line,
-            relations.in_test,
-            resolved.validation_kind,
-            targets.relative_path,
-            bm25(indexed_resolved_code_relation_search, 7.0, 5.0, 1.0, 0.5),
-            source_manifests.content_sha256,
-            source_files.kind,
-            source_files.content_sha256,
-            target_manifests.content_sha256,
-            target_files.kind,
-            target_files.content_sha256
-        FROM indexed_resolved_code_relation_search
-        JOIN indexed_resolved_code_relations AS resolved
-          ON resolved.relation_id = indexed_resolved_code_relation_search.rowid
-        JOIN indexed_resolved_relation_workspaces AS resolved_workspaces
-          ON resolved_workspaces.workspace_id = resolved.workspace_id
-        JOIN indexed_code_relations AS relations
-          ON relations.id = resolved.relation_id
-        JOIN indexed_code_unit_files AS source_manifests
-          ON source_manifests.workspace_id = relations.workspace_id
-         AND source_manifests.relative_path = relations.relative_path
-        JOIN indexed_files AS source_files
-          ON source_files.workspace_id = relations.workspace_id
-         AND source_files.relative_path = relations.relative_path
-        JOIN indexed_code_units AS targets
-          ON targets.id = resolved.target_unit_id
-        JOIN indexed_code_unit_files AS target_manifests
-          ON target_manifests.workspace_id = targets.workspace_id
-         AND target_manifests.relative_path = targets.relative_path
-        JOIN indexed_files AS target_files
-          ON target_files.workspace_id = targets.workspace_id
-         AND target_files.relative_path = targets.relative_path
-        WHERE indexed_resolved_code_relation_search MATCH ?
-          AND resolved.workspace_id = ?
-          AND resolved_workspaces.status = 'ok'
-          AND relations.relation_kind = 'call'
-          AND source_manifests.status = 'ok'
-          AND source_manifests.relation_status = 'ok'
-          AND source_manifests.resolution_status = 'ok'
-          AND target_manifests.status = 'ok'
-        ORDER BY bm25(indexed_resolved_code_relation_search, 7.0, 5.0, 1.0, 0.5),
-                 relations.relative_path, relations.line, relations.column
-        LIMIT ?
-        """,
-        (fts_expression, workspace_id, candidate_limit),
-    ).fetchall()
-    ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    for row in rows:
-        (
-            relative_path,
-            scope,
-            resolved_target,
-            line,
-            in_test,
-            validation_kind,
-            target_path,
-            raw_score,
-            source_manifest_sha,
-            source_kind,
-            source_indexed_sha,
-            target_manifest_sha,
-            target_kind,
-            target_indexed_sha,
-        ) = row
-        if (
-            not isinstance(relative_path, str)
-            or not isinstance(scope, str)
-            or not isinstance(resolved_target, str)
-            or not resolved_target
-            or isinstance(line, bool)
-            or not isinstance(line, int)
-            or line <= 0
-            or isinstance(in_test, bool)
-            or not isinstance(in_test, int)
-            or in_test not in {0, 1}
-            or validation_kind
-            not in {"python_workspace_direct_export", "python_workspace_reexport_chain"}
-            or not isinstance(target_path, str)
-            or not isinstance(raw_score, (int, float))
-            or not isinstance(source_manifest_sha, str)
-            or source_manifest_sha != source_indexed_sha
-            or source_kind != IndexedFileKind.FILE.value
-            or not isinstance(target_manifest_sha, str)
-            or target_manifest_sha != target_indexed_sha
-            or target_kind != IndexedFileKind.FILE.value
-            or is_document_path(relative_path)
-            or is_generated_text_output_path(relative_path)
-        ):
-            raise ProjectRetrievalError(
-                "resolved code relation search crossed authoritative index state"
-            )
-        ref = f"code:{relative_path}"
-        summary = f"resolved call {resolved_target}"
-        if scope:
-            summary = f"{summary} in {scope}"
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if explicit_intent else _QUALITY_ALL_TERMS
-        candidate = _RankedProjectHit(
-            hit=ProjectSearchHit(
-                ref=ref,
-                kind=ProjectSearchKind.CODE,
-                title=Path(relative_path).name,
-                location=relative_path,
-                short_summary=_truncate_utf8(summary, _SUMMARY_MAX_BYTES),
-                match_reason="code resolved call relation",
-                freshness="indexed_snapshot",
-                path=relative_path,
-                evidence_line=line,
-            ),
-            quality=quality,
-            matched_terms=len(query.terms),
-            lexical_score=float(raw_score),
-            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 2,
-        )
-        previous = ranked_by_ref.get(ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[ref] = candidate
-    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
-
-
-def _indexed_code_relation_hits(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: AnalyzedSearchQuery,
-    limit: int,
-) -> tuple[_RankedProjectHit, ...]:
-    plan = _code_relation_query_plan(query)
-    if plan is None:
-        return ()
-    fts_expression, relation_kinds, target_terms, explicit_intent = plan
-    candidate_limit = min(
-        _FILE_CANDIDATE_LIMIT,
-        max(24, limit * 8, len(target_terms) * 16),
-    )
-    placeholders = ", ".join("?" for _kind in relation_kinds)
-    rows = connection.execute(
-        f"""
-        SELECT
-            relations.relative_path,
-            relations.relation_kind,
-            relations.scope,
-            relations.target,
-            relations.line,
-            relations.in_test,
-            bm25(indexed_code_relation_search, 7.0, 5.0, 1.0, 0.5),
-            manifests.content_sha256,
-            files.kind,
-            files.content_sha256
-        FROM indexed_code_relation_search
-        JOIN indexed_code_relations AS relations
-            ON relations.id = indexed_code_relation_search.rowid
-        JOIN indexed_code_unit_files AS manifests
-            ON manifests.workspace_id = relations.workspace_id
-           AND manifests.relative_path = relations.relative_path
-        JOIN indexed_files AS files
-            ON files.workspace_id = relations.workspace_id
-           AND files.relative_path = relations.relative_path
-        WHERE indexed_code_relation_search MATCH ?
-          AND relations.workspace_id = ?
-          AND manifests.status = 'ok'
-          AND manifests.relation_status = 'ok'
-          AND relations.relation_kind IN ({placeholders})
-        ORDER BY bm25(indexed_code_relation_search, 7.0, 5.0, 1.0, 0.5),
-                 relations.relative_path, relations.line, relations.column
-        LIMIT ?
-        """,
-        (fts_expression, workspace_id, *relation_kinds, candidate_limit),
-    ).fetchall()
-    ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    for row in rows:
-        (
-            relative_path,
-            relation_kind,
-            scope,
-            target,
-            line,
-            in_test,
-            raw_score,
-            manifest_sha256,
-            raw_kind,
-            indexed_sha256,
-        ) = row
-        if (
-            not isinstance(relative_path, str)
-            or relation_kind not in _CODE_RELATION_INTENT_TERMS
-            or not isinstance(scope, str)
-            or not isinstance(target, str)
-            or not target
-            or isinstance(line, bool)
-            or not isinstance(line, int)
-            or line <= 0
-            or isinstance(in_test, bool)
-            or not isinstance(in_test, int)
-            or in_test not in {0, 1}
-            or not isinstance(raw_score, (int, float))
-            or not isinstance(manifest_sha256, str)
-            or not isinstance(indexed_sha256, str)
-            or raw_kind != IndexedFileKind.FILE.value
-            or is_document_path(relative_path)
-            or is_generated_text_output_path(relative_path)
-        ):
-            raise ProjectRetrievalError(
-                "indexed code relation search crossed authoritative index state"
-            )
-        if manifest_sha256 != indexed_sha256:
-            continue
-        ref = f"code:{relative_path}"
-        summary = f"{relation_kind} {target}"
-        if scope:
-            summary = f"{summary} in {scope}"
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE if explicit_intent else _QUALITY_ALL_TERMS
-        candidate = _RankedProjectHit(
-            hit=ProjectSearchHit(
-                ref=ref,
-                kind=ProjectSearchKind.CODE,
-                title=Path(relative_path).name,
-                location=relative_path,
-                short_summary=_truncate_utf8(summary, _SUMMARY_MAX_BYTES),
-                match_reason=f"code {relation_kind} relation",
-                freshness="indexed_snapshot",
-                path=relative_path,
-                evidence_line=line,
-            ),
-            quality=quality,
-            matched_terms=len(query.terms),
-            lexical_score=float(raw_score),
-            relevance_boost=_path_relevance_penalty(relative_path, query.terms) - 1,
-        )
-        previous = ranked_by_ref.get(ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[ref] = candidate
-    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
-
-
-def _code_relation_query_plan(
-    query: AnalyzedSearchQuery,
-) -> tuple[str, tuple[str, ...], tuple[str, ...], bool] | None:
-    requested_kinds = tuple(
-        kind
-        for kind, intent_terms in _CODE_RELATION_INTENT_TERMS.items()
-        if any(term in intent_terms for term in query.terms)
-    )
-    if not requested_kinds:
-        return (
-            query.all_fts_expression,
-            tuple(_CODE_RELATION_INTENT_TERMS),
-            query.terms,
-            False,
-        )
-
-    all_intent_terms = frozenset().union(
-        *(_CODE_RELATION_INTENT_TERMS[kind] for kind in requested_kinds)
-    )
-    target_terms = tuple(
-        term
-        for term in query.terms
-        if term not in all_intent_terms and term not in _CODE_RELATION_QUESTION_TERMS
-    )
-    if not target_terms:
-        return None
-    target_query = analyze_search_query(" ".join(target_terms))
-    return target_query.all_fts_expression, requested_kinds, target_query.terms, True
-
-
-def _indexed_content_hits(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    query: AnalyzedSearchQuery,
-    scope: IndexedPathSearchScope,
-    limit: int,
-) -> tuple[_RankedProjectHit, ...]:
-    corpus = "docs" if scope is IndexedPathSearchScope.DOCS else "code"
-    candidate_limit = min(
-        _FILE_CANDIDATE_LIMIT,
-        max(24, limit * 8, len(query.terms) * 16),
-    )
-    ranked_by_ref: dict[str, _RankedProjectHit] = {}
-    full_rows = _indexed_content_rows(
-        connection,
-        workspace_id,
-        corpus,
-        query.all_fts_expression,
-        candidate_limit,
-    )
-    term_sets = _content_coverage_term_sets(query.terms)
-    partial_rows: list[tuple[object, ...]] = []
-    if len(term_sets) > 1:
-        partial_rows = _indexed_content_rows(
-            connection,
-            workspace_id,
-            corpus,
-            " OR ".join(
-                f"({analyze_search_query(' '.join(terms)).all_fts_expression})"
-                for terms in term_sets[1:]
-            ),
-            candidate_limit,
-        )
-    dense_paths = _dense_content_paths(
-        connection,
-        workspace_id,
-        corpus,
-        term_sets,
-        candidate_limit,
-    )
-    full_paths = {
-        relative_path for relative_path, *_rest in full_rows if isinstance(relative_path, str)
-    }
-    for row in [*full_rows, *partial_rows]:
-        relative_path = row[0] if row else None
-        matched_terms = (
-            len(query.terms)
-            if isinstance(relative_path, str) and relative_path in full_paths
-            else len(query.terms) - 1
-        )
-        candidate = _indexed_content_row(
-            row,
-            query,
-            corpus,
-            matched_terms=matched_terms,
-            dense_match=isinstance(relative_path, str) and relative_path in dense_paths,
-        )
-        if candidate is None:
-            continue
-        previous = ranked_by_ref.get(candidate.hit.ref)
-        if previous is None or _ranked_hit_key(candidate) < _ranked_hit_key(previous):
-            ranked_by_ref[candidate.hit.ref] = candidate
-    return tuple(sorted(ranked_by_ref.values(), key=_ranked_hit_key))
-
-
-def _indexed_content_rows(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    corpus: str,
-    expression: str,
-    limit: int,
-) -> list[tuple[object, ...]]:
-    return connection.execute(
-        """
-        SELECT
-            documents.relative_path,
-            documents.corpus,
-            documents.content_sha256,
-            documents.title,
-            documents.path_tokens,
-            documents.identifier_tokens,
-            bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
-            files.kind,
-            files.size_bytes,
-            files.content_sha256
-        FROM indexed_content_search
-        JOIN indexed_search_documents AS documents
-            ON documents.id = indexed_content_search.rowid
-        JOIN indexed_files AS files
-            ON files.workspace_id = documents.workspace_id
-           AND files.relative_path = documents.relative_path
-        WHERE indexed_content_search MATCH ?
-          AND documents.workspace_id = ?
-          AND documents.corpus = ?
-        ORDER BY bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
-                 documents.relative_path
-        LIMIT ?
-        """,
-        (expression, workspace_id, corpus, limit),
-    ).fetchall()
-
-
-def _content_coverage_term_sets(terms: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
-    if not _MIN_HIGH_COVERAGE_QUERY_TERMS <= len(terms) <= _MAX_HIGH_COVERAGE_QUERY_TERMS:
-        return (terms,)
-    return (terms, *(terms[:index] + terms[index + 1 :] for index in range(len(terms))))
-
-
-def _dense_content_paths(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    corpus: str,
-    term_sets: tuple[tuple[str, ...], ...],
-    limit: int,
-) -> frozenset[str]:
-    if not term_sets or len(term_sets[0]) < 2:
-        return frozenset()
-    expression = " OR ".join(_fts_near_expression(terms) for terms in term_sets)
-    rows = connection.execute(
-        """
-        SELECT documents.relative_path
-        FROM indexed_content_search
-        JOIN indexed_search_documents AS documents
-            ON documents.id = indexed_content_search.rowid
-        WHERE indexed_content_search MATCH ?
-          AND documents.workspace_id = ?
-          AND documents.corpus = ?
-        ORDER BY bm25(indexed_content_search, 8.0, 6.0, 5.0, 1.0),
-                 documents.relative_path
-        LIMIT ?
-        """,
-        (expression, workspace_id, corpus, limit),
-    ).fetchall()
-    paths: set[str] = set()
-    for row in rows:
-        if len(row) != 1 or not isinstance(row[0], str):
-            raise ProjectRetrievalError("dense content search crossed authoritative index state")
-        paths.add(row[0])
-    return frozenset(paths)
-
-
-def _fts_near_expression(terms: tuple[str, ...]) -> str:
-    operands: list[str] = []
-    for term in terms:
-        prefix = query_term_prefixes(term)[-1]
-        operand = f'"{prefix}"'
-        if len(prefix) >= 3:
-            operand += "*"
-        operands.append(operand)
-    return f"NEAR({' '.join(operands)}, {_DENSE_CONTENT_NEAR_TOKENS})"
-
-
-def _indexed_content_row(
-    row: tuple[object, ...],
-    query: AnalyzedSearchQuery,
-    corpus: str,
-    *,
-    matched_terms: int,
-    dense_match: bool,
-) -> _RankedProjectHit | None:
-    (
-        relative_path,
-        stored_corpus,
-        document_sha256,
-        title,
-        path_tokens,
-        normalized_identifiers,
-        raw_score,
-        raw_kind,
-        size_bytes,
-        indexed_sha256,
-    ) = row
-    if (
-        not isinstance(relative_path, str)
-        or stored_corpus != corpus
-        or not isinstance(document_sha256, str)
-        or not isinstance(title, str)
-        or not isinstance(path_tokens, str)
-        or not isinstance(normalized_identifiers, str)
-        or not isinstance(raw_score, (int, float))
-        or not isinstance(raw_kind, str)
-        or isinstance(size_bytes, bool)
-        or not isinstance(size_bytes, int)
-        or size_bytes < 0
-        or indexed_sha256 != document_sha256
-        or is_document_path(relative_path) != (corpus == "docs")
-    ):
-        raise ProjectRetrievalError("indexed content search crossed authoritative index state")
-    try:
-        IndexedFileKind(raw_kind)
-    except ValueError as exc:
-        raise ProjectRetrievalError(
-            "indexed content search returned an invalid entry kind"
-        ) from exc
-    if is_generated_text_output_path(relative_path):
-        return None
-
-    prefix = "doc" if corpus == "docs" else "code"
-    kind = ProjectSearchKind.DOC if corpus == "docs" else ProjectSearchKind.CODE
-    exact_filename_stem = analyze_search_query(Path(title).stem).terms == query.terms
-    phrase_match = contains_term_phrase(query.terms, title) or contains_term_phrase(
-        query.terms, normalized_identifiers
-    )
-    if exact_filename_stem:
-        quality = _QUALITY_EXACT_FILENAME_STEM
-        reason = "exact filename stem"
-    elif phrase_match:
-        quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
-        reason = "normalized identifier/title phrase"
-    elif dense_match:
-        quality = _QUALITY_DENSE_CONTENT
-        reason = (
-            "dense lexical content (all terms)"
-            if matched_terms == len(query.terms)
-            else f"dense lexical content ({matched_terms}/{len(query.terms)} terms)"
-        )
-    elif matched_terms == len(query.terms):
-        quality = _QUALITY_ALL_TERMS
-        reason = "lexical content (all terms)"
-    else:
-        quality = _QUALITY_PARTIAL
-        reason = f"lexical content ({matched_terms}/{len(query.terms)} terms)"
-    return _RankedProjectHit(
-        hit=ProjectSearchHit(
-            ref=f"{prefix}:{relative_path}",
-            kind=kind,
-            title=title,
-            location=relative_path,
-            short_summary=None,
-            match_reason=reason,
-            freshness="indexed_snapshot",
-            path=relative_path,
-        ),
-        quality=quality,
-        matched_terms=matched_terms,
-        lexical_score=float(raw_score),
-        relevance_boost=_path_relevance_penalty(relative_path, query.terms),
-    )
-
-
-def _knowledge_hits(
-    connection: sqlite3.Connection,
-    project_id: str,
-    query: AnalyzedSearchQuery,
-    limit: int,
-    *,
-    active_workspace_id: str,
-    include_unanchored_agent_asserted: bool = False,
-) -> tuple[_RankedProjectHit, ...]:
-    candidate_limit = _candidate_limit(limit)
-    rows = connection.execute(
-        """
-        SELECT knowledge_id, bm25(knowledge_search, 0.0, 0.0, 5.0, 1.0) AS score
-        FROM knowledge_search
-        WHERE knowledge_search MATCH ? AND project_id = ?
-        ORDER BY score, knowledge_id
-        LIMIT ?
-        """,
-        (query.fts_expression, project_id, candidate_limit),
-    ).fetchall()
-    ranked: list[_RankedProjectHit] = []
-    seen: set[str] = set()
-    for knowledge_id, raw_score in rows:
-        if not isinstance(knowledge_id, str) or not isinstance(raw_score, (int, float)):
-            raise ProjectRetrievalError("Knowledge search index returned invalid persisted types")
-        if knowledge_id in seen:
-            continue
-        seen.add(knowledge_id)
-        card = get_knowledge_card(connection, knowledge_id)
-        if card.project_id != project_id:
-            raise ProjectRetrievalError("Knowledge search index crossed Project ownership")
-        if not _knowledge_applies_to_workspace(
-            connection,
-            card,
-            active_workspace_id,
-            include_unanchored_agent_asserted=include_unanchored_agent_asserted,
-        ):
-            continue
-        stale = card.freshness is KnowledgeFreshness.NEEDS_REVALIDATION
-        location = card.anchors[0].relative_path if card.anchors else f"project:{project_id[:12]}"
-        anchor_text = " ".join(
-            f"{anchor.relative_path} {anchor.symbol or ''}" for anchor in card.anchors
-        )
-        matched_terms = matching_term_count(query.terms, card.title, card.body, anchor_text)
-        if contains_term_phrase(query.terms, card.title):
-            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
-            match_reason = "Knowledge title phrase"
-        elif matched_terms == len(query.terms):
-            quality = _QUALITY_ALL_TERMS
-            match_reason = "Knowledge title/body (all terms)"
-        else:
-            quality = _QUALITY_PARTIAL
-            match_reason = "Knowledge title/body"
-        if stale:
-            quality += _QUALITY_STALE_OFFSET
-        ranked.append(
-            _RankedProjectHit(
-                hit=ProjectSearchHit(
-                    ref=f"knowledge:{card.knowledge_id}",
-                    kind=ProjectSearchKind.KNOWLEDGE,
-                    title=card.title,
-                    location=location,
-                    short_summary=_truncate_utf8(card.body, _SUMMARY_MAX_BYTES),
-                    match_reason=match_reason,
-                    freshness=card.freshness.value,
-                ),
-                quality=quality,
-                matched_terms=matched_terms,
-                lexical_score=float(raw_score),
-            )
-        )
-    ranked.sort(key=_ranked_hit_key)
-    return tuple(ranked[:limit])
-
-
-def _knowledge_applies_to_workspace(
-    connection: sqlite3.Connection,
-    card: KnowledgeCardRecord,
-    active_workspace_id: str,
-    *,
-    include_unanchored_agent_asserted: bool,
-) -> bool:
-    if card.source_type is not KnowledgeSourceType.AGENT_ASSERTED:
-        return True
-    if not card.anchors:
-        return include_unanchored_agent_asserted
-    anchors_match = True
-    for anchor in card.anchors:
-        indexed = get_indexed_file(connection, active_workspace_id, anchor.relative_path)
-        if (
-            indexed is None
-            or indexed.kind.value != anchor.fingerprint_kind.value
-            or indexed.content_sha256 != anchor.content_sha256
-        ):
-            anchors_match = False
-            break
-    if anchors_match:
-        return True
-    return include_unanchored_agent_asserted and all(
-        anchor.workspace_id == active_workspace_id for anchor in card.anchors
-    )
 
 
 def _task_hits(
@@ -1591,37 +295,121 @@ def _task_hits(
     *,
     project_id: str | None = None,
     active_workspace_id: str | None = None,
+    applicability: WorkspaceApplicability | None = None,
 ) -> tuple[_RankedProjectHit, ...]:
+    def fragment_visible(ref: str) -> bool:
+        return (
+            applicability is None
+            or not ref.startswith("checkpoint:")
+            or applicability.checkpoint_visible(ref.removeprefix("checkpoint:"))
+        )
+
+    if applicability is not None:
+        connection.create_function("harness_task_fragment_visible", 1, fragment_visible)
+        connection.create_function("harness_task_visible", 1, applicability.task_visible)
+    try:
+        return _task_hits_with_visibility(
+            connection,
+            query,
+            limit,
+            project_id=project_id,
+            active_workspace_id=active_workspace_id,
+            applicability=applicability,
+        )
+    finally:
+        if applicability is not None:
+            connection.create_function("harness_task_visible", 1, None)
+            connection.create_function("harness_task_fragment_visible", 1, None)
+
+
+def _task_hits_with_visibility(
+    connection: sqlite3.Connection,
+    query: AnalyzedSearchQuery,
+    limit: int,
+    *,
+    project_id: str | None = None,
+    active_workspace_id: str | None = None,
+    applicability: WorkspaceApplicability | None = None,
+) -> tuple[_RankedProjectHit, ...]:
+    current = (
+        None
+        if active_workspace_id is None
+        else get_relevant_task(connection, active_workspace_id, applicability=applicability)
+    )
+    current_task_id = None if current is None else current.task_id
+    identifier_hits = _task_identifier_hits(
+        connection,
+        query,
+        limit,
+        project_id=project_id,
+        current_task_id=current_task_id,
+        applicability=applicability,
+    )
+    if identifier_hits:
+        return identifier_hits
+
+    rank_width = len(query.terms) + 1
+
+    def match_rank(title: object, body: object) -> int:
+        if not isinstance(title, str) or not isinstance(body, str):
+            raise ProjectRetrievalError("Task search index returned invalid persisted types")
+        matched_terms = matching_term_count(query.terms, title, body)
+        if contains_term_phrase(query.terms, title):
+            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
+        elif contains_russian_case_phrase(query.terms, title):
+            quality = _QUALITY_RUSSIAN_CASE_PHRASE
+        elif matched_terms == len(query.terms):
+            quality = _QUALITY_ALL_TERMS
+        else:
+            quality = _QUALITY_PARTIAL
+        return quality * rank_width + len(query.terms) - matched_terms
+
+    # Materialize only compact rank/identity data: FTS auxiliary functions must run in the
+    # MATCH query, before windowing. The candidate cap applies to Tasks, not history fragments.
     sql = """
-        SELECT
-            fragment_ref,
-            task_id,
-            workspace_id,
-            project_id,
-            title,
-            body,
-            bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
-        FROM task_search
-        WHERE task_search MATCH ?
+        WITH matched AS MATERIALIZED (
+            SELECT fragment_ref, task_id, workspace_id, project_id,
+                   harness_task_match_rank(title, body) AS match_rank,
+                   bm25(task_search, 0.0, 0.0, 0.0, 0.0, 5.0, 1.0) AS score
+            FROM task_search
+            WHERE task_search MATCH ?
     """
     params: list[object] = [query.fts_expression]
     if project_id is not None:
         sql += " AND project_id = ?"
         params.append(project_id)
-    sql += " ORDER BY score, rowid LIMIT ?"
-    params.append(_candidate_limit(limit))
-    rows = connection.execute(sql, params).fetchall()
-    current = (
-        None if active_workspace_id is None else get_relevant_task(connection, active_workspace_id)
-    )
-    best: dict[str, tuple[str, str, str, float, int, int]] = {}
+    if applicability is not None:
+        sql += " AND harness_task_visible(task_id) AND harness_task_fragment_visible(fragment_ref)"
+    sql += """
+        ), per_task AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY task_id ORDER BY match_rank, score, fragment_ref
+            ) AS fragment_position
+            FROM matched
+        )
+        SELECT fragment_ref, task_id, workspace_id, project_id, match_rank, score
+        FROM per_task
+        WHERE fragment_position = 1
+        ORDER BY match_rank, CASE WHEN task_id = ? THEN 0 ELSE 1 END,
+                 score, task_id, fragment_ref
+        LIMIT ?
+    """
+    params.extend((current_task_id, _candidate_limit(limit)))
+    connection.create_function("harness_task_match_rank", 2, match_rank, deterministic=True)
+    try:
+        rows = connection.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        raise ProjectRetrievalError("Task search candidate ranking failed") from exc
+    finally:
+        connection.create_function("harness_task_match_rank", 2, None)
+
+    ranked: list[_RankedProjectHit] = []
     for (
         fragment_ref,
         task_id,
         workspace_id,
         indexed_project_id,
-        title,
-        body,
+        raw_match_rank,
         raw_score,
     ) in rows:
         if (
@@ -1629,40 +417,12 @@ def _task_hits(
             or not isinstance(task_id, str)
             or not isinstance(workspace_id, str)
             or not isinstance(indexed_project_id, str)
-            or not isinstance(title, str)
-            or not isinstance(body, str)
+            or not isinstance(raw_match_rank, int)
             or not isinstance(raw_score, (int, float))
         ):
             raise ProjectRetrievalError("Task search index returned invalid persisted types")
-        matched_terms = matching_term_count(query.terms, title, body)
-        if contains_term_phrase(query.terms, title):
-            quality = _QUALITY_TITLE_OR_IDENTIFIER_PHRASE
-        elif matched_terms == len(query.terms):
-            quality = _QUALITY_ALL_TERMS
-        else:
-            quality = _QUALITY_PARTIAL
-        candidate = (
-            fragment_ref,
-            workspace_id,
-            indexed_project_id,
-            float(raw_score),
-            quality,
-            matched_terms,
-        )
-        previous = best.get(task_id)
-        if previous is None or (quality, -matched_terms, float(raw_score), fragment_ref) < (
-            previous[4],
-            -previous[5],
-            previous[3],
-            previous[0],
-        ):
-            best[task_id] = candidate
-
-    ranked: list[_RankedProjectHit] = []
-    for (
-        task_id,
-        (fragment_ref, workspace_id, indexed_project_id, score, quality, matched_terms),
-    ) in best.items():
+        quality, unmatched_terms = divmod(raw_match_rank, rank_width)
+        matched_terms = len(query.terms) - unmatched_terms
         task = get_task(connection, task_id)
         owner = get_workspace(connection, task.workspace_id)
         if owner.project_id != indexed_project_id or workspace_id != task.workspace_id:
@@ -1685,12 +445,92 @@ def _task_hits(
                 ),
                 quality=quality,
                 matched_terms=matched_terms,
-                lexical_score=score,
-                relevance_boost=(0 if current is not None and current.task_id == task_id else 1),
+                lexical_score=float(raw_score),
+                relevance_boost=(0 if current_task_id == task_id else 1),
             )
         )
     ranked.sort(key=_ranked_hit_key)
     return tuple(ranked[:limit])
+
+
+def _task_identifier_hits(
+    connection: sqlite3.Connection,
+    query: AnalyzedSearchQuery,
+    limit: int,
+    *,
+    project_id: str | None,
+    current_task_id: str | None,
+    applicability: WorkspaceApplicability | None = None,
+) -> tuple[_RankedProjectHit, ...]:
+    identifier = query.normalized.removeprefix("task:")
+    canonical = (
+        identifier.lower() if re.fullmatch(r"[0-9a-fA-F]{10,32}", identifier) else identifier
+    )
+    scope_sql = " AND workspaces.project_id = ?" if project_id is not None else ""
+    if applicability is not None:
+        scope_sql += " AND harness_task_visible(tasks.id)"
+    owner_sql = "FROM tasks JOIN workspaces ON workspaces.id = tasks.workspace_id"
+    params: list[object] = [query.normalized, identifier, canonical]
+    if project_id is not None:
+        params.append(project_id)
+    params.extend((query.normalized, identifier))
+    rows = connection.execute(
+        "SELECT tasks.id "
+        + owner_sql
+        + " WHERE tasks.id IN (?, ?, ?)"
+        + scope_sql
+        + " ORDER BY CASE WHEN tasks.id = ? THEN 0 WHEN tasks.id = ? THEN 1 ELSE 2 END LIMIT 1",
+        params,
+    ).fetchall()
+    quality = _QUALITY_EXACT_TASK_ID
+    reason = "Task ID"
+    if not rows and re.fullmatch(r"[0-9a-f]{10,31}", canonical):
+        params = [canonical + "*"]
+        if project_id is not None:
+            params.append(project_id)
+        params.extend((current_task_id, limit))
+        rows = connection.execute(
+            "SELECT tasks.id "
+            + owner_sql
+            + " WHERE tasks.id GLOB ? AND length(tasks.id) = 32"
+            + " AND tasks.id NOT GLOB '*[^0-9a-f]*'"
+            + scope_sql
+            + " ORDER BY CASE WHEN tasks.id = ? THEN 0 ELSE 1 END, tasks.id LIMIT ?",
+            params,
+        ).fetchall()
+        quality = _QUALITY_TASK_ID_PREFIX
+        reason = "Task ID prefix"
+
+    ranked: list[_RankedProjectHit] = []
+    for (raw_task_id,) in rows:
+        task_id = _require_text(raw_task_id, "Task identifier")
+        task = get_task(connection, task_id)
+        if (
+            project_id is not None
+            and get_workspace(connection, task.workspace_id).project_id != project_id
+        ):
+            raise ProjectRetrievalError("Task identifier lookup crossed Project ownership")
+        result_ref, _reason, summary, location = _task_fragment_projection(
+            connection, task_id, f"task:{task_id}"
+        )
+        ranked.append(
+            _RankedProjectHit(
+                hit=ProjectSearchHit(
+                    ref=result_ref,
+                    kind=ProjectSearchKind.TASK,
+                    title=task.title,
+                    location=location,
+                    short_summary=summary,
+                    match_reason=reason,
+                    freshness="durable_history",
+                ),
+                quality=quality,
+                matched_terms=len(query.terms),
+                lexical_score=0.0,
+                relevance_boost=(0 if current_task_id == task_id else 1),
+            )
+        )
+    return tuple(ranked)
 
 
 def _task_fragment_projection(
@@ -1756,7 +596,7 @@ def _task_fragment_projection(
         row = connection.execute(
             """
             SELECT task_id, task_revision, event_type, operator_feedback,
-                   operator_comment, jira_url, operator_status
+                   operator_comment, jira_url, operator_status, deploy_test, deploy_prod
             FROM task_events
             WHERE id = ?
             """,
@@ -1775,7 +615,10 @@ def _task_fragment_projection(
         ):
             raise ProjectRetrievalError("Task search event ownership mismatch")
         event_type = _require_text(row[2], "Task event type")
-        raw_summary = next((value for value in row[3:] if isinstance(value, str)), None)
+        operator_status = _task_event_delivery_status(row[6], row[7], row[8])
+        raw_summary = next(
+            (value for value in (*row[3:6], operator_status) if isinstance(value, str)), None
+        )
         if raw_summary is None:
             raise ProjectRetrievalError("Task search event has no searchable payload")
         revision = row[1]
@@ -1790,10 +633,35 @@ def _task_fragment_projection(
     raise ProjectRetrievalError("Task search fragment ref is invalid")
 
 
+def _task_event_delivery_status(
+    legacy_status: object, deploy_test: object, deploy_prod: object
+) -> str | None:
+    """Project immutable event delivery evidence, retaining pre-v22 history."""
+    if deploy_test is None and deploy_prod is None:
+        if legacy_status is not None and not isinstance(legacy_status, str):
+            raise ProjectRetrievalError("Task event delivery status is invalid")
+        return legacy_status
+    if (
+        type(deploy_test) is not int
+        or deploy_test not in (0, 1)
+        or type(deploy_prod) is not int
+        or deploy_prod not in (0, 1)
+        or legacy_status is not None
+    ):
+        raise ProjectRetrievalError("Task event deployment flags are invalid")
+    if deploy_test and deploy_prod:
+        return TaskOperatorStatus.DEPLOY_BOTH.value
+    if deploy_test:
+        return TaskOperatorStatus.DEPLOY_TEST.value
+    return TaskOperatorStatus.DEPLOY_PROD.value if deploy_prod else None
+
+
 def _task_context(
     connection: sqlite3.Connection,
     project_id: str,
     ref: str,
+    *,
+    applicability: WorkspaceApplicability,
 ) -> ProjectContextItem:
     task_part, separator, fragment = ref.partition("#")
     task_id = task_part.removeprefix("task:")
@@ -1823,7 +691,9 @@ def _task_context(
     }
     if not separator:
         history: list[dict[str, object]] = []
-        for event in list_task_events(connection, task.task_id, limit=_CONTEXT_HISTORY_LIMIT):
+        for event in list_task_events(
+            connection, task.task_id, limit=_CONTEXT_HISTORY_LIMIT, applicability=applicability
+        ):
             item: dict[str, object] = {
                 "event_type": event.event_type.value,
                 "task_revision": event.task_revision,
@@ -1915,7 +785,8 @@ def _task_context(
         row = connection.execute(
             """
             SELECT task_id, task_revision, event_type, operator_feedback,
-                   operator_comment, jira_url, operator_status, created_at
+                   operator_comment, jira_url, operator_status, created_at,
+                   deploy_test, deploy_prod
             FROM task_events
             WHERE id = ?
             """,
@@ -1928,7 +799,7 @@ def _task_context(
             ("operator_feedback", row[3]),
             ("operator_comment", row[4]),
             ("jira_url", row[5]),
-            ("operator_status", row[6]),
+            ("operator_status", _task_event_delivery_status(row[6], row[8], row[9])),
         )
         payload = next(
             ((name, value) for name, value in payload_names if isinstance(value, str)),
@@ -2011,20 +882,20 @@ def _bounded_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
 
 def _normalize_query(query: str) -> str:
     if not isinstance(query, str) or not query.strip() or "\x00" in query:
-        raise SearchError("project search query must be non-empty text")
+        raise SearchError("Task search query must be non-empty text")
     normalized = query.strip()
     try:
         size = len(normalized.encode("utf-8"))
     except UnicodeEncodeError as exc:
-        raise SearchError("project search query must be valid UTF-8 text") from exc
+        raise SearchError("Task search query must be valid UTF-8 text") from exc
     if size > MAX_SEARCH_QUERY_BYTES:
-        raise SearchError(f"project search query exceeds {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes")
+        raise SearchError(f"Task search query exceeds {MAX_SEARCH_QUERY_BYTES} UTF-8 bytes")
     return normalized
 
 
 def _validate_limit(limit: int) -> None:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_SEARCH_LIMIT:
-        raise SearchError(f"project search limit must be between 1 and {MAX_SEARCH_LIMIT}")
+        raise SearchError(f"Task search limit must be between 1 and {MAX_SEARCH_LIMIT}")
 
 
 def _ranked_hit_key(item: _RankedProjectHit) -> tuple[int, int, int, float, str]:
@@ -2037,739 +908,8 @@ def _ranked_hit_key(item: _RankedProjectHit) -> tuple[int, int, int, float, str]
     )
 
 
-def _path_relevance_penalty(relative_path: str, query_terms: tuple[str, ...]) -> int:
-    lowered = relative_path.casefold()
-    name = lowered.rsplit("/", 1)[-1]
-    parts = lowered.split("/")
-    penalty = 0
-    if not any(term in {"test", "tests", "testing"} for term in query_terms):
-        penalty += int(
-            "tests" in parts
-            or "test" in parts
-            or name.startswith(("test_", "test-"))
-            or name.endswith(("_test.py", "-test.py", ".test.js", ".test.ts"))
-        )
-    if not any(term.startswith(("archiv", "архив")) for term in query_terms):
-        penalty += int(any(part in {"archive", "archives", "archived"} for part in parts[:-1]))
-    return penalty
-
-
-def _attach_current_source_evidence(
-    connection: sqlite3.Connection,
-    workspace: WorkspaceRecord,
-    query: AnalyzedSearchQuery,
-    hits: tuple[ProjectSearchHit, ...],
-    *,
-    response_reserve_bytes: int = 0,
-) -> tuple[ProjectSearchHit, ...]:
-    annotated: list[ProjectSearchHit] = []
-    evidence_budget = MAX_SEARCH_EVIDENCE_HITS
-    for hit in hits:
-        if hit.kind not in {ProjectSearchKind.CODE, ProjectSearchKind.DOC} or hit.path is None:
-            annotated.append(hit)
-            continue
-        indexed_sha = _indexed_content_sha256(connection, workspace.workspace_id, hit.path)
-        if indexed_sha is None:
-            annotated.append(
-                replace(
-                    hit,
-                    evidence=None,
-                    evidence_reason=EVIDENCE_REASON_PATH_ONLY,
-                    evidence_line=None,
-                )
-            )
-            continue
-        if evidence_budget <= 0:
-            annotated.append(
-                replace(
-                    hit,
-                    evidence=None,
-                    evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET,
-                    evidence_line=None,
-                )
-            )
-            continue
-        read = read_current_search_text(
-            workspace,
-            hit.path,
-            expected_content_sha256=indexed_sha,
-        )
-        if read.status is SearchEvidenceReadStatus.CHANGED_SINCE_INDEX:
-            annotated.append(
-                replace(
-                    hit,
-                    short_summary=None,
-                    evidence=None,
-                    evidence_reason=EVIDENCE_REASON_CHANGED_SINCE_INDEX,
-                    evidence_line=None,
-                )
-            )
-            continue
-        if read.status is not SearchEvidenceReadStatus.OK or read.text is None:
-            annotated.append(
-                replace(
-                    hit,
-                    evidence=None,
-                    evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
-                    evidence_line=None,
-                )
-            )
-            continue
-        evidence = (
-            _search_evidence_at_line(read.text, hit.evidence_line, query.terms)
-            if hit.evidence_line is not None
-            else None
-        )
-        if evidence is None:
-            evidence = _relocate_search_evidence(read.text, query.terms)
-        if evidence is None:
-            annotated.append(
-                replace(
-                    hit,
-                    evidence=None,
-                    evidence_reason=EVIDENCE_REASON_NOT_RELOCATED,
-                    evidence_line=None,
-                )
-            )
-            continue
-        annotated.append(replace(hit, evidence=evidence, evidence_reason=None, evidence_line=None))
-        evidence_budget -= 1
-    return _fit_search_hits_to_response_budget(
-        annotated,
-        query.normalized,
-        response_reserve_bytes=response_reserve_bytes,
-    )
-
-
-def _indexed_content_sha256(
-    connection: sqlite3.Connection,
-    workspace_id: str,
-    relative_path: str,
-) -> str | None:
-    row = connection.execute(
-        """
-        SELECT documents.content_sha256, files.content_sha256, files.kind
-        FROM indexed_search_documents AS documents
-        JOIN indexed_files AS files
-          ON files.workspace_id = documents.workspace_id
-         AND files.relative_path = documents.relative_path
-        WHERE documents.workspace_id = ? AND documents.relative_path = ?
-        """,
-        (workspace_id, relative_path),
-    ).fetchone()
-    if row is None:
-        return None
-    document_sha256, file_sha256, raw_kind = row
-    if (
-        not isinstance(document_sha256, str)
-        or not isinstance(file_sha256, str)
-        or document_sha256 != file_sha256
-        or not isinstance(raw_kind, str)
-    ):
-        raise ProjectRetrievalError("indexed content search crossed authoritative index state")
-    try:
-        kind = IndexedFileKind(raw_kind)
-    except ValueError as exc:
-        raise ProjectRetrievalError(
-            "indexed content search returned an invalid entry kind"
-        ) from exc
-    if kind is not IndexedFileKind.FILE:
-        return None
-    return document_sha256
-
-
-def _relocate_search_evidence(text: str, terms: tuple[str, ...]) -> ProjectSearchEvidence | None:
-    lines = text.splitlines()
-    if not lines:
-        return None
-
-    line_terms = tuple(frozenset(matching_terms(terms, line)) for line in lines)
-    present = frozenset(term for matched in line_terms for term in matched)
-    present_terms = tuple(term for term in terms if term in present)
-    if not present_terms:
-        return None
-    matches = [
-        (line_index, term)
-        for line_index, matched in enumerate(line_terms)
-        for term in sorted(matched)
-    ]
-    if not matches:
-        return None
-
-    counts: dict[str, int] = {}
-    left = 0
-    best_key: tuple[int, int, int, int] | None = None
-    best: tuple[int, int] | None = None
-    for right, (right_line, term) in enumerate(matches):
-        counts[term] = counts.get(term, 0) + 1
-        while right_line - matches[left][0] + 1 > MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
-            _remove_search_evidence_match(counts, matches[left][1])
-            left += 1
-        while left < right and counts[matches[left][1]] > 1:
-            _remove_search_evidence_match(counts, matches[left][1])
-            left += 1
-        start_line = matches[left][0]
-        width = right_line - start_line + 1
-        candidate_key = (-len(counts), width, start_line, right_line)
-        if best_key is None or candidate_key < best_key:
-            best_key = candidate_key
-            best = (start_line, right_line)
-    if best is None:
-        return None
-    match_start, match_end = best
-    matched_terms = tuple(
-        term
-        for term in present_terms
-        if any(term in line_terms[index] for index in range(match_start, match_end + 1))
-    )
-    minimum_terms = 1 if len(present_terms) == 1 else 2
-    if len(matched_terms) < minimum_terms:
-        return None
-    return _search_evidence_from_line_range(lines, match_start, match_end, matched_terms)
-
-
-def _search_evidence_at_line(
-    text: str,
-    line: int,
-    terms: tuple[str, ...],
-) -> ProjectSearchEvidence | None:
-    lines = text.splitlines()
-    if line < 1 or line > len(lines):
-        return None
-    match_line = line - 1
-    matched_terms = matching_terms(terms, lines[match_line])
-    if not matched_terms:
-        return None
-    return _search_evidence_from_line_range(lines, match_line, match_line, matched_terms)
-
-
-def _remove_search_evidence_match(counts: dict[str, int], term: str) -> None:
-    remaining = counts[term] - 1
-    if remaining:
-        counts[term] = remaining
-    else:
-        del counts[term]
-
-
-def _search_evidence_from_line_range(
-    lines: list[str],
-    match_start: int,
-    match_end: int,
-    required_terms: tuple[str, ...],
-) -> ProjectSearchEvidence | None:
-    start = match_start
-    end = match_end
-    while end - start + 1 < MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
-        grew = False
-        if start > 0:
-            expanded = "\n".join(lines[start - 1 : end + 1])
-            if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
-                start -= 1
-                grew = True
-        if end - start + 1 >= MAX_SEARCH_EVIDENCE_SNIPPET_LINES:
-            break
-        if end + 1 < len(lines):
-            expanded = "\n".join(lines[start : end + 2])
-            if len(expanded.encode("utf-8")) <= MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
-                end += 1
-                grew = True
-        if not grew:
-            break
-
-    snippet = "\n".join(lines[start : end + 1])
-    truncated = start > 0 or end < len(lines) - 1
-    if len(snippet.encode("utf-8")) > MAX_SEARCH_EVIDENCE_SNIPPET_BYTES:
-        snippet = _truncate_utf8(snippet, MAX_SEARCH_EVIDENCE_SNIPPET_BYTES)
-        truncated = True
-        if matching_term_count(required_terms, snippet) < len(required_terms):
-            return None
-    return ProjectSearchEvidence(
-        start_line=start + 1,
-        end_line=end + 1,
-        snippet=snippet,
-        truncated=truncated,
-    )
-
-
-def _fit_search_hits_to_response_budget(
-    hits: list[ProjectSearchHit],
-    query: str,
-    *,
-    response_reserve_bytes: int = 0,
-) -> tuple[ProjectSearchHit, ...]:
-    fitted = list(hits)
-    while True:
-        encoded = json.dumps(
-            {
-                "query": query,
-                "scope": "all",
-                "results": [project_search_hit_payload(hit) for hit in fitted],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if (
-            len(encoded) + _SEARCH_EVIDENCE_ENVELOPE_RESERVE_BYTES + response_reserve_bytes
-            <= PROJECT_SEARCH_MAX_BYTES
-        ):
-            return tuple(fitted)
-        trimmed = False
-        for index in range(len(fitted) - 1, -1, -1):
-            hit = fitted[index]
-            if hit.evidence is None:
-                continue
-            fitted[index] = replace(
-                hit, evidence=None, evidence_reason=EVIDENCE_REASON_RESPONSE_BUDGET
-            )
-            trimmed = True
-            break
-        if not trimmed:
-            return tuple(fitted)
-
-
-def project_exact_search_coverage_payload(
-    coverage: ProjectExactSearchCoverage,
-) -> dict[str, object]:
-    return coverage.to_wire()
-
-
-def project_symbol_navigation_payload(
-    navigation: ProjectSymbolNavigation,
-) -> dict[str, object]:
-    return navigation.to_wire()
-
-
-def _build_symbol_navigation(
-    needle: str,
-    syntax_relations: list[SyntaxRelation],
-    *,
-    precise_languages: tuple[str, ...],
-    candidate_precise_files: int,
-    parsed_precise_files: int,
-    parse_failures: int,
-    parse_skipped_files: int,
-    matching_unsupported_files: int,
-    source_scan_complete: bool,
-) -> ProjectSymbolNavigation:
-    relations = tuple(
-        sorted(
-            (_project_symbol_relation(relation) for relation in syntax_relations),
-            key=_project_symbol_relation_key,
-        )
-    )
-    definition_count = sum(relation.kind == "definition" for relation in relations)
-    call_count = sum(relation.kind == "call" for relation in relations)
-    test_call_count = sum(relation.kind == "call" and relation.in_test for relation in relations)
-    import_count = sum(relation.kind == "import" for relation in relations)
-    inheritance_count = sum(relation.kind == "inheritance" for relation in relations)
-    truncated = len(relations) > MAX_SYMBOL_NAVIGATION_RELATIONS
-    navigation = ProjectSymbolNavigation(
-        needle=needle,
-        precise_languages=precise_languages,
-        candidate_precise_files=candidate_precise_files,
-        parsed_precise_files=parsed_precise_files,
-        parse_failures=parse_failures,
-        parse_skipped_files=parse_skipped_files,
-        matching_unsupported_files=matching_unsupported_files,
-        definition_count=definition_count,
-        call_count=call_count,
-        test_call_count=test_call_count,
-        import_count=import_count,
-        inheritance_count=inheritance_count,
-        precise_classification_complete=(
-            source_scan_complete
-            and candidate_precise_files == parsed_precise_files
-            and parse_failures == 0
-            and parse_skipped_files == 0
-            and matching_unsupported_files == 0
-        ),
-        relations_truncated=truncated,
-        evidence_truncated=False,
-        relations=relations[:MAX_SYMBOL_NAVIGATION_RELATIONS],
-    )
-    return _fit_symbol_navigation_to_budget(navigation)
-
-
-def _project_symbol_relation_key(
-    relation: ProjectSymbolRelation,
-) -> tuple[int, str, int, int, str, str]:
-    priority = {
-        "definition": 0,
-        "call": 2 if relation.in_test else 1,
-        "inheritance": 3,
-        "import": 4,
-    }
-    return (
-        priority.get(relation.kind, 9),
-        relation.path,
-        relation.line,
-        relation.column,
-        relation.scope or "",
-        relation.target,
-    )
-
-
-def _project_symbol_relation(relation: SyntaxRelation) -> ProjectSymbolRelation:
-    evidence = relation.evidence
-    return ProjectSymbolRelation(
-        kind=relation.kind,
-        path=relation.path,
-        line=relation.line,
-        column=relation.column,
-        scope=(
-            None
-            if relation.scope is None
-            else _truncate_utf8(relation.scope, MAX_SYMBOL_RELATION_TEXT_BYTES)
-        ),
-        target=_truncate_utf8(relation.target, MAX_SYMBOL_RELATION_TEXT_BYTES),
-        symbol_kind=relation.symbol_kind,
-        in_test=relation.in_test,
-        resolved_target=(
-            None
-            if relation.resolved_target is None
-            else _truncate_utf8(relation.resolved_target, MAX_SYMBOL_RELATION_TEXT_BYTES)
-        ),
-        resolution_kind=relation.resolution_kind,
-        resolution_module=relation.resolution_module,
-        evidence=ProjectSearchEvidence(
-            start_line=evidence.start_line,
-            end_line=evidence.end_line,
-            snippet=evidence.snippet,
-            truncated=evidence.truncated,
-        ),
-    )
-
-
-def _validate_python_workspace_exports(
-    workspace: WorkspaceRecord,
-    indexed_rows: list[tuple[object, ...]],
-    navigation: ProjectSymbolNavigation,
-) -> ProjectSymbolNavigation:
-    """Attach positive-only direct or bounded re-export locations for Python imports."""
-    module_files: list[_PythonIndexedModuleFile] = []
-    for raw_path, raw_kind, raw_size, raw_sha in indexed_rows:
-        if (
-            isinstance(raw_path, str)
-            and raw_kind == IndexedFileKind.FILE.value
-            and isinstance(raw_size, int)
-            and not isinstance(raw_size, bool)
-            and raw_size >= 0
-            and isinstance(raw_sha, str)
-            and precise_symbol_language(raw_path) == "python"
-            and not is_generated_text_output_path(raw_path)
-        ):
-            module_files.append(
-                _PythonIndexedModuleFile(
-                    path=raw_path,
-                    size_bytes=raw_size,
-                    content_sha256=raw_sha,
-                )
-            )
-
-    parse_cache: dict[str, PythonModuleExportAnalysis | None] = {}
-    validation_bytes = 0
-
-    def module_exports(
-        module_file: _PythonIndexedModuleFile,
-    ) -> PythonModuleExportAnalysis | None:
-        nonlocal validation_bytes
-        if module_file.path in parse_cache:
-            return parse_cache[module_file.path]
-        if (
-            module_file.size_bytes > MAX_SYMBOL_PARSE_BYTES
-            or validation_bytes + module_file.size_bytes > MAX_SYMBOL_IMPORT_VALIDATION_BYTES
-        ):
-            parse_cache[module_file.path] = None
-            return None
-        validation_bytes += module_file.size_bytes
-        read = read_current_exact_search_text(
-            workspace,
-            module_file.path,
-            expected_content_sha256=module_file.content_sha256,
-        )
-        if read.status is not ExactSearchReadStatus.OK or read.text is None:
-            parse_cache[module_file.path] = None
-            return None
-        analysis = analyze_python_module_exports(module_file.path, read.text)
-        if analysis.status != "ok":
-            parse_cache[module_file.path] = None
-            return None
-        parse_cache[module_file.path] = analysis
-        return analysis
-
-    def resolve_export(
-        module_file: _PythonIndexedModuleFile,
-        export_name: str,
-        *,
-        followed_edges: int,
-        seen: frozenset[tuple[str, str]],
-    ) -> tuple[SyntaxRelation, str] | None:
-        analysis = module_exports(module_file)
-        if analysis is None:
-            return None
-
-        definitions = tuple(
-            definition for definition in analysis.definitions if definition.target == export_name
-        )
-        if len(definitions) == 1:
-            validation_kind = (
-                "python_workspace_direct_export"
-                if followed_edges == 0
-                else "python_workspace_reexport_chain"
-            )
-            return definitions[0], validation_kind
-        if definitions or followed_edges >= MAX_PYTHON_REEXPORT_EDGES:
-            return None
-
-        reexports = tuple(
-            reexport for reexport in analysis.reexports if reexport.exported_name == export_name
-        )
-        if len(reexports) != 1:
-            return None
-        reexport = reexports[0]
-        candidates = _python_workspace_module_candidates(
-            module_file.path,
-            reexport.module,
-            module_files,
-        )
-        if len(candidates) != 1:
-            return None
-        next_file = candidates[0]
-        state = (next_file.path, reexport.imported_name)
-        if state in seen:
-            return None
-        return resolve_export(
-            next_file,
-            reexport.imported_name,
-            followed_edges=followed_edges + 1,
-            seen=seen | {state},
-        )
-
-    validated: list[ProjectSymbolRelation] = []
-    for relation in navigation.relations:
-        export_name = _python_direct_resolved_export_name(relation)
-        if export_name is None or relation.resolution_module is None:
-            validated.append(relation)
-            continue
-        candidates = _python_workspace_module_candidates(
-            relation.path,
-            relation.resolution_module,
-            module_files,
-        )
-        if len(candidates) != 1:
-            validated.append(relation)
-            continue
-        initial_state = (candidates[0].path, export_name)
-        resolved = resolve_export(
-            candidates[0],
-            export_name,
-            followed_edges=0,
-            seen=frozenset({initial_state}),
-        )
-        if resolved is None:
-            validated.append(relation)
-            continue
-        definition, validation_kind = resolved
-        validated.append(
-            replace(
-                relation,
-                resolved_definition_path=definition.path,
-                resolved_definition_line=definition.line,
-                resolved_definition_column=definition.column,
-                resolved_definition_kind=definition.symbol_kind,
-                resolution_validation_kind=validation_kind,
-            )
-        )
-    return _fit_symbol_navigation_to_budget(replace(navigation, relations=tuple(validated)))
-
-
-def _python_direct_resolved_export_name(relation: ProjectSymbolRelation) -> str | None:
-    if (
-        relation.kind != "call"
-        or relation.resolved_target is None
-        or relation.resolution_module is None
-        or relation.resolution_kind not in {"python_import_binding", "python_from_import_binding"}
-    ):
-        return None
-    module = relation.resolution_module
-    if not module:
-        return None
-    prefix = module if module.endswith(".") else f"{module}."
-    if not relation.resolved_target.startswith(prefix):
-        return None
-    export_name = relation.resolved_target[len(prefix) :]
-    if not export_name or "." in export_name or not export_name.isidentifier():
-        return None
-    return export_name
-
-
-def _python_workspace_module_candidates(
-    source_path: str,
-    module: str,
-    module_files: list[_PythonIndexedModuleFile],
-) -> tuple[_PythonIndexedModuleFile, ...]:
-    by_path = {module_file.path: module_file for module_file in module_files}
-    candidate_paths = python_workspace_module_candidate_paths(
-        source_path,
-        module,
-        tuple(by_path),
-    )
-    return tuple(by_path[path] for path in candidate_paths)
-
-
-def _fit_symbol_navigation_to_budget(
-    navigation: ProjectSymbolNavigation,
-) -> ProjectSymbolNavigation:
-    fitted = navigation
-    while True:
-        encoded = json.dumps(
-            project_symbol_navigation_payload(fitted),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if len(encoded) <= MAX_SYMBOL_NAVIGATION_BYTES:
-            return fitted
-        relations = list(fitted.relations)
-        evidence_index = next(
-            (
-                index
-                for index in range(len(relations) - 1, -1, -1)
-                if relations[index].evidence is not None
-            ),
-            None,
-        )
-        if evidence_index is not None:
-            relations[evidence_index] = replace(relations[evidence_index], evidence=None)
-            fitted = replace(
-                fitted,
-                evidence_truncated=True,
-                relations=tuple(relations),
-            )
-            continue
-        if relations:
-            fitted = replace(
-                fitted,
-                relations_truncated=True,
-                relations=tuple(relations[:-1]),
-            )
-            continue
-        return fitted
-
-
-def _is_identifier_exact_needle(value: str) -> bool:
-    if (
-        re.fullmatch(
-            r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*",
-            value,
-        )
-        is None
-    ):
-        return False
-    return not keyword.iskeyword(value.rsplit(".", 1)[-1])
-
-
-def _exact_search_needle(query: str) -> tuple[str, str] | None:
-    normalized = query.strip()
-    for match in re.finditer(r"`([^`\n]+)`|\"([^\"\n]+)\"|'([^'\n]+)'", normalized):
-        candidate = next(value for value in match.groups() if value is not None).strip()
-        if _valid_exact_needle(candidate):
-            return candidate, "quoted_literal"
-
-    raw_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", normalized)
-    for candidate in raw_tokens:
-        if (
-            "_" in candidate
-            or "." in candidate
-            or any(left.islower() and right.isupper() for left, right in pairwise(candidate))
-        ) and _valid_exact_needle(candidate):
-            return candidate, "identifier"
-
-    if not any(character.isspace() for character in normalized) and _valid_exact_needle(normalized):
-        return normalized, "single_term"
-    return None
-
-
-def _valid_exact_needle(value: str) -> bool:
-    if not value or "\x00" in value or "\n" in value or "\r" in value:
-        return False
-    try:
-        return len(value.encode("utf-8")) <= MAX_EXACT_SEARCH_NEEDLE_BYTES
-    except UnicodeEncodeError:
-        return False
-
-
-def _literal_columns(line: str, needle: str) -> tuple[int, ...]:
-    columns: list[int] = []
-    start = 0
-    while True:
-        index = line.find(needle, start)
-        if index < 0:
-            return tuple(columns)
-        columns.append(index + 1)
-        start = index + max(1, len(needle))
-
-
-def _fit_exact_coverage_to_budget(
-    coverage: ProjectExactSearchCoverage,
-) -> ProjectExactSearchCoverage:
-    fitted = coverage
-    while fitted.locations:
-        encoded = json.dumps(
-            project_exact_search_coverage_payload(fitted),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        if len(encoded) <= MAX_EXACT_SEARCH_COVERAGE_BYTES:
-            return fitted
-        fitted = replace(
-            fitted,
-            locations=fitted.locations[:-1],
-            locations_truncated=True,
-        )
-    return fitted
-
-
-def project_search_hit_payload(hit: ProjectSearchHit) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "ref": hit.ref,
-        "kind": hit.kind.value,
-        "title": hit.title,
-        "location": hit.location,
-        "short_summary": hit.short_summary,
-        "match_reason": hit.match_reason,
-        "freshness": hit.freshness,
-        "evidence": None if hit.evidence is None else hit.evidence.to_wire(),
-        "evidence_reason": hit.evidence_reason,
-    }
-    if hit.path is not None:
-        payload["path"] = hit.path
-    return payload
-
-
 def _project_hits(items: tuple[_RankedProjectHit, ...]) -> tuple[ProjectSearchHit, ...]:
     return tuple(item.hit for item in items)
-
-
-def _fuse_ranked_channels(
-    channels: tuple[tuple[_RankedProjectHit, ...], ...],
-    limit: int,
-) -> tuple[ProjectSearchHit, ...]:
-    """Fuse comparable match-quality tiers, then interleave uncalibrated channel ranks."""
-    fused: list[tuple[int, int, int, int, str, ProjectSearchHit]] = []
-    for channel_index, channel in enumerate(channels):
-        for channel_rank, item in enumerate(channel):
-            fused.append(
-                (
-                    item.quality,
-                    -item.matched_terms,
-                    channel_rank,
-                    channel_index,
-                    item.hit.ref,
-                    item.hit,
-                )
-            )
-    fused.sort(key=lambda item: item[:-1])
-    return tuple(item[-1] for item in fused[:limit])
 
 
 def _candidate_limit(limit: int) -> int:

@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 21
+        assert SCHEMA_VERSION == 24
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
 
         with pytest.raises(sqlite3.IntegrityError):
@@ -122,27 +122,32 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
             "SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_search_%'"
         ).fetchall():
             connection.execute(f'DROP TRIGGER "{trigger_name}"')
-        connection.execute("DROP TABLE indexed_resolved_code_relation_search")
-        connection.execute("DROP TABLE indexed_resolved_code_relations")
-        connection.execute("DROP TABLE indexed_resolved_relation_workspaces")
-        connection.execute("DROP TABLE indexed_python_reexports")
-        connection.execute("DROP TABLE indexed_code_relation_search")
-        connection.execute("DROP TABLE indexed_code_relations")
-        connection.execute("DROP TABLE indexed_code_unit_search")
-        connection.execute("DROP TABLE indexed_code_units")
-        connection.execute("DROP TABLE indexed_code_unit_files")
-        connection.execute("DROP TABLE indexed_content_search")
-        connection.execute("DROP TABLE indexed_search_documents")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_resolved_relation_workspaces")
+        connection.execute("DROP TABLE IF EXISTS indexed_python_reexports")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relation_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_relations")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_units")
+        connection.execute("DROP TABLE IF EXISTS indexed_code_unit_files")
+        connection.execute("DROP TABLE IF EXISTS indexed_content_search")
+        connection.execute("DROP TABLE IF EXISTS indexed_search_documents")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_inclusion_excludes_exclusion")
         connection.execute("DROP TRIGGER IF EXISTS project_skill_exclusion_excludes_inclusion")
         connection.execute("DROP TABLE project_skill_inclusions")
         connection.execute("DROP TABLE project_skill_exclusions")
-        connection.execute("DROP TABLE workspace_search_index_dirty_paths")
-        connection.execute("DROP TABLE workspace_search_index_state")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_dirty_paths")
+        connection.execute("DROP TABLE IF EXISTS workspace_search_index_state")
         connection.execute("DROP TABLE workspace_index_reconcile")
         connection.execute("DROP TABLE task_search")
-        connection.execute("DROP TABLE knowledge_search")
+        connection.execute("DROP TABLE IF EXISTS knowledge_search")
         connection.execute("DROP TABLE task_checkpoint_verification")
+        connection.execute("DROP TABLE task_git_evidence_paths")
+        connection.execute("DROP TABLE task_git_evidence")
+        connection.execute("DROP TABLE task_git_origins")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_test")
+        connection.execute("ALTER TABLE tasks DROP COLUMN deploy_prod")
         connection.execute("DELETE FROM schema_migrations WHERE version >= 8")
         connection.commit()
     finally:
@@ -150,7 +155,7 @@ def test_schema_v7_migrates_to_v8_without_losing_task_history(tmp_path: Path) ->
 
     status = initialize_database(database)
 
-    assert status.schema_version == SCHEMA_VERSION == 21
+    assert status.schema_version == SCHEMA_VERSION
     connection = sqlite3.connect(database)
     try:
         assert connection.execute("SELECT id, revision FROM tasks").fetchall() == [("task", 2)]

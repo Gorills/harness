@@ -14,6 +14,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from harness.agent_instructions import (
+    TASK_CONTINUITY_INSTRUCTIONS,
+    TASK_CREATION_INSTRUCTIONS,
+    TASK_REVIEW_INSTRUCTIONS,
+)
 from harness.dashboard import load_or_create_dashboard_access_token, read_dashboard_access_token
 from harness.git_workspace import inspect_workspace_layout
 from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
@@ -145,7 +150,7 @@ _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Checkpoint each logical stage.\n"
 )
 
-CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+_NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "Harness required. `project_status` must be the first repository action per Codex task. "
     "Before running any shell command/read/search/browser inspection/change, find Harness tools if "
     "deferred/omitted from initial visible tool list; call `project_status`. Tool discovery is the "
@@ -160,6 +165,51 @@ CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
     "logical stage.\n"
 )
 
+_MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness required. `project_status` must be the first repository action. "
+    "Before shell/read/search/browser/change, find deferred/omitted Harness tools; discovery alone "
+    "may precede status. After Harness config changes restart Codex/new conversation; instruction "
+    "snapshots do not refresh. After status, start/resume a Harness Task before diagnosis/edits; "
+    "schema error: retry, never skip. "
+    "Same outcome: one Task across diagnosis, implementation, checks and follow-ups. "
+    "New Task only for a distinct outcome. "
+    "Small work or known paths still need a Task. "
+    "Identifiers/literals/Knowledge/Tasks: `project_search` before broad native work; "
+    "natural-language code/doc discovery may use native search directly; lexical hits allow broad "
+    "fallback. Exact paths may skip search, not Task; code/doc paths may be read natively, "
+    "project_context optional. Complete untruncated exact_coverage replaces native search. "
+    "Checkpoint each logical stage with task_id+expected_revision; complete only when the outcome "
+    "is done."
+)
+
+
+_PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness required. `project_status` must be the first repository action. "
+    "Before shell/read/search/browser/change, find deferred/omitted Harness tools; "
+    "discovery alone may precede status. After config changes restart Codex/new conversation. "
+    + TASK_CREATION_INSTRUCTIONS
+    + TASK_CONTINUITY_INSTRUCTIONS
+    + "Resume by explicit ID; retry schema errors. "
+    "Identifiers/literals/Knowledge/Tasks: `project_search` before broad native work; "
+    "natural-language discovery may use native search. Lexical hits allow broad fallback. "
+    "Exact paths allow native reads; project_context optional. "
+    "Complete untruncated exact_coverage replaces native search. " + TASK_REVIEW_INSTRUCTIONS
+)
+
+CODEX_BOOTSTRAP_INSTRUCTION_BODY = (
+    "Harness required. `project_status` must be the first repository action. "
+    "Before shell/read/search/browser/change, find deferred/omitted Harness tools; "
+    "discovery alone may precede status. After config changes restart Codex/new conversation. "
+    + TASK_CREATION_INSTRUCTIONS
+    + TASK_CONTINUITY_INSTRUCTIONS
+    + "Resume by explicit ID; retry schema errors. "
+    "Use native repository tools for code and documentation discovery. "
+    "Harness provides no project code/document search. "
+    "For older Task/Knowledge without ID, optionally use `project_recall`; "
+    "open selected refs with `project_context`. "
+    "Explicit code/doc refs remain metadata-only. " + TASK_REVIEW_INSTRUCTIONS
+)
+
 _OWNED_CODEX_BOOTSTRAP_BASES = (
     _LEGACY_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _SNAPSHOT_AWARE_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
@@ -167,6 +217,9 @@ _OWNED_CODEX_BOOTSTRAP_BASES = (
     _TASK_BEFORE_DIAGNOSIS_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _TASK_THEN_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     _LEXICAL_SEARCH_REQUIRED_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _NATURAL_SEARCH_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _MANDATORY_TASK_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
+    _PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(
@@ -366,7 +419,7 @@ class CodexAdapter:
                     raise HostIntegrationError(
                         "tracked source-checkout .codex/config.toml requires the exact Harness "
                         "Codex bootstrap and local MCP placement; update the checkout and restart "
-                        "Codex with a new task"
+                        "Codex in a new conversation; resume the same unfinished Harness Task"
                     )
                 if _manual_config_is_desired(
                     value,
@@ -433,7 +486,7 @@ class CodexAdapter:
                 raise HostIntegrationError(
                     "tracked source-checkout .codex/config.toml requires the exact Harness "
                     "Codex bootstrap and local MCP placement; update the checkout and restart "
-                    "Codex with a new task"
+                    "Codex in a new conversation; resume the same unfinished Harness Task"
                 )
             if marker is None and _manual_config_is_desired(
                 value,
@@ -653,6 +706,7 @@ def _desired_entry(
         return {}
     return {
         "url": mcp_http_url,
+        "enabled": True,
         "required": True,
         "startup_timeout_sec": 30,
         "http_headers": {
@@ -672,7 +726,7 @@ def _desired_config(
     entry = _desired_entry(root, mcp_http_url, mcp_http_token)
     lines = [
         "# Generated and owned by Harness. Do not edit this file in place.",
-        "# After this file changes, fully restart Codex and begin a new task.",
+        "# After this file changes, restart Codex in a new conversation; resume the unfinished Harness Task.",
         f"developer_instructions = {_toml_string(codex_developer_instructions(hidden=hidden))}",
         "",
     ]
@@ -680,6 +734,7 @@ def _desired_config(
         [
             "[mcp_servers.harness]",
             f"url = {_toml_string(entry['url'])}",
+            "enabled = true",
             "required = true",
             "startup_timeout_sec = 30",
             "",
@@ -751,6 +806,8 @@ def _isolated_development_bootstrap_is_current(value: dict[str, object]) -> bool
     return (
         value.get("developer_instructions") == CODEX_BOOTSTRAP_INSTRUCTION_BODY
         and entry is not None
+        and entry.get("enabled") is True
+        and entry.get("required") is True
         and entry.get("experimental_environment") == "local"
     )
 
@@ -832,8 +889,13 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     if "url" in entry:
         headers = entry.get("http_headers")
         return (
-            set(entry) == {"url", "required", "startup_timeout_sec", "http_headers"}
+            set(entry)
+            in (
+                {"url", "required", "startup_timeout_sec", "http_headers"},
+                {"url", "enabled", "required", "startup_timeout_sec", "http_headers"},
+            )
             and isinstance(entry.get("url"), str)
+            and entry.get("enabled", True) is True
             and entry.get("required") is True
             and entry.get("startup_timeout_sec") == 30
             and isinstance(headers, dict)

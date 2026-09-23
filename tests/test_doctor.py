@@ -174,6 +174,7 @@ def test_run_system_doctor_reports_isolated_development_overlay_as_preserved(
 command = "./scripts/dogfood"
 args = ["mcp"]
 startup_timeout_sec = 30
+enabled = true
 required = true
 experimental_environment = "local"
 

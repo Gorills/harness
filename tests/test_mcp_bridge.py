@@ -22,88 +22,88 @@ from harness.daemon import serve_daemon
 from harness.index import scan_workspace
 from harness.ipc import request_dashboard_url
 from harness.mcp_bridge import (
+    _MCP_WIRE_OVERHEAD_BYTES,
     _PROJECT_CONTEXT_DESCRIPTION,
-    _PROJECT_SEARCH_DESCRIPTION,
+    _RECALL_MAX_BYTES,
     _SERVER_INSTRUCTIONS,
     _STATUS_MAX_BYTES,
     _TASK_START_DESCRIPTION,
     _TOOL_ARGUMENTS,
-    _fit_project_search_payload,
-    _structured_search_result_size,
+    _fit_recall_payload,
     _unknown_tool_argument_error,
 )
 from harness.registry import VisibilityMode, create_project, list_workspaces, register_workspace
-from harness.search_currentness import SearchCurrentnessTimeoutError, SearchCurrentnessUnstableError
 from harness.storage import connect_database, initialize_database
+from harness.task_baseline import get_task_baseline
 from harness.task_checkpoints import (
     MAX_CHECKPOINT_NEXT_STEP_BYTES,
     MAX_OPERATOR_FEEDBACK_BYTES,
     TaskEventType,
+    list_task_checkpoints,
     list_task_events,
 )
-from harness.tasks import TaskState, get_task, get_task_stack_hints
+from harness.tasks import TaskState, TaskWaitReason, get_task, get_task_stack_hints
+from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
 
-def test_server_instructions_require_task_before_diagnosis_within_budget() -> None:
-    encoded = _SERVER_INSTRUCTIONS.encode("utf-8")
+def test_server_instructions_allow_proportionate_tasks_within_budget() -> None:
+    assert len(_SERVER_INSTRUCTIONS.encode("utf-8")) < 1024
     first_512 = _SERVER_INSTRUCTIONS[:512]
-    assert len(encoded) < 1024
-    assert "must be the first repository action" in first_512
-    assert "Before any shell command" in first_512
-    assert "Russian" in first_512
-    assert "title" in first_512
-    assert "next_step" in first_512
-    assert "stack_hints" in first_512
-    assert "optional Task metadata" in first_512
-    assert "before diagnosis" in _SERVER_INSTRUCTIONS
-    assert "never skip" in _SERVER_INSTRUCTIONS
-    assert "Do not skip Task because work looks small or the path is known" in _SERVER_INSTRUCTIONS
-    assert "may skip search, not Task" in _SERVER_INSTRUCTIONS
-    assert "Checkpoint each stage" in _SERVER_INSTRUCTIONS
-    assert "implement-after-diagnosis" in _SERVER_INSTRUCTIONS
-    assert "code/doc path may be read natively" in _SERVER_INSTRUCTIONS
-    assert "project_context is not required for those kinds" in _SERVER_INSTRUCTIONS
-    assert "Start/resume a Task before changes." not in _SERVER_INSTRUCTIONS
-    assert "discussion only" not in _SERVER_INSTRUCTIONS
-    assert "waiver" not in _SERVER_INSTRUCTIONS
-    assert "trivial" not in _SERVER_INSTRUCTIONS
-    assert "skip Task for" not in _SERVER_INSTRUCTIONS
-    assert "meaningful changes" not in _SERVER_INSTRUCTIONS
+    for required in (
+        "must be the first repository action",
+        "Before any shell command",
+        "Russian",
+        "title",
+        "next_step",
+        "stack_hints",
+        "optional Task metadata",
+    ):
+        assert required in first_512
+    for required in (
+        "substantial changes",
+        "multi-step work",
+        "needed continuity",
+        "explicit request",
+        "Quick questions, reads, and small local edits may proceed without a Task",
+        "Same outcome: one Task",
+        "New Task only for a distinct outcome",
+        "task_id+expected_revision",
+        "ready => waiting(operator_review)",
+        "Only the operator completes Tasks",
+        "Use native repository tools for code and document discovery",
+        "Optional project_recall finds past Knowledge/Tasks without IDs",
+    ):
+        assert required in _SERVER_INSTRUCTIONS
+    assert "Small work or known paths still need a Task" not in _SERVER_INSTRUCTIONS
+    assert "before diagnosis/edits" not in _SERVER_INSTRUCTIONS
 
 
-def test_mcp_bootstrap_requires_task_before_search_diagnosis() -> None:
-    text = _SERVER_INSTRUCTIONS
-    after_status = text.split("After status", maxsplit=1)[1]
-    task_at = after_status.find("start/resume a Task")
-    search_at = after_status.find("project_search")
-    assert 0 <= task_at < search_at
-    assert "After status use project_search" not in text
-    assert "After status, use project_search" not in text
-    assert "project_search, project_context, then native tools" not in text
-    assert "code/doc path may be read natively" in text
-    assert "project_context is not required for those kinds" in text
-    assert "natural-language code/doc discovery may use native search directly" in text
-    assert "lexical hits do not block broad fallback" in text
-    assert "project_context only for selected semantic refs." not in text
-
-
-def test_project_search_description_allows_targeted_native_read_after_localization() -> None:
-    description = _PROJECT_SEARCH_DESCRIPTION
-    assert "exact path" in description
-    assert "targeted native read is allowed" in description
-    assert "Python/JS/TS/TSX/Go/Rust/Java" in description
-    assert "structuredContent" in description
-    assert "results_truncated=true" in description
-    assert "project_context is not required for those kinds" in description
-    assert "after task_start or resume" in description
-    assert "Natural-language code/doc discovery may use native broad search directly" in description
-    assert "ordinary lexical hits do not suppress broader native fallback" in description
-    assert "Skip this search when an exact path" in description
-    assert "Task remains required" in description
-    assert "use project_context only for selected refs" not in description
+def test_recall_payload_keeps_bounded_hits_when_previews_are_long() -> None:
+    payload = {
+        "query": "q" * 256,
+        "kind": "task",
+        "results_truncated": False,
+        "results": [
+            {
+                "ref": "task:" + str(index) * 155,
+                "title": "\\" * 256,
+                "short_summary": "\\" * 384,
+                "freshness": "durable",
+            }
+            for index in range(5)
+        ],
+    }
+    result = _fit_recall_payload(payload)
+    encoded = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= _RECALL_MAX_BYTES
+    assert result["results"]
+    assert result["results_truncated"] is (len(result["results"]) < 5)
+    assert [hit["ref"] for hit in result["results"]] == [
+        "task:" + str(index) * 155 for index in range(len(result["results"]))
+    ]
 
 
 def test_project_context_description_is_not_mandatory_for_code_docs() -> None:
@@ -118,7 +118,16 @@ def test_task_start_description_states_stack_hints_are_not_skill_selectors() -> 
     assert "not a Skill selector" in _TASK_START_DESCRIPTION
     assert "optional durable Task metadata" in _TASK_START_DESCRIPTION
     assert "live skill injection" in _TASK_START_DESCRIPTION
-    assert "Do not skip because work looks small or the path is known" in _TASK_START_DESCRIPTION
+    assert "small local edits may proceed without a Task" in _TASK_START_DESCRIPTION
+    assert "resume the relevant working/waiting Task from project_status by ID" in (
+        _TASK_START_DESCRIPTION
+    )
+    assert (
+        "messages, tool calls and subagents do not each need a new Task" in _TASK_START_DESCRIPTION
+    )
+    assert "A ready audit also waits for operator review" in _TASK_START_DESCRIPTION
+    assert "Keep existing work working or put it waiting with its reason" in _TASK_START_DESCRIPTION
+    assert "task_start cannot reopen completed/cancelled Tasks" in _TASK_START_DESCRIPTION
 
 
 def test_server_instruction_budget_remains_bounded() -> None:
@@ -228,9 +237,7 @@ def _dashboard_post(url: str, fields: dict[str, str | int]) -> int:
 
 
 @pytest.mark.anyio
-async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -> None:
     root, database = _repo(tmp_path)
     state = tmp_path / "state"
     runtime = tmp_path / "runtime"
@@ -261,29 +268,20 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
             assert "Before any shell command" in first_512
             assert "project_status" in first_512
             assert "deferred" in first_512
-            assert "initial visible tool list" in first_512
+            assert "find deferred/omitted tools" in first_512
+            assert "discovery is the only allowed pre-status action" in first_512
             listed = await client.list_tools()
             assert listed.tools[0].description is not None
             assert "Required first repository action" in listed.tools[0].description
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
-                "project_search",
                 "project_context",
+                "project_recall",
                 "task_start",
                 "task_checkpoint",
             ]
-            searched = await client.call_tool(
-                "project_search", {"query": "token service", "scope": "code"}
-            )
-            assert searched.is_error is False
-            assert searched.structured_content is not None
-            results = searched.structured_content["results"]
-            assert len(results) <= 5
-            assert results[0]["ref"] == "code:src/token_service.py"
-            assert "bm25" not in str(searched.structured_content).casefold()
-            evidence = results[0].get("evidence")
-            assert evidence is not None
-            assert "TOKEN = 1" in evidence["snippet"]
+            removed_search = await client.call_tool("project_search", {"query": "token"})
+            assert removed_search.is_error is True
             with pytest.raises(MCPError, match="Unknown tool argument fields") as status_error:
                 await client.call_tool("project_status", {"unexpected": True})
             assert "no arguments" in str(status_error.value)
@@ -322,13 +320,11 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
             }
             assert set(status.structured_content["index"]) == {
                 "indexed_file_count",
-                "content_search_document_count",
                 "index_revision",
                 "last_successful_reconcile_at",
                 "last_reconcile_kind",
             }
             assert status.structured_content["index"]["indexed_file_count"] == 2
-            assert status.structured_content["index"]["content_search_document_count"] == 2
             assert isinstance(status.structured_content["index"]["index_revision"], int)
             assert status.structured_content["index"]["index_revision"] >= 1
             assert status.structured_content["index"]["last_reconcile_kind"] in {
@@ -377,49 +373,6 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(
                     },
                 )
                 assert invalid_checkpoint.is_error is True
-            for invalid_limit_value in ("1", True, 1.5, 0, 11):
-                invalid_limit = await client.call_tool(
-                    "project_search", {"query": "token", "limit": invalid_limit_value}
-                )
-                assert invalid_limit.is_error is True
-            for invalid_query in ("", " \t ", "token\x00", "x" * 257, "я" * 129):
-                invalid_search = await client.call_tool("project_search", {"query": invalid_query})
-                assert invalid_search.is_error is True
-            padded_query = " " * 6500 + "token" + " " * 6500
-            padded_search = await client.call_tool("project_search", {"query": padded_query})
-            assert padded_search.is_error is False
-            assert padded_search.structured_content is not None
-            assert padded_search.structured_content["query"] == "token"
-            assert len(json.dumps(padded_search.structured_content).encode("utf-8")) < 12 * 1024
-            punctuation_search = await client.call_tool(
-                "project_search", {"query": '"="', "scope": "code"}
-            )
-            assert punctuation_search.is_error is False
-            assert punctuation_search.structured_content is not None
-            assert punctuation_search.structured_content["exact_coverage"]["complete"] is True
-            assert (
-                punctuation_search.structured_content["exact_coverage"]["matched_occurrences"] > 0
-            )
-            for error_type, code in (
-                (SearchCurrentnessTimeoutError, "search_timeout"),
-                (SearchCurrentnessUnstableError, "search_workspace_changed"),
-            ):
-                with monkeypatch.context() as isolated_patch:
-
-                    def fail_search(
-                        *_args: object,
-                        _error_type: type[Exception] = error_type,
-                        **_kwargs: object,
-                    ) -> None:
-                        raise _error_type("private-source-detail")
-
-                    isolated_patch.setattr("harness.daemon.read_project_search", fail_search)
-                    failed = await client.call_tool("project_search", {"query": "token"})
-                    assert failed.is_error is True
-                    serialized_failure = failed.model_dump_json()
-                    assert code in serialized_failure
-                    assert "private-source-detail" not in serialized_failure
-                    assert len(serialized_failure.encode("utf-8")) < 4096
             checkpoint = await client.call_tool(
                 "task_checkpoint",
                 {
@@ -520,8 +473,8 @@ async def test_mcp_hidden_status_does_not_disclose_enforcement(tmp_path: Path) -
             listed = await client.list_tools()
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
-                "project_search",
                 "project_context",
+                "project_recall",
                 "task_start",
                 "task_checkpoint",
             ]
@@ -686,78 +639,6 @@ async def test_human_review_feedback_survives_new_mcp_session_and_accept_complet
         future.result()
 
 
-@pytest.mark.anyio
-async def test_project_search_scope_filters_before_backend_limit(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    (root / "aa").mkdir()
-    (root / "zz").mkdir()
-    for index in range(12):
-        (root / "aa" / f"token_{index:02}.py").write_text("x = 1\n", encoding="utf-8")
-    (root / "zz" / "token_notes.md").write_text("token documentation\n", encoding="utf-8")
-    _git(root, "init")
-    _git(root, "add", ".")
-    _git(
-        root,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=t@example.invalid",
-        "commit",
-        "-m",
-        "init",
-    )
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        project = create_project(connection)
-        workspace = register_workspace(connection, project_id=project.project_id, path=root)
-        scan_workspace(connection, workspace.workspace_id)
-    finally:
-        connection.close()
-
-    runtime = tmp_path / "runtime"
-    socket_path = runtime / "harness" / "harness.sock"
-    stop, executor, future = _start_daemon(database, socket_path)
-    env = dict(os.environ)
-    env.update(
-        {
-            "XDG_STATE_HOME": str(tmp_path / "state"),
-            "XDG_RUNTIME_DIR": str(runtime),
-            "HARNESS_WORKSPACE_ROOT": str(root),
-        }
-    )
-    params = StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "harness.mcp_process"],
-        env=env,
-        cwd=str(root),
-    )
-    try:
-        async with Client(stdio_client(params)) as client:
-            docs = await client.call_tool(
-                "project_search", {"query": "token", "scope": "docs", "limit": 1}
-            )
-            code = await client.call_tool(
-                "project_search", {"query": "token", "scope": "code", "limit": 3}
-            )
-            assert docs.is_error is False
-            assert docs.structured_content is not None
-            assert [item["path"] for item in docs.structured_content["results"]] == [
-                "zz/token_notes.md"
-            ]
-            assert code.is_error is False
-            assert code.structured_content is not None
-            assert all(
-                not item["path"].endswith(".md") for item in code.structured_content["results"]
-            )
-    finally:
-        stop.set()
-        executor.shutdown(wait=True)
-        future.result()
-
-
 def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
     process = subprocess.Popen(
         [sys.executable, "-m", "harness.mcp_process"],
@@ -801,12 +682,18 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "stack_hints" in instructions[:512]
                 assert "optional Task metadata" in instructions[:512]
                 assert "durable SCM mutations" in instructions
-                assert "code/doc path may be read natively" in instructions
-                assert "project_context is not required for those kinds" in instructions
+                assert "Paths allow native reads" in instructions
+                assert "project_context expands selected refs" in instructions
                 assert "project_context only for selected semantic refs." not in instructions
-                assert "before diagnosis" in instructions
-                assert "never skip" in instructions
+                assert "substantial changes" in instructions
+                assert "retry errors" in instructions
                 assert "After status, start/resume a Task" in instructions
+                assert (
+                    "Same outcome: one Task across diagnosis, implementation, checks and follow-ups"
+                    in instructions
+                )
+                assert "New Task only for a distinct outcome" in instructions
+                assert "implement-after-diagnosis" not in instructions
                 assert "After status use project_search" not in instructions
                 assert "Start/resume a Task before changes." not in instructions
                 assert "scm_write" not in instructions
@@ -815,34 +702,35 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 tools = response["result"]["tools"]
                 assert [tool["name"] for tool in tools] == [
                     "project_status",
-                    "project_search",
                     "project_context",
+                    "project_recall",
                     "task_start",
                     "task_checkpoint",
                 ]
                 for tool in tools:
                     assert tool["inputSchema"]["additionalProperties"] is False
                 by_name = {tool["name"]: tool for tool in tools}
-                search_properties = by_name["project_search"]["inputSchema"]["properties"]
-                assert search_properties["limit"]["type"] == "integer"
-                assert search_properties["limit"]["minimum"] == 1
-                assert search_properties["limit"]["maximum"] == 10
-                assert search_properties["limit"]["default"] == 5
-                assert search_properties["query"]["minLength"] == 1
-                assert "256 UTF-8 bytes after trimming" in search_properties["query"]["description"]
                 assert "Russian" in by_name["task_start"]["description"]
                 assert "not a Skill selector" in by_name["task_start"]["description"]
-                assert "before diagnosis" in by_name["task_start"]["description"]
-                assert "project_search" in by_name["task_start"]["description"]
+                assert "substantial changes" in by_name["task_start"]["description"]
+                assert (
+                    "small local edits may proceed without a Task"
+                    in by_name["task_start"]["description"]
+                )
                 assert "omit task_id" in by_name["task_start"]["description"]
                 assert "never pass summary" in by_name["task_start"]["description"]
                 assert "read this schema and retry" in by_name["task_start"]["description"]
                 assert "optional durable Task metadata" in by_name["task_start"]["description"]
                 assert "live skill injection" in by_name["task_start"]["description"]
-                assert "targeted native read is allowed" in by_name["project_search"]["description"]
                 assert "Not mandatory for code or doc" in by_name["project_context"]["description"]
                 assert "Russian" in by_name["task_checkpoint"]["description"]
                 assert "each logical stage" in by_name["task_checkpoint"]["description"]
+                assert (
+                    "a turn ending is not completion" in by_name["task_checkpoint"]["description"]
+                )
+                assert (
+                    "Only the operator completes Tasks" in by_name["task_checkpoint"]["description"]
+                )
                 task_start_schema = by_name["task_start"]["inputSchema"]
                 assert "stack_hints" in task_start_schema["properties"]
                 checkpoint_schema = by_name["task_checkpoint"]["inputSchema"]
@@ -1139,7 +1027,7 @@ def test_oversized_request_id_is_rejected_before_task_mutation(tmp_path: Path) -
 
 
 @pytest.mark.anyio
-async def test_project_context_expands_long_ref_returned_by_project_search(tmp_path: Path) -> None:
+async def test_project_context_expands_long_code_ref(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     root.mkdir()
     first = "a" * 140
@@ -1189,12 +1077,7 @@ async def test_project_context_expands_long_ref_returned_by_project_search(tmp_p
     )
     try:
         async with Client(stdio_client(params)) as client:
-            searched = await client.call_tool(
-                "project_search", {"query": "token", "scope": "code", "limit": 1}
-            )
-            assert searched.is_error is False
-            assert searched.structured_content is not None
-            ref = searched.structured_content["results"][0]["ref"]
+            ref = f"code:{relative_path}"
             assert len(ref.encode("utf-8")) > 256
 
             context = await client.call_tool("project_context", {"refs": [ref]})
@@ -1219,201 +1102,6 @@ async def test_project_context_expands_long_ref_returned_by_project_search(tmp_p
         future.result()
 
 
-def test_project_search_success_wire_stays_within_model_budget(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    directory = "a" * 150
-    for index in range(10):
-        source = root / directory / f"token_{index:02}_service.py"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text("TOKEN = 1\n", encoding="utf-8")
-    _git(root, "init")
-    _git(root, "add", ".")
-    _git(
-        root,
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=t@example.invalid",
-        "commit",
-        "-m",
-        "init",
-    )
-    database = tmp_path / "harness.db"
-    initialize_database(database)
-    connection = connect_database(database)
-    try:
-        project = create_project(connection)
-        workspace = register_workspace(connection, project_id=project.project_id, path=root)
-        scan_workspace(connection, workspace.workspace_id)
-    finally:
-        connection.close()
-
-    runtime = tmp_path / "runtime"
-    socket_path = runtime / "harness" / "harness.sock"
-    stop, executor, future = _start_daemon(database, socket_path)
-    env = dict(os.environ)
-    env.update(
-        {
-            "XDG_STATE_HOME": str(tmp_path / "state"),
-            "XDG_RUNTIME_DIR": str(runtime),
-            "HARNESS_WORKSPACE_ROOT": str(root),
-        }
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-m", "harness.mcp_process"],
-        cwd=root,
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    assert process.stdin is not None
-    assert process.stdout is not None
-    meta = {
-        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-        "io.modelcontextprotocol/clientInfo": {"name": "raw-budget-test", "version": "1.0"},
-        "io.modelcontextprotocol/clientCapabilities": {},
-    }
-    try:
-        for request in (
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "server/discover",
-                "params": {"_meta": meta},
-            },
-            {
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {
-                    "_meta": meta,
-                    "name": "project_search",
-                    "arguments": {"query": "token", "limit": 3},
-                },
-            },
-            {
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "_meta": meta,
-                    "name": "project_search",
-                    "arguments": {"query": "token", "limit": 10},
-                },
-            },
-        ):
-            process.stdin.write(json.dumps(request, separators=(",", ":")) + "\n")
-            process.stdin.flush()
-            ready, _, _ = select.select([process.stdout], [], [], 3)
-            assert ready, f"no MCP response for {request['method']}"
-            raw = process.stdout.readline()
-            if request["id"] == 1:
-                continue
-            assert len(raw.encode("utf-8")) < 12 * 1024
-            response = json.loads(raw)
-            assert response["result"]["isError"] is False
-            assert response["result"]["content"] == []
-            structured = response["result"]["structuredContent"]
-            assert structured["results_truncated"] is False
-            expected_count = 3 if request["id"] == 2 else 10
-            assert len(structured["results"]) == expected_count
-    finally:
-        process.terminate()
-        process.wait(timeout=3)
-        stop.set()
-        executor.shutdown(wait=True)
-        future.result()
-
-
-def _search_payload_hit(index: int, *, evidence: str | None) -> dict[str, object]:
-    return {
-        "ref": f"code:src/service_{index}.py",
-        "kind": "code",
-        "title": f"service_{index}.py",
-        "location": f"src/service_{index}.py",
-        "short_summary": None,
-        "match_reason": "lexical content (all terms)",
-        "freshness": "indexed_snapshot",
-        "evidence": (
-            None
-            if evidence is None
-            else {
-                "start_line": 1,
-                "end_line": 1,
-                "snippet": evidence,
-                "truncated": True,
-            }
-        ),
-        "evidence_reason": None,
-        "path": f"src/service_{index}.py",
-    }
-
-
-def _search_payload(results: list[dict[str, object]]) -> dict[str, object]:
-    return {
-        "query": "service token",
-        "scope": "code",
-        "workspace_state": "current",
-        "exact_coverage": None,
-        "symbol_navigation": None,
-        "results_truncated": False,
-        "results": results,
-    }
-
-
-def test_project_search_compaction_drops_tail_evidence_before_hits(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first = _search_payload_hit(1, evidence="first token " + ("a" * 512))
-    second = _search_payload_hit(2, evidence="second token " + ("b" * 512))
-    payload = _search_payload([first, second])
-    without_tail_evidence = _search_payload(
-        [
-            first,
-            {
-                **second,
-                "evidence": None,
-                "evidence_reason": "response_budget",
-            },
-        ]
-    )
-    budget = _structured_search_result_size(without_tail_evidence)
-    assert _structured_search_result_size(payload) > budget
-    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
-
-    fitted = _fit_project_search_payload(payload)
-
-    assert fitted["results_truncated"] is False
-    assert len(fitted["results"]) == 2
-    assert fitted["results"][0]["evidence"] is not None
-    assert fitted["results"][1]["evidence"] is None
-    assert fitted["results"][1]["evidence_reason"] == "response_budget"
-
-
-def test_project_search_compaction_marks_tail_hit_truncation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    hits = [_search_payload_hit(index, evidence=None) for index in range(3)]
-    payload = _search_payload(hits)
-    two_hit_payload = _search_payload(hits[:2])
-    two_hit_payload["results_truncated"] = True
-    budget = _structured_search_result_size(two_hit_payload)
-    assert _structured_search_result_size(payload) > budget
-    monkeypatch.setattr("harness.mcp_bridge._SEARCH_MAX_BYTES", budget)
-
-    fitted = _fit_project_search_payload(payload)
-
-    assert fitted["results_truncated"] is True
-    assert [hit["ref"] for hit in fitted["results"]] == [
-        "code:src/service_0.py",
-        "code:src/service_1.py",
-    ]
-
-
 @pytest.mark.anyio
 async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path) -> None:
     root, database = _repo(tmp_path)
@@ -1435,19 +1123,50 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
         env=env,
         cwd=str(root),
     )
+    stages = (
+        "Diagnosed the token service defect",
+        "Implemented the token service fix",
+        "Applied the first clarification to the same fix",
+        "Applied the second clarification to the same fix",
+    )
     try:
         async with Client(stdio_client(params)) as first_client:
             started = await first_client.call_tool("task_start", {"title": "Durable continuity"})
             assert started.is_error is False
             assert started.structured_content is not None
             task_id = started.structured_content["task_id"]
-            checkpoint = await first_client.call_tool(
+            connection = connect_database(database)
+            try:
+                baseline = get_task_baseline(connection, task_id)
+                assert baseline.snapshot.dirty_paths == ()
+            finally:
+                connection.close()
+
+            for revision, summary in enumerate(stages, start=1):
+                if revision == 2:
+                    (root / "src" / "token_service.py").write_text("TOKEN = 2\n", encoding="utf-8")
+                checkpoint = await first_client.call_tool(
+                    "task_checkpoint",
+                    {
+                        "task_id": task_id,
+                        "expected_revision": revision,
+                        "state": "working",
+                        "summary": summary,
+                    },
+                )
+                assert checkpoint.is_error is False
+                assert checkpoint.structured_content is not None
+                assert checkpoint.structured_content["task_id"] == task_id
+                assert checkpoint.structured_content["revision"] == revision + 1
+
+            waiting = await first_client.call_tool(
                 "task_checkpoint",
                 {
                     "task_id": task_id,
-                    "expected_revision": 1,
-                    "state": "working",
-                    "summary": "Persisted before bridge restart",
+                    "expected_revision": 5,
+                    "state": "waiting",
+                    "wait_reason": "external",
+                    "summary": "Verification passed; waiting for an external dependency",
                     "next_step": "Resume from this exact checkpoint",
                     "verification": [
                         {
@@ -1458,36 +1177,89 @@ async def test_task_continuity_survives_independent_mcp_processes(tmp_path: Path
                     ],
                 },
             )
-            assert checkpoint.is_error is False
-            assert checkpoint.structured_content is not None
-            assert checkpoint.structured_content["revision"] == 2
-            assert checkpoint.structured_content["verification_count"] == 1
+            assert waiting.is_error is False
+            assert waiting.structured_content is not None
+            assert waiting.structured_content["task_id"] == task_id
+            assert waiting.structured_content["revision"] == 6
+            assert waiting.structured_content["verification_count"] == 1
 
         async with Client(stdio_client(params)) as second_client:
             status = await second_client.call_tool("project_status")
             assert status.is_error is False
             assert status.structured_content is not None
-            current = status.structured_content["current_task"]
-            assert current == {
+            assert status.structured_content["current_task"] is None
+            assert status.structured_content["relevant_waiting_task"] == {
                 "task_id": task_id,
                 "title": "Durable continuity",
-                "state": "working",
-                "wait_reason": None,
-                "revision": 2,
+                "state": "waiting",
+                "wait_reason": "external",
+                "revision": 6,
             }
-            assert status.structured_content["relevant_waiting_task"] is None
             assert status.structured_content["next_step"] == "Resume from this exact checkpoint"
             assert status.structured_content["last_checkpoint"]["verification"] == [
                 {"name": "focused tests", "status": "passed"}
             ]
-            resumed = await second_client.call_tool("task_start", {"task_id": task_id})
+            resumed = await second_client.call_tool(
+                "task_start", {"task_id": task_id, "expected_revision": 6}
+            )
             assert resumed.is_error is False
             assert resumed.structured_content is not None
-            assert resumed.structured_content["revision"] == 2
+            assert resumed.structured_content["task_id"] == task_id
+            assert resumed.structured_content["state"] == "working"
+            assert resumed.structured_content["revision"] == 7
+            completed = await second_client.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": task_id,
+                    "expected_revision": 7,
+                    "state": "waiting",
+                    "wait_reason": "operator_review",
+                    "next_step": "Operator accepts the result",
+                    "summary": "Completed the same fix after the dependency became available",
+                },
+            )
+            assert completed.is_error is False
+            assert completed.structured_content is not None
+            assert completed.structured_content["task_id"] == task_id
+            assert completed.structured_content["state"] == "waiting"
+            assert completed.structured_content["revision"] == 8
     finally:
         stop.set()
         executor.shutdown(wait=True)
         future.result()
+
+    connection = connect_database(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone() == (1,)
+        assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (1,)
+        assert get_task_baseline(connection, task_id) == baseline
+        task = get_task(connection, task_id)
+        assert task.state is TaskState.WAITING
+        assert task.wait_reason is TaskWaitReason.OPERATOR_REVIEW
+        assert task.revision == 8
+        checkpoints = list_task_checkpoints(connection, task_id)
+        assert tuple(checkpoint.task_revision for checkpoint in checkpoints) == (2, 3, 4, 5, 6, 8)
+        assert tuple(checkpoint.summary for checkpoint in checkpoints[:4]) == stages
+        assert all(checkpoint.task_id == task_id for checkpoint in checkpoints)
+        assert checkpoints[0].changed_paths == ()
+        assert all(
+            checkpoint.changed_paths == ("src/token_service.py",) for checkpoint in checkpoints[1:]
+        )
+        verification = list_checkpoint_verification(connection, checkpoints[4].checkpoint_id)
+        assert len(verification) == 1
+        assert verification[0].name == "focused tests"
+        assert verification[0].status.value == "passed"
+        assert verification[0].evidence == "pytest target: passed"
+        events = list_task_events(connection, task_id)
+        assert tuple(event.task_revision for event in events) == tuple(range(1, 9))
+        assert tuple(event.event_type for event in events) == (
+            TaskEventType.CREATED,
+            *(TaskEventType.CHECKPOINT for _ in range(5)),
+            TaskEventType.RESUMED,
+            TaskEventType.CHECKPOINT,
+        )
+    finally:
+        connection.close()
 
 
 @pytest.mark.anyio
@@ -1540,8 +1312,8 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
             listed = await client.list_tools()
             assert [tool.name for tool in listed.tools] == [
                 "project_status",
-                "project_search",
                 "project_context",
+                "project_recall",
                 "task_start",
                 "task_checkpoint",
             ]
@@ -1567,6 +1339,8 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
                 },
             )
             assert checkpoint.is_error is False
+            assert checkpoint.structured_content is not None
+            knowledge_ref = f"knowledge:{checkpoint.structured_content['knowledge_ids'][0]}"
 
         codex_params = StdioServerParameters(
             command=sys.executable,
@@ -1581,15 +1355,14 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
             assert status.structured_content["workspace_id"] == root_workspace_id
             assert status.structured_content["current_task"]["task_id"] == task_id
             knowledge = await client.call_tool(
-                "project_search",
-                {"query": "cross host invariant", "scope": "knowledge", "limit": 5},
+                "project_context", {"refs": [knowledge_ref, f"task:{task_id}"]}
             )
             assert knowledge.is_error is False
             assert knowledge.structured_content is not None
-            assert any(
-                item["ref"].startswith("knowledge:")
-                for item in knowledge.structured_content["results"]
-            )
+            assert {item["ref"] for item in knowledge.structured_content["items"]} == {
+                knowledge_ref,
+                f"task:{task_id}",
+            }
 
         cursor_params = StdioServerParameters(
             command=sys.executable,
@@ -1605,24 +1378,14 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
             assert status.structured_content["current_task"]["task_id"] == task_id
 
             knowledge = await client.call_tool(
-                "project_search",
-                {"query": "cross host invariant", "scope": "knowledge", "limit": 5},
+                "project_context", {"refs": [knowledge_ref, f"task:{task_id}"]}
             )
             assert knowledge.is_error is False
             assert knowledge.structured_content is not None
-            assert any(
-                item["ref"].startswith("knowledge:")
-                for item in knowledge.structured_content["results"]
-            )
-            tasks = await client.call_tool(
-                "project_search",
-                {"query": "cross host continuity", "scope": "tasks", "limit": 5},
-            )
-            assert tasks.is_error is False
-            assert tasks.structured_content is not None
-            assert any(
-                item["ref"] == f"task:{task_id}" for item in tasks.structured_content["results"]
-            )
+            assert {item["ref"] for item in knowledge.structured_content["items"]} == {
+                knowledge_ref,
+                f"task:{task_id}",
+            }
 
         linked_params = StdioServerParameters(
             command=sys.executable,
@@ -1637,14 +1400,12 @@ async def test_cross_host_task_and_knowledge_continuity_without_worktree_mixing(
             assert status.structured_content["workspace_id"] == linked_workspace.workspace_id
             assert status.structured_content["workspace_id"] != root_workspace_id
             assert status.structured_content["current_task"] is None
-            linked_search = await client.call_tool(
-                "project_search", {"query": "linked only", "scope": "code", "limit": 5}
+            linked_context = await client.call_tool(
+                "project_context", {"refs": ["code:src/linked_only.py"]}
             )
-            assert linked_search.is_error is False
-            assert linked_search.structured_content is not None
-            assert (
-                linked_search.structured_content["results"][0]["ref"] == "code:src/linked_only.py"
-            )
+            assert linked_context.is_error is False
+            assert linked_context.structured_content is not None
+            assert linked_context.structured_content["items"][0]["path"] == "src/linked_only.py"
 
         cursor_again = StdioServerParameters(
             command=sys.executable,

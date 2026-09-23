@@ -13,6 +13,7 @@ import stat
 import subprocess
 import tempfile
 import tomllib
+import warnings
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -66,6 +67,30 @@ _GRADLE_GROOVY_KTS_NAMES = frozenset(
     }
 )
 _GRADLE_MANIFEST_NAMES = _GRADLE_GROOVY_KTS_NAMES | {_GRADLE_VERSION_CATALOG_NAME}
+_MAX_PYTHON_EVIDENCE_FILES = 128
+_MAX_PYTHON_EVIDENCE_FILE_BYTES = 256 * 1024
+_MAX_PYTHON_EVIDENCE_TOTAL_BYTES = 2 * 1024 * 1024
+_PYTHON_EVIDENCE_EXCLUDED_PARTS = frozenset(
+    {"benchmark", "benchmarks", "docs", "examples", "fixtures", "scripts", "test", "tests"}
+)
+_HTTP_SERVER_CLASSES = frozenset(
+    {
+        "http.server.BaseHTTPRequestHandler",
+        "http.server.HTTPServer",
+        "http.server.SimpleHTTPRequestHandler",
+        "http.server.ThreadingHTTPServer",
+    }
+)
+_LOGGING_CONFIGURATION_CALLS = frozenset(
+    {
+        "logging.basicConfig",
+        "logging.config.dictConfig",
+        "logging.config.fileConfig",
+        "logging.handlers.QueueHandler",
+        "logging.handlers.RotatingFileHandler",
+        "logging.handlers.TimedRotatingFileHandler",
+    }
+)
 _LANGUAGE_SUFFIXES: Mapping[str, str] = {
     ".c": "c",
     ".cc": "cpp",
@@ -483,6 +508,8 @@ def detect_workspace_stack(
     manifests: set[str] = set()
     facets: set[str] = set()
     has_web_source = False
+    python_records: list[IndexedFileRecord] = []
+    mobile_roots: set[PurePosixPath] = set()
     gemfile_lock_directories = {
         PurePosixPath(record.relative_path).parent
         for record in records
@@ -505,14 +532,22 @@ def detect_workspace_stack(
             }
         manifests.add(path.as_posix().casefold())
         manifests.add(path.name.casefold())
-        facets.update(_path_facets(path))
+        path_facets = _path_facets(path)
+        facets.update(path_facets)
+        if "mobile-app" in path_facets:
+            mobile_roots.add(_mobile_source_root(path))
+        if record.kind is IndexedFileKind.FILE and _is_production_python_source(path):
+            python_records.append(record)
         if record.kind is not IndexedFileKind.FILE:
             continue
         name = path.name.casefold()
         manifest_dependencies: set[str] = set()
         if name == "package.json":
             manifest_dependencies = _package_json_dependencies(workspace, record, deadline=deadline)
-            facets.update(_package_json_facets(manifest_dependencies))
+            package_facets = _package_json_facets(manifest_dependencies)
+            facets.update(package_facets)
+            if "mobile-app" in package_facets:
+                mobile_roots.add(path.parent)
         elif name == "pyproject.toml":
             manifest_dependencies = _pyproject_dependencies(workspace, record, deadline=deadline)
         elif name.startswith("requirements") and name.endswith(".txt"):
@@ -537,9 +572,16 @@ def detect_workspace_stack(
         elif suffix == ".csproj":
             manifest_dependencies = _csproj_dependencies(workspace, record, deadline=deadline)
         dependencies.update(manifest_dependencies)
-        facets.update(_dependency_facets(manifest_dependencies))
+        dependency_facets = _dependency_facets(manifest_dependencies)
+        facets.update(dependency_facets)
+        if "mobile-app" in dependency_facets:
+            mobile_roots.add(path.parent)
 
-    if has_web_source and "mobile-app" not in facets:
+    source_facets = _python_source_facets(
+        workspace, python_records, mobile_roots=mobile_roots, deadline=deadline
+    )
+    facets.update(source_facets - {"web-frontend"})
+    if "web-frontend" in source_facets or (has_web_source and "mobile-app" not in facets):
         facets.add("web-frontend")
     facets.add("software-project")
 
@@ -1318,6 +1360,239 @@ def _portable_tree_sha256(directory: Path, files: Sequence[PurePosixPath]) -> st
     return digest.hexdigest()
 
 
+def _mobile_source_root(path: PurePosixPath) -> PurePosixPath:
+    for index, part in enumerate(path.parts[:-1]):
+        if part.casefold() in {"android", "ios"}:
+            return PurePosixPath(*path.parts[:index]) if index else PurePosixPath(".")
+    return path.parent
+
+
+def _is_production_python_source(path: PurePosixPath) -> bool:
+    if path.suffix.casefold() != ".py":
+        return False
+    parts = {part.casefold() for part in path.parts[:-1]}
+    name = path.name.casefold()
+    return not (
+        parts & _PYTHON_EVIDENCE_EXCLUDED_PARTS
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name in {"conftest.py", "setup.py"}
+    )
+
+
+def _python_source_facets(
+    workspace: WorkspaceRecord,
+    records: Sequence[IndexedFileRecord],
+    *,
+    mobile_roots: set[PurePosixPath],
+    deadline: float | None,
+) -> set[str]:
+    """Use only bounded, current production source as optional stack evidence."""
+    facets: set[str] = set()
+    embedded_css = False
+    embedded_js = False
+    embedded_html = False
+    files_read = 0
+    bytes_budget = _MAX_PYTHON_EVIDENCE_TOTAL_BYTES
+    for record in records:
+        _require_resolution_deadline(deadline)
+        if files_read >= _MAX_PYTHON_EVIDENCE_FILES:
+            break
+        if record.size_bytes > _MAX_PYTHON_EVIDENCE_FILE_BYTES or record.size_bytes > bytes_budget:
+            continue
+        files_read += 1
+        bytes_budget -= record.size_bytes
+        try:
+            payload = _read_indexed_manifest(
+                workspace, record, deadline=deadline, max_bytes=record.size_bytes
+            )
+        except SkillResolutionError:
+            # Source signals are optional. A changed/unreadable file cannot supply evidence,
+            # but it must not block existing manifest-based skill delivery.
+            _require_resolution_deadline(deadline)
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(payload.decode("utf-8"), filename=record.relative_path)
+        except (SyntaxError, UnicodeDecodeError, RecursionError):
+            continue
+        try:
+            source_facets, css, js, html = _python_tree_signals(tree)
+        except RecursionError:
+            continue
+        facets.update(source_facets)
+        path = PurePosixPath(record.relative_path)
+        if not any(path.is_relative_to(root) for root in mobile_roots):
+            embedded_css |= css
+            embedded_js |= js
+            embedded_html |= html
+    if embedded_html or (embedded_css and embedded_js):
+        facets.add("web-frontend")
+    return facets
+
+
+def _python_scope_nodes(
+    scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+) -> tuple[ast.AST, ...]:
+    """Walk one lexical scope, leaving nested scopes for separate binding analysis."""
+    nodes: list[ast.AST] = []
+    pending: list[ast.AST] = list(reversed(scope.body))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.If) and (
+            (isinstance(node.test, ast.Constant) and node.test.value is False)
+            or (isinstance(node.test, ast.Name) and node.test.id == "TYPE_CHECKING")
+            or (isinstance(node.test, ast.Attribute) and node.test.attr == "TYPE_CHECKING")
+        ):
+            pending.extend(reversed(node.orelse))
+            continue
+        nodes.append(node)
+        if isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.AsyncFunctionDef,
+                ast.ClassDef,
+                ast.Lambda,
+                ast.ListComp,
+                ast.SetComp,
+                ast.DictComp,
+                ast.GeneratorExp,
+            ),
+        ):
+            continue
+        pending.extend(reversed(list(ast.iter_child_nodes(node))))
+    return tuple(nodes)
+
+
+def _python_scope_facets(
+    scope: ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    inherited: Mapping[str, str],
+) -> set[str]:
+    nodes = _python_scope_nodes(scope)
+    imports: dict[str, str] = {}
+    shadowed: set[str] = set()
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        arguments = scope.args
+        shadowed.update(
+            argument.arg
+            for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+        )
+        shadowed.update(
+            argument.arg for argument in (arguments.vararg, arguments.kwarg) if argument
+        )
+    for node in nodes:
+        aliases: Iterable[tuple[str, str]]
+        if isinstance(node, ast.Import):
+            aliases = (
+                (
+                    alias.asname or alias.name.split(".", 1)[0],
+                    alias.name if alias.asname else alias.name.split(".", 1)[0],
+                )
+                for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            aliases = (
+                (alias.asname or alias.name, f"{node.module}.{alias.name}")
+                for alias in node.names
+                if alias.name != "*" and node.level == 0 and node.module is not None
+            )
+            if node.level or node.module is None or any(alias.name == "*" for alias in node.names):
+                shadowed.update(alias.asname or alias.name for alias in node.names)
+        else:
+            aliases = ()
+        for name, target in aliases:
+            if name in imports and imports[name] != target:
+                shadowed.add(name)
+            imports[name] = target
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            shadowed.add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            shadowed.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            shadowed.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            shadowed.update(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            shadowed.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            shadowed.add(node.rest)
+
+    bindings = {name: target for name, target in inherited.items() if name not in shadowed}
+    bindings.update({name: target for name, target in imports.items() if name not in shadowed})
+    facets: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Call):
+            called = _python_referenced_name(node.func, bindings)
+            if called == "sqlite3.connect":
+                facets.add("database-backed")
+            if called in _HTTP_SERVER_CLASSES:
+                facets.add("backend-service")
+            if called in _LOGGING_CONFIGURATION_CALLS:
+                facets.add("observability")
+        elif isinstance(node, ast.ClassDef):
+            bases = {_python_referenced_name(base, bindings) for base in node.bases}
+            if bases & _HTTP_SERVER_CLASSES:
+                facets.add("backend-service")
+            if "logging.Handler" in bases:
+                facets.add("observability")
+
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Class names are not lexical bindings inside methods.
+            parent = inherited if isinstance(scope, ast.ClassDef) else bindings
+            facets.update(_python_scope_facets(node, parent))
+        elif isinstance(node, ast.ClassDef):
+            facets.update(_python_scope_facets(node, bindings))
+    return facets
+
+
+def _python_tree_signals(tree: ast.Module) -> tuple[set[str], bool, bool, bool]:
+    facets = _python_scope_facets(tree, {})
+
+    css = False
+    js = False
+    html = False
+    for node in tree.body:
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            value = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+            value = node.value
+        else:
+            continue
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        body = value.value
+        for name in names:
+            upper = name.upper()
+            if upper.endswith("_HTML") and len(body) >= 256:
+                lower = body.casefold()
+                html |= ("<!doctype html" in lower or "<html" in lower) and "<body" in lower
+            elif upper.endswith("_CSS") and len(body) >= 512:
+                css |= body.count("{") >= 3 and body.count("}") >= 3 and ":" in body
+            elif upper.endswith("_JS") and len(body) >= 512:
+                js |= "document." in body or "window." in body
+    return facets, css, js, html
+
+
+def _python_referenced_name(node: ast.expr, bindings: Mapping[str, str]) -> str | None:
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    bound = bindings.get(current.id)
+    if bound is None:
+        return None
+    return ".".join((bound, *reversed(parts)))
+
+
 def _path_facets(path: PurePosixPath) -> set[str]:
     normalized = path.as_posix().casefold()
     name = path.name.casefold()
@@ -1862,6 +2137,7 @@ def _read_indexed_manifest(
     record: IndexedFileRecord,
     *,
     deadline: float | None = None,
+    max_bytes: int | None = None,
 ) -> bytes:
     _require_resolution_deadline(deadline)
     path = workspace.workspace_root / Path(*PurePosixPath(record.relative_path).parts)
@@ -1875,14 +2151,25 @@ def _read_indexed_manifest(
         raise SkillResolutionError(
             f"indexed manifest is no longer a regular file: {record.relative_path}"
         )
+    if max_bytes is not None and path_stat.st_size > max_bytes:
+        raise SkillResolutionError(f"indexed file exceeds evidence limit: {record.relative_path}")
     try:
         payload_parts: list[bytes] = []
+        bytes_read = 0
         with path.open("rb") as handle:
             while True:
                 _require_resolution_deadline(deadline)
-                chunk = handle.read(64 * 1024)
+                read_size = 64 * 1024
+                if max_bytes is not None:
+                    read_size = min(read_size, max_bytes + 1 - bytes_read)
+                chunk = handle.read(read_size)
                 if not chunk:
                     break
+                bytes_read += len(chunk)
+                if max_bytes is not None and bytes_read > max_bytes:
+                    raise SkillResolutionError(
+                        f"indexed file exceeds evidence limit: {record.relative_path}"
+                    )
                 payload_parts.append(chunk)
         payload = b"".join(payload_parts)
     except OSError as exc:
