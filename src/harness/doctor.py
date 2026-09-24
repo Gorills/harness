@@ -994,6 +994,13 @@ def _inspect_projects_and_workspaces(
                 else:
                     codex_projects_bad += 1
                     issue = codex_project.preflight_error or codex_project.state.value
+                    if codex_project.root_agents_state not in (
+                        None,
+                        HostRegistrationState.CURRENT,
+                    ):
+                        issue += (
+                            f"; root AGENTS.override.md: {codex_project.root_agents_state.value}"
+                        )
                     codex_project_checks.append(
                         _check(
                             f"Codex project MCP config {workspace.workspace_id}",

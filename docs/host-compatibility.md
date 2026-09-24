@@ -83,11 +83,22 @@ ownership state; uninstall removes only marker-owned config. An HTTP initializat
 explicit root fails before publishing a usable tool session. Wire tests prove Cursor → Codex Task/Knowledge
 continuity.
 
+Codex install and scan also write a short root `AGENTS.override.md`. Codex gives this file
+precedence over a same-directory `AGENTS.md`; the generated instruction calls `project_status`
+first, then directs Codex to read and follow the user's root `AGENTS.md`. A separate
+`.codex/.harness-agents-owner.json` marker and an exact Git-local exclude block make updates and
+cleanup ownership-aware. Generated files are ignored in Normal and Hidden, including linked
+worktrees. Existing user or tracked `AGENTS.md` is untouched. An existing user override with the
+exact bootstrap and post-status read instruction is accepted without mutation; one without them blocks registration. Manually
+adopted production configs receive an override; the tracked source-checkout overlay is left alone.
+Hidden text is added in Hidden mode ([ADR-0073](decisions/0073-codex-root-agents-bootstrap.md)).
+
 Codex and Cursor share one `.agents/skills` projection. Cursor leftover cleanup still lists
 `.claude/skills` as a visible compatibility root; Claude Code is not an active host
 ([ADR-0039](decisions/0039-retire-claude-code-host.md)). Hidden uses exact `developer_instructions` in the trusted marker-owned
-project config and never replaces existing `AGENTS.md`; returning to Normal removes only that exact
-owned key. This is hygiene-effective policy, not host SCM-write enforcement. Installed-wheel cross-interpreter upgrade continuity is automated;
+project config and adds Hidden text to a Harness-owned root `AGENTS.override.md`. Returning
+to Normal removes the Hidden text from both owned surfaces; user files remain unchanged. This is
+hygiene-effective policy, not host SCM-write enforcement. Installed-wheel cross-interpreter upgrade continuity is automated;
 proprietary CLI/IDE/desktop acceptance remains open.
 
 `scripts/accept_codex.py` is the separate opt-in CLI model acceptance runner. Its no-argument mode
@@ -127,10 +138,8 @@ project action; substantial tracked work starts or resumes a Task before further
 Code and documentation discovery uses native repository tools. Compact
 `project_status.index` remains a snapshot (`indexed_file_count` and last-known
 reconcile provenance), not a live freshness proof. Only tool discovery needed to locate and call Harness is
-allowed before status. Harness does
-not generate or merge root `AGENTS.md`:
-that file is user-owned, and claiming it would be unsafe across existing instructions and linked
-worktrees. MCP server instructions carry the same deferred-tool bootstrap in their first 512
+allowed before status. Harness generates a root `AGENTS.override.md` for production Codex
+registrations and directs Codex to read any root `AGENTS.md` after status. MCP server instructions carry the same deferred-tool bootstrap in their first 512
 characters as a second supported delivery path after server discovery.
 
 ### Cursor
@@ -217,7 +226,7 @@ Hidden mode is stricter than ordinary project instructions. Prompt/rule loading 
 | Host/profile | Project/local rule or settings surface | SCM-write enforcement evidence | Attribution evidence | Hidden status before acceptance |
 | --- | --- | --- | --- | --- |
 | Claude Code local CLI/IDE | leftover Harness-owned `.claude/rules/harness-hidden.md` is removed when applying supported Hidden; do not write `CLAUDE.local.md` | Not a supported Hidden profile | leftover only | Leftover cleanup only; Claude Code is not a supported Hidden profile ([ADR-0039](decisions/0039-retire-claude-code-host.md)) |
-| Codex local CLI/IDE | Trusted project `.codex/config.toml` `developer_instructions`; Harness leaves `AGENTS.md` unchanged | Safe project-local hard SCM denial is not established by docs reviewed here | No host-injected attribution contract established here | Hygiene-effective Hidden (ADR-0028/0030): exact owned developer instructions + git-local ignore; not host-enforced SCM denial |
+| Codex local CLI/IDE | Trusted project `.codex/config.toml` `developer_instructions` and owned root `AGENTS.override.md`; Harness leaves user `AGENTS.md` unchanged | Safe project-local hard SCM denial is not established by docs reviewed here | No host-injected attribution contract established here | Hygiene-effective Hidden (ADR-0028/0030/0073): exact owned instructions + git-local ignore; not host-enforced SCM denial |
 | Cursor IDE/CLI | `.cursor/rules/harness-hidden.mdc` (`alwaysApply: true`) plus Git `info/exclude` | Safe project-local hard SCM denial is not established by docs reviewed here | Cursor changelog documents per-user/admin attribution control | Hygiene-effective Hidden (ADR-0028): instructions + git-local ignore; not host-enforced SCM denial |
 | Cursor Cloud/background | Cloud profile is separate from local project execution | Local project settings cannot be assumed to control server-side branch/commit/PR behavior | Official docs reviewed do not establish a complete cloud suppression contract; Cursor staff support has separately reported cloud `Co-authored-by: Cursor` attribution as independent of the local setting | Unsupported until current vendor behavior and acceptance prove suppression |
 | Antigravity IDE | `.agents/rules/`; project-scoped settings/permissions are documented | Official Deny > Ask > Allow permission engine and project settings are candidate controls | No automatic durable attribution behavior established by docs reviewed here | Candidate; real-host acceptance required |
