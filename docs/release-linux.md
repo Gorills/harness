@@ -37,12 +37,16 @@ Cursor's current MCP documentation requires restarting Cursor after changing `mc
 
 `harness scan` reconciles all current supported host profiles together. When Cursor host integration is active it also creates/updates the Workspace `.cursor/mcp.json` override carrying the canonical absolute Workspace root in `HARNESS_WORKSPACE_ROOT` and enable/verifies that project MCP. Codex and Cursor therefore share one generated `.agents/skills` projection. `harness skills list` shows the canonical skill registry without changing projects.
 
-When Codex intent is active, scan creates/updates only the ignored marker-owned project
+When Codex intent is active, scan creates/updates the ignored marker-owned project
 `.codex/config.toml`, with the authenticated daemon Streamable HTTP URL and exact absolute
-`X-Harness-Workspace-Root`. Harness never writes project trust or
+`X-Harness-Workspace-Root`. It also creates an owned root `AGENTS.override.md`; the file and its
+ownership marker are excluded through Git `info/exclude` in Normal and Hidden. Codex reads this
+override first, then its instruction directs Codex to read any root `AGENTS.md` after status.
+Existing user or tracked `AGENTS.md` remains untouched. An existing override without the exact
+bootstrap blocks registration. Harness never writes project trust or
 `~/.codex/config.toml`. Restart Codex and verify from the trusted Workspace with
-`codex mcp get harness --json`. For Hidden Projects the same marker-owned config carries exact
-`developer_instructions`; install and transitions preserve user `AGENTS.md`. Doctor reports that
+`codex mcp get harness --json`. For Hidden Projects the marker-owned config and root file carry
+exact Hidden instructions when Harness owns them. Doctor reports that
 this is hygiene-effective policy and does not claim Codex host-blocks Git or pull requests.
 
 ## Upgrade or reinstall

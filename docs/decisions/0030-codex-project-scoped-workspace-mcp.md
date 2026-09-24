@@ -1,5 +1,8 @@
 # ADR-0030: Codex Workspace identity is explicit project-scoped MCP state
 
+> **Amended by ADR-0073:** Harness now projects an owned root `AGENTS.override.md`;
+> existing user and tracked files remain untouched and generated files use Git-local excludes.
+
 > **Amended by ADR-0037:** Codex now uses authenticated daemon-owned Streamable HTTP. The stdio
 > launch details below remain historical context and migration input, not current runtime behavior.
 >
