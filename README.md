@@ -30,8 +30,8 @@ scripts\dev.cmd connect-codex
 scripts\dev.cmd harness dashboard
 ```
 
-The wrapper downloads a pinned uv and Python 3.13 into the ignored checkout overlay if needed.
-The daemon, database and skill registry also stay under `.harness`; a global Harness installation
+The wrapper downloads a pinned uv and Python 3.13 into an ignored per-user checkout overlay if needed.
+The daemon, database and skill registry also stay under `.harness-windows-<SID>`; a global Harness installation
 is not required. The dashboard runs on loopback. `connect-codex` writes an ignored project-local
 Codex MCP config for this checkout. Fully restart Codex and open a new conversation after that
 command; Codex loads project configuration only for a trusted project. Use

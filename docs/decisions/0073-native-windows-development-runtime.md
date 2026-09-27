@@ -15,7 +15,9 @@ change POSIX defaults.
 ## Decision
 
 - `scripts/dev.cmd` invokes `scripts/dev.ps1`, pins uv 0.12.5 and Python 3.13 under the ignored
-  checkout overlay, and sets isolated state, runtime, skills and temporary paths under `.harness`.
+  checkout overlay, and sets isolated state, runtime, skills and temporary paths under
+  `.harness-windows-<SID>`. The per-user environment avoids sharing sandbox-owned ACLs with the
+  interactive Windows account.
   The wrapper does not install Harness globally.
 - Windows defaults use `%LOCALAPPDATA%` for durable state when no XDG override is supplied, and a
   current-user temporary directory for runtime data. The checkout wrapper overrides both paths.

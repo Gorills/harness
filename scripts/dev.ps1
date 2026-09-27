@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$overlay = Join-Path $repoRoot '.harness'
+$currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$overlay = Join-Path $repoRoot ".harness-windows-$currentSid"
 $toolDirectory = Join-Path $overlay 'tools'
 $uv = Join-Path $toolDirectory 'uv.exe'
 
@@ -13,6 +14,7 @@ $env:HARNESS_SKILL_REGISTRY = Join-Path $overlay 'skills'
 $env:HARNESS_DEV_SKILL_PROFILES = 'codex,cursor'
 $env:UV_CACHE_DIR = Join-Path $overlay 'uv-cache'
 $env:UV_PYTHON_INSTALL_DIR = Join-Path $overlay 'python'
+$env:UV_PROJECT_ENVIRONMENT = Join-Path $overlay 'venv'
 $env:TEMP = Join-Path $overlay 'tmp'
 $env:TMP = $env:TEMP
 New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
@@ -31,7 +33,8 @@ Usage:
   scripts\dev.cmd <command> [args...]
 
 The wrapper uses uv 0.12.5 and Python 3.13 from this checkout. It keeps
-the database, IPC endpoint, skills, and uv cache under .harness. It does not
+the database, IPC endpoint, skills, and uv cache under .harness-windows-<SID>.
+Each Windows account gets a separate runtime. This wrapper does not
 install or uninstall Harness from the user's global host configuration.
 '@ | Write-Output
 }
@@ -44,12 +47,18 @@ function Ensure-Uv {
         }
     }
     New-Item -ItemType Directory -Force -Path $toolDirectory | Out-Null
-    $installer = Join-Path $toolDirectory 'uv-install.ps1'
-    Invoke-WebRequest -Uri 'https://astral.sh/uv/0.12.5/install.ps1' -OutFile $installer
-    $env:UV_INSTALL_DIR = $toolDirectory
-    $env:UV_NO_MODIFY_PATH = '1'
-    & $installer
-    if ($LASTEXITCODE -ne 0) { throw "uv installer exited with $LASTEXITCODE" }
+    $archive = Join-Path $toolDirectory 'uv-0.12.5.zip'
+    $url = 'https://releases.astral.sh/github/uv/releases/download/0.12.5/uv-x86_64-pc-windows-msvc.zip'
+    Invoke-WebRequest -Uri $url -OutFile $archive
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
+    try {
+        $entry = $zip.Entries | Where-Object { $_.Name -eq 'uv.exe' } | Select-Object -First 1
+        if ($null -eq $entry) { throw 'uv archive did not contain uv.exe' }
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $uv, $true)
+    } finally {
+        $zip.Dispose()
+    }
     $version = & $uv --version
     if ($LASTEXITCODE -ne 0 -or $version -notmatch '^uv 0\.12\.5(?:\s|$)') {
         throw 'uv 0.12.5 was not installed successfully'
@@ -64,7 +73,7 @@ function Sync-Project {
 }
 
 function Secure-Overlay {
-    $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
+    $python = Join-Path $env:UV_PROJECT_ENVIRONMENT 'Scripts\python.exe'
     $code = @'
 from pathlib import Path
 import sys
@@ -83,7 +92,7 @@ else:
 }
 
 function Stop-IsolatedDaemon {
-    $python = Join-Path $repoRoot '.venv\Scripts\python.exe'
+    $python = Join-Path $env:UV_PROJECT_ENVIRONMENT 'Scripts\python.exe'
     $code = @'
 from harness.ipc import IpcTransportError, request_shutdown
 from harness.runtime_paths import default_runtime_paths
@@ -114,6 +123,7 @@ switch ($args[0]) {
             "HARNESS_SKILL_REGISTRY=$env:HARNESS_SKILL_REGISTRY"
             "UV_CACHE_DIR=$env:UV_CACHE_DIR"
             "UV_PYTHON_INSTALL_DIR=$env:UV_PYTHON_INSTALL_DIR"
+            "UV_PROJECT_ENVIRONMENT=$env:UV_PROJECT_ENVIRONMENT"
         ) | Write-Output
         exit 0
     }
@@ -126,7 +136,7 @@ if ($args[0] -eq 'sync') {
     Secure-Overlay
     exit 0
 }
-if (-not (Test-Path -LiteralPath (Join-Path $repoRoot '.venv\Scripts\python.exe'))) {
+if (-not (Test-Path -LiteralPath (Join-Path $env:UV_PROJECT_ENVIRONMENT 'Scripts\python.exe'))) {
     Sync-Project
 }
 Secure-Overlay

@@ -5,6 +5,8 @@
 On Windows, run the PowerShell-backed `scripts\dev.cmd` from Command Prompt or PowerShell.
 It bootstraps pinned uv 0.12.5 and Python 3.13 within this checkout. No Linux subsystem or
 global Harness installation is needed.
+Each Windows account uses an ignored `.harness-windows-<SID>` directory, including a separate
+virtual environment. Run the wrapper as the same Windows account that will use Codex.
 
 ```powershell
 scripts\dev.cmd sync
