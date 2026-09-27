@@ -1973,6 +1973,15 @@ def sync_builtin_skills(registry_root: Path) -> BuiltinSkillSyncResult:
 
 
 def _prepare_registry(root: Path) -> None:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, ensure_private_windows_directory
+
+        try:
+            ensure_private_windows_directory(root.parent)
+            ensure_private_windows_directory(root)
+        except WindowsFileSecurityError as exc:
+            raise BuiltinSkillError(str(exc)) from exc
+        return
     try:
         root.parent.mkdir(parents=True, exist_ok=True, mode=_BUILTIN_DIR_MODE)
         pm = root.parent.lstat()
@@ -2038,12 +2047,17 @@ def _write_manifest(path: Path, owned: dict[str, str]) -> None:
     try:
         fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
         temporary = Path(name)
-        os.fchmod(fd, _BUILTIN_FILE_MODE)
+        if os.name != "nt":
+            os.fchmod(fd, _BUILTIN_FILE_MODE)
         with os.fdopen(fd, "wb") as handle:
             fd = -1
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        if os.name == "nt":
+            from harness.windows_fs import secure_owned_windows_path
+
+            secure_owned_windows_path(temporary, directory=False)
         os.replace(temporary, path)
     except OSError as exc:
         if fd >= 0:

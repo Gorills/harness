@@ -7,7 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Any, cast
+from types import TracebackType
+from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -67,6 +68,27 @@ _PROJECT_RECALL_MAX_QUERY_BYTES = 256
 _PROJECT_RECALL_MAX_RESULTS = 5
 _HOST_PROFILE_MAX_BYTES = 64
 _HOST_PROFILE_MAX_ITEMS = 8
+
+
+class IpcPeer(Protocol):
+    def sendall(self, payload: bytes) -> None: ...
+
+    def recv(self, maximum: int) -> bytes: ...
+
+    def settimeout(self, timeout: float | None) -> None: ...
+
+    def gettimeout(self) -> float | None: ...
+
+    def close(self) -> None: ...
+
+    def __enter__(self) -> IpcPeer: ...
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None: ...
 
 
 class IpcError(RuntimeError):
@@ -740,7 +762,7 @@ def request_task_checkpoint(
     return _task_checkpoint_from_response(response, expected_request_id=request_id)
 
 
-def receive_request(peer: socket.socket) -> IpcRequest:
+def receive_request(peer: IpcPeer) -> IpcRequest:
     """Receive and validate exactly one bounded request frame."""
     payload = _decode_json(_receive_frame(peer))
     version = payload.get("version")
@@ -891,7 +913,7 @@ def receive_request(peer: socket.socket) -> IpcRequest:
     raise IpcProtocolError("unsupported IPC method")
 
 
-def send_status_response(peer: socket.socket, request_id: str, status: StatusResult) -> None:
+def send_status_response(peer: IpcPeer, request_id: str, status: StatusResult) -> None:
     """Send the exact success contract for the global status path."""
     peer.sendall(
         _encode_json(
@@ -910,7 +932,7 @@ def send_status_response(peer: socket.socket, request_id: str, status: StatusRes
 
 
 def send_runtime_diagnostics_response(
-    peer: socket.socket, request_id: str, diagnostics: RuntimeDiagnosticsResult
+    peer: IpcPeer, request_id: str, diagnostics: RuntimeDiagnosticsResult
 ) -> None:
     """Send bounded read-only daemon runtime diagnostics."""
     peer.sendall(
@@ -934,7 +956,7 @@ def send_runtime_diagnostics_response(
 
 
 def send_dashboard_url_response(
-    peer: socket.socket, request_id: str, dashboard: DashboardUrlResult
+    peer: IpcPeer, request_id: str, dashboard: DashboardUrlResult
 ) -> None:
     """Send the exact success contract for daemon-owned dashboard discovery."""
     peer.sendall(
@@ -949,7 +971,7 @@ def send_dashboard_url_response(
     )
 
 
-def send_shutdown_response(peer: socket.socket, request_id: str) -> None:
+def send_shutdown_response(peer: IpcPeer, request_id: str) -> None:
     """Acknowledge a clean local daemon shutdown request."""
     peer.sendall(
         _encode_json(
@@ -964,7 +986,7 @@ def send_shutdown_response(peer: socket.socket, request_id: str) -> None:
 
 
 def send_workspace_status_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     status: WorkspaceStatusResult,
 ) -> None:
@@ -995,7 +1017,7 @@ def send_workspace_status_response(
 
 
 def send_workspace_task_status_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     status: WorkspaceTaskStatusResult,
 ) -> None:
@@ -1053,7 +1075,7 @@ def send_workspace_task_status_response(
 
 
 def send_workspace_scan_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: WorkspaceScanResult,
 ) -> None:
@@ -1083,7 +1105,7 @@ def send_workspace_scan_response(
 
 
 def send_visibility_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: VisibilityResult,
 ) -> None:
@@ -1112,7 +1134,7 @@ def send_visibility_response(
 
 
 def send_workspace_skills_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: WorkspaceSkillsResult,
 ) -> None:
@@ -1138,7 +1160,7 @@ def send_workspace_skills_response(
 
 
 def send_skill_cleanup_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: SkillCleanupResult,
 ) -> None:
@@ -1163,7 +1185,7 @@ def send_skill_cleanup_response(
 
 
 def send_project_recall_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: ProjectRecallResult,
 ) -> None:
@@ -1196,7 +1218,7 @@ def send_project_recall_response(
 
 
 def send_project_context_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: ProjectContextResult,
 ) -> None:
@@ -1222,7 +1244,7 @@ def send_project_context_response(
 
 
 def send_workspace_index_entry_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: WorkspaceIndexEntryResult,
 ) -> None:
@@ -1248,7 +1270,7 @@ def send_workspace_index_entry_response(
 
 
 def send_task_start_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: TaskStartResult,
 ) -> None:
@@ -1275,7 +1297,7 @@ def send_task_start_response(
 
 
 def send_task_checkpoint_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     request_id: str,
     result: TaskCheckpointResult,
 ) -> None:
@@ -1305,7 +1327,7 @@ def send_task_checkpoint_response(
 
 
 def send_error_response(
-    peer: socket.socket,
+    peer: IpcPeer,
     *,
     request_id: str | None,
     code: str,
@@ -1330,6 +1352,22 @@ def _request_response(
     *,
     timeout: float,
 ) -> dict[str, Any]:
+    if os.name == "nt":
+        from multiprocessing.context import AuthenticationError
+
+        from harness.windows_fs import WindowsFileSecurityError
+        from harness.windows_pipe import connect_pipe
+
+        payload = _encode_json(request)
+        try:
+            with connect_pipe(socket_path, timeout=timeout) as client:
+                client.settimeout(timeout)
+                client.sendall(payload)
+                return _decode_json(_receive_frame(client))
+        except TimeoutError as exc:
+            raise IpcTransportError("local IPC request timed out") from exc
+        except (OSError, WindowsFileSecurityError, AuthenticationError) as exc:
+            raise IpcTransportError(f"local IPC transport failed: {exc}") from exc
     _require_posix_transport()
     payload = _encode_json(request)
     try:
@@ -1903,7 +1941,7 @@ def _validate_hint_fields(
         raise IpcProtocolError("workspace hint uses an unsupported match mode")
 
 
-def _receive_frame(peer: socket.socket) -> bytes:
+def _receive_frame(peer: IpcPeer) -> bytes:
     data = bytearray()
     original_timeout = peer.gettimeout()
     deadline = (

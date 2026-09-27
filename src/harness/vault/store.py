@@ -41,15 +41,44 @@ def private_directory(path: Path) -> None:
     if not path.is_absolute():
         raise VaultError("unsafe_path")
     for ancestor in (path, *path.parents):
-        if ancestor.is_symlink():
+        if ancestor.is_symlink() or (os.name == "nt" and ancestor.is_junction()):
             raise VaultError("unsafe_path")
+    created = not path.exists()
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "nt":
+        from harness.windows_fs import (
+            WindowsFileSecurityError,
+            require_private_windows_path,
+            secure_owned_windows_path,
+        )
+
+        try:
+            if created:
+                secure_owned_windows_path(path, directory=True)
+            require_private_windows_path(path, directory=True)
+        except WindowsFileSecurityError:
+            raise VaultError("unsafe_path") from None
+        return
     info = path.stat()
     if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise VaultError("unsafe_path")
 
 
 def read_private(path: Path) -> bytes:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(path, directory=False)
+        except WindowsFileSecurityError:
+            raise VaultError("unsafe_path") from None
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size > MAX_FILE_BYTES:
+                raise VaultError("unsafe_path")
+            value = stream.read(MAX_FILE_BYTES + 1)
+        if len(value) > MAX_FILE_BYTES:
+            raise VaultError("too_large")
+        return value
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -67,6 +96,8 @@ def read_private(path: Path) -> bytes:
 
 
 def _sync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
     descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(descriptor)
@@ -78,6 +109,10 @@ def _write(path: Path, value: bytes, *, replace: bool) -> None:
     descriptor, name = tempfile.mkstemp(prefix=".vault-", dir=path.parent)
     temporary = Path(name)
     try:
+        if os.name == "nt":
+            from harness.windows_fs import secure_owned_windows_path
+
+            secure_owned_windows_path(temporary, directory=False)
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(value)
             stream.flush()
@@ -85,7 +120,11 @@ def _write(path: Path, value: bytes, *, replace: bool) -> None:
         if replace:
             os.replace(temporary, path)
         else:
-            os.link(temporary, path, follow_symlinks=False)
+            os.link(temporary, path) if os.name == "nt" else os.link(
+                temporary, path, follow_symlinks=False
+            )
+        if os.name == "nt":
+            secure_owned_windows_path(path, directory=False)
         _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)

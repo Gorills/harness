@@ -442,6 +442,14 @@ def validate_skill_registry_trust(root: Path) -> None:
     or other write bits. Callers must not chmod an unsafe existing root into
     compliance.
     """
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(root, directory=True)
+        except WindowsFileSecurityError as exc:
+            raise SkillRegistryError(str(exc)) from exc
+        return
     try:
         metadata = root.lstat()
     except FileNotFoundError:

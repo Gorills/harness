@@ -303,6 +303,11 @@ Use a platform-specific local IPC transport owned by the daemon subsystem:
 - Unix/macOS: Unix domain socket.
 - Windows: named pipe or another equivalent local-user IPC mechanism if proven simpler and equally secure.
 
+The native Windows checkout route now uses a named pipe with a private HMAC key and Windows owner/DACL
+checks. The isolated wrapper and project-local Codex connection are specified in
+[ADR-0073](docs/decisions/0073-native-windows-development-runtime.md). Global Windows host
+installation remains acceptance-gated.
+
 IPC requirements:
 
 - accessible only to the current OS user;

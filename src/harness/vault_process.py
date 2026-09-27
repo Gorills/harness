@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import select
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from threading import RLock
 from urllib.parse import urlsplit
@@ -45,14 +48,24 @@ class VaultProcess:
             )
             self._process = process
             assert process.stdout is not None
-            readable, _, _ = select.select([process.stdout], [], [], 5)
-            origin = process.stdout.readline(128).decode("ascii").strip() if readable else ""
+            if os.name == "nt":
+                # select() accepts sockets only on Windows, not subprocess pipes.
+                with ThreadPoolExecutor(max_workers=1) as reader:
+                    result = reader.submit(process.stdout.readline, 128)
+                    try:
+                        origin = result.result(timeout=5).decode("ascii").strip()
+                    except FutureTimeoutError:
+                        self._stop()
+                        origin = ""
+            else:
+                readable, _, _ = select.select([process.stdout], [], [], 5)
+                origin = process.stdout.readline(128).decode("ascii").strip() if readable else ""
             parsed = urlsplit(origin)
             if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or not parsed.port:
                 self._stop()
                 raise RuntimeError("vault_unavailable")
             self._origin = origin
-            return origin
+            return str(origin)
 
     def close(self) -> None:
         with self._lock:

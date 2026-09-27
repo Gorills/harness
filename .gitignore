@@ -21,3 +21,4 @@ Thumbs.db
 
 # Local Harness runtime artifacts
 .harness/
+.harness-windows-*/

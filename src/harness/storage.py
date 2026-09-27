@@ -327,6 +327,13 @@ def _require_wal_file_header(path: Path) -> None:
 
 
 def _require_read_only_database_file(path: Path) -> None:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(path, directory=False)
+        except WindowsFileSecurityError as exc:
+            raise DatabaseError("SQLite database is not a private regular file") from exc
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
@@ -347,6 +354,13 @@ def _live_wal_sidecars_are_safe(path: Path) -> bool:
         raise DatabaseError("SQLite WAL sidecar could not be inspected") from exc
     if stat.S_ISLNK(wal_metadata.st_mode) or not stat.S_ISREG(wal_metadata.st_mode):
         raise DatabaseError("SQLite WAL sidecar must be a real regular file")
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(wal, directory=False)
+        except WindowsFileSecurityError as exc:
+            raise DatabaseError("SQLite WAL sidecar is unsafe for read-only inspection") from exc
 
     shm = path.with_name(f"{path.name}-shm")
     try:
@@ -358,10 +372,17 @@ def _live_wal_sidecars_are_safe(path: Path) -> bool:
     if (
         stat.S_ISLNK(shm_metadata.st_mode)
         or not stat.S_ISREG(shm_metadata.st_mode)
-        or shm_metadata.st_uid != os.geteuid()
+        or (os.name != "nt" and shm_metadata.st_uid != os.geteuid())
         or shm_metadata.st_nlink != 1
     ):
         raise DatabaseError("SQLite SHM sidecar is unsafe for read-only WAL inspection")
+    if os.name == "nt":
+        try:
+            require_private_windows_path(shm, directory=False)
+        except WindowsFileSecurityError as exc:
+            raise DatabaseError(
+                "SQLite SHM sidecar is unsafe for read-only WAL inspection"
+            ) from exc
     return True
 
 

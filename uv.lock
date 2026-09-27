@@ -233,6 +233,7 @@ dependencies = [
     { name = "ast-grep-py" },
     { name = "mcp" },
     { name = "pykeepass" },
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "secretstorage", marker = "sys_platform == 'linux'" },
 ]
 
@@ -249,6 +250,7 @@ requires-dist = [
     { name = "ast-grep-py", specifier = "==0.45.1" },
     { name = "mcp", specifier = "==2.0.0" },
     { name = "pykeepass", specifier = "==4.2.0" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = "==312" },
     { name = "secretstorage", marker = "sys_platform == 'linux'", specifier = "==3.4.0" },
 ]
 

@@ -38,6 +38,7 @@ from harness.index import (
 from harness.ipc import (
     DashboardUrlResult,
     IpcMessageTooLargeError,
+    IpcPeer,
     IpcProtocolError,
     ProjectContextResult,
     ProjectRecallResult,
@@ -142,6 +143,7 @@ from harness.watcher import (
     DEFAULT_WATCH_TOKEN_DEADLINE_SECONDS,
     run_workspace_watcher,
 )
+from harness.windows_pipe import WindowsPipeListener, WindowsPipeSocket
 from harness.workspace_resolution import (
     WorkspaceCandidate,
     WorkspaceHint,
@@ -674,19 +676,21 @@ def serve_daemon(
     from harness.mcp_http_server import MCPHTTPServerError, MCPHTTPServerManager
     from harness.runtime_paths import dashboard_listen_port, mcp_http_listen_port
 
-    _require_posix_transport()
+    _require_supported_transport()
     _require_daemon_runtime_identity()
     _prepare_socket_parent(socket_path.parent)
     socket_lock_fd = _acquire_daemon_lock(socket_path)
 
     database_lock_fd: int | None = None
-    server: socket.socket | None = None
+    server: socket.socket | WindowsPipeListener | None = None
     socket_identity: tuple[int, int] | None = None
     scan_lock = Lock()
     dashboard_lock = Lock()
     client_slots = BoundedSemaphore(_MAX_CLIENT_WORKERS)
     client_workers: ThreadPoolExecutor | None = None
     client_failures: SimpleQueue[BaseException] = SimpleQueue()
+    windows_accepts: SimpleQueue[WindowsPipeSocket | BaseException] = SimpleQueue()
+    windows_accept_pending = False
     watcher_stop = Event()
     watcher_thread: Thread | None = None
     watcher_failures: SimpleQueue[Exception] = SimpleQueue()
@@ -708,13 +712,16 @@ def serve_daemon(
         database_lock_fd = _acquire_database_lock(database_path)
         initialize_database(database_path)
 
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(str(socket_path))
-        os.chmod(socket_path, 0o600)
-        socket_stat = socket_path.lstat()
-        socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
-        server.listen(_MAX_CLIENT_WORKERS)
-        server.settimeout(_ACCEPT_POLL_SECONDS)
+        if os.name == "nt":
+            server = WindowsPipeListener(socket_path)
+        else:
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(socket_path))
+            os.chmod(socket_path, 0o600)
+            socket_stat = socket_path.lstat()
+            socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
+            server.listen(_MAX_CLIENT_WORKERS)
+            server.settimeout(_ACCEPT_POLL_SECONDS)
         client_workers = ThreadPoolExecutor(
             max_workers=_MAX_CLIENT_WORKERS,
             thread_name_prefix="harness-ipc-client",
@@ -761,16 +768,41 @@ def serve_daemon(
                 if watcher_failure is not None:
                     raise DaemonError("Workspace watcher stopped unexpectedly") from watcher_failure
                 raise DaemonError("Workspace watcher stopped unexpectedly")
-            if not client_slots.acquire(timeout=_ACCEPT_POLL_SECONDS):
-                continue
-            try:
-                client, _ = server.accept()
-            except TimeoutError:
-                client_slots.release()
-                continue
-            except BaseException:
-                client_slots.release()
-                raise
+            if os.name == "nt":
+                if not windows_accept_pending:
+                    if not client_slots.acquire(timeout=_ACCEPT_POLL_SECONDS):
+                        continue
+
+                    def accept_windows_client() -> None:
+                        try:
+                            assert isinstance(server, WindowsPipeListener)
+                            windows_accepts.put(server.accept())
+                        except BaseException as exc:
+                            windows_accepts.put(exc)
+
+                    Thread(target=accept_windows_client, daemon=True).start()
+                    windows_accept_pending = True
+                try:
+                    accepted = windows_accepts.get(timeout=_ACCEPT_POLL_SECONDS)
+                except Empty:
+                    continue
+                windows_accept_pending = False
+                if isinstance(accepted, BaseException):
+                    client_slots.release()
+                    raise accepted
+                client: IpcPeer = accepted
+            else:
+                if not client_slots.acquire(timeout=_ACCEPT_POLL_SECONDS):
+                    continue
+                try:
+                    assert isinstance(server, socket.socket)
+                    client, _ = server.accept()
+                except TimeoutError:
+                    client_slots.release()
+                    continue
+                except BaseException:
+                    client_slots.release()
+                    raise
             try:
                 client_workers.submit(
                     _serve_client_worker,
@@ -830,7 +862,7 @@ def serve_daemon(
 
 
 def _serve_client_worker(
-    client: socket.socket,
+    client: IpcPeer,
     database_path: Path,
     scan_lock: Lock,
     dashboard_lock: Lock,
@@ -843,6 +875,8 @@ def _serve_client_worker(
     try:
         with client:
             client.settimeout(_CLIENT_TIMEOUT_SECONDS)
+            if isinstance(client, WindowsPipeSocket):
+                client.authenticate_server()
             database = connect_database(database_path)
             try:
                 _serve_client(
@@ -857,8 +891,14 @@ def _serve_client_worker(
                 )
             finally:
                 database.close()
-    except OSError:
+    except (OSError, EOFError, TimeoutError):
         return
+    except Exception as exc:
+        from multiprocessing.context import AuthenticationError
+
+        if isinstance(exc, AuthenticationError):
+            return
+        failures.put(exc)
     except BaseException as exc:
         failures.put(exc)
     finally:
@@ -873,7 +913,7 @@ def _queue_failure(failures: SimpleQueue[BaseException]) -> BaseException | None
 
 
 def _serve_client(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     database_path: Path,
     scan_lock: Lock,
@@ -1022,7 +1062,7 @@ def _serve_client(
 
 
 def _serve_dashboard_url(
-    client: socket.socket,
+    client: IpcPeer,
     request_id: str,
     dashboard: DashboardServerManager,
     dashboard_lock: Lock,
@@ -1044,7 +1084,7 @@ def _serve_dashboard_url(
 
 
 def _serve_global_status(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
 ) -> None:
@@ -1062,7 +1102,7 @@ def _serve_global_status(
 
 
 def _serve_workspace_status(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1113,7 +1153,7 @@ def _serve_workspace_status(
 
 
 def _serve_workspace_task_status(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1172,7 +1212,7 @@ def _serve_workspace_task_status(
 
 
 def _serve_project_recall(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1226,7 +1266,7 @@ def _serve_project_recall(
 
 
 def _serve_project_context(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1281,7 +1321,7 @@ def _serve_project_context(
 
 
 def _serve_workspace_index_entry(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1349,7 +1389,7 @@ def _serve_workspace_index_entry(
 
 
 def _serve_task_start(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     request: TaskStartRequestData,
@@ -1433,7 +1473,7 @@ def _serve_task_start(
 
 
 def _serve_task_checkpoint(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     request: TaskCheckpointRequestData,
@@ -1517,7 +1557,7 @@ def _serve_task_checkpoint(
 
 
 def _serve_workspace_scan(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     path: Path,
@@ -1591,7 +1631,7 @@ def _serve_workspace_scan(
 
 
 def _serve_set_visibility(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     database_path: Path,
     request_id: str,
@@ -1684,7 +1724,7 @@ def _serve_set_visibility(
 
 
 def _serve_workspace_skills(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
@@ -1784,7 +1824,7 @@ def _serve_workspace_skills(
 
 
 def _serve_skill_cleanup(
-    client: socket.socket,
+    client: IpcPeer,
     database: sqlite3.Connection,
     request_id: str,
     profiles: tuple[str, ...],
@@ -1835,7 +1875,7 @@ def _serve_skill_cleanup(
 
 
 def _try_send_error(
-    client: socket.socket,
+    client: IpcPeer,
     *,
     code: str,
     message: str,
@@ -1900,6 +1940,14 @@ def _index_reconcile_provenance(
 
 
 def _prepare_socket_parent(parent: Path) -> None:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, ensure_private_windows_directory
+
+        try:
+            ensure_private_windows_directory(parent)
+        except WindowsFileSecurityError as exc:
+            raise InsecureSocketDirectoryError(str(exc)) from exc
+        return
     parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     parent_stat = parent.lstat()
     if (
@@ -1947,7 +1995,12 @@ def _acquire_daemon_lock(socket_path: Path) -> int:
 def _acquire_database_lock(database_path: Path) -> int:
     lock_path = _database_lock_path(database_path)
     try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            from harness.windows_fs import ensure_private_windows_directory
+
+            ensure_private_windows_directory(lock_path.parent)
+        else:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise InsecureDaemonLockError(
             f"daemon database lock parent could not be prepared: {lock_path.parent}"
@@ -1959,8 +2012,6 @@ def _acquire_database_lock(database_path: Path) -> int:
 
 
 def _acquire_lock_file(lock_path: Path, *, conflict_message: str) -> int:
-    import fcntl
-
     try:
         existing = lock_path.lstat()
     except FileNotFoundError:
@@ -1986,6 +2037,36 @@ def _acquire_lock_file(lock_path: Path, *, conflict_message: str) -> int:
     try:
         opened = os.fstat(lock_fd)
         current = lock_path.lstat()
+        if os.name == "nt":
+            import msvcrt
+
+            from harness.windows_fs import (
+                WindowsFileSecurityError,
+                require_private_windows_path,
+                secure_owned_windows_path,
+            )
+
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise InsecureDaemonLockError(f"daemon lock path changed: {lock_path}")
+            try:
+                if existing is None:
+                    secure_owned_windows_path(lock_path, directory=False)
+                else:
+                    require_private_windows_path(lock_path, directory=False)
+            except WindowsFileSecurityError as exc:
+                raise InsecureDaemonLockError(str(exc)) from exc
+            try:
+                os.lseek(lock_fd, 0, os.SEEK_SET)
+                msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+            except OSError as exc:
+                raise DaemonAlreadyRunningError(conflict_message) from exc
+            return lock_fd
+        import fcntl
+
         if (
             not stat.S_ISREG(opened.st_mode)
             or not stat.S_ISREG(current.st_mode)
@@ -2012,6 +2093,8 @@ def _acquire_lock_file(lock_path: Path, *, conflict_message: str) -> int:
 
 
 def _prepare_socket_path_for_bind(socket_path: Path) -> None:
+    if os.name == "nt":
+        return
     try:
         current = socket_path.lstat()
     except FileNotFoundError:
@@ -2061,6 +2144,8 @@ def _socket_endpoint_accepts_connections(socket_path: Path) -> bool:
 
 
 def _unlink_owned_socket(socket_path: Path, identity: tuple[int, int] | None) -> None:
+    if os.name == "nt":
+        return
     if identity is None:
         return
     try:
@@ -2071,8 +2156,8 @@ def _unlink_owned_socket(socket_path: Path, identity: tuple[int, int] | None) ->
         socket_path.unlink()
 
 
-def _require_posix_transport() -> None:
-    if os.name == "nt" or not hasattr(socket, "AF_UNIX"):
+def _require_supported_transport() -> None:
+    if os.name != "nt" and not hasattr(socket, "AF_UNIX"):
         raise UnsupportedIpcTransportError(
-            "the Windows local-user IPC transport is not implemented in this bounded slice"
+            "the local-user IPC transport is unavailable on this platform"
         )
