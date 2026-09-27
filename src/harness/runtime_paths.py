@@ -22,7 +22,7 @@ class InsecureRuntimeDirectoryError(RuntimePathError):
 
 @dataclass(frozen=True, slots=True)
 class RuntimePaths:
-    """Canonical per-user paths used by the installed Harness POSIX runtime."""
+    """Canonical per-user database and local IPC endpoint paths."""
 
     database: Path
     socket: Path
@@ -44,7 +44,23 @@ def default_runtime_paths(
     temp_directory: Path | None = None,
     effective_uid: int | None = None,
 ) -> RuntimePaths:
-    """Return deterministic POSIX state/database and local-IPC socket defaults."""
+    """Return deterministic state/database and local-IPC endpoint defaults."""
+    if os.name == "nt":
+        values = os.environ if environment is None else environment
+        local_app_data = _absolute_environment_path(values.get("LOCALAPPDATA"))
+        if local_app_data is None:
+            home_directory = _home_directory() if home is None else home
+            local_app_data = home_directory / "AppData" / "Local"
+        state_base = _absolute_environment_path(values.get("XDG_STATE_HOME"))
+        runtime_base = _absolute_environment_path(values.get("XDG_RUNTIME_DIR"))
+        return RuntimePaths(
+            database=(state_base or local_app_data / "Harness" / "state")
+            / "harness"
+            / "harness.db",
+            socket=(runtime_base or local_app_data / "Harness" / "runtime")
+            / "harness"
+            / "harness.pipe",
+        )
     _require_posix_runtime()
     values = os.environ if environment is None else environment
 
@@ -152,6 +168,14 @@ def ensure_private_state_directory(
     effective_uid: int | None = None,
 ) -> None:
     """Create/validate the canonical state directory as a real current-user-only directory."""
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, ensure_private_windows_directory
+
+        try:
+            ensure_private_windows_directory(directory)
+        except WindowsFileSecurityError as exc:
+            raise InsecureStateDirectoryError(str(exc)) from exc
+        return
     _require_posix_runtime()
     try:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -166,6 +190,16 @@ def require_private_state_directory(
     effective_uid: int | None = None,
 ) -> None:
     """Validate an existing canonical state directory without creating or changing it."""
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(directory, directory=True)
+        except FileNotFoundError as exc:
+            raise RuntimePathError("Harness state directory does not exist") from exc
+        except WindowsFileSecurityError as exc:
+            raise InsecureStateDirectoryError(str(exc)) from exc
+        return
     _require_posix_runtime()
     uid = _effective_uid(effective_uid)
     try:
@@ -190,7 +224,17 @@ def require_private_runtime_directory(
     *,
     effective_uid: int | None = None,
 ) -> None:
-    """Validate a canonical socket directory before a client trusts its Unix socket."""
+    """Validate a canonical IPC directory before a client trusts its endpoint."""
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(directory, directory=True)
+        except FileNotFoundError as exc:
+            raise RuntimePathError("Harness runtime directory does not exist") from exc
+        except WindowsFileSecurityError as exc:
+            raise InsecureRuntimeDirectoryError(str(exc)) from exc
+        return
     _require_posix_runtime()
     uid = _effective_uid(effective_uid)
     try:

@@ -3883,6 +3883,26 @@ def read_dashboard_access_token(database_path: Path) -> str | None:
 
 
 def _write_private_url_file(path: Path, url: str) -> None:
+    if os.name == "nt":
+        from harness.windows_fs import require_private_windows_path, secure_owned_windows_path
+
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.unlink(missing_ok=True)
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            secure_owned_windows_path(temporary, directory=False)
+            with os.fdopen(descriptor, "wb") as handle:
+                descriptor = -1
+                handle.write(f"{url}\n".encode("ascii"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            require_private_windows_path(path, directory=False)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+        return
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -3932,6 +3952,15 @@ def _write_private_url_file(path: Path, url: str) -> None:
 
 
 def _unlink_private_url_file(path: Path) -> None:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(path, directory=False)
+        except (FileNotFoundError, WindowsFileSecurityError):
+            return
+        path.unlink(missing_ok=True)
+        return
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -3945,6 +3974,21 @@ def _unlink_private_url_file(path: Path) -> None:
 
 
 def _read_private_ascii_line(path: Path) -> str | None:
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(path, directory=False)
+        except (FileNotFoundError, WindowsFileSecurityError):
+            return None
+        if path.stat().st_size > 128:
+            return None
+        try:
+            payload = path.read_bytes()
+            line, remainder = payload.split(b"\n", 1)
+            return line.decode("ascii") if not remainder else None
+        except (OSError, UnicodeDecodeError, ValueError):
+            return None
     try:
         info = path.lstat()
     except FileNotFoundError:

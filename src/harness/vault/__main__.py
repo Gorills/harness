@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import argparse
 import base64
-import fcntl
 import json
 import os
-import resource
 import secrets
-import select
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from threading import Event, Thread
 from time import monotonic
 from typing import ClassVar
 
@@ -280,12 +278,44 @@ def main() -> None:
     parser.add_argument("--parent-origin", required=True)
     args = parser.parse_args()
     # Import parsing cannot take down the daemon; bound this separate process.
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    if os.name != "nt":
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
     private_directory(args.root)
-    lock_fd = os.open(args.root / "vault.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    lock_path = args.root / "vault.lock"
+    if lock_path.is_symlink() or (os.name == "nt" and lock_path.is_junction()):
+        raise VaultError("unsafe_path")
+    new_lock = not lock_path.exists()
+    lock_fd = os.open(
+        lock_path, os.O_CREAT | os.O_RDWR | (os.O_NOFOLLOW if os.name != "nt" else 0), 0o600
+    )
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.name == "nt":
+            import msvcrt
+
+            from harness.windows_fs import require_private_windows_path, secure_owned_windows_path
+
+            if new_lock:
+                secure_owned_windows_path(lock_path, directory=False)
+            require_private_windows_path(lock_path, directory=False)
+            os.lseek(lock_fd, 0, os.SEEK_SET)
+            msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
+        else:
+            import fcntl
+
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        parent_closed = Event()
+        if os.name == "nt":
+
+            def watch_parent() -> None:
+                try:
+                    os.read(sys.stdin.fileno(), 1)
+                finally:
+                    parent_closed.set()
+
+            Thread(target=watch_parent, daemon=True).start()
         Handler.app = VaultApplication(args.root)
         Handler.parent_origin = args.parent_origin
         with HTTPServer(("127.0.0.1", 0), Handler) as server:
@@ -294,9 +324,15 @@ def main() -> None:
             print(Handler.origin, flush=True)
             while True:
                 # Parent exit closes stdin, including abrupt daemon termination.
-                readable, _, _ = select.select([sys.stdin], [], [], 0)
-                if readable and not os.read(sys.stdin.fileno(), 1):
-                    break
+                if os.name == "nt":
+                    if parent_closed.is_set():
+                        break
+                else:
+                    import select
+
+                    readable, _, _ = select.select([sys.stdin], [], [], 0)
+                    if readable and not os.read(sys.stdin.fileno(), 1):
+                        break
                 Handler.app.expire()
                 server.handle_request()
         Handler.app.lock(pause_device=False)
