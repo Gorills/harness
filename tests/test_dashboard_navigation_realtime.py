@@ -138,10 +138,10 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert f"workspaces/{quote(workspace_id, safe='')}/" in overview
         assert f"projects/{quote(project_id, safe='')}/" in overview
         assert f"vault/{quote(project_id, safe='')}/" in overview
-        assert 'class="hub-grid"' in overview
+        assert 'class="panel project-directory"' in overview
         assert 'class="nav-task"' not in overview
-        assert "Поиск по всем задачам" in overview
-        assert "Последние задачи" in overview
+        assert "Поиск задач во всех проектах" in overview
+        assert 'class="portfolio-layout"' in overview
         assert '<nav class="breadcrumbs"' in overview
         assert "<ol>" in overview
         assert 'aria-current="page"' in overview
@@ -157,7 +157,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         status, css_headers, css = _read(base_url + "assets/dashboard.css")
         assert status == 200
         assert css_headers["Content-Type"].startswith("text/css")
-        assert "--accent: #748cff" in css
+        assert "--accent: #137d75" in css
         assert "prefers-reduced-motion" in css
 
         status, js_headers, javascript = _read(base_url + "assets/dashboard.js")
@@ -185,18 +185,18 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         assert status == 200
         assert "src/feature_flag.py" not in workspace_page
         assert "идентификатор" not in workspace_page
-        assert "Поиск по задачам" in workspace_page
+        assert "Поиск задач в проекте" in workspace_page
         assert "ENABLED = True" not in workspace_page
-        assert task.task_id[:10] in workspace_page
+        assert "Задач в этом списке нет" in workspace_page
         status, _headers, workspace_task_search = _read(
             workspace_url + "?" + urlencode({"q": "Polish dashboard"})
         )
         assert status == 200
-        assert 'class="search-hit"' in workspace_task_search
+        assert 'class="task-row"' in workspace_task_search
         assert "Polish" in workspace_task_search
         assert "src/feature_flag.py" not in workspace_task_search
-        assert 'Ветка <strong class="mono">main</strong>' in workspace_page
-        assert "Текущая задача" in workspace_page
+        assert 'Ветка <strong class="mono">main</strong>' in workspace_task_search
+        assert 'name="action" value="accept"' in workspace_task_search
         assert "Папка" in workspace_page
         assert "Удаление проекта" not in workspace_page
         assert f'href="/projects/{quote(project_id, safe="")}/settings/"' in workspace_page
@@ -204,7 +204,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
         status, _headers, task_page = _read(task_url)
         assert status == 200
         assert "История" in task_page
-        assert "Замечание" in task_page
+        assert "Доработать" in task_page
         assert "Tighten &lt;b&gt;mobile&lt;/b&gt; spacing" in task_page
         assert "First review &lt;mark&gt;needs escaping&lt;/mark&gt;" in task_page
         assert "<b>dashboard</b>" not in task_page
@@ -240,7 +240,7 @@ def test_dashboard_drilldown_search_timeline_and_assets_are_capability_scoped(
 
         status, _headers, home_search = _read(base_url + "?" + urlencode({"q": "Polish dashboard"}))
         assert status == 200
-        assert "search-hit" in home_search
+        assert 'class="task-row"' in home_search
         assert "Polish" in home_search
         assert "ENABLED = True" not in home_search
         with pytest.raises(HTTPError) as malformed_home_search:

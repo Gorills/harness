@@ -389,8 +389,8 @@ def test_dashboard_project_skill_scope_persists_without_full_scan_invalidation(
         get_status, html = _get_text(project_url + "settings/")
         assert get_status == 200
         assert "Скиллы проекта" in html
-        assert "<h3>Frontend</h3><span" in html
-        assert 'data-mode="excluded"' in html
+        assert 'id="skill-scope-web-frontend" data-mode="excluded"' in html
+        assert 'class="skill-scope-current" aria-current="true">Исключено</span>' in html
         assert 'name="facet" value="web-frontend"' in html
         assert 'name="mode" value="auto"' in html
         assert 'name="mode" value="included"' in html

@@ -181,16 +181,18 @@ def test_dashboard_loopback_page_is_capability_scoped_and_escapes_task_text(
             assert response.headers["Cache-Control"] == "no-store"
             assert "default-src 'none'" in response.headers["Content-Security-Policy"]
         assert "Проекты · Harness" in body
-        assert "Задачи, заметки и доступы — всё под рукой." in body
-        assert "Последние задачи" in body
+        assert 'class="portfolio-layout"' in body
+        assert 'id="review-queue"' in body
         assert 'class="nav-task"' not in body
         assert "/projects/" in body
         assert "Основная копия" not in body
-        assert "ревью" in body
+        assert "на проверке" in body
         assert f"workspaces/{workspace_id}/" in body
         assert "/vault/" in body
         assert "&lt;script&gt;alert(&#x27;task&#x27;)&lt;/script&gt;" in body
-        with urlopen(url + f"workspaces/{workspace_id}/", timeout=2) as workspace_response:
+        with urlopen(
+            url + f"workspaces/{workspace_id}/?scope=review", timeout=2
+        ) as workspace_response:
             workspace_body = workspace_response.read().decode("utf-8")
         assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in workspace_body
         assert "<script>alert('task')</script>" not in body
@@ -336,7 +338,7 @@ def test_dashboard_keeps_persisted_overview_when_workspace_git_is_unavailable(
     assert row.dirty_path_count is None
     assert row.live_error == "Git status unavailable"
     assert row.indexed_file_count == 1
-    html = render_projects_page(read_dashboard_home(database), base_path="/cap/")
+    html = render_projects_page(read_dashboard_home(database, scope="all"), base_path="/cap/")
     assert 'class="task-git-branch"' in html
     assert '<strong class="mono">main</strong>' in html
     workspace_html = render_workspace_page(
@@ -501,14 +503,14 @@ def test_dashboard_keeps_task_git_branch_after_live_checkout_moves(tmp_path: Pat
     row = rows[0]
     assert row.branch == "main"
     assert row.task_git_branch == DashboardGitBranch(captured=True, name="feature/dashboard-branch")
-    overview = render_projects_page(read_dashboard_home(database), base_path="/cap/")
+    overview = render_projects_page(read_dashboard_home(database, scope="all"), base_path="/cap/")
     assert 'class="task-git-branch"' in overview
     assert '<strong class="mono">feature/dashboard-branch</strong>' in overview
     project_html = render_project_page(
         read_dashboard_project_detail(database, row.project_id),
         base_path="/cap/",
     )
-    assert '<div class="mini-stat"><span>Ветка</span><strong>main</strong></div>' in project_html
+    assert "Ветка: main" in project_html
 
     workspace = read_dashboard_workspace_detail(database, workspace_id)
     assert workspace.workspace.task_id is None
@@ -589,14 +591,14 @@ def test_dashboard_shows_detached_head_for_task_without_named_branch(tmp_path: P
 
     rows = read_dashboard_workspace_rows(database)
     assert rows[0].task_git_branch == DashboardGitBranch(captured=True, name=None)
-    html = render_projects_page(read_dashboard_home(database), base_path="/cap/")
+    html = render_projects_page(read_dashboard_home(database, scope="all"), base_path="/cap/")
     assert '<strong class="mono">(detached)</strong>' in html
     assert rows[0].branch is None
     project_html = render_project_page(
         read_dashboard_project_detail(database, rows[0].project_id),
         base_path="/cap/",
     )
-    assert '<div class="mini-stat"><span>Ветка</span><strong>—</strong></div>' in project_html
+    assert "Ветка: —" in project_html
 
 
 def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
@@ -616,10 +618,10 @@ def test_dashboard_home_lists_projects_not_copies(tmp_path: Path) -> None:
     assert len({row.project_id for row in rows}) == 1
     assert any(f"workspaces/{row.workspace_id}/" in html for row in rows)
     assert f"/projects/{project_id}/" in html
-    assert html.count('class="hub-card"') == 1
+    assert html.count('class="project-row"') == 1
     assert 'class="nav-task"' not in html
-    assert "Поиск по всем задачам" in html
-    assert "Последние задачи" in html
+    assert "Поиск задач во всех проектах" in html
+    assert 'class="portfolio-layout"' in html
     assert "Открыть папку" not in html
     assert "Основная копия" not in html
     assert "рабочая копия" not in html.casefold()
@@ -689,26 +691,26 @@ def test_dashboard_home_pins_live_tasks_ahead_of_newer_completed(
     finally:
         connection.close()
 
-    home = read_dashboard_home(database)
+    home = read_dashboard_home(database, scope="all")
     assert [row.task.title for row in home.recent_tasks] == [
-        "Newest working task",
         "Older review task",
+        "Newest working task",
         "Newer completed task",
     ]
     html = render_projects_page(home, base_path="/")
-    assert html.index("Newest working task") < html.index("Older review task")
+    assert html.index("Older review task") < html.index("Newest working task")
     assert html.index("Older review task") < html.index("Newer completed task")
 
-    workspace = read_dashboard_workspace_detail(database, workspace_id)
+    workspace = read_dashboard_workspace_detail(database, workspace_id, scope="all")
     assert [row.task.title for row in workspace.recent_tasks] == [
-        "Newest working task",
         "Older review task",
+        "Newest working task",
         "Newer completed task",
     ]
 
     monkeypatch.setattr("harness.dashboard._DASHBOARD_RECENT_TASK_LIMIT", 2)
-    bounded = read_dashboard_home(database)
+    bounded = read_dashboard_home(database, scope="all")
     assert [row.task.title for row in bounded.recent_tasks] == [
-        "Newest working task",
         "Older review task",
+        "Newest working task",
     ]

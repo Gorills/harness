@@ -673,6 +673,9 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert "command" not in entry
     assert "cwd" not in entry
     assert "env" not in entry
+    override_path = repo / "AGENTS.override.md"
+    assert "project_status" in override_path.read_text(encoding="utf-8")
+    _git(repo, "check-ignore", "-q", "AGENTS.override.md")
     assert (repo / ".agents" / "skills" / "python-helper" / "SKILL.md").is_file()
 
     monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
@@ -698,12 +701,24 @@ def test_codex_install_scan_uninstall_owns_only_project_config(
     assert harness_main() == 0
     capsys.readouterr()
 
+    override_path.unlink()
+    monkeypatch.setattr(sys, "argv", ["harness", "doctor"])
+    assert harness_main() == 1
+    missing_override_doctor = capsys.readouterr().out
+    assert "Codex project MCP configs: FAIL" in missing_override_doctor
+    assert "root AGENTS.override.md: stale_owned" in missing_override_doctor
+    monkeypatch.setattr(sys, "argv", ["harness", "install", "--host", "codex"])
+    assert harness_main() == 0
+    capsys.readouterr()
+    assert override_path.is_file()
+
     monkeypatch.setattr(sys, "argv", ["harness", "uninstall", "--host", "codex"])
     assert harness_main() == 0
     uninstall_output = capsys.readouterr().out
     assert "Codex project overrides changed: 1" in uninstall_output
     assert not (repo / ".codex" / "config.toml").exists()
     assert not (repo / ".codex" / ".harness-mcp-owner.json").exists()
+    assert not override_path.exists()
     assert not (repo / ".agents" / "skills" / "python-helper").exists()
     assert not (state_home / "harness" / "host-integrations.json").exists()
 

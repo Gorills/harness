@@ -209,6 +209,34 @@ async function probe() {
   const document = new Document({ method: getForm ? 'get' : 'post', active: true });
   const fresh = new Document({ revision: '9', method: getForm ? 'get' : 'post' });
   document.sidebar.scrollTop = 37;
+  if (scenario === 'project-filters') {
+    for (const page of [document, fresh]) {
+      const filter = (group) => {
+        const field = new HTMLInputElement('', 'search');
+        field.attrs['data-ui-filter'] = group;
+        field.dataset.uiFilter = group;
+        return field;
+      };
+      page.projectSearch = filter('projects');
+      page.sidebarSearch = filter('sidebar');
+      page.mobileSearch = filter('sidebar');
+      page.reviewFilter = new HTMLElement('button', { 'data-project-filter': 'review' });
+      page.reviewProject = new HTMLElement('article', {
+        'data-filter-item': 'projects', 'data-filter-text': 'Atlas', 'data-category': 'review',
+      });
+      page.idleProject = new HTMLElement('article', {
+        'data-filter-item': 'projects', 'data-filter-text': 'Atlas docs', 'data-category': 'idle',
+      });
+      page.projectNavigation = new HTMLElement('nav', { class: 'project-navigation' }, [
+        page.sidebarSearch, page.mobileSearch, page.projectSearch, page.reviewFilter,
+        page.reviewProject, page.idleProject,
+      ]);
+      page.sidebar.children.push(page.projectNavigation);
+      page.projectNavigation.parentElement = page.sidebar;
+      page.adopt(page.layout);
+    }
+    document.projectNavigation.scrollTop = 95;
+  }
   const requests = [];
   const sources = [];
   const scrolls = [];
@@ -269,6 +297,33 @@ async function probe() {
     requests[0].body.resolve('<fresh page>');
     await tick();
   };
+
+  if (scenario === 'project-filters') {
+    document.sidebarSearch.value = 'Atlas';
+    document.sidebarSearch.fire('input');
+    assert.equal(document.mobileSearch.value, 'Atlas');
+    document.projectSearch.value = 'Atlas';
+    document.projectSearch.fire('input');
+    document.reviewFilter.fire('click');
+    assert.equal(document.reviewProject.hidden, false);
+    assert.equal(document.idleProject.hidden, true);
+    document.sidebarSearch.focus();
+    let prompted = false;
+    windowListeners.get('beforeunload')({ preventDefault() { prompted = true; } });
+    assert.equal(prompted, false, 'Project filtering is not an unsaved mutation');
+    sources[0].fire('refresh');
+    await beginResponse();
+    await finishResponse();
+    assert.equal(document.replacements, 1, 'filters must not block SSE updates');
+    assert.equal(fresh.sidebarSearch.value, 'Atlas');
+    assert.equal(fresh.mobileSearch.value, 'Atlas');
+    assert.equal(fresh.projectSearch.value, 'Atlas');
+    assert.equal(document.activeElement, fresh.sidebarSearch, 'keep filter focus across replacement');
+    assert.equal(fresh.reviewFilter.getAttribute('aria-pressed'), 'true');
+    assert.equal(fresh.idleProject.hidden, true);
+    assert.equal(fresh.projectNavigation.scrollTop, 95);
+    return;
+  }
 
   if (scenario === 'mutation-during-refresh') {
     sources[0].fire('refresh');
@@ -388,9 +443,9 @@ async function probe() {
       assert.equal(fresh.copy.textContent, 'Проверьте форму');
     } else if (scenario === 'mutation-late-edit') {
       assert.equal(fresh.feedback.value, 'Изменение во время сохранения');
-      assert.equal(fresh.copy.textContent, 'Онлайн');
+      assert.equal(fresh.copy.textContent, 'Сохранено');
     } else {
-      assert.equal(fresh.copy.textContent, 'Онлайн');
+      assert.equal(fresh.copy.textContent, 'Сохранено');
     }
     return;
   }
@@ -518,6 +573,7 @@ probe().catch((error) => { console.error(error); process.exitCode = 1; });
         "mutation-url-sync",
         "navigation-feedback",
         "navigation-search",
+        "project-filters",
     ),
 )
 def test_dashboard_javascript_retains_drafts_across_refresh(scenario: str) -> None:

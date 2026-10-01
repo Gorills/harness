@@ -326,6 +326,11 @@ def test_codex_hidden_uses_project_developer_instructions_without_overwriting_ag
         )
         assert hidden.project.visibility_mode is VisibilityMode.HIDDEN
         assert (root / "AGENTS.md").read_bytes() == agents_before
+        override = root / "AGENTS.override.md"
+        assert "project_status" in override.read_text(encoding="utf-8")
+        assert "read it before any other repository work" in override.read_text(encoding="utf-8")
+        assert HIDDEN_INSTRUCTION_BODY in override.read_text(encoding="utf-8")
+        assert _git(root, "check-ignore", "-q", "AGENTS.override.md").returncode == 0
         config_path = root / ".codex" / "config.toml"
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
         assert config["developer_instructions"] == codex_developer_instructions(hidden=True)
@@ -341,6 +346,53 @@ def test_codex_hidden_uses_project_developer_instructions_without_overwriting_ag
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
         assert config["developer_instructions"] == CODEX_BOOTSTRAP_INSTRUCTION_BODY
         assert (root / "AGENTS.md").read_bytes() == agents_before
+        assert HIDDEN_INSTRUCTION_BODY not in override.read_text(encoding="utf-8")
+    finally:
+        connection.close()
+
+
+def test_codex_hidden_creates_ignored_root_agents_file_when_absent(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root, {"README.md": "repo\n"})
+    database = tmp_path / "harness.db"
+    initialize_database(database)
+    connection = connect_database(database)
+    try:
+        project = create_project(connection)
+        register_workspace(connection, project_id=project.project_id, path=root)
+        hidden = set_project_visibility(
+            connection,
+            mode=VisibilityMode.HIDDEN,
+            host_profiles=("codex",),
+            project_id=project.project_id,
+        )
+        assert hidden.project.visibility_mode is VisibilityMode.HIDDEN
+        agents = root / "AGENTS.override.md"
+        assert "project_status" in agents.read_text(encoding="utf-8")
+        assert HIDDEN_INSTRUCTION_BODY in agents.read_text(encoding="utf-8")
+        assert (root / ".codex" / ".harness-agents-owner.json").is_file()
+        assert _git(root, "check-ignore", "-q", "AGENTS.override.md").returncode == 0
+        assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == b""
+        inspection = inspect_hidden_workspace(
+            root, required_profiles=("codex",), expect_hidden=True
+        )
+        assert inspection.missing_required == ()
+        assert inspection.unignored == ()
+        agents.unlink()
+        inspection = inspect_hidden_workspace(
+            root, required_profiles=("codex",), expect_hidden=True
+        )
+        assert inspection.missing_required == ("AGENTS.override.md",)
+
+        normal = set_project_visibility(
+            connection,
+            mode=VisibilityMode.NORMAL,
+            host_profiles=("codex",),
+            project_id=project.project_id,
+        )
+        assert normal.project.visibility_mode is VisibilityMode.NORMAL
+        assert agents.is_file()
+        assert HIDDEN_INSTRUCTION_BODY not in agents.read_text(encoding="utf-8")
     finally:
         connection.close()
 

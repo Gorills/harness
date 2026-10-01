@@ -112,13 +112,18 @@ def _delivery(snapshot: DashboardSkillsSnapshot, action: str) -> str:
             + "</ul>"
         )
         rows.append(
-            '<section class="skill-delivery-row" data-skill-status="'
+            '<details class="skill-delivery-row" data-skill-status="'
             + escape(workspace.projection_status, quote=True)
-            + '"><h4>'
-            + escape(str(workspace.workspace_root))
-            + "</h4><strong>"
+            + '"><summary><span class="skill-delivery-name">'
+            + escape(workspace.workspace_root.name)
+            + '</span><span class="skill-delivery-count">'
+            + str(len(workspace.selected))
+            + ' скиллов</span><span class="skill-delivery-status">'
             + escape(title)
-            + "</strong><p>"
+            + '</span><span class="skill-chevron" aria-hidden="true">⌄</span></summary>'
+            + '<div class="skill-delivery-body"><p class="mono skill-workspace-path">'
+            + escape(str(workspace.workspace_root))
+            + "</p><p>"
             + escape(hint)
             + "</p>"
             + counts
@@ -135,18 +140,17 @@ def _delivery(snapshot: DashboardSkillsSnapshot, action: str) -> str:
             + ")</summary>"
             + _skill_list(tuple(item.skill_id for item in workspace.selected), catalog)
             + reasons
-            + "</details></section>"
+            + "</details></div></details>"
         )
     return (
         '<section class="skill-delivery" aria-labelledby="skill-delivery-title">'
-        '<h3 id="skill-delivery-title">Фактическая доставка</h3>'
+        '<div class="skill-section-heading"><h3 id="skill-delivery-title">Состояние скиллов</h3>'
+        + '<a class="text-link" href="'
+        + escape(action + "#skill-scope", quote=True)
+        + '">Обновить состояние</a></div>'
         + "".join(rows)
         + ("<p>У проекта пока нет папок.</p>" if not rows and not snapshot.error else "")
-        + '<p class="management-hint">Наличие файлов не подтверждает чтение инструкций текущей беседой. '
-        "Если хост не обнаружил изменения, откройте новую сессию; после изменения конфигурации перезапустите хост.</p>"
-        + '<a class="btn" href="'
-        + escape(action + "#skill-scope", quote=True)
-        + '">Обновить состояние</a></section>'
+        + "</section>"
     )
 
 
@@ -167,16 +171,10 @@ def render_skill_policy(
             if facet in policy.excluded_facets
             else ProjectSkillFacetMode.AUTO
         )
-        label, hint = _MODES[current]
+        _, hint = _MODES[current]
         members = tuple(item.skill_id for item in catalog.values() if facet in item.facets)
         actions = []
         for mode, (mode_label, _) in _MODES.items():
-            if mode is current:
-                actions.append(
-                    '<span class="skill-scope-current" aria-current="true">'
-                    + escape(mode_label)
-                    + "</span>"
-                )
             previews = []
             if snapshot is not None:
                 for workspace in snapshot.workspaces:
@@ -287,13 +285,33 @@ def render_skill_policy(
             + "</p>"
         )
         rows.append(
-            '<section class="skill-scope-row" data-mode="'
+            '<details class="skill-scope-row" id="skill-scope-'
+            + facet
+            + '" data-mode="'
             + current.value
-            + '"><div class="skill-scope-copy"><h3>'
+            + '"><summary><span class="skill-scope-name">'
             + escape(_FACETS[facet])
-            + "</h3><span>"
-            + escape(label + " · " + hint)
-            + "</span>"
+            + '</span><span class="skill-scope-detection">'
+            + (
+                "Состав недоступен"
+                if snapshot is None or snapshot.error
+                else "Обнаружено в папках: "
+                + str(sum(facet in workspace.detected_facets for workspace in snapshot.workspaces))
+                if any(facet in workspace.detected_facets for workspace in snapshot.workspaces)
+                else "Не обнаружено"
+            )
+            + '</span><span class="skill-scope-current" aria-current="true">'
+            + escape(
+                {
+                    ProjectSkillFacetMode.AUTO: "Авто",
+                    ProjectSkillFacetMode.INCLUDED: "Включено",
+                    ProjectSkillFacetMode.EXCLUDED: "Исключено",
+                }[current]
+            )
+            + '</span><span class="skill-chevron" aria-hidden="true">⌄</span></summary>'
+            + '<div class="skill-scope-body"><div class="skill-scope-copy"><p>'
+            + escape(hint)
+            + "</p>"
             + detected
             + "<details><summary>Скиллы области ("
             + str(len(members))
@@ -301,7 +319,7 @@ def render_skill_policy(
             + _skill_list(members, catalog)
             + '</details></div><div class="skill-scope-actions">'
             + "".join(actions)
-            + "</div></section>"
+            + "</div></div></details>"
         )
     error = (
         ""
@@ -317,17 +335,24 @@ def render_skill_policy(
     return (
         '<section class="panel skill-scope-panel" id="skill-scope"><div class="panel-head"><h2>'
         + escape(labels.SKILL_SCOPE)
-        + '</h2></div><div class="panel-body"><p class="management-hint skill-scope-hint">'
-        + escape(labels.SKILL_SCOPE_HINT)
+        + '</h2></div><div class="panel-body"><p class="skill-scope-hint">'
+        + "Выберите области разработки. Настройки действуют для всех папок проекта."
         + "</p>"
         + error
         + (_delivery(snapshot, action) if snapshot is not None else "")
-        + '<details class="skill-baseline"><summary>Базовые скиллы ('
+        + '<div class="skill-section-heading"><h3>Области разработки</h3>'
+        + '<span class="skill-empty">Нажмите на область, чтобы изменить режим</span></div>'
+        + '<div class="skill-scope-list">'
+        + "".join(rows)
+        + '</div><details class="skill-baseline"><summary>Базовые скиллы ('
         + str(len(core))
         + ")</summary>"
-        + "<p>Входят в отбор для каждой зарегистрированной папки. Фактическая доставка показана выше.</p>"
+        + '<div class="skill-baseline-body"><p>Общий набор для каждой папки проекта.</p>'
         + _skill_list(core, catalog)
-        + '</details><div class="skill-scope-list">'
-        + "".join(rows)
-        + "</div></div></section>"
+        + '</div></details><details class="skill-help"><summary>Как применяются настройки</summary>'
+        + '<div class="skill-help-body"><p>'
+        + escape(labels.SKILL_SCOPE_HINT)
+        + "</p><p>Наличие файлов не подтверждает чтение инструкций текущей беседой. "
+        + "Если хост не обнаружил изменения, откройте новую сессию; после изменения конфигурации перезапустите хост.</p>"
+        + "</div></details></div></section>"
     )

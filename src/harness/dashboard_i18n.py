@@ -55,7 +55,10 @@ HOME_SEARCH_PLACEHOLDER = "Задача, ветка, Jira или коммент�
 RECENT_TASKS_HOME = "Последние задачи"
 METRIC_PROJECTS = "Проекты"
 METRIC_ACTIVE = "Активные задачи"
-METRIC_REVIEW = "На ревью"
+METRIC_REVIEW = "На проверке"
+FILTER_PROJECTS_ALL = "Все"
+ALL_FOLDERS = "Все папки"
+REVIEW_PAGE_EMPTY = "На этой странице нет задач на проверке"
 METRIC_INDEX = "Проиндексировано"
 METRICS_LABEL = "Сводка"
 SECTION_WORKSPACES = "Папки"
@@ -131,7 +134,7 @@ DIRTY = "Изменения"
 INDEX = "Индекс"
 MODE = "Режим"
 STATE_IDLE = "нет задачи"
-STATE_REVIEW = "ревью"
+STATE_REVIEW = "на проверке"
 STATE_WORKING = "в работе"
 STATE_WAITING = "ожидание"
 STATE_COMPLETED = "завершена"
@@ -147,10 +150,10 @@ ACTION_REJECTED = "Действие не принято"
 CANCEL = "Отменить"
 CANCEL_TASK = "Отменить задачу"
 REOPEN_TASK = "Открыть заново"
-FEEDBACK_SUMMARY = "Замечание"
+FEEDBACK_SUMMARY = "Доработать"
 FEEDBACK_LABEL = "Что изменить"
 FEEDBACK_PLACEHOLDER = "Что должен сделать агент дальше"
-FEEDBACK_SUBMIT = "Отправить и продолжить"
+FEEDBACK_SUBMIT = "Вернуть в работу"
 COMMENT_SUMMARY = "Комментарий"
 COMMENT_LABEL = "Комментарий оператора"
 COMMENT_PLACEHOLDER = "Контекст, решение или заметка по задаче"
@@ -274,6 +277,10 @@ def task_state_label(state: str | None, wait_reason: str | None = None) -> str:
         return STATE_IDLE
     if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.OPERATOR_REVIEW.value:
         return STATE_REVIEW
+    if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.OPERATOR_INPUT.value:
+        return "нужно решение"
+    if state == TaskState.WAITING.value and wait_reason == TaskWaitReason.EXTERNAL.value:
+        return "внешняя зависимость"
     return _TASK_STATE_LABELS.get(state, state)
 
 
@@ -300,6 +307,14 @@ def operator_status_label(status: str | None) -> str:
 def workspace_count_label(count: int) -> str:
     noun = ru_plural(count, "папка", "папки", "папок")
     return f"{count} {noun}"
+
+
+def project_count_label(count: int) -> str:
+    return f"{count} {ru_plural(count, 'проект', 'проекта', 'проектов')}"
+
+
+def active_task_count_label(count: int) -> str:
+    return f"{count} {ru_plural(count, 'активная задача', 'активные задачи', 'активных задач')}"
 
 
 def event_count_label(count: int) -> str:
@@ -330,3 +345,6 @@ def document_title(label: str) -> str:
 
 
 OPERATOR_STATE_WORKING = "В работе"
+
+TASKS_ALL = "Все задачи"
+INBOX_CLEAR_HINT = "Готовые результаты появятся здесь. Можно продолжать работу с проектами."

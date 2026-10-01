@@ -156,6 +156,7 @@ def apply_hidden_projection(
     projected_paths = set(desired)
     if codex_requested:
         projected_paths.add(PurePosixPath(".codex/config.toml"))
+        projected_paths.add(PurePosixPath("AGENTS.override.md"))
     return HiddenProjectionResult(
         materialized=materialized,
         removed=removed,
@@ -276,19 +277,33 @@ def inspect_hidden_workspace(
                     unignored.append(posix)
         if codex_requested:
             try:
-                diagnostic = _codex_adapter().project_registration_diagnostic(root, hidden=True)
+                codex = _codex_adapter()
+                diagnostic = codex.project_registration_diagnostic(root, hidden=True)
+                agents_state = codex.project_root_agents_state(root, hidden=True)
             except HostIntegrationError as exc:
                 raise HiddenProjectionError(
-                    f"Codex Hidden developer instructions could not be inspected: {exc}"
+                    f"Codex Hidden instructions could not be inspected: {exc}"
                 ) from exc
             config_relative = PurePosixPath(".codex/config.toml")
-            if diagnostic.state is not HostRegistrationState.CURRENT:
+            agents_relative = PurePosixPath("AGENTS.override.md")
+            agents_marker_relative = PurePosixPath(".codex/.harness-agents-owner.json")
+            if diagnostic.state is not HostRegistrationState.CURRENT and (
+                agents_state is HostRegistrationState.CURRENT
+            ):
                 missing.append(config_relative.as_posix())
             elif diagnostic.harness_owned:
                 if _git_is_tracked(root, config_relative, deadline=deadline):
                     tracked.append(config_relative.as_posix())
                 elif not _git_is_ignored(root, config_relative, deadline=deadline):
                     unignored.append(config_relative.as_posix())
+            if agents_state is not HostRegistrationState.CURRENT:
+                missing.append(agents_relative.as_posix())
+            elif (root / agents_marker_relative).is_file():
+                for relative in (agents_relative, agents_marker_relative):
+                    if _git_is_tracked(root, relative, deadline=deadline):
+                        tracked.append(relative.as_posix())
+                    elif not _git_is_ignored(root, relative, deadline=deadline):
+                        unignored.append(relative.as_posix())
     else:
         for profile in IMPLEMENTED_HIDDEN_PROFILES:
             surface = _surface_for_profile(profile)

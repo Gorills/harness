@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -45,16 +44,6 @@ def _database(tmp_path: Path) -> tuple[Path, str, str]:
         connection.close()
 
 
-def _metric(html: str, label: str) -> int:
-    match = re.search(
-        rf'<span class="metric-label">{re.escape(label)}</span>'
-        r'<strong class="metric-value">(\d+)</strong>',
-        html,
-    )
-    assert match is not None
-    return int(match[1])
-
-
 class _HistoryLinks(HTMLParser):
     def __init__(self, html: str) -> None:
         super().__init__()
@@ -81,7 +70,7 @@ def _read(url: str) -> str:
         return body.decode("utf-8")
 
 
-def test_dashboard_metrics_count_every_waiting_and_working_task(tmp_path: Path) -> None:
+def test_dashboard_metrics_count_working_and_review_tasks_separately(tmp_path: Path) -> None:
     database, project_id, workspace_id = _database(tmp_path)
     connection = connect_database(database)
     try:
@@ -117,16 +106,18 @@ def test_dashboard_metrics_count_every_waiting_and_working_task(tmp_path: Path) 
         connection.close()
 
     home = read_dashboard_home(database)
-    assert _metric(render_projects_page(home), "Активные задачи") == 5
-    assert _metric(render_projects_page(home), "На ревью") == 2
+    html = render_projects_page(home)
+    assert "2 активные задачи" in html
+    assert 'class="queue-count">2</span>' in html
+    assert len(home.recent_tasks) == 2
     project = render_project_page(
         read_dashboard_project_detail(database, project_id), base_path="/"
     )
-    assert "<span>Активные задачи: 4</span>" in project
-    assert "<span>Ожидают проверки: 2</span>" in project
+    assert "1 активная задача" in project
+    assert "2 на проверке" in project
 
 
-def test_task_history_pages_keep_all_tasks_and_search_query(tmp_path: Path) -> None:
+def test_task_history_pages_and_bounded_search_keep_the_entire_archive(tmp_path: Path) -> None:
     database, _project_id, workspace_id = _database(tmp_path)
     connection = connect_database(database)
     task_ids: set[str] = set()
@@ -137,9 +128,8 @@ def test_task_history_pages_keep_all_tasks_and_search_query(tmp_path: Path) -> N
             task_accept(connection, workspace_id, task.task_id, expected_revision=task.revision)
     finally:
         connection.close()
-
-    first = read_dashboard_home(database, search_query="История")
-    second = read_dashboard_home(database, search_query="История", page=2)
+    first = read_dashboard_home(database, scope="archive")
+    second = read_dashboard_home(database, scope="archive", page=2)
     assert len(first.recent_tasks) == 24
     assert len(second.recent_tasks) == 2
     first_ids = {row.task.task_id for row in first.recent_tasks}
@@ -147,36 +137,37 @@ def test_task_history_pages_keep_all_tasks_and_search_query(tmp_path: Path) -> N
     assert first_ids.isdisjoint(second_ids)
     assert first_ids | second_ids == task_ids
     assert first.task_count == second.task_count == 26
-    assert (
-        "?q=%D0%98%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F&amp;page=2#history"
-        in render_projects_page(first)
-    )
+    assert "?scope=archive&amp;page=2#history" in render_projects_page(first)
     assert "Страница 2 из 2" in render_projects_page(second)
-    assert read_dashboard_home(database, page=999).page == 2
-
-    workspace = read_dashboard_workspace_detail(database, workspace_id, page=2)
+    assert read_dashboard_home(database, scope="archive", page=999).page == 2
+    assert read_dashboard_home(database).recent_tasks == ()
+    search = read_dashboard_home(database, search_query="История")
+    assert len(search.search_task_rows) == 24
+    assert {row.task.task_id for row in search.search_task_rows} <= task_ids
+    assert "Уточните запрос" in render_projects_page(search)
+    assert 'rel="next"' not in render_projects_page(search)
+    workspace = read_dashboard_workspace_detail(database, workspace_id, page=2, scope="archive")
     assert {row.task.task_id for row in workspace.recent_tasks} == second_ids
     assert "Страница 2 из 2" in render_workspace_page(workspace, base_path="/")
-
     manager = DashboardServerManager(database)
     try:
         base_url = manager.get_url()
         for route in ("", f"workspaces/{workspace_id}/"):
-            first_html = _read(base_url + route + "?" + urlencode({"q": "История"}))
+            first_html = _read(base_url + route + "?scope=archive")
             next_url = urljoin(base_url, _HistoryLinks(first_html).links["next"])
             assert urlsplit(next_url).path == "/" + route
             second_html = _read(next_url)
             assert "Страница 2 из 2" in second_html
             page_links = _HistoryLinks(second_html)
             assert "next" not in page_links.links
-            assert "q=" in page_links.links["prev"]
+            assert "scope=archive" in page_links.links["prev"]
             assert "page=1#history" in page_links.links["prev"]
             view, identity, query, snapshot, page = _parse_sse_view(
                 urlsplit(page_links.events_url).query
             )
             assert page == 2
-            assert query == "История"
-            assert _view_fingerprint(database, view, identity, query, page) == snapshot
+            assert query is None
+            assert _view_fingerprint(database, view, identity, query, page, "archive") == snapshot
     finally:
         manager.close()
 
@@ -270,9 +261,11 @@ def test_history_pagination_keeps_strict_search_schema(query: str) -> None:
         _parse_page_request("/", "/", query)
 
 
-def test_history_pagination_does_not_expand_project_or_task_query_scope() -> None:
+def test_project_history_accepts_pagination_and_task_query_scope_stays_bounded() -> None:
+    request = _parse_page_request("/", "/projects/example/", "page=2&q=example")
+    assert request.page == 2 and request.search_query == "example"
     with pytest.raises(DashboardError):
-        _parse_page_request("/", "/projects/example/", "page=2")
+        _parse_page_request("/", "/projects/example/settings/", "page=2")
     with pytest.raises(DashboardError):
         _parse_page_request("/", "/tasks/example/", "q=hidden&page=2")
     with pytest.raises(DashboardError):

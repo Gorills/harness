@@ -3,21 +3,15 @@ from __future__ import annotations
 from harness.dashboard_assets import DASHBOARD_CSS, DASHBOARD_JS
 
 
-def test_dashboard_uses_modern_product_workspace_visual_language() -> None:
-    assert "--bg: #0b0d12;" in DASHBOARD_CSS
-    assert "--accent: #748cff;" in DASHBOARD_CSS
-    assert ".app-layout" in DASHBOARD_CSS
-    assert ".app-sidebar" in DASHBOARD_CSS
-    assert ".project-navigation" in DASHBOARD_CSS
-    assert ".project-section" in DASHBOARD_CSS
-    assert ".workspace-layout" in DASHBOARD_CSS
-    assert ".skill-scope-current" in DASHBOARD_CSS
-    assert "color: #161922;" in DASHBOARD_CSS
-    assert "background: #e8ebf2;" in DASHBOARD_CSS
-    assert "a.btn" in DASHBOARD_CSS
-    assert '"Segoe UI Variable"' in DASHBOARD_CSS
-    assert '"Iowan Old Style"' not in DASHBOARD_CSS
-    assert "@media (prefers-color-scheme: light)" in DASHBOARD_CSS
+def test_dashboard_has_a_light_workspace_and_responsive_work_surfaces() -> None:
+    assert "color-scheme: light;" in DASHBOARD_CSS
+    assert "--bg: #f4f6f7;" in DASHBOARD_CSS
+    assert "--sidebar: #202a32;" in DASHBOARD_CSS
+    assert ".portfolio-layout" in DASHBOARD_CSS
+    assert ".directory-scroll" in DASHBOARD_CSS
+    assert ".inbox-scroll" in DASHBOARD_CSS
+    assert ".task-scopes" in DASHBOARD_CSS
+    assert "@media (max-width: 760px)" in DASHBOARD_CSS
     assert "@media (prefers-reduced-motion: reduce)" in DASHBOARD_CSS
 
 

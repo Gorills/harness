@@ -130,6 +130,16 @@ storage, stale/unauthorized mode transitions, corruption, return to password mod
 calls, no idle expiry, real subprocess restart/Origin checks, production JS startup and MCP
 negative disclosure in both modes. Browser acceptance uses synthetic records only.
 
+### Presentation amendment (operator feedback, 2026-10-01)
+
+The private iframe fills the remaining dashboard workspace. Its light palette and teal actions
+match the dashboard. Search and type filters stay above a compact record list; the adjacent
+viewer/editor has bounded line lengths and scrolls independently. On narrow screens, opening a
+record switches to a single detail pane with a visible Back action. Show the empty-list creation
+action only when no records match, and omit the redundant scope checkbox in the all-projects
+view. These presentation changes preserve the private origin, authorization, KDBX persistence,
+secret handling and recovery contracts. Browser acceptance uses synthetic records only.
+
 ## Threat and recovery boundary
 
 Password-protected mode protects data at rest; both modes preserve accidental model-disclosure

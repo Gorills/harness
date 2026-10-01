@@ -45,7 +45,7 @@ def test_every_project_screen_keeps_navigation_and_vault_returns_to_exact_task(
         context = urlencode({"workspace": second.workspace_id, "task": task.task_id})
         vault = f"vault/{project_id}/?{context}"
         for path, current in (
-            (project, "Обзор"),
+            (project, "Задачи"),
             (tasks, "Задачи"),
             (task_path, "Задачи"),
             (project + "settings/", "Настройки"),
@@ -56,16 +56,18 @@ def test_every_project_screen_keeps_navigation_and_vault_returns_to_exact_task(
             assert f'href="/{project}"' in tabs
             assert f'href="/{project}settings/"' in tabs
             assert re.search(r'aria-current="(?:page|true)">' + current + r"</a>", tabs)
-            assert ">Обзор</a>" in tabs and ">Задачи</a>" in tabs
+            assert ">Обзор</a>" not in tabs and ">Задачи</a>" in tabs
             assert ">Заметки и доступы</a>" in tabs and ">Настройки</a>" in tabs
             if path in (tasks, task_path, vault):
                 assert f'href="/{tasks}"' in tabs  # Never jump to the attention workspace.
             if path == task_path:
                 assert f'href="/{vault}"' in tabs
-                assert html.index('id="task-actions"') < html.index('id="timeline"')
+                assert html.index('class="task-main-column"') < html.index('id="timeline"')
+                assert html.index('class="task-side-column"') < html.index('id="task-actions"')
+                assert 'href="#task-actions"' in html
             if path == tasks:
                 assert f'href="/workspaces/{workspace_id}/"' in html
-                assert "Состояние задачи" not in html
+                assert "Изменить статус" in html
                 assert 'name="visibility_mode"' not in html
             if path == vault:
                 assert f'href="/{task_path}">Вернуться к задаче</a>' in tabs
