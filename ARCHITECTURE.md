@@ -623,6 +623,13 @@ Dashboard rules:
 - SSE and the explicit refresh control re-fetch the current same-origin HTML and replace the rendered layout in place; they must not force a full page navigation. Dirty operator input still blocks automatic apply ([ADR-0043](docs/decisions/0043-dashboard-in-place-html-refresh.md)).
 - JavaScript enhances action forms with immediate saving feedback and applies the existing POST/303 HTML response in place. Concurrent submissions and competing refresh responses are suppressed; drafts and fresh server revision tokens remain protected. Workspace/Project live status reuses its request-local applicability proof to avoid duplicate identity inspections ([ADR-0068](docs/decisions/0068-dashboard-mutation-response-latency.md)).
 - dashboard assets stay same-origin so CSP can forbid inline script/style.
+- operator-only Git actions at `/workspaces/{id}/git/` call `git_operations`, with registered
+  worktree identity and a stable snapshot token over HEAD/branch, refs, index, status and dirty
+  file metadata. Five recent branches or twelve search matches and twenty-four files per page
+  keep rendered inventories bounded. Git remains authoritative; no branch inventory or write
+  capability is added to MCP. Task pages offer explicit navigation to their recorded branch;
+  neither page reads nor Task lifecycle writes perform an implicit checkout. See
+  [ADR-0078](docs/decisions/0078-dashboard-git-workbench.md).
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 
 Task cards expose the latest checkpoint's reported verification and its revision/time, with

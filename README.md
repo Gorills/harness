@@ -50,6 +50,14 @@ Every Project screen has Tasks, Notes/access and Settings links. Notes opened fr
 include a direct return to that Task. Project configuration lives in Settings; unsaved Task forms
 warn before navigation. See [the daily-work dashboard contract](docs/decisions/0076-dashboard-daily-project-workspace.md)
 and [the navigation contract](docs/decisions/0070-project-navigation-and-operator-focus.md).
+Git links beside Projects and folders open a focused branch and changes panel. It shows five
+recent branches, searches all local and known remote branches with at most twelve results, and
+supports switching, creating a branch, preparing/unpreparing individual files or all project changes, committing the
+index, merging into the current branch and cancelling a merge. Task pages offer a branch switch
+when their recorded branch differs from the folder; opening or reopening a Task never switches
+Git silently. Switch/merge require a clean folder, and changed Git state rejects stale forms.
+Remote branches use locally available refs; network fetch/pull/push and conflict editing stay in
+native Git tools. See [the Git panel contract](docs/decisions/0078-dashboard-git-workbench.md).
 Codex integration updates preserve existing per-tool approval preferences. Cleanup refuses to
 delete a project config carrying these user preferences; resolve them before uninstalling the
 integration. See [the preservation contract](docs/decisions/0075-preserve-codex-tool-approval-preferences.md).

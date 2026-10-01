@@ -19,6 +19,7 @@ from typing import ClassVar, cast
 from urllib.parse import parse_qs, quote, unquote_to_bytes, urlencode, urlsplit
 
 from harness.dashboard_assets import DASHBOARD_CSS, DASHBOARD_JS
+from harness.dashboard_git import render_git_panel
 from harness.dashboard_i18n import (
     ACCEPT,
     ACTION_REJECTED,
@@ -131,6 +132,12 @@ from harness.dashboard_i18n import (
 from harness.dashboard_skill_view import render_skill_policy
 from harness.dashboard_skills import DashboardSkillsSnapshot, read_dashboard_skills
 from harness.git_applicability import WorkspaceApplicability
+from harness.git_operations import (
+    GitOperationError,
+    GitOperationRequest,
+    read_git_snapshot,
+    run_git_operation,
+)
 from harness.git_workspace import (
     GitWorkspaceError,
     inspect_git_working_tree_status,
@@ -1359,9 +1366,41 @@ def _parse_dashboard_action_form(
     | DashboardSkillPolicyRequest
     | DashboardProjectDeleteRequest
     | DashboardWorkspaceRelocationRequest
+    | GitOperationRequest
 ):
     fields = _parse_dashboard_form_fields(payload)
     action = fields.get("action")
+    if action is not None and action.startswith("git_"):
+        actions = {
+            "git_switch",
+            "git_create",
+            "git_stage",
+            "git_unstage",
+            "git_stage_all",
+            "git_unstage_all",
+            "git_commit",
+            "git_merge",
+            "git_abort_merge",
+        }
+        expected = {"action", "workspace_id", "expected_token"}
+        if action not in {"git_abort_merge", "git_stage_all", "git_unstage_all"}:
+            expected.add("value")
+        workspace_id = fields.get("workspace_id", "")
+        token = fields.get("expected_token", "")
+        value = fields.get("value", "")
+        if (
+            action not in actions
+            or set(fields) != expected
+            or not workspace_id
+            or len(workspace_id) > 128
+            or "\x00" in workspace_id
+            or len(token) != 64
+            or any(c not in "0123456789abcdef" for c in token)
+            or "\x00" in value
+            or len(value.encode("utf-8")) > 4096
+        ):
+            raise TaskValidationError("dashboard Git form does not match the expected schema")
+        return GitOperationRequest(action, workspace_id, token, value)
     if action == "delete_project":
         expected = {"action", "project_id", "confirmation"}
         if set(fields) != expected:
@@ -2472,6 +2511,90 @@ def _render_navigation_error(title: str, message: str) -> str:
     )
 
 
+def _render_git_link(row: DashboardWorkspaceRow, base_path: str, *, folder: bool = False) -> str:
+    if row.git_common_dir == row.workspace_root:
+        return '<span class="section-note">Без Git</span>'
+    label = _display_live_status(row.branch, row)
+    # Navigation-only rows do not carry live status; show an honest entry point there.
+    if row.dirty_path_count is None and row.live_error is None:
+        label = "Ветки и операции"
+    prefix = f"{row.workspace_root.name} · " if folder else ""
+    return (
+        f'<a class="git-entry" href="{_url(base_path, "workspaces", row.workspace_id)}git/" '
+        f'title="Открыть Git: {escape(str(row.workspace_root), quote=True)}">'
+        f'<span aria-hidden="true">⑂</span> {escape(prefix + label)} <span aria-hidden="true">⌄</span></a>'
+    )
+
+
+def _render_task_branch_prompt(detail: DashboardTaskDetail, base_path: str) -> str:
+    row = detail.workspace
+    branch = detail.git_branch.name
+    if row.live_error or not branch or row.git_common_dir == row.workspace_root:
+        return ""
+    git_url = _url(base_path, "workspaces", row.workspace_id) + "git/"
+    if row.branch == branch:
+        return '<div class="task-branch-context">' + _render_git_link(row, base_path) + "</div>"
+    target = git_url + "?" + urlencode({"q": branch})
+    return (
+        '<section class="task-branch-prompt"><div><strong>Переключиться на ветку задачи?</strong>'
+        f'<p>Задача: <span class="mono">{escape(branch)}</span> · Сейчас: '
+        f'<span class="mono">{escape(row.branch or DETACHED_HEAD)}</span></p></div>'
+        f'<a class="button" href="{escape(target, quote=True)}">Открыть {escape(branch)} в Git</a></section>'
+    )
+
+
+def _render_git_page(
+    database_path: Path,
+    base_path: str,
+    request: _DashboardPageRequest,
+    *,
+    error: str | None = None,
+    draft_action: str = "",
+    draft_value: str = "",
+) -> str:
+    assert request.identity is not None
+    connection = connect_database(database_path)
+    try:
+        snapshot = read_git_snapshot(
+            connection, request.identity, query=request.search_query or "", page=request.page
+        )
+    finally:
+        connection.close()
+    navigation = _read_dashboard_navigation_rows(database_path)
+    row = snapshot.workspace
+    project_url = _url(base_path, "projects", row.project_id)
+    workspace_url = _url(base_path, "workspaces", row.workspace_id)
+    git_url = workspace_url + "git/"
+    name = _project_display_name(navigation, row.project_id)
+    return _render_shell(
+        base_path=base_path,
+        page_title=document_title(f"Git · {name}"),
+        breadcrumbs=((BREADCRUMB_PROJECTS, base_path), (name, project_url), ("Git", None)),
+        events_url=_events_url(
+            base_path,
+            view="git",
+            identity=row.workspace_id,
+            search_query=request.search_query,
+            page=snapshot.page,
+            snapshot=_snapshot_fingerprint((snapshot, navigation)),
+        ),
+        content=(
+            '<section class="page-intro compact"><div><p class="eyebrow">'
+            + escape(name)
+            + " · Git</p><h1>Ветки и изменения</h1>"
+            + f'<p class="hero-copy workspace-path">{escape(str(row.workspace_root))}</p></div>'
+            + f'<a class="text-link" href="{workspace_url}">Задачи проекта →</a></section>'
+            + render_git_panel(
+                snapshot, git_url, error=error, draft_action=draft_action, draft_value=draft_value
+            )
+        ),
+        navigation_rows=navigation,
+        current_project_id=row.project_id,
+        current_workspace_id=row.workspace_id,
+        current_section="tasks",
+    )
+
+
 def _render_project_hub_cards(rows: tuple[DashboardWorkspaceRow, ...], base_path: str) -> str:
     projects = []
     for project_id, project_rows in _group_navigation_rows(rows):
@@ -2506,7 +2629,8 @@ def _render_project_hub_cards(rows: tuple[DashboardWorkspaceRow, ...], base_path
             f'<span>{escape(name)}</span></a><span class="project-row-path" title="{escape(filter_text, quote=True)}">'
             f"{escape(workspace_count_label(len(project_rows)))} · {escape(workspace.workspace_root.name)}</span></div>"
             f'<div class="project-row-focus">{task}<span class="project-row-next">'
-            f"{escape(_display_recorded_branch(workspace.task_git_branch)) if workspace.task_git_branch else ''}</span></div>"
+            + _render_git_link(workspace, base_path)
+            + "</span></div>"
             f'<div class="project-row-state">{state}<span>{activity}</span></div>'
             '<div class="project-row-links">'
             f'<a href="{_url(base_path, "workspaces", workspace.workspace_id)}">Папка</a>'
@@ -2824,6 +2948,9 @@ def render_project_page(
         )
         + "</section>"
         + folders
+        + '<div class="project-git-links">'
+        + "".join(_render_git_link(row, base_path, folder=len(rows) > 1) for row in rows)
+        + "</div>"
         + _render_work_list(
             detail,
             project_url,
@@ -3101,6 +3228,9 @@ def render_workspace_page(
         f"<h1>{escape(workspace_name)}</h1>"
         f'<p class="hero-copy workspace-path">{escape(str(row.workspace_root))}</p></div></section>'
         + _render_workspace_switcher(navigation, row, base_path)
+        + '<div class="project-git-links">'
+        + _render_git_link(row, base_path)
+        + "</div>"
         + (
             _render_workspace_current_task(row, base_path=base_path, actions="")
             if row.live_error
@@ -3349,7 +3479,9 @@ def render_task_page(
         f'<span class="mono" title="{escape(task.task_id, quote=True)}">{escape(task.task_id[:10])}</span>'
         f"<span>{escape(REVISION)} {task.revision}</span>"
         f'<span>{escape(BRANCH)} <strong class="mono">{escape(_display_recorded_branch(detail.git_branch))}</strong></span>'
-        '</div></div></section><nav class="task-sections" aria-label="Разделы задачи">'
+        "</div></div></section>"
+        + _render_task_branch_prompt(detail, base_path)
+        + '<nav class="task-sections" aria-label="Разделы задачи">'
         '<a href="#task-result">Результат и проверки</a><a href="#task-actions">Действия</a>'
         '<a href="#timeline">История</a></nav>'
         '<section class="task-layout"><div class="task-main-column"><div class="task-summary" id="task-result">'
@@ -3531,6 +3663,15 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
         raise DashboardError("dashboard path is outside the dashboard route")
     relative = path[len(base_path) :]
     parts = relative.split("/")
+    if len(parts) == 4 and parts[0] == "workspaces" and parts[2:] == ["git", ""]:
+        search_query, page = _parse_history_query(query, allow_search=True)
+        return _DashboardPageRequest(
+            "git",
+            _decode_identity_component(parts[1]),
+            search_query,
+            path + (f"?{query}" if query else ""),
+            page,
+        )
     if len(parts) == 4 and parts[0] == "projects" and parts[2:] == ["settings", ""]:
         if query:
             raise DashboardError("dashboard settings route does not accept query fields")
@@ -3559,6 +3700,8 @@ def _parse_page_request(base_path: str, path: str, query: str) -> _DashboardPage
 
 
 def _render_page(database_path: Path, base_path: str, request: _DashboardPageRequest) -> str:
+    if request.kind == "git":
+        return _render_git_page(database_path, base_path, request)
     if request.kind == "projects":
         return render_projects_page(
             read_dashboard_home(
@@ -3651,13 +3794,15 @@ def _parse_sse_view(query: str) -> tuple[str, str | None, str | None, str, int]:
                 raise DashboardError("dashboard event search query is invalid")
         _parse_event_scope(query, view)
         return view, None, search_query, snapshot, page
-    if view not in {"project", "project_settings", "workspace", "task"}:
+    if view not in {"project", "project_settings", "workspace", "task", "git"}:
         raise DashboardError("dashboard event view is unsupported")
     identity_key = "project_id" if view == "project_settings" else f"{view}_id"
     allowed = {"view", "snapshot", identity_key}
+    if view in {"workspace", "project", "git"}:
+        allowed.add("q")
     if view in {"workspace", "project"}:
         allowed.update({"q", "scope"})
-    if view in {"workspace", "project", "task"}:
+    if view in {"workspace", "project", "task", "git"}:
         allowed.add("page")
     if set(parsed) - allowed or identity_key not in parsed or len(parsed[identity_key]) != 1:
         raise DashboardError("dashboard event query does not match the expected schema")
@@ -3700,8 +3845,17 @@ def _view_fingerprint(
     page: int = 1,
     scope: str | None = None,
 ) -> str:
-    if view == "projects":
-        value: object = _fingerprint_home(
+    if view == "git":
+        assert identity is not None
+        connection = connect_database(database_path)
+        try:
+            value: object = read_git_snapshot(
+                connection, identity, query=search_query or "", page=page
+            )
+        finally:
+            connection.close()
+    elif view == "projects":
+        value = _fingerprint_home(
             read_dashboard_home(
                 database_path,
                 search_query=search_query,
@@ -3984,7 +4138,17 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             request = _parse_dashboard_action_form(payload)
-            if isinstance(request, DashboardVisibilityRequest):
+            if isinstance(request, GitOperationRequest):
+                if page.kind != "git" or page.identity != request.workspace_id:
+                    raise TaskValidationError("Git target does not match its Workspace page")
+                connection = connect_database(self.database_path)
+                try:
+                    run_git_operation(connection, request)
+                finally:
+                    connection.close()
+                if self.workspace_invalidations is not None:
+                    self.workspace_invalidations.put(request.workspace_id)
+            elif isinstance(request, DashboardVisibilityRequest):
                 mutate_dashboard_visibility(self.database_path, request)
             elif isinstance(request, DashboardSkillPolicyRequest):
                 if page.kind != "project" or page.identity != request.project_id:
@@ -4030,6 +4194,33 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     and request.action == "delete_task"
                     else page.redirect_target
                 )
+        except GitOperationError as exc:
+            if not isinstance(request, GitOperationRequest):
+                self._send_form_error(409, page, payload)
+                return
+            if self.workspace_invalidations is not None:
+                self.workspace_invalidations.put(request.workspace_id)
+            try:
+                html = _render_git_page(
+                    self.database_path,
+                    self.route_path,
+                    page,
+                    error=str(exc),
+                    draft_action=request.action,
+                    draft_value=request.value,
+                )
+            except (
+                GitWorkspaceError,
+                RegistryError,
+                OSError,
+                sqlite3.DatabaseError,
+                DatabaseError,
+            ):
+                html = _render_navigation_error(
+                    "Git недоступен", "Обновите страницу и проверьте папку проекта."
+                )
+            self._send_html(409, html)
+            return
         except TaskValidationError:
             self._send_form_error(400, page, payload)
             return
@@ -4121,7 +4312,7 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     data_version = current_data_version
                     self._write_sse("event: refresh\ndata: changed\n\n")
                 if monotonic() >= heartbeat_at:
-                    if view in {"workspace", "project", "project_settings"}:
+                    if view in {"workspace", "project", "project_settings", "git"}:
                         try:
                             refreshed_snapshot = _view_fingerprint(
                                 self.database_path,

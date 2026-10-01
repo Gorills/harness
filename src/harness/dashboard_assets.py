@@ -351,6 +351,55 @@ nav.action-row { border-top: 1px solid var(--border); padding: 16px 24px; }
 .project-row-path, .project-row-next, .project-row-state > span:last-child { font-size: 11px; }
 .project-row-links { font-size: 11px; }
 .mobile-work-tabs { display: none; }
+.git-entry { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--accent); font-size: 12px; overflow-wrap: anywhere; }
+.project-git-links { display: flex; flex-wrap: wrap; gap: 12px; margin: -8px 0 20px; }
+.task-branch-context { margin: -8px 0 20px; }
+.task-branch-prompt, .git-status-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border: 1px solid var(--border); background: var(--panel); border-radius: var(--radius); margin-bottom: 20px; }
+.task-branch-prompt { background: var(--accent-soft); border-color: #b9d9d3; }
+.task-branch-prompt p { margin-top: 4px; color: var(--text-secondary); }
+.task-branch-prompt .button { color: var(--accent); font-weight: 600; }
+.git-status-bar > div { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; }
+.git-status-bar > div > span, .git-status-bar small, .git-status-bar > p { color: var(--text-secondary); font-size: 12px; }
+.git-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+.git-columns > .panel { margin: 0; min-width: 0; }
+.git-workbench form { margin: 0; }
+.git-workbench label { display: block; font-weight: 550; font-size: 12px; margin-bottom: 6px; }
+.git-workbench button { border: 1px solid var(--border-strong); border-radius: 4px; background: var(--panel); padding: 7px 11px; font-size: 12px; min-height: 34px; }
+.git-workbench button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.git-workbench button:disabled { cursor: not-allowed; }
+.git-workbench button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+.git-search > div { display: flex; gap: 8px; }
+.git-search + p { margin: 12px 0; }
+.git-branch-list, .git-file-list { list-style: none; margin: 0; padding: 0; }
+.git-branch-list { max-height: 380px; overflow-y: auto; }
+.git-branch-row, .git-file-row { display: flex; gap: 12px; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.git-branch-name, .git-file-row > div { display: grid; gap: 3px; min-width: 0; }
+.git-branch-name span, .git-file-row span { font-size: 11px; color: var(--text-secondary); }
+.git-file-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-branch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; flex-shrink: 0; }
+.git-merge-choice { position: relative; }
+.git-merge-choice > summary { font-size: 12px; color: var(--text-secondary); padding: 8px 4px; }
+.git-merge-choice > div { position: absolute; right: 0; width: 290px; max-width: 80vw; padding: 16px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 8px 24px #202b3320; z-index: 5; }
+.git-merge-choice p { margin-bottom: 12px; overflow-wrap: anywhere; }
+.git-create { margin: 12px 0; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+.git-create summary { padding: 8px 0; color: var(--accent); font-weight: 550; }
+.git-create form, .git-commit { display: grid; gap: 10px; margin-top: 12px !important; }
+.git-commit { padding-top: 12px; }
+.git-commit button { justify-self: start; }
+.git-warning { background: var(--warning-soft); border: 1px solid #e4c794; border-radius: var(--radius); padding: 16px 20px; margin-bottom: 18px; overflow-wrap: anywhere; }
+.git-warning p { margin: 8px 0 12px; white-space: pre-wrap; }
+.git-switch-hint { color: var(--text-secondary); margin: -8px 0 20px; font-size: 12px; }
+@media (max-width: 1100px) {
+  .git-columns { grid-template-columns: minmax(0, 1fr); }
+  .git-workbench.has-changes .git-changes { order: -1; }
+}
+@media (max-width: 600px) {
+  .git-status-bar, .task-branch-prompt { align-items: flex-start; flex-direction: column; padding: 14px; }
+  .git-branch-row { align-items: flex-start; flex-wrap: wrap; }
+  .git-branch-actions { width: 100%; justify-content: flex-start; }
+  .git-merge-choice > div { right: auto; left: 0; }
+  .git-file-row { flex-wrap: wrap; }
+}
 @media (min-width: 1700px) {
   .portfolio-layout { grid-template-columns: minmax(0,1fr) 360px; }
   .project-directory-head, .project-row { grid-template-columns: minmax(160px,.8fr) minmax(200px,1.3fr) 145px 95px; padding-left: 24px; padding-right: 24px; }
