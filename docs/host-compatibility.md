@@ -91,7 +91,7 @@ cleanup ownership-aware. Generated files are ignored in Normal and Hidden, inclu
 worktrees. Existing user or tracked `AGENTS.md` is untouched. An existing user override with the
 exact bootstrap and post-status read instruction is accepted without mutation; one without them blocks registration. Manually
 adopted production configs receive an override; the tracked source-checkout overlay is left alone.
-Hidden text is added in Hidden mode ([ADR-0073](decisions/0073-codex-root-agents-bootstrap.md)).
+Hidden text is added in Hidden mode ([ADR-0077](decisions/0077-codex-root-agents-bootstrap.md)).
 
 Codex and Cursor share one `.agents/skills` projection. Cursor leftover cleanup still lists
 `.claude/skills` as a visible compatibility root; Claude Code is not an active host

@@ -1,4 +1,4 @@
-# ADR-0073: Codex bootstrap in a Workspace root AGENTS.override.md
+# ADR-0077: Codex bootstrap in a Workspace root AGENTS.override.md
 
 - **Status:** Accepted
 - **Date:** 2026-09-24

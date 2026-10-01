@@ -1,6 +1,6 @@
 # ADR-0028: Hygiene-effective Hidden without host SCM-write enforcement
 
-> **Amended by ADR-0073:** Codex adds an owned root `AGENTS.override.md` with Hidden instructions;
+> **Amended by ADR-0077:** Codex adds an owned root `AGENTS.override.md` with Hidden instructions;
 > the generated file is excluded locally and user `AGENTS.md` remains untouched.
 
 - **Status:** Accepted
