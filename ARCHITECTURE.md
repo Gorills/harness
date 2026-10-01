@@ -545,6 +545,11 @@ The implemented Linux/POSIX installation slice supports local Codex CLI/IDE/desk
 
 `harness init` binds one folder (Git optional). `harness scan` inspects Harness-owned intent, reconciles active Codex/Cursor project config, enables/verifies Cursor, and submits one compatible profile set to daemon-owned skill reconciliation for an already-registered Workspace. `harness uninstall` removes selected host artifacts and reprojects remaining profiles; uninstall-all does not require the Codex CLI to clean owned config. Bare doctor reports Codex CLI/intent/project config separately from Cursor global/project/tool state, daemon runtime, and Project index. Core Task/Knowledge/index logic remains host-neutral. Automated stdio plus Streamable HTTP and installed-wheel tests prove Cursor → Codex continuity; real Codex acceptance exercises the configured HTTP path.
 
+Codex reconciliation preserves existing documented per-tool `approval_mode` preferences; it never
+creates or changes a preference. Already-current files remain byte-unchanged. Unknown content
+remains a collision, and cleanup refuses to delete a config with user tool approvals before
+removing companion files ([ADR-0075](docs/decisions/0075-preserve-codex-tool-approval-preferences.md)).
+
 The checkout global-refresh helper activates its default Cursor+Codex set through one
 `harness install --host all` lifecycle call, preserving joint preflight and the existing combined
 Codex-then-Cursor adapter order. Post-install repair errors
@@ -588,10 +593,18 @@ Dashboard rules:
 - serve the operator UI at that loopback root (`http://127.0.0.1:17373/`); persist `dashboard.token` next to the selected database as the Codex bearer, not a dashboard path secret ([ADR-0040](docs/decisions/0040-dashboard-root-url-and-project-index.md));
 - start with the daemon; do not require a separate `harness dashboard` start step;
 - same daemon/domain state as MCP;
-- show Project cards on the home page and sidebar links to `/projects/{id}/`, with direct Task
-  and private-vault navigation, plus home Task search and a bounded Task list that pins live
-  (`working`/`waiting`) Tasks ahead of recency; do not present Workspaces as copies;
-- every Project screen shares Overview / Tasks / Notes/access / Settings navigation. Settings live
+- home pairs a Project directory with an independent ready-results inbox, using a light work surface
+  and persistent dark navigation. Global Tasks and review have their own views; archived Tasks do not
+  appear in the default inbox or active list ([ADR-0076](docs/decisions/0076-dashboard-daily-project-workspace.md));
+- `/projects/{id}/` is the aggregate Project Task list with bounded search and pagination across
+  folders; it replaces the redundant Overview. Project and Workspace routes default to active Tasks.
+  Native `scope` filters select active (working only), review (waiting for operator review), all
+  or archive; active counters exclude waiting Tasks. Sidebar links and search stay fixed above
+  a scrollable quick Project list with no visible scrollbar. Selected counts, pagination and SSE
+  snapshots use the same membership. Within each list, review precedes other active Tasks and archive,
+  by recency within each group. Search spans the existing global or Project boundary, includes archive,
+  and renders one bounded actionable list with a refinement hint at 24 matches;
+- every Project screen shares Tasks / Notes/access / Settings navigation. Settings live
   at `/projects/{id}/settings/`, including skill scope, visibility and Project management. The legacy
   `/projects/{id}/#skill-scope` anchor links to the new location. Existing Workspace/Task routes remain;
 - notes links preserve an explicitly validated source Workspace/Task in the dashboard wrapper and
@@ -599,7 +612,7 @@ Dashboard rules:
 - show only observed activity, never claim access to model internal reasoning;
 - state transitions (accept, feedback, cancel, Hidden/Normal) and registry mutations call daemon-owned domain services rather than editing dashboard-local state;
 - mutation POSTs require the exact loopback Host and either a matching same-origin Origin or, when Origin is absent or `null`, `Sec-Fetch-Site: same-origin`; a foreign Origin stays non-mutating;
-- Hidden/Normal operator control is on Project and Workspace detail;
+- Hidden/Normal operator control is in Project Settings;
 - SSE is for dashboard realtime UI and is unrelated to deprecated MCP SSE transport; events carry freshness hints only, not Task/source payloads.
 - dashboard navigation/search/actions must remain progressively usable without JavaScript; JavaScript may enhance freshness but must not become mutation authority.
 - SSE and the explicit refresh control re-fetch the current same-origin HTML and replace the rendered layout in place; they must not force a full page navigation. Dirty operator input still blocks automatic apply ([ADR-0043](docs/decisions/0043-dashboard-in-place-html-refresh.md)).
@@ -610,8 +623,11 @@ Dashboard rules:
 Task cards expose the latest checkpoint's reported verification and its revision/time, with
 historical verification attached to its original timeline checkpoint. An empty latest report does
 not inherit older success; human acceptance remains the existing explicit CAS operation. Metrics
-count all durable active/review Tasks, including multiple waiting Tasks in one Workspace. Home and
-Workspace history pages contain 24 Tasks; Task timeline pages contain 60 events, with real
+count all durable active/review Tasks, including multiple waiting Tasks in one Workspace. Task rows
+provide acceptance, feedback and status forms with explicit identities and revision CAS; the detail
+page keeps its status form visible. Client-side Project filters are optional, survive in-place
+refresh and do not mark a draft dirty. They are hidden on script-free vault pages and without JS.
+Home inbox, Project and Workspace Task pages contain 24 Tasks; Task timeline pages contain 60 events, with real
 previous/next links and page-aware SSE snapshots. Older pages retain the latest Task header.
 
 Failed same-origin POSTs preserve supported editable drafts and reconstruct available retry controls
@@ -619,6 +635,8 @@ from fresh authoritative state. Automatic refresh yields to dirty controls; expl
 preserves compatible drafts and interaction state without restoring hidden revision tokens. When
 the matching form disappeared, the draft remains available instead of being applied elsewhere.
 See [ADR-0065](docs/decisions/0065-dashboard-evidence-history-and-draft-recovery.md).
+The multi-project workbench and inline decisions follow
+[ADR-0074](docs/decisions/0074-dashboard-workbench-and-inline-decisions.md).
 Shared navigation, operator-focused layout, settings routing and draft-aware navigation follow
 [ADR-0070](docs/decisions/0070-project-navigation-and-operator-focus.md). Task decisions precede
 history in reading order; unavailable Workspaces retain an immediate relocation action.

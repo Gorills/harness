@@ -19,10 +19,18 @@ Harness is a local-first control plane for coding agents. It preserves project i
 
 ## Linux local use with Cursor or Codex
 
-The dashboard home is a Project hub with direct Task and personal Notes/access navigation.
-Every Project screen has Overview, Tasks, Notes/access and Settings links. Notes opened from a Task
+The dashboard pairs a searchable Project directory with a ready-results inbox and one-click
+acceptance. Persistent navigation opens Projects, review and global Tasks. Project links open
+working Tasks across all registered folders; review, all Tasks and archive have separate filters
+and pagination. Search includes active Tasks and archive and shows actionable results directly.
+Task rows offer feedback and state changes without opening another screen.
+Every Project screen has Tasks, Notes/access and Settings links. Notes opened from a Task
 include a direct return to that Task. Project configuration lives in Settings; unsaved Task forms
-warn before navigation. See [the navigation contract](docs/decisions/0070-project-navigation-and-operator-focus.md).
+warn before navigation. See [the daily-work dashboard contract](docs/decisions/0076-dashboard-daily-project-workspace.md)
+and [the navigation contract](docs/decisions/0070-project-navigation-and-operator-focus.md).
+Codex integration updates preserve existing per-tool approval preferences. Cleanup refuses to
+delete a project config carrying these user preferences; resolve them before uninstalling the
+integration. See [the preservation contract](docs/decisions/0075-preserve-codex-tool-approval-preferences.md).
 The personal vault stores notes, servers, passwords and SSH keys in a separate KDBX4
 file/process, with a no-password mode or optional master-password protection, outside MCP and
 Harness SQLite and MCP. Every successful private save creates a full backup in the selected

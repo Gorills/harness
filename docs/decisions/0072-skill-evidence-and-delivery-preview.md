@@ -56,6 +56,10 @@ its local skill files were stale.
 7. Global reconciliation and cleanup both preserve an ADR-0036 source-checkout overlay. Refresh
    that checkout through its isolated `scripts/dev` route. Do not bypass ownership protections
    or silently enable/disable global dogfood to update skills.
+8. Present delivery as compact Workspace rows and development facets as expandable rows with
+   detection and current mode visible. Put technical diagnostics, selection reasons, original
+   triggers and exact Apply previews inside their corresponding disclosures. Keep the baseline
+   and explanatory guidance separately expandable; preserve all mutation and preview contracts.
 
 ## Consequences and verification
 

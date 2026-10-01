@@ -525,6 +525,7 @@ class CodexAdapter:
         marker_path = _marker_path(root)
         raw = _read_optional_regular_file(path, label="Codex project config")
         marker = _read_owner_marker(root)
+        tool_approvals: dict[str, str] = {}
 
         if raw is not None:
             value = _parse_toml(raw, path)
@@ -563,12 +564,16 @@ class CodexAdapter:
                 raise HostRegistrationCollisionError(
                     f"Codex project config cannot be safely reconciled: {path}"
                 )
+            approvals = _tool_approval_overrides(_harness_entry(value))
+            assert approvals is not None
+            tool_approvals = approvals
 
         desired = _desired_config(
             root,
             self.mcp_http_url,
             self._required_http_token(),
             hidden=hidden,
+            tool_approvals=tool_approvals,
         )
         _require_directory_safe(path.parent)
         if marker is None:
@@ -617,9 +622,10 @@ class CodexAdapter:
             raise HostIntegrationError(
                 "tracked Harness Codex project configuration requires manual removal"
             )
-        if raw is not None and not _config_is_owned_shape(_parse_toml(raw, path), root):
+        if raw is not None and not _config_is_removable_shape(_parse_toml(raw, path), root):
             raise HostIntegrationError(
-                "Harness-owned Codex config contains unknown user content and cannot be removed: "
+                "Harness-owned Codex config contains user tool approvals or unknown user content "
+                "and cannot be removed: "
                 f"{path}"
             )
 
@@ -651,9 +657,10 @@ class CodexAdapter:
             raise HostIntegrationError(
                 "tracked Harness Codex project configuration requires manual removal"
             )
-        if raw is not None and not _config_is_owned_shape(_parse_toml(raw, path), root):
+        if raw is not None and not _config_is_removable_shape(_parse_toml(raw, path), root):
             raise HostIntegrationError(
-                "Harness-owned Codex config contains unknown user content and cannot be removed: "
+                "Harness-owned Codex config contains user tool approvals or unknown user content "
+                "and cannot be removed: "
                 f"{path}"
             )
         if raw is not None:
@@ -798,6 +805,7 @@ def _desired_config(
     mcp_http_token: str,
     *,
     hidden: bool = False,
+    tool_approvals: Mapping[str, str] | None = None,
 ) -> bytes:
     entry = _desired_entry(root, mcp_http_url, mcp_http_token)
     lines = [
@@ -820,6 +828,14 @@ def _desired_config(
             "",
         ]
     )
+    for tool, approval in sorted((tool_approvals or {}).items()):
+        lines.extend(
+            [
+                f"[mcp_servers.harness.tools.{json.dumps(tool, ensure_ascii=False)}]",
+                f"approval_mode = {_toml_string(approval)}",
+                "",
+            ]
+        )
     return "\n".join(lines).encode("utf-8")
 
 
@@ -914,7 +930,35 @@ def _entry_is_desired(
     mcp_http_url: str,
     mcp_http_token: str | None,
 ) -> bool:
-    return entry == _desired_entry(root, mcp_http_url, mcp_http_token)
+    return _entry_without_tool_approvals(entry) == _desired_entry(
+        root, mcp_http_url, mcp_http_token
+    )
+
+
+def _tool_approval_overrides(entry: dict[str, object] | None) -> dict[str, str] | None:
+    """Recognize only documented per-tool approval settings, never invent or change a policy."""
+    if entry is None or "tools" not in entry:
+        return {}
+    tools = entry["tools"]
+    if not isinstance(tools, dict):
+        return None
+    overrides: dict[str, str] = {}
+    for tool, policy in tools.items():
+        if not isinstance(tool, str) or not tool or not isinstance(policy, dict):
+            return None
+        if set(policy) != {"approval_mode"}:
+            return None
+        mode = policy["approval_mode"]
+        if not isinstance(mode, str) or mode not in {"auto", "prompt", "writes", "approve"}:
+            return None
+        overrides[tool] = mode
+    return overrides
+
+
+def _entry_without_tool_approvals(entry: dict[str, object] | None) -> dict[str, object] | None:
+    if entry is None or _tool_approval_overrides(entry) is None:
+        return None
+    return {key: value for key, value in entry.items() if key != "tools"}
 
 
 def _manual_config_is_desired(
@@ -943,7 +987,13 @@ def _config_is_desired(
         and _config_is_owned_shape(value, root)
         and value
         == tomllib.loads(
-            _desired_config(root, mcp_http_url, mcp_http_token, hidden=hidden).decode("utf-8")
+            _desired_config(
+                root,
+                mcp_http_url,
+                mcp_http_token,
+                hidden=hidden,
+                tool_approvals=_tool_approval_overrides(_harness_entry(value)),
+            ).decode("utf-8")
         )
     )
 
@@ -959,8 +1009,8 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
     servers = value.get("mcp_servers")
     if not isinstance(servers, dict) or set(servers) != {_SERVER_NAME}:
         return False
-    entry = servers.get(_SERVER_NAME)
-    if not isinstance(entry, dict):
+    entry = _entry_without_tool_approvals(_harness_entry(value))
+    if entry is None:
         return False
     if "url" in entry:
         headers = entry.get("http_headers")
@@ -1008,6 +1058,13 @@ def _config_is_owned_shape(value: dict[str, object], root: Path) -> bool:
             _HOST_PROFILE_ENV: _CODEX_PROFILE,
             _WORKSPACE_ROOT_ENV: str(root),
         }
+    )
+
+
+def _config_is_removable_shape(value: dict[str, object], root: Path) -> bool:
+    # Reconciliation preserves user approval preferences; cleanup must not delete them.
+    return _config_is_owned_shape(value, root) and not _tool_approval_overrides(
+        _harness_entry(value)
     )
 
 

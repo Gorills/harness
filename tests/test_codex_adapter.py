@@ -908,6 +908,76 @@ def test_codex_owned_config_refuses_unknown_user_content(tmp_path: Path) -> None
         adapter.remove_project(root)
 
 
+@pytest.mark.parametrize("approval_mode", ["auto", "prompt", "writes", "approve"])
+def test_codex_reconcile_preserves_user_tool_approvals(tmp_path: Path, approval_mode: str) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    adapter.reconcile_project(root)
+    path = _config(root)
+    tool = 'project_status."quoted".😀'
+    path.write_bytes(
+        path.read_bytes()
+        + f"\n[mcp_servers.harness.tools.{json.dumps(tool, ensure_ascii=False)}]\n"
+        f"approval_mode = {json.dumps(approval_mode)}\n".encode()
+    )
+    before = path.read_bytes()
+    assert adapter.project_registration_state(root) is HostRegistrationState.CURRENT
+    assert adapter.reconcile_project(root) is IntegrationChange.UNCHANGED
+    assert path.read_bytes() == before
+
+    refreshed = _adapter(token="rotated-capability")
+    assert refreshed.reconcile_project(root, hidden=True) is IntegrationChange.CHANGED
+    value = tomllib.loads(path.read_text())
+    assert value["mcp_servers"]["harness"]["tools"] == {tool: {"approval_mode": approval_mode}}
+    assert value["mcp_servers"]["harness"]["http_headers"]["Authorization"] == (
+        "Bearer rotated-capability"
+    )
+    assert value["developer_instructions"] == codex_module.codex_developer_instructions(hidden=True)
+    assert refreshed.reconcile_project(root, hidden=True) is IntegrationChange.UNCHANGED
+    assert refreshed.project_registration_state(root, hidden=True) is HostRegistrationState.CURRENT
+    assert refreshed.reconcile_project(root, hidden=False) is IntegrationChange.CHANGED
+    assert tomllib.loads(path.read_text())["mcp_servers"]["harness"]["tools"] == {
+        tool: {"approval_mode": approval_mode}
+    }
+
+
+def test_codex_cleanup_does_not_delete_user_tool_approvals(tmp_path: Path) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    adapter.reconcile_project(root)
+    path = _config(root)
+    path.write_bytes(
+        path.read_bytes()
+        + b'\n[mcp_servers.harness.tools.project_status]\napproval_mode = "approve"\n'
+    )
+    saved = {p: p.read_bytes() for p in (path, _marker(root), _agents(root), _agents_marker(root))}
+    with pytest.raises(HostIntegrationError, match="user tool approvals"):
+        adapter.preflight_project_remove(root)
+    with pytest.raises(HostIntegrationError, match="user tool approvals"):
+        adapter.remove_project(root)
+    assert {p: p.read_bytes() for p in saved} == saved
+
+
+@pytest.mark.parametrize(
+    "policy",
+    ['approval_mode = "unknown"', "approval_mode = true", 'approval_mode = "approve"\ncustom = 1'],
+)
+def test_codex_tool_approval_extension_still_refuses_unknown_content(
+    tmp_path: Path, policy: str
+) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    adapter.reconcile_project(root)
+    path = _config(root)
+    path.write_bytes(
+        path.read_bytes() + f"\n[mcp_servers.harness.tools.project_status]\n{policy}\n".encode()
+    )
+    before = path.read_bytes()
+    with pytest.raises(HostIntegrationError, match="unknown user content"):
+        adapter.reconcile_project(root)
+    assert path.read_bytes() == before
+
+
 @pytest.mark.parametrize("kind", ["malformed", "symlink"])
 def test_codex_malformed_or_symlink_user_config_fails_without_rewrite(
     tmp_path: Path, kind: str

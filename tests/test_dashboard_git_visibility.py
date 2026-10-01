@@ -202,15 +202,18 @@ def test_workspace_archive_keeps_other_branch_tasks_while_current_task_follows_c
         task = _feature_task(connection, root, workspace)
         feature_fingerprint = _view_fingerprint(database, "workspace", workspace, None)
         _git(root, "checkout", "main")
-        detail = read_dashboard_workspace_detail(database, workspace, search_query="feature")
+        detail = read_dashboard_workspace_detail(
+            database, workspace, search_query="feature", scope="review"
+        )
         assert detail.workspace.task_id is None
-        assert detail.workspace.active_task_count == detail.workspace.review_task_count == 1
+        assert detail.workspace.active_task_count == 0
+        assert detail.workspace.review_task_count == 1
         assert detail.task_count == 1
         assert detail.recent_tasks[0].task.task_id == task.task_id
         assert detail.task_search_results
         project_detail = read_dashboard_project_detail(database, project)
         assert project_detail.workspaces[0].task_id is None
-        assert project_detail.workspaces[0].active_task_count == 1
+        assert project_detail.workspaces[0].active_task_count == 0
         assert project_detail.workspaces[0].review_task_count == 1
         assert _view_fingerprint(database, "workspace", workspace, None) != feature_fingerprint
         assert read_dashboard_home(database).recent_tasks[0].task.task_id == task.task_id
@@ -253,8 +256,8 @@ def test_workspace_history_pages_include_other_branch_tasks(tmp_path: Path) -> N
             task = task_start(connection, workspace, f"feature {number}")
             task_accept(connection, workspace, task.task_id, expected_revision=task.revision)
         _git(root, "checkout", "main")
-        first = read_dashboard_workspace_detail(database, workspace, page=1)
-        second = read_dashboard_workspace_detail(database, workspace, page=2)
+        first = read_dashboard_workspace_detail(database, workspace, page=1, scope="all")
+        second = read_dashboard_workspace_detail(database, workspace, page=2, scope="all")
         assert first.task_count == second.task_count == 28
         assert first.page == 1
         assert second.page == 2

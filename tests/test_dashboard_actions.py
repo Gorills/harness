@@ -108,7 +108,8 @@ def _post(
         headers["Host"] = host
     if extra_headers:
         headers.update(extra_headers)
-    connection.request("POST", parsed.path, body=body, headers=headers)
+    target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+    connection.request("POST", target, body=body, headers=headers)
     response = connection.getresponse()
     payload = response.read()
     result = response.status, {name: value for name, value in response.getheaders()}, payload
@@ -135,10 +136,10 @@ def test_dashboard_feedback_is_same_origin_cas_and_resumes_same_task(tmp_path: P
         parsed = urlsplit(url)
         origin = f"http://127.0.0.1:{parsed.port}"
         workspace_url = url + f"workspaces/{quote(workspace_id, safe='')}/"
-        with urlopen(workspace_url, timeout=2) as response:
+        with urlopen(workspace_url + "?scope=review", timeout=2) as response:
             body = response.read().decode("utf-8")
         assert ">Принять<" in body
-        assert ">Замечание<" in body
+        assert ">Доработать<" in body
         assert ">Отменить<" in body
         assert f'value="{waiting.revision}"' in body
 
