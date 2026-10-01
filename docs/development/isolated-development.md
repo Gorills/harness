@@ -1,5 +1,37 @@
 # Isolated development and testing
 
+## Windows native checkout
+
+On Windows, run the PowerShell-backed `scripts\dev.cmd` from Command Prompt or PowerShell.
+It bootstraps pinned uv 0.12.5 and Python 3.13 within this checkout. No Linux subsystem or
+global Harness installation is needed.
+Each Windows account uses an ignored `.harness-windows-<SID>` directory, including a separate
+virtual environment. Run the wrapper as the same Windows account that will use Codex.
+
+```powershell
+scripts\dev.cmd sync
+scripts\dev.cmd env
+scripts\dev.cmd harness skills sync
+scripts\dev.cmd harness init .
+scripts\dev.cmd harness doctor
+scripts\dev.cmd harness status .
+scripts\dev.cmd connect-codex
+scripts\dev.cmd harness dashboard
+```
+
+`connect-codex` creates `.codex/config.toml` under the chosen Git Workspace and places an exact
+ignore entry in that Workspace's `.git/info/exclude`; it refuses an existing unknown config. It
+uses the daemon's private bearer token and loopback MCP port, and does not touch user-global Codex
+settings. Fully restart Codex and start a new conversation so the project MCP config is loaded.
+The project must be trusted in Codex. Run `scripts\dev.cmd stop` to stop only this checkout's
+daemon. `scripts\dev.cmd connect-codex <Git-root>` can connect a separate registered Workspace
+to the same isolated daemon.
+
+The personal vault supports manual master-password and no-password use. Linux Secret Service
+device unlock is unavailable on Windows. Global install, Cursor activation and restore are not
+part of this checkout route. [ADR-0073](../decisions/0073-native-windows-development-runtime.md)
+records the Windows transport and filesystem decisions.
+
 Harness is one global install per user with one canonical daemon. By default a checkout does not
 share that process, database, or Unix socket with a separately installed build. ADR-0036 adds an
 explicit global-dogfood route; it never changes the default isolated test runtime.
@@ -100,7 +132,7 @@ Stop with Ctrl+C, or stop a background/autostarted isolated daemon with:
 scripts/dev stop
 ```
 
-`stop` only targets the Unix socket under `.harness/runtime/`. It does not signal a system daemon on the canonical per-user socket.
+`stop` only targets this checkout's endpoint under `.harness/runtime/`. It does not signal a system daemon on the canonical per-user endpoint.
 
 ## 4. Quality gate
 

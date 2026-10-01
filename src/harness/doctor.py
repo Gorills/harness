@@ -121,7 +121,7 @@ class DoctorCheck:
 
 @dataclass(frozen=True, slots=True)
 class SystemDoctorReport:
-    """Full supported Linux operational diagnostics without durable mutation."""
+    """Supported platform diagnostics without durable mutation."""
 
     checks: tuple[DoctorCheck, ...]
 
@@ -173,15 +173,17 @@ def run_system_doctor(
     environment: Mapping[str, str] | None = None,
     python_executable: Path | None = None,
 ) -> SystemDoctorReport:
-    """Run the complete supported Linux doctor contract read-only and fail-closed."""
+    """Run the supported platform doctor contract read-only and fail-closed."""
     checks: list[DoctorCheck] = []
     stale_notes: list[str] = []
 
     if sys.platform.startswith("linux") and os.name != "nt" and hasattr(os, "geteuid"):
         checks.append(_check("Platform", DoctorSeverity.OK, "Linux/POSIX runtime supported"))
+    elif os.name == "nt":
+        checks.append(_check("Platform", DoctorSeverity.OK, "native Windows runtime supported"))
     else:
         checks.append(
-            _check("Platform", DoctorSeverity.FAIL, "supported production target is Linux/POSIX")
+            _check("Platform", DoctorSeverity.FAIL, "supported targets are Linux and Windows")
         )
 
     values = os.environ if environment is None else environment
@@ -676,7 +678,22 @@ def _inspect_daemon(
     checks: list[DoctorCheck],
     stale_notes: list[str],
 ) -> RuntimeDiagnosticsResult | None:
-    if not _exists_without_following(socket_path):
+    if os.name == "nt":
+        from harness.windows_pipe import read_pipe_key
+
+        try:
+            read_pipe_key(socket_path)
+        except FileNotFoundError:
+            checks.append(
+                _check(
+                    "Daemon", DoctorSeverity.WARN, "not running; canonical daemon is lazy-started"
+                )
+            )
+            return None
+        except (OSError, RuntimeError) as exc:
+            checks.append(_check("Daemon", DoctorSeverity.FAIL, _bounded_detail(exc)))
+            return None
+    elif not _exists_without_following(socket_path):
         checks.append(
             _check("Daemon", DoctorSeverity.WARN, "not running; canonical daemon is lazy-started")
         )
@@ -686,23 +703,28 @@ def _inspect_daemon(
             _check("Daemon", DoctorSeverity.FAIL, "socket exists under an unsafe runtime directory")
         )
         return None
-    try:
-        metadata = socket_path.lstat()
-    except OSError as exc:
-        checks.append(_check("Daemon", DoctorSeverity.FAIL, f"socket cannot be inspected: {exc}"))
-        return None
-    if (
-        not stat.S_ISSOCK(metadata.st_mode)
-        or metadata.st_uid != os.geteuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o077
-    ):
-        stale_notes.append("unsafe or stale daemon socket")
-        checks.append(
-            _check(
-                "Daemon", DoctorSeverity.FAIL, "canonical socket identity or permissions are unsafe"
+    if os.name != "nt":
+        try:
+            metadata = socket_path.lstat()
+        except OSError as exc:
+            checks.append(
+                _check("Daemon", DoctorSeverity.FAIL, f"socket cannot be inspected: {exc}")
             )
-        )
-        return None
+            return None
+        if (
+            not stat.S_ISSOCK(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            stale_notes.append("unsafe or stale daemon socket")
+            checks.append(
+                _check(
+                    "Daemon",
+                    DoctorSeverity.FAIL,
+                    "canonical socket identity or permissions are unsafe",
+                )
+            )
+            return None
     try:
         diagnostics = request_runtime_diagnostics(socket_path)
     except IpcRemoteError as exc:

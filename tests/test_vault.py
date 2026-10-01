@@ -57,7 +57,12 @@ def test_full_round_trip_and_independent_recovery(vault: VaultStore, tmp_path: P
     for path in [vault.path, *backups(tmp_path)]:
         assert SECRET.encode() not in path.read_bytes()
         assert b"Production SSH" not in path.read_bytes()
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        if os.name == "nt":
+            from harness.windows_fs import require_private_windows_path
+
+            require_private_windows_path(path, directory=False)
+        else:
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
     saved = backups(tmp_path)[-1].read_bytes()
     assert saved == vault.path.read_bytes()
     vault.lock()
@@ -169,7 +174,13 @@ def test_paths_and_unknown_owned_directories_fail_closed(tmp_path: Path) -> None
     unsafe.mkdir(mode=0o755)
     with pytest.raises(VaultError, match="unsafe_path"):
         VaultStore(unsafe)
-    assert stat.S_IMODE(unsafe.stat().st_mode) == 0o755
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        with pytest.raises(WindowsFileSecurityError):
+            require_private_windows_path(unsafe, directory=True)
+    else:
+        assert stat.S_IMODE(unsafe.stat().st_mode) == 0o755
 
 
 def test_validation_rejects_record_and_preserves_unlocked_state(vault: VaultStore) -> None:

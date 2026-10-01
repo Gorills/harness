@@ -29,6 +29,26 @@ def canonical_database_lock_path(paths: RuntimePaths) -> Path:
 def preflight_canonical_database_state(paths: RuntimePaths) -> None:
     """Fail closed on unsafe canonical state-directory or SQLite artifact identities."""
     state_directory = paths.database.parent
+    if os.name == "nt":
+        from harness.windows_fs import WindowsFileSecurityError, require_private_windows_path
+
+        try:
+            require_private_windows_path(state_directory, directory=True)
+        except FileNotFoundError:
+            return
+        except WindowsFileSecurityError as exc:
+            raise RuntimeStateError("Harness refused an unsafe state directory") from exc
+        for candidate in (
+            *canonical_database_purge_candidates(paths),
+            canonical_database_lock_path(paths),
+        ):
+            try:
+                require_private_windows_path(candidate, directory=False)
+            except FileNotFoundError:
+                continue
+            except WindowsFileSecurityError as exc:
+                raise RuntimeStateError("Harness refused unsafe database state") from exc
+        return
     try:
         directory_metadata = state_directory.lstat()
     except FileNotFoundError:

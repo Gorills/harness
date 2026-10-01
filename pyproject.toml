@@ -12,6 +12,7 @@ dependencies = [
     "ast-grep-py==0.45.1",
     "mcp==2.0.0",
     "pykeepass==4.2.0",
+    "pywin32==312 ; sys_platform == 'win32'",
     "secretstorage==3.4.0 ; sys_platform == 'linux'",
 ]
 
@@ -46,9 +47,14 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "RUF"]
 
 [tool.mypy]
 python_version = "3.13"
+platform = "linux"
 strict = true
 warn_unreachable = true
 files = ["src", "tests", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["ntsecuritycon", "win32api", "win32con", "win32security", "secretstorage"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

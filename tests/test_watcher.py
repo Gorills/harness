@@ -421,7 +421,10 @@ def test_directory_listing_skips_cmake_build_prefix_trees(tmp_path: Path) -> Non
     assert not any(path.startswith("cmake-build-debug/") for path in directories)
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory mode bits")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX directory mode bits are unavailable or bypassed",
+)
 def test_unreadable_subdirectory_does_not_hot_loop_full_scan(tmp_path: Path) -> None:
     root, database, _workspace_id = _registered(tmp_path)
     blocked = root / "blocked"
