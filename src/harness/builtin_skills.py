@@ -540,8 +540,12 @@ production guarantees, but do not create a production/CI platform for a developm
 ## State, secrets, and networking
 
 - Put uploads, generated media, database files, and other durable mutable data in named volumes,
-  explicit host storage, or object storage. Define ownership, capacity, backup, restore, and
-  migration behavior; prove data survives container recreation.
+  explicit host storage, or object storage. For valuable state, define ownership, capacity, backup,
+  restore, and migration behavior; prove data survives container recreation when required.
+- A project-local development/test volume containing only reproducible fixtures or seed data may
+  be reset/reseeded when needed for the authorized task. Confirm its exact scope and disposability;
+  do not add backups, recovery infrastructure, or compatibility code solely to retain those rows.
+  Keep fixture/seed sources. Localhost or a dev-looking name alone does not establish disposability.
 - Use ephemeral caches/tmpfs only for data that is safe to lose. Never let test cleanup target a
   production-named volume, and make any volume reset command explicit and recoverability-aware.
 - Keep secrets out of images, build arguments, source, and logs. Use the deployment platform's
@@ -743,71 +747,42 @@ check. A full audit or performance benchmark needs a concrete reason or an expli
     ),
     BuiltinSkill(
         "frontend-design",
-        "Use when creating, changing, or reviewing any user-facing web or mobile interface; exclude backend-only and non-visual work.",
+        "Use when implementing or reviewing web or mobile interfaces: layout, controls, interaction, and rendered behavior. Choose guidance for working applications versus marketing surfaces; exclude backend-only and non-visual work.",
         (),
         """
 # Frontend design
-Match the design work to the request. For a small copy, spacing, color, icon, or component-position
-edit, reuse the existing tokens and patterns, make the change, and inspect the affected result.
-Check wrapping, focus, contrast, or responsive behavior only where it can change. No new design
-contract, reference tour, test suite, or redesign is required.
+Start with the user's task, actual content/data, current screens, components, and state ownership.
+Extend the existing system. A small copy, spacing, color, or icon edit needs the affected rendered
+check, not a new visual direction, test suite, or application-wide audit.
 
-For a new screen, substantial redesign, or missing visual direction, use the guidance below.
+## Choose the surface before choosing the layout
+- Admin panels, CRM, dashboards, settings, and other working applications use
+  [product interfaces](references/product-interfaces.md). Optimize for completing and repeating
+  work, scanning/comparing data, and keeping context. Familiar patterns shared with other tools are
+  useful. Do not add a hero, sales sections, ornamental metrics, or signature styling without a
+  concrete task or an explicit design brief that needs them.
+- Public marketing/editorial pages use [marketing and editorial](references/marketing-sites.md).
+  Public access alone does not make a task-oriented application a marketing page. A project may
+  contain both surfaces; select guidance per screen, not once for the whole repository.
+- Use [visual language](references/visual-language.md) for a requested visual exploration or a
+  marketing surface needing direction. A new internal screen may reuse conventional controls and
+  a small semantic token set; missing branding does not require an artistic concept.
+- For web actions, state updates, forms, or navigation, read
+  [web interactions](references/web-interactions.md). Routine actions within a working screen should
+  update the affected content without a full document reload and preserve the user's context.
 
-## Establish a direction when needed
-Inspect the existing screens, tokens, components, brand assets, copy, and platform conventions. If
-they form a coherent system, extend it instead of silently rebranding the product. When direction
-is missing, infer a defensible direction from the subject, audience, and job instead of falling back
-to the model's favorite style.
-
-Use these prompts to settle unclear design choices; they are not a required written deliverable:
-
-1. **User and job:** who is here, what they need, and the one primary action or outcome.
-2. **Content hierarchy:** what must be noticed first, second, and only on demand.
-3. **Visual direction:** a direction grounded in the product and its existing brand.
-4. **Character:** a distinctive idea when the brief calls for it; ordinary product controls need
-   clarity and consistency, not a mandatory signature treatment.
-5. **System:** named color roles, type roles, spacing rhythm, shape/depth rule, content width,
-   density, compact-layout behavior, and motion rule.
-
-Keep these decisions lightweight and reuse established answers. Consult
-[visual language](references/visual-language.md) when defining a direction, and the relevant
-[marketing and editorial](references/marketing-sites.md) or
-[product and mobile](references/product-interfaces.md) guidance when designing those surfaces.
-
-## Build from hierarchy, not decoration
-- Put real content and the primary task into the layout before polishing surfaces. Copy, images,
-  data, and state are design material; generic filler produces a generic composition.
-- Encode the contract as existing project tokens or a small semantic token layer. Derive component
-  values from those roles instead of scattering arbitrary colors, radii, shadows, and spacing.
-- Design wide and compact layouts together. Responsive behavior is a change in grouping, priority,
-  navigation, and interaction where necessary, not merely smaller text and stacked columns.
-- Prefer familiar controls and clear affordances. Originality belongs in visual voice and
-  composition, not in making standard actions hard to recognize.
-- Complete states introduced or affected by the change: for example, a new submit flow needs
-  loading/error/success behavior; a margin adjustment does not need an offline-state matrix.
-- Preserve repository architecture and the established design system. A design task does not
-  authorize framework replacement, route churn, destructive rewrites, invented claims, or unrelated
-  copy changes.
-
-## Reject model defaults unless the brief earns them
-Do not emit a purple/blue gradient hero, centered headline above three equal feature cards, card
-inside card, glass panels, floating blurred orbs, universal pill shapes, identical rounded boxes,
-decorative 01/02/03 labels, emoji as product icons, or glow on every important element merely
-because they are easy defaults. Any one of these can be valid when it follows from the brand,
-content, or interaction; without that reason, choose a structure specific to this subject.
-
-Do not replace one fashion with another. Cream editorial pages, black pages with an acid accent,
-brutalist grids, bento layouts, giant type, and excessive whitespace are also generic when selected
-without a brief-specific reason. Do not fabricate testimonials, customer logos, ratings, usage
-numbers, people, product screenshots, or photographic evidence. Use supplied/licensed assets,
-clearly marked placeholders, or honest copy.
-
-## Verify the rendered result
-Inspect the rendered result when possible. For new screens, substantial redesigns, or a requested
-design audit, use [visual review](references/visual-review.md). For a small edit, inspect the changed
-area and a relevant adjacent state or breakpoint; stop when it looks and behaves correctly. If
-rendering is unavailable, state that limitation briefly without inventing an approval gate.
+## Implement the affected behavior
+- Reuse existing components, semantic color/type/spacing roles, and framework patterns. Do not
+  replace frameworks, routing, state ownership, or the design system for a local UI request.
+- Let task frequency, comparison needs, and user expertise determine density. Responsive layouts
+  adapt grouping and available space; wide data tables do not become decorative cards by default.
+- Keep controls recognizable, keyboard-operable, and clearly named. Provide relevant focus,
+  disabled/pending, success, empty, and error states without adding unrelated state matrices.
+- Use real content or clearly marked fixtures. Do not fabricate testimonials, customer logos,
+  ratings, metrics, photographic evidence, or product claims.
+- Render and exercise the affected result. Use [visual review](references/visual-review.md) for new
+  screens, substantial redesigns, or an audit. Check a small edit locally and stop when sufficient
+  evidence is obtained. If rendering or interaction tools are unavailable, report the concrete gap.
 """,
         applies_facets=("mobile-app", "web-frontend"),
         references=(
@@ -818,6 +793,8 @@ rendering is unavailable, state that limitation briefly without inventing an app
 
 Use this guide when establishing or revising a visual direction. Existing designs and narrow
 edits normally supply these decisions already; do not manufacture a new design system each time.
+Subject-inspired imagery and distinctive composition apply to marketing or an explicit visual
+brief. Working applications may use neutral, familiar layouts; no artistic metaphor is required.
 
 ## Derive a direction from the subject
 Start with the product rather than a style catalog. Name three concrete nouns from its world—tools,
@@ -854,9 +831,11 @@ an established brand direction unless the user asked to change it.
   reduced-motion result.
 
 ## Create hierarchy on purpose
-Each screen needs one dominant element, a small supporting layer, and quiet detail. Achieve contrast
+For marketing/editorial composition, establish a dominant element and supporting detail. Achieve contrast
 with scale, weight, space, placement, color, and content—not by making every element louder. A user
 should understand the page purpose and next action from a blurred or squinted view.
+For working applications, prioritize relevant actions and data relationships. Multiple work regions,
+comparison tables, and compact toolbars can be appropriate without a single dominant visual object.
 
 Structural decoration must carry meaning. Use numbering only for real sequence, badges only for
 status/category, dividers only for grouping, and labels only when they clarify a value. Remove any
@@ -867,6 +846,12 @@ ornament whose rationale would fit an unrelated product equally well.
                 "marketing-sites.md",
                 """
 # Marketing and editorial sites
+
+Apply this guide to promotional or editorial surfaces. An admin panel, CRM, settings page, or
+task-oriented public tool needs product-interface guidance, even when its visual system is new.
+Avoid default gradient heroes, glass panels, decorative labels, or repeated card grids unless the
+brief/content supports them. Replacing those with fashionable giant type or whitespace is not a
+substitute for a useful composition.
 
 ## Design the conversion argument
 Give each page one commercial or editorial job. The first screen should make the audience, offer,
@@ -914,6 +899,15 @@ Product UI should disappear into the user's work. Start with the primary task, c
 next safe action. Keep navigation, terminology, save behavior, and control placement consistent with
 the product's existing mental model. Do not trade recognition for novelty.
 
+## Working applications and desktop layout
+Admin panels, CRM, operations tools, and data-heavy screens support repeated work and comparison.
+Choose density for actual users and data. Use available width for tables, editors, related detail,
+and compact action bars. Reserve whitespace for grouping/readability rather than promotional rhythm.
+Keep frequent actions near their objects and bulk actions near selection. Use stable navigation,
+columns, units, and labels; reveal secondary detail without unnecessarily leaving the task.
+Shared conventional layouts are acceptable. Do not add sales heroes, showcase cards, decorative
+KPIs, or a distinctive metaphor to make a working application look original.
+
 - Use standard controls for standard behaviors. Make the whole control target interactive, give it a
   visible label or accessible name, and keep destructive or irreversible actions visually distinct
   without making them the loudest element by default.
@@ -956,6 +950,8 @@ longer choreography must never delay task completion and must respect reduced-mo
 Scope the review to the changed area and plausible effects on its neighbors. A local edit can
 use one rendered inspection; no saved screenshot set, written report, or automated visual test is
 required. Expand to the following checks for new screens, substantial redesigns, or an audit.
+Select criteria for the actual surface. Visual novelty is not an acceptance criterion for a working
+application unless requested; task completion, readable data, and preserved context are.
 
 ## Render a bounded evidence set
 1. Inspect representative compact and wide sizes when responsiveness is affected; use the project's
@@ -969,8 +965,8 @@ required. Expand to the following checks for new screens, substantial redesigns,
 - Can a person identify the screen's purpose, current state, and primary action in five seconds?
 - Does the eye land where the design contract said it should, or do equal cards, badges, borders,
   colors, and buttons compete at the same volume?
-- Is the direction specific to this subject, or would the same structure, palette, copy, and
-  decoration fit ten unrelated products?
+- For marketing or an explicit visual brief, does the direction fit the subject and content?
+  For working applications, does the structure support the actual workflow and comparisons?
 - If the design uses a signature idea, does it survive at compact size without hiding content
   or interaction?
 - Are spacing, alignment, type roles, radii, shadows, icon style, and state colors visibly coherent?
@@ -979,8 +975,45 @@ required. Expand to the following checks for new screens, substantial redesigns,
 - Do compact layouts feel intentionally recomposed rather than shrunken or mechanically stacked?
 - Are controls recognizable and complete across interaction, failure, and accessibility states?
 
+Screenshots cannot establish interaction correctness. Exercise affected forms/actions and check
+their result, failure behavior, and retained context; a working web screen should not reload the
+whole document for a routine in-place action. Reuse unaffected evidence when the result is unchanged.
+
 Source inspection and rendered inspection answer different questions. Report material verification
 gaps, but do not enumerate every untouched platform, viewport, or state as unverified.
+""",
+            ),
+            (
+                "web-interactions.md",
+                """
+# Web interactions
+
+Use this guide for changed web actions, forms, data views, and navigation. Reuse the framework's
+existing action/query/router facilities or a small progressive enhancement. This does not require
+an SPA, a new state library, or rewriting server-rendered pages.
+
+- Within a working screen, create/edit/delete, toggles, filters, sorting, pagination, and bulk
+  actions normally update affected content without a full document reload. Do not use
+  `location.reload()` or a post-submit document redirect as a substitute for updating that result.
+  Deliberate document navigation, external links/downloads, authentication transitions, or an
+  established no-JavaScript fallback can use document navigation when appropriate.
+- Preserve applicable filter/sort/page state, selection, scroll, focus, and valid form input after
+  an action. Reconcile invalid selection or an empty last page after deletion. Keep dialogs/editors
+  open after an error; announce the outcome and move/restore focus where the task needs it.
+- Show pending state on the affected control/region, prevent duplicate consequential submission,
+  and display success only after confirmation or a justified optimistic update with recovery.
+  Handle network/server/validation failures without losing work or freezing unrelated controls.
+- Update or invalidate affected views through the existing state/cache owner. Ignore/cancel stale
+  read responses so an older filter request cannot overwrite a newer result. Cancelling a client
+  request does not prove that a server write was cancelled; resolve an uncertain outcome before
+  repeating a consequential write.
+- Keep links as links and actions as buttons/forms. Preserve keyboard and accessible feedback.
+  Use URLs/history for state that should be shareable or restored by Back/Forward; ordinary
+  navigation must keep direct links and browser behavior useful.
+- Exercise the changed action in the rendered app: confirm the actual result, relevant error/pending
+  behavior, and retained context. For an in-place action, check that no new document loads. Inspect
+  affected responsive layouts with realistic data. Add a focused interaction regression only for
+  a meaningful recurring risk; a cosmetic edit does not need this whole walkthrough.
 """,
             ),
         ),
@@ -1767,6 +1800,16 @@ or run every build/test variant just because a reference lists it.
         (),
         """
 # Data integrity
+- Classify the affected data before choosing preservation or migration work. Reproducible local
+  fixtures, seed rows, and disposable test databases may be reset/recreated when necessary for the
+  authorized task after confirming the exact project-local target. Keep seed/fixture sources; do
+  not add backups, dual-schema support, or recovery code solely to retain disposable rows.
+- Protect production/shared data, real user uploads, and valuable local state. Localhost, a dev
+  label, or an ignored database file alone does not prove data is disposable. Resolve unknown
+  ownership/value before destructive changes, using existing instructions and authorization.
+- Apply the preservation and migration guidance below to valuable state and required deployment
+  compatibility. A disposable dev dataset does not remove the product's real migration contract,
+  but a dev-only change with no existing users/rollout overlap does not need staged deployment.
 - Inspect the affected schema, query, and transaction first. Read migration history, backup policy,
   or deployment overlap when the change can affect compatibility, writes, or recovery. A read-only
   query adjustment does not require a complete data-lifecycle review.
@@ -1783,7 +1826,9 @@ or run every build/test variant just because a reference lists it.
 - Base indexes and query changes on representative plans/workload. Account for write cost,
   selectivity, locking, storage growth, and stale-statistics behavior.
 - Prevent test/dev/prod database and volume confusion. Destructive resets require exact targets and
-  explicit authorization; fixtures and tests must never depend on production data.
+  authorization for the affected data. A necessary reset of confirmed disposable project-local data
+  is covered by the authorized development task; do not ask again solely because a reset is used.
+  Fixtures and tests must never depend on production data.
 - Verify the affected invariant against the actual database engine when practical. Schema/write
   changes need relevant failure/concurrency and compatibility coverage; a read-query change needs
   correct results and, when relevant, a representative query plan.
@@ -1880,6 +1925,9 @@ policy requires a separate reviewer; use an independent agent when it would add 
 # Legacy preservation
 Treat the existing system as an evidence-bearing contract, including awkward behavior that users or
 integrations may rely on.
+- Preserve required contracts and valuable state, not incidental disposable development/test rows.
+  Do not add adapters, backup copies, or data migration branches solely to retain reproducible local
+  seed data. Required compatibility comes from actual users, integrations, and rollout needs.
 - Start with the target code and its relevant caller/tests. Expand to architecture, configuration,
   migrations, or history only when needed to resolve a concrete contract or uncertainty. A local
   change does not need a full repository investigation.

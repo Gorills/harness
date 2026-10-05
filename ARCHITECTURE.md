@@ -446,10 +446,13 @@ system cannot be compromised. `project-architecture` and `complex-change-plannin
 detected software projects and route ADR/scalability and specification-audit/independent-review
 playbooks through references. `legacy-preservation` is a dedicated always-on Skill for detected
 software projects; `complex-change-planning` keeps only a one-line pointer to it. `frontend-design` accompanies recognized web and mobile frontend
-surfaces through matching facets. Its compact entrypoint requires a subject-specific
-design contract, progressively routes marketing/editorial versus product/mobile guidance, rejects
-unjustified model-default aesthetics, and requires bounded rendered visual review before a design
-claim is treated as verified.
+surfaces through matching facets. Its stable ID carries the shared implementation baseline:
+layout, controls, state, and bounded rendered/interaction verification. Working applications use
+task-oriented product guidance and context-preserving in-place web actions; marketing/editorial
+composition and subject-inspired visual direction apply only to those surfaces or an explicit
+visual brief. Disposable reproducible development data does not require preservation machinery;
+valuable state and actual product migration/rollout contracts retain their safeguards
+([ADR-0029](docs/decisions/0029-quality-discipline-verification-and-response-economy.md)).
 
 Stack evidence describes the whole Workspace. The resolver does not narrow the pack from the
 current Task `stack_hints`. Built-in descriptions state when the host should load each projected

@@ -358,6 +358,7 @@ def test_frontend_design_routes_surface_guidance_and_visual_review(tmp_path: Pat
         PurePosixPath("references/product-interfaces.md"),
         PurePosixPath("references/visual-language.md"),
         PurePosixPath("references/visual-review.md"),
+        PurePosixPath("references/web-interactions.md"),
     )
 
 
