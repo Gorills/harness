@@ -262,3 +262,33 @@ projected. The applicability and packaging decisions remain unchanged.
   specialized skill lives in `secure-by-design/references/web-backend.md`.
 - Future observed hooks may add `source=observed` without changing the v1 agent-reported shape.
 - Real-host compliance with response instructions remains acceptance evidence, not an enforcement claim.
+
+## 2026-10-05 amendment: disposable data and working interfaces
+
+The built-in guidance distinguishes reproducible project-local fixtures/seed databases from
+valuable state. A necessary reset of a confirmed disposable target is covered by the authorized
+development task; it does not require backups, adapters, or compatibility branches solely to keep
+those rows. Fixture sources remain intact. Localhost, ignored files, and dev-looking names do not
+establish disposability. Production/shared data, valuable local state, and real migration/rollout
+contracts retain their existing protection. Data-integrity, legacy, and container guidance share
+this boundary.
+
+`frontend-design` keeps its ID and web/mobile facets for delivery compatibility. Its entrypoint
+prioritizes implementation and selects guidance by the actual screen: working applications versus
+marketing/editorial surfaces. Admin panels, CRM, dashboards, settings, and other operational tools
+may use compact familiar layouts with comparison tables and multiple work regions. Artistic
+metaphors, novelty, and marketing composition are not default requirements for those screens.
+Public availability alone does not classify a screen as marketing. Subject-inspired direction
+remains available for promotional/editorial work and explicitly requested visual exploration.
+
+A portable `web-interactions.md` reference governs routine in-place actions: update affected content
+without a whole-document reload, retain applicable context, handle pending/error/duplicate/stale
+results, and verify the rendered action. This does not mandate an SPA, a new state library, or a
+rewrite of server-rendered applications. Deliberate navigation, authentication, downloads, and
+established fallbacks may navigate normally. Review remains proportional to changed behavior.
+
+These content changes do not alter Task-based selection, registry ownership, canonical locations,
+or host projection mechanics. A user-global orchestration skill is independent of the Harness pack:
+when invoked in a Harness project it must honor bootstrap, parent-owned Task continuity, revision
+checks, and operator completion; in other projects it uses native instructions without requiring
+Harness installation. A scratch fix counter/evidence record is not a second durable Task system.

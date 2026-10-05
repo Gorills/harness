@@ -287,6 +287,12 @@ Codex/Cursor subset into `.agents/skills`; it never reads the user-global skill 
 watcher and later scans re-resolve skills after project or index changes only. Task `stack_hints`
 remain metadata and do not select the pack.
 
+Working-interface guidance covers compact data layouts and routine actions without whole-page
+reloads, preserving context and verifying pending/error behavior. Marketing visual direction is
+selected for that surface or an explicit design brief. Confirmed disposable local seed/test data
+may be recreated within an authorized development task without preservation machinery; valuable
+state and real product migration contracts remain protected (ADR-0029).
+
 Project settings show the exact skills selected for each folder, their purposes and why they
 match. Expand a skill-scope action to see what will be added, removed and retained before applying
 it to the Project. The delivery panel separately reports current files, required updates, conflicts,
