@@ -9,7 +9,7 @@ import struct
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from urllib.request import urlopen
 
 import pytest
@@ -86,7 +86,7 @@ def test_missing_ipc_start_polls_failed_command_and_fresh_http_recovery(
             connection.close()
 
     def inspect(label: str, expected_revision: int, rates: bool) -> dict[str, Any]:
-        selected = controller.state("fixture")["selected"]
+        selected = cast(dict[str, Any], controller.state("fixture")["selected"])
         connection = connect_database(database)
         try:
             stored = get_profile(connection, "fixture")
@@ -238,9 +238,8 @@ def test_missing_ipc_start_polls_failed_command_and_fresh_http_recovery(
 
             server = Thread(target=serve, daemon=True)
             server.start()
-            original_socket = socket.socket
 
-            class FixturePeerSocket(original_socket):
+            class FixturePeerSocket(socket.socket):
                 def getsockopt(self, level: int, option: int, buflen: int = 0) -> Any:
                     raw = super().getsockopt(level, option, buflen)
                     if level == socket.SOL_SOCKET and option == socket.SO_PEERCRED:
@@ -355,8 +354,9 @@ def test_startup_observation_failure_rolls_back_all_profiles_then_retries(tmp_pa
         finally:
             connection.close()
         controller.start()
-        assert controller._monitor is not None
-        controller._monitor.join(timeout=2)
+        monitor = cast(Thread | None, controller._monitor)
+        assert monitor is not None
+        monitor.join(timeout=2)
         connection = connect_database(database)
         try:
             for identity in ("first", "second"):

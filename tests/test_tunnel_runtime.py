@@ -51,7 +51,7 @@ def test_resolved_configuration_is_owned_and_failure_is_not_ignored(
 
     with monkeypatch.context() as patch:
         patch.setattr(platform, "run", command)
-        patch.setattr(platform.Path, "exists", lambda self: True)
+        patch.setattr(Path, "exists", lambda self: True)
         if broken_step:
             with pytest.raises(PlatformError):
                 platform.LinuxGuard(995).configure_dns()

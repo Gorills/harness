@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from threading import Lock
@@ -140,7 +141,7 @@ def test_removal_progress_reload_and_fresh_ssh_reconciliation(
     assert "TRANSIENT_RECOVERY_CANARY" not in (tmp_path / "applied.json").read_text()
 
 
-def mapped_paths(root: Path):
+def mapped_paths(root: Path) -> Callable[..., Path]:
     original = pathlib.Path
 
     def mapped(value: object = ".", *parts: str) -> Path:

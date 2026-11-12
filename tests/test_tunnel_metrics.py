@@ -473,6 +473,11 @@ def test_actual_engine_retired_metrics_token_replay_and_generation_races(
         finally:
             peer.close()
 
+    def current_generation(runtime: service.ServiceRuntime) -> service.MetricsGeneration:
+        generation = runtime.metrics_generation
+        assert generation is not None
+        return generation
+
     def launch(runtime: service.ServiceRuntime, transport: str) -> service.MetricsGeneration:
         runtime._start_path(profile, 0, transport, "hysteria2")
         assert runtime.metrics_generation
@@ -489,7 +494,7 @@ def test_actual_engine_retired_metrics_token_replay_and_generation_races(
     captured: list[str] = []
     all_tokens: list[str] = []
     receiver_errors: list[BaseException] = []
-    restored = None
+    restored: service.ServiceRuntime | None = None
     outcomes: dict[str, Any] = {}
     try:
         first = launch(instance, "reality")
@@ -614,8 +619,8 @@ def test_actual_engine_retired_metrics_token_replay_and_generation_races(
         with monkeypatch.context() as race:
             race.setattr(service, "metrics", replace_generation_during_request)
             instance._sample_metrics()
-        assert instance.metrics_generation is not None
-        all_tokens.append(instance.metrics_generation.token)
+        generation = current_generation(instance)
+        all_tokens.append(generation.token)
         assert instance.state["snapshot"]["rx_bytes"] != 876543 + instance.metric_offsets[0]
         assert instance.state["state"] == "reconnecting"
         outcomes["generation_changed_during_request"] = {
@@ -623,7 +628,7 @@ def test_actual_engine_retired_metrics_token_replay_and_generation_races(
             "state": "reconnecting",
         }
         observed_retired: list[bool] = []
-        current_process = instance.metrics_generation.process
+        current_process = generation.process
         terminate = current_process.terminate
 
         def stop() -> None:

@@ -21,7 +21,7 @@ import tarfile
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import pytest
@@ -32,7 +32,10 @@ import harness.tunnel_service as service
 from harness.tunnel_platform import PlatformError
 from harness.tunnel_ssh import REMOTE_BOOTSTRAP
 
-pwd = pytest.importorskip("pwd", reason="Linux account database fixture")
+if TYPE_CHECKING:
+    import pwd
+else:
+    pwd = pytest.importorskip("pwd", reason="Linux account database fixture")
 
 
 class AccountRoot:

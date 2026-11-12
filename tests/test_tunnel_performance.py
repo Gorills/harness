@@ -18,7 +18,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from threading import enumerate as threads
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -27,6 +27,12 @@ import harness.tunnel_health as health
 import harness.tunnel_service as service
 from harness.tunnel_config import AdaptivePaths, PathResult, runtime_settings
 from harness.tunnel_platform import PlatformError
+
+
+class HealthMeasurement(TypedDict):
+    phase: str
+    seconds: float
+    peak_tls: int
 
 
 class SerialPool:
@@ -135,7 +141,7 @@ def test_parallel_health_controlled_tls_before_after(
     server.socket = tls.wrap_socket(server.socket, server_side=True)
     worker = Thread(target=server.serve_forever, daemon=True)
     worker.start()
-    address = server.server_address
+    address = ("127.0.0.1", server.server_port)
 
     def connect(host: str, port: int) -> socket.socket:
         from threading import get_ident
@@ -154,7 +160,7 @@ def test_parallel_health_controlled_tls_before_after(
         assert spec and spec.loader
         baseline = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(baseline)
-    measurements = []
+    measurements: list[HealthMeasurement] = []
     try:
         for label, module in (("before", baseline), ("after", health)):
             peak = 0
@@ -287,7 +293,17 @@ def test_unexpected_worker_error_joins_all_before_return_and_recovers(
     assert health.probe(0, "reality")[0].usable
 
 
-def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[
+    service.ServiceRuntime,
+    dict[str, Any],
+    list[tuple[int, str, str]],
+    list[bool],
+    list[dict[str, Any]],
+    list[float],
+    dict[str, bool],
+]:
     instance = service.ServiceRuntime.__new__(service.ServiceRuntime)
     instance.owner_uid = 1000
     monkeypatch.setattr(service, "system_probe", lambda uid, ip: (True, True))
