@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import harness.git_applicability as applicability_module
+import harness.storage as storage
 from harness.git_applicability import GitApplicabilityError, WorkspaceApplicability
 from harness.index import scan_workspace
 from harness.knowledge import (
@@ -426,26 +427,34 @@ def test_capture_byte_budget_records_incomplete_proof_without_blocking_task(
         assert not WorkspaceApplicability(connection, workspace_id).task_visible(task.task_id)
 
 
-def test_v23_migration_does_not_fabricate_legacy_dirty_evidence(tmp_path: Path) -> None:
-    with _workspace(tmp_path) as (connection, root, workspace_id):
-        _git(root, "checkout", "-b", "feature")
-        task = task_start(connection, workspace_id, "Legacy dirty")
-        (root / "service.py").write_text("value = 'feature'\n")
-        _checkpoint(connection, workspace_id, task.task_id, 1)
-        # Reconstruct v22 exactly for this additive migration; historical rows remain intact.
-        connection.execute("DROP TABLE task_git_evidence_paths")
-        connection.execute("DROP TABLE task_git_evidence")
-        connection.execute("DROP TABLE task_git_origins")
-        connection.execute("DELETE FROM schema_migrations WHERE version >= 23")
-        _commit(root, "feature")
-        _git(root, "checkout", "main")
-        _git(root, "merge", "--ff-only", "feature")
-        initialize_database(tmp_path / "state.db")
+def test_v23_migration_does_not_fabricate_legacy_dirty_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 23)
+        with _workspace(tmp_path) as (connection, root, workspace_id):
+            _git(root, "checkout", "-b", "feature")
+            task = task_start(connection, workspace_id, "Legacy dirty")
+            (root / "service.py").write_text("value = 'feature'\n")
+            _checkpoint(connection, workspace_id, task.task_id, 1)
+            # Only v23's additive tables must be removed to reconstruct a real v22 database.
+            connection.execute("DROP TABLE task_git_evidence_paths")
+            connection.execute("DROP TABLE task_git_evidence")
+            connection.execute("DROP TABLE task_git_origins")
+            connection.execute("DELETE FROM schema_migrations WHERE version >= 23")
+            _commit(root, "feature")
+            _git(root, "checkout", "main")
+            _git(root, "merge", "--ff-only", "feature")
+    initialize_database(tmp_path / "state.db")
+    connection = connect_database(tmp_path / "state.db")
+    try:
         for table in ("task_git_origins", "task_git_evidence", "task_git_evidence_paths"):
             assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
         assert not WorkspaceApplicability(connection, workspace_id).task_visible(task.task_id)
         _git(root, "checkout", "feature")
         assert WorkspaceApplicability(connection, workspace_id).task_visible(task.task_id)
+    finally:
+        connection.close()
 
 
 def test_checkpoint_counts_individual_untracked_paths_and_rejects_null_hashes(

@@ -8,6 +8,7 @@ from typing import Any, Literal
 import anyio
 from mcp.server import MCPServer
 from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.stdio import stdio_server
 from mcp.shared.dispatcher import as_request_id, coerce_request_id
 from mcp.shared.exceptions import MCPError
@@ -437,7 +438,7 @@ def build_mcp_server(
             or task_status.head != status.head
             or task_status.branch != status.branch
         ):
-            raise ValueError("project_status Workspace changed during bounded status read")
+            raise ToolError("project_status Workspace changed during bounded status read")
         selected_task = task_status.task
         current_task = (
             _status_task_payload(selected_task)

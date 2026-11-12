@@ -305,7 +305,7 @@ def test_v31_barrier_preserves_exact_rows_and_old_runtime_refuses(
         c.execute("SELECT * FROM server_events").fetchall(),
     )
     c.close()
-    assert storage.initialize_database(path).schema_version == 31
+    assert storage.initialize_database(path).schema_version == storage.SCHEMA_VERSION
     with storage.connect_database(path) as current:
         assert (
             current.execute("SELECT * FROM servers").fetchall(),

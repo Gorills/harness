@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import harness.storage as storage
 from harness.registry import create_project
 from harness.server_import import enrich_selected_card, preview_import
 from harness.servers import (
@@ -168,15 +169,18 @@ def test_safe_import_selected_card_preserves_existing_edits(
     assert (root / ".cursor/rules/host-other.mdc").read_text() == "OTHER_CARD_CANARY"
 
 
-def test_v25_migration_preserves_prior_state(tmp_path: Path) -> None:
+def test_v25_migration_preserves_prior_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "old.db"
-    initialize_database(path)
-    connection = connect_database(path)
-    project = create_project(connection)
-    connection.executescript(
-        "DROP TABLE server_map_batches; DROP TABLE server_map_checks; DROP TABLE server_map_links; DROP TABLE server_map_objects; DROP TABLE server_legacy_snapshots; DROP TRIGGER server_events_no_update; DROP TRIGGER server_events_no_delete; DROP TABLE server_imported_sites; DROP TABLE server_imported_profiles; DROP TABLE server_events; DROP TABLE server_projects; DROP TABLE servers; DELETE FROM schema_migrations WHERE version>=26;"
-    )
-    connection.close()
+    with monkeypatch.context() as previous_schema:
+        previous_schema.setattr(storage, "SCHEMA_VERSION", 25)
+        initialize_database(path)
+        connection = connect_database(path)
+        try:
+            project = create_project(connection)
+        finally:
+            connection.close()
     assert initialize_database(path).schema_version == SCHEMA_VERSION
     connection = connect_database(path)
     assert connection.execute("SELECT id FROM projects").fetchone()[0] == project.project_id

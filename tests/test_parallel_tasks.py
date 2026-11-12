@@ -140,8 +140,8 @@ def test_v24_migration_preserves_task_history_and_allows_parallel_work(
             )
             baseline = get_task_baseline(connection, first.task_id)
             events = list_task_events(connection, first.task_id)
-    assert initialize_database(database).schema_version == 25
-    assert initialize_database(database).schema_version == 25
+    assert initialize_database(database).schema_version == storage.SCHEMA_VERSION
+    assert initialize_database(database).schema_version == storage.SCHEMA_VERSION
     with closing(connect_database(database)) as connection:
         assert get_task(connection, first.task_id) == checkpoint.task
         assert get_task_baseline(connection, first.task_id) == baseline
