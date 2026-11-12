@@ -279,6 +279,21 @@ marketing/editorial surfaces. Admin panels, CRM, dashboards, settings, and other
 may use compact familiar layouts with comparison tables and multiple work regions. Artistic
 metaphors, novelty, and marketing composition are not default requirements for those screens.
 
+Public availability alone does not classify a screen as marketing. Subject-inspired direction
+remains available for promotional/editorial work and explicitly requested visual exploration.
+
+A portable `web-interactions.md` reference governs routine in-place actions: update affected content
+without a whole-document reload, retain applicable context, handle pending/error/duplicate/stale
+results, and verify the rendered action. This does not mandate an SPA, a new state library, or a
+rewrite of server-rendered applications. Deliberate navigation, authentication, downloads, and
+established fallbacks may navigate normally. Review remains proportional to changed behavior.
+
+These content changes do not alter Task-based selection, registry ownership, canonical locations,
+or host projection mechanics. A user-global orchestration skill is independent of the Harness pack:
+when invoked in a Harness project it must honor bootstrap, parent-owned Task continuity, revision
+checks, and operator completion; in other projects it uses native instructions without requiring
+Harness installation. A scratch fix counter/evidence record is not a second durable Task system.
+
 ## 2026-10-30 amendment: vulnerability research precedes stack and version choices
 
 On every stack, an agent must research current known vulnerabilities online before recommending
@@ -303,17 +318,3 @@ known affected or unsupported choices likewise require explicit risk acceptance.
 work may continue. This is an instruction contract, not an automated vulnerability gate or proof
 that a component is safe; real-host compliance remains acceptance evidence. It does not authorize
 exploit probes, production changes, new tooling or changes to the operator's deployment scheme.
-Public availability alone does not classify a screen as marketing. Subject-inspired direction
-remains available for promotional/editorial work and explicitly requested visual exploration.
-
-A portable `web-interactions.md` reference governs routine in-place actions: update affected content
-without a whole-document reload, retain applicable context, handle pending/error/duplicate/stale
-results, and verify the rendered action. This does not mandate an SPA, a new state library, or a
-rewrite of server-rendered applications. Deliberate navigation, authentication, downloads, and
-established fallbacks may navigate normally. Review remains proportional to changed behavior.
-
-These content changes do not alter Task-based selection, registry ownership, canonical locations,
-or host projection mechanics. A user-global orchestration skill is independent of the Harness pack:
-when invoked in a Harness project it must honor bootstrap, parent-owned Task continuity, revision
-checks, and operator completion; in other projects it uses native instructions without requiring
-Harness installation. A scratch fix counter/evidence record is not a second durable Task system.
