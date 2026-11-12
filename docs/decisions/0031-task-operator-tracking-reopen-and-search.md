@@ -6,6 +6,9 @@
 - **Amends:** [ADR-0011](0011-task-persistence-and-revision-cas.md), [ADR-0019](0019-dashboard-human-review-loop.md), [ADR-0020](0020-dashboard-drilldown-realtime-design.md), [ADR-0021](0021-project-intelligence-retrieval.md)
 - **Amended by:** [ADR-0040](0040-dashboard-root-url-and-project-index.md)
 
+The one-working-Task constraint in this historical decision is superseded by
+[ADR-0079](0079-parallel-workspace-tasks.md); explicit identity, revision CAS and applicability remain.
+
 ## Context
 
 The existing Task lifecycle answers whether agent work is active, waiting, completed, or cancelled. It does not answer the operator's separate delivery questions: which Jira work item owns the work, whether the result is being deployed to test or production, and what human notes explain its current position. Reusing `waiting` reasons for those facts would mix agent coordination with delivery tracking and recreate the workflow-state explosion rejected by the original specification.

@@ -14,7 +14,8 @@ Returning to a Task should make a different recorded branch obvious and offer an
 
 ## Decision
 
-Project rows, Project detail and Workspace detail expose compact Git links. An exact folder-scoped
+Project rows expose a visible Git button; Project, Workspace and Task navigation include a Git tab
+for the selected Git folder. Compact branch links remain secondary context. An exact folder-scoped
 `/workspaces/{id}/git/` page extends the existing Russian dashboard shell and form workflow.
 It displays current branch/HEAD, dirty/prepared file counts, five branches with recent commits,
 or up to twelve case-insensitive substring matches. Exact matches rank first. Search considers
@@ -43,6 +44,16 @@ Operations are explicit native Git commands in `git_operations`, outside transpo
   panel supports staging resolved files, committing the merge and explicit `merge --abort`,
   whose copy explains that merge/resolution edits will be discarded. Other in-progress Git
   operations require terminal completion; staging remains available.
+- Fetch a selected configured remote into its remote-tracking namespace with an explicit
+  refmap and no tag/prune side effects. Pull fetches the displayed upstream, rechecks local
+  HEAD/branch/dirty state and merges its captured fetched OID with explicit `--ff-only`,
+  no autostash and a clean folder. Divergence remains for explicit operator merge.
+  Push one explicit local branch to its configured upstream; never use implicit push mappings,
+  mirror, tags or force defaults. Publish to a selected configured remote and branch with
+  `--set-upstream` to create the remote branch and establish tracking in one action. Native
+  non-fast-forward refusal remains visible. Remote setup and initial authentication stay native.
+  Remote/config data is included in snapshot freshness; reads do not fetch. Ahead/behind counts
+  describe the locally known remote ref, refreshed by Fetch/Pull, not a live server query.
 
 Every POST requires the existing exact Host, same-origin proof, bounded singular form grammar,
 the Workspace identity of its Git page and a snapshot token. Snapshot capture repeats worktree
@@ -52,6 +63,10 @@ dashboard/registry writes; Git retains its own native file/ref locks. The snapsh
 metadata freshness proof, not a whole-file content proof or a lock respected by external editors
 and CLI Git. Concurrent external commands remain outside this serialization; no global Git
 transaction is claimed. Merge uses the sampled source OID even if its ref moves after the proof.
+Network operations release SQLite's write lock before calling Git. All dashboard Git actions
+hold a process-local lock for their Git common directory, rejecting competing dashboard actions
+while allowing unrelated Projects and registry writes to continue. Native/external Git remains
+outside that lock and network effects cannot be rolled back by SQLite.
 
 Git effects cannot be rolled back by SQLite. A failed/conflicted/timed-out command can have
 changed Git; the response re-reads authoritative state, preserves editable input, invalidates
@@ -60,6 +75,14 @@ after the commit was created. Subprocesses receive argument arrays, cleaned Git 
 no interactive stdin/credential prompt, and bounded timeouts. Read output is rejected beyond
 2 MiB; error detail is limited to 1800 characters. Invalid UTF-8 POSIX names display escaped
 bytes and require native tools for that name instead of submitting lossy paths.
+The last command result is bounded to 8000 characters per Workspace, kept for at most 128
+Workspaces in daemon memory and cleared on daemon restart. POST/303 and subsequent page refreshes
+show the command, stdout/stderr, exit code or timeout, and an operator-readable status. Output is
+HTML escaped; HTTP URL credentials/query values are masked, ANSI controls stripped. There is no
+arbitrary console command endpoint or durable command-history schema. A 50-second operation
+deadline caps each process at 45 seconds; timeout kills its process group (including SSH/hooks),
+retains partial output and does not retry. Existing native credential helpers/SSH agent are used;
+terminal/askpass prompting is disabled and failed authentication points to native setup.
 
 Opening a Task on another branch displays a prompt linking to its exact branch search. Reopening
 retains the existing Task revision CAS and this same prompt; Task state and Git are separate
@@ -69,9 +92,9 @@ Git SSE snapshots include index/refs and poll at the existing heartbeat; drafts 
 existing refresh/submission protection. All operations and search work without JavaScript.
 
 This surface is for human operators, including human Git actions in Hidden Projects. It adds
-no MCP capability and does not relax Hidden's prohibition on agent SCM publication. Fetch,
-pull/push, branch deletion, history rewriting, diff editing and conflict editing stay in native
-Git tools. No network or credential-management subsystem is introduced.
+no MCP capability and does not relax Hidden's prohibition on agent SCM publication. Branch
+deletion, history rewriting, diff editing and conflict editing stay in native Git tools.
+Network transport remains native Git, with no new credential storage or authentication subsystem.
 
 ## Verification
 
@@ -84,3 +107,7 @@ draft messages, Task branch prompt and Git SSE fingerprint alignment. Existing d
 HTTP/SSE, Task actions, disclosure, draft and JavaScript regression tests remain in force.
 Browser checks use a disposable database/repository with 302 branches, long paths, preparation,
 commit and branch search at wide and compact sizes; no registered real Task is mutated for testing.
+Synthetic local bare remotes additionally cover first publication/upstream binding, explicit
+push despite mirror/tag/refspec defaults, fetch counts, fast-forward pull, dirty/diverged refusal,
+stale remote config, SQLite lock release, console redaction and timeout output. HTTP tests cover
+visible Git navigation, publication, Pull/Push controls and command output after POST/303 refresh.

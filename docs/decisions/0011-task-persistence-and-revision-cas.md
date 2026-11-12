@@ -4,6 +4,9 @@
 - **Date:** 2026-08-23
 - **Deciders:** Repository architecture baseline
 
+The one-working-Task constraint in this historical decision is superseded by
+[ADR-0079](0079-parallel-workspace-tasks.md); explicit identity, revision CAS and applicability remain.
+
 ## Context
 
 The audited delivery sequence places Task lifecycle after the first search contract. The architecture requires Task identity to survive host and bridge restarts, enforces at most one distinct `working` Task per Workspace, and requires every mutation of an existing Task to carry stable `task_id` plus `expected_revision`.

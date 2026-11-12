@@ -462,8 +462,8 @@ def test_checkout_agent_instructions_require_status_and_proportionate_tracking()
 
 def test_cursor_bootstrap_matches_canonical_workflow() -> None:
     text = _SERVER_INSTRUCTIONS
-    assert "Use native repository tools for code and document discovery" in text
-    assert "Paths allow native reads; project_context expands selected refs" in text
+    assert "Native code/doc search" in text
+    assert "Research current vulnerabilities online before stack/version choices" in text
     assert "project_search" not in text
     assert "for substantial changes, multi-step work, needed continuity" in text
     assert "Quick questions, reads, and small local edits may proceed without a Task" in text
@@ -517,7 +517,7 @@ def _dogfood_fixture(tmp_path: Path) -> tuple[Path, dict[str, str], Path, Path]:
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
         "#!/usr/bin/env bash\n"
-        "if [[ \"${1-}\" == '--version' ]]; then echo 'uv 0.12.5'; exit 0; fi\n"
+        "if [[ \"${1-}\" == '--version' ]]; then echo 'uv 0.13.6'; exit 0; fi\n"
         "if [[ \"${1-}\" == 'tool' && \"${2-}\" == 'dir' && \"${3-}\" == '--bin' ]]; then\n"
         "  printf '%s\\n' \"$DOGFOOD_TEST_TOOL_BIN\"\n"
         "  exit 0\n"
@@ -926,12 +926,33 @@ def test_dev_env_prepends_checkout_venv_when_present(tmp_path: Path) -> None:
     assert result.stdout.splitlines()[0].split(":")[0] == str(venv_bin)
 
 
+def test_uv_bootstrap_keeps_installer_output_out_of_resolved_executable(tmp_path: Path) -> None:
+    result = _run(
+        [
+            "bash",
+            "-c",
+            'repo_root="$1"; source "$2"; '
+            'resolve_uv() { [[ -f "$repo_root/ready" ]] || return 1; '
+            'printf "%s\\n" "$repo_root/uv"; }; '
+            'bootstrap_uv() { printf "installer progress\\n"; touch "$repo_root/ready"; }; '
+            "ensure_uv",
+            "bootstrap-test",
+            str(tmp_path),
+            str(DEV_UV_SCRIPT),
+        ],
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(tmp_path / "uv")
+    assert "installer progress" in result.stderr
+
+
 def _fake_uv(path: Path, *, bin_dir: Path, log: Path) -> Path:
     path.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$UV_LOG"\n'
         'if [ "$1" = "--version" ]; then\n'
-        '  printf "%s\\n" "uv 0.12.5"\n'
+        '  printf "%s\\n" "uv 0.13.6"\n'
         "  exit 0\n"
         "fi\n"
         'if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then\n'
@@ -1069,7 +1090,7 @@ def test_install_global_dry_run_strips_overlay_and_uses_tool_harness(tmp_path: P
     assert fields["uv"] == env["HARNESS_DEV_UV"]
     assert fields["hosts"] == "cursor"
     assert fields["package_command"] == (
-        f"{env['HARNESS_DEV_UV']} tool install --force --reinstall --python 3.13 ."
+        f"{env['HARNESS_DEV_UV']} tool install --force --reinstall --python 3.13.18 ."
     )
     assert fields["harness"] == str(fake_bin / "harness")
     assert fields["lifecycle_commands"] == f"{fake_bin / 'harness'} install --host cursor"
@@ -1236,7 +1257,7 @@ def test_install_global_reports_partial_activation_and_preserves_failure_status(
     fake_uv.write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$UV_LOG"\n'
-        'if [ "$1" = "--version" ]; then printf "%s\\n" "uv 0.12.5"; exit 0; fi\n'
+        'if [ "$1" = "--version" ]; then printf "%s\\n" "uv 0.13.6"; exit 0; fi\n'
         'if [ "$1" = "tool" ] && [ "$2" = "dir" ] && [ "$3" = "--bin" ]; then\n'
         '  printf "%s\\n" "$FAKE_UV_BIN_DIR"; exit 0\n'
         "fi\n"

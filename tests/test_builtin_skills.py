@@ -358,6 +358,7 @@ def test_frontend_design_routes_surface_guidance_and_visual_review(tmp_path: Pat
         PurePosixPath("references/product-interfaces.md"),
         PurePosixPath("references/visual-language.md"),
         PurePosixPath("references/visual-review.md"),
+        PurePosixPath("references/web-interactions.md"),
     )
 
 
@@ -377,7 +378,8 @@ def test_builtin_pack_omits_task_hints_and_requires_stack_applies(tmp_path: Path
     for skill in BUILTIN_SKILLS:
         assert skill.task_hints == (), skill.skill_id
         assert (
-            skill.applies_languages
+            skill.skill_id == "server-operations"
+            or skill.applies_languages
             or skill.applies_dependencies
             or skill.applies_manifests
             or skill.applies_facets
@@ -407,6 +409,7 @@ def test_merged_quality_guidance_is_routed_from_surviving_skills(tmp_path: Path)
         "specification-audit.md",
     }
     assert "web-backend.md" in dict(security.references)
+    assert "vulnerability-research.md" in dict(security.references)
     registry = tmp_path / "skills"
     sync_builtin_skills(registry)
     definitions = load_skill_registry(registry)
@@ -625,7 +628,7 @@ def test_busy_polyglot_keeps_every_matching_surface(tmp_path: Path) -> None:
     )
     resolved = resolve_skills(definitions, busy)
     ids = _ids(resolved)
-    assert len(BUILTIN_SKILLS) == 16
+    assert len(BUILTIN_SKILLS) == 17
     assert set(ids) == {
         "ci-release",
         "complex-change-planning",

@@ -491,7 +491,7 @@ def test_codex_acceptance_allows_context_after_task_start() -> None:
 
 def test_codex_acceptance_validates_exact_fail_closed_wire_catalog() -> None:
     properties = {
-        "project_status": (),
+        "project_status": ("task_id",),
         "project_context": ("refs",),
         "project_recall": ("query", "kind", "limit"),
         "task_start": ("title", "stack_hints", "task_id", "expected_revision"),

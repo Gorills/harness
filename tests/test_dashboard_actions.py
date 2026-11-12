@@ -774,6 +774,67 @@ def test_dashboard_visibility_collision_leaves_mode_unchanged(tmp_path: Path) ->
         manager.close()
 
 
+@pytest.mark.parametrize("mixed_project", [False, True])
+@pytest.mark.parametrize("surface", ["settings", "workspace", "home"])
+def test_dashboard_filesystem_workspace_explains_hidden_unavailability(
+    tmp_path: Path, mixed_project: bool, surface: str
+) -> None:
+    git_root, database, git_workspace_id = _database(tmp_path)
+    _write_host_profiles(database, "cursor")
+    root = tmp_path / "plain-folder"
+    root.mkdir()
+    connection = connect_database(database)
+    try:
+        project_id = (
+            get_workspace(connection, git_workspace_id).project_id
+            if mixed_project
+            else create_project(connection).project_id
+        )
+        workspace = register_workspace(connection, project_id=project_id, path=root)
+    finally:
+        connection.close()
+    manager = DashboardServerManager(database)
+    try:
+        base = manager.get_url()
+        settings = base + f"projects/{project_id}/settings/"
+        with urlopen(settings, timeout=2) as response:
+            html = response.read().decode("utf-8")
+        assert (
+            "Скрытый режим доступен только для проектов, у которых все папки подключены к Git"
+            in html
+        )
+        assert 'name="visibility_mode"' not in html
+        target = {
+            "settings": settings,
+            "workspace": base + f"workspaces/{workspace.workspace_id}/",
+            "home": base,
+        }[surface]
+        status, headers, payload = _post(
+            target,
+            {"action": "set_visibility", "project_id": project_id, "visibility_mode": "hidden"},
+            origin=f"http://{urlsplit(base).netloc}",
+        )
+        assert status == 409
+        _assert_hardened(headers)
+        html = payload.decode("utf-8")
+        assert (
+            "Скрытый режим доступен только для проектов, у которых все папки подключены к Git"
+            in html
+        )
+        assert "Данные изменились" not in html
+        assert 'name="visibility_mode"' not in html
+        connection = connect_database(database)
+        try:
+            assert get_project(connection, project_id).visibility_mode is VisibilityMode.NORMAL
+        finally:
+            connection.close()
+        assert not (root / ".git").exists()
+        assert not (root / CURSOR_HIDDEN_RULE_RELATIVE.as_posix()).exists()
+        assert not (git_root / CURSOR_HIDDEN_RULE_RELATIVE.as_posix()).exists()
+    finally:
+        manager.close()
+
+
 def test_operator_state_deployment_and_delete_are_explicit_same_origin_cas(tmp_path: Path) -> None:
     root, database, workspace_id = _database(tmp_path)
     task = _review_task(database, workspace_id, title="Remove accidental work")

@@ -30,7 +30,13 @@ from harness.registry import create_project, register_workspace
 from harness.retrieval import ProjectRetrievalRefError
 from harness.storage import connect_database, initialize_database
 from harness.task_workflow import task_accept, task_checkpoint, task_start
-from harness.tasks import TaskRecord, TaskState, TaskWaitReason, get_relevant_task
+from harness.tasks import (
+    TaskRecord,
+    TaskState,
+    TaskWaitReason,
+    TaskWorkspaceConflictError,
+    get_relevant_task,
+)
 from harness.workspace_resolution import WorkspaceHint
 
 
@@ -75,6 +81,29 @@ def _feature_task(connection: sqlite3.Connection, root: Path, workspace: str) ->
         summary="Изменён ответ",
         next_step="Проверить feature",
     ).task
+
+
+def test_parallel_status_filters_other_branch_tasks_before_count_and_selection(
+    tmp_path: Path,
+) -> None:
+    root, _database, connection, _project, workspace = _setup(tmp_path)
+    try:
+        hidden = _feature_task(connection, root, workspace)
+        for i in range(6):
+            task_start(connection, workspace, f"Other-branch private outcome {i}")
+        _git(root, "checkout", "main")
+        visible = task_start(connection, workspace, "Current outcome")
+        status = daemon.read_workspace_task_status(connection, [WorkspaceHint(root, "test")])
+        assert status.task is not None and status.task.task_id == visible.task_id
+        assert status.active_task_count == 1
+        assert [task.task_id for task in status.active_tasks] == [visible.task_id]
+        with pytest.raises(TaskWorkspaceConflictError, match="unavailable"):
+            daemon.read_workspace_task_status(
+                connection, [WorkspaceHint(root, "test")], task_id=hidden.task_id
+            )
+        assert not connection.in_transaction
+    finally:
+        connection.close()
 
 
 def test_workspace_dashboard_reuses_applicability_identity_proof(

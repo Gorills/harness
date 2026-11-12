@@ -6,6 +6,9 @@ from harness.tasks import TaskOperatorStatus, TaskState, TaskWaitReason
 from harness.verification import VerificationSource, VerificationStatus
 
 VERIFICATION_TITLE = "Проверки последнего отчёта"
+MULTIPLE_TASKS_TITLE = "Несколько задач"
+MULTIPLE_TASKS_HINT = "Выберите задачу в списке ниже, чтобы открыть её прогресс и отчёты."
+WORKSPACE_DELTA_HINT = "Изменения папки с начала задачи. Могут включать параллельную работу."
 VERIFICATION_EMPTY = "В последнем отчёте проверки не указаны."
 VERIFICATION_NO_REPORT = "Отчётов с результатами пока нет."
 VERIFICATION_OLDER = (
@@ -145,6 +148,10 @@ VISIBILITY_SET_HIDDEN = "Скрытый"
 VISIBILITY_SET_NORMAL = "Обычный"
 VISIBILITY_HINT_HIDDEN = "Правила и git-ignore включены. Cursor не блокирует git-команды агента."
 VISIBILITY_HINT_NORMAL = "Обычный режим. Публикация в git — по правилам хоста."
+VISIBILITY_REQUIRES_GIT = (
+    "Скрытый режим доступен только для проектов, у которых все папки подключены к Git. "
+    "В этом проекте есть папка без Git."
+)
 ACCEPT = "Принять"
 ACTION_REJECTED = "Действие не принято"
 CANCEL = "Отменить"

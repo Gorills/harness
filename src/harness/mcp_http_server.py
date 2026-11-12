@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import secrets
 import socket
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
+from typing import Any
 
 import uvicorn
+from starlette.applications import Starlette
 from starlette.responses import Response
+from starlette.routing import Mount
 from starlette.types import Receive, Scope, Send
 
 from harness.dashboard import load_or_create_dashboard_access_token
 from harness.mcp_bridge import build_mcp_server
 from harness.runtime_paths import DASHBOARD_HOST
+from harness.server_mcp import build_server_mcp
 
 MCP_HTTP_PATH = "/mcp"
 MCP_HTTP_AUTHORIZATION_HEADER = "Authorization"
@@ -90,13 +95,36 @@ class MCPHTTPServerManager:
             if isinstance(actual_port, bool) or not isinstance(actual_port, int):
                 raise MCPHTTPServerError("MCP HTTP listener returned an invalid port")
             mcp = build_mcp_server(workspace_transport="http-header")
+            project_app = mcp.streamable_http_app(
+                streamable_http_path=MCP_HTTP_PATH,
+                json_response=False,
+                stateless_http=False,
+                max_request_body_size=_MAX_REQUEST_BODY_BYTES,
+                host=DASHBOARD_HOST,
+            )
+            servers_app = build_server_mcp().streamable_http_app(
+                streamable_http_path="/mcp",
+                json_response=False,
+                stateless_http=False,
+                max_request_body_size=64 * 1024,
+                host=DASHBOARD_HOST,
+            )
+
+            @asynccontextmanager
+            async def lifespan(app: Any) -> AsyncIterator[None]:
+                async with AsyncExitStack() as stack:
+                    await stack.enter_async_context(
+                        project_app.router.lifespan_context(project_app)
+                    )
+                    await stack.enter_async_context(
+                        servers_app.router.lifespan_context(servers_app)
+                    )
+                    yield
+
             app = _BearerCapabilityApp(
-                mcp.streamable_http_app(
-                    streamable_http_path=MCP_HTTP_PATH,
-                    json_response=False,
-                    stateless_http=False,
-                    max_request_body_size=_MAX_REQUEST_BODY_BYTES,
-                    host=DASHBOARD_HOST,
+                Starlette(
+                    routes=[Mount("/servers", app=servers_app), Mount("/", app=project_app)],
+                    lifespan=lifespan,
                 ),
                 token,
             )

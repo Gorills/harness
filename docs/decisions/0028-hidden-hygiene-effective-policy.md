@@ -24,6 +24,7 @@ While Hidden is effective, Harness MUST:
 1. Project host-local Hidden instructions for each active installed host profile (Cursor `.cursor/rules/harness-hidden.mdc` with `alwaysApply: true`; Claude Code `.claude/rules/harness-hidden.md`; Codex project-scoped `developer_instructions` in marker-owned `.codex/config.toml`). Files/config are Harness-owned, fail closed on tracked or unknown user-owned collisions, and never replace tracked instruction files such as `AGENTS.md` or `CLAUDE.local.md`. An exact manually adopted Codex config is accepted only when it already carries the exact Hidden developer instructions.
 2. Keep those exact Harness-owned paths untracked and ignored through `git rev-parse --git-path info/exclude` without modifying `.gitignore`.
 3. Tell the model, via `visibility_mode` plus MCP instructions and the projected rule, not to perform durable SCM mutations or add agent-identifying Git artifacts.
+4. Require an explicit operator request before creating or updating repository README files, feature descriptions, changelogs, implementation plans, task reports, or other documents revealing agent work. The rule covers existing/new and tracked/untracked files under any name. A functionality request or a generic project/skill documentation requirement is not authorization; unsolicited summaries stay in the conversation or external Harness Task state. Explicitly requested documentation edits remain allowed.
 
 Codex and Cursor `scm_write_enforcement` remain **unsupported**. Dashboard and doctor MUST say that these profiles do not host-block `git commit`/`push`/PR. That diagnostic MUST NOT appear in model-visible MCP payloads.
 
@@ -50,6 +51,7 @@ Automated tests must prove:
 - linked worktrees share `info/exclude` and receive the rule in each worktree;
 - restore to Normal removes only Harness-owned Hidden files/exclude entries;
 - Codex Hidden/Normal transitions add/remove only the exact owned `developer_instructions`, preserve the MCP/root contract, and leave existing `AGENTS.md` byte-for-byte unchanged;
+- Codex and Cursor receive the explicit-operator-request documentation rule; older Harness-owned Hidden instructions remain recognizable for upgrade, Normal transition, and cleanup, while unknown user content stays protected;
 - `git add -f` can still add an ignored Hidden rule;
 - `project_status` does not leak enforcement internals;
 - the isolated-development Cursor overlay `mcp.json` is not rewritten.

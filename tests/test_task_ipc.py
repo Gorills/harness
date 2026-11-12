@@ -291,13 +291,20 @@ def test_task_start_and_checkpoint_round_trip_is_bounded_and_atomic(tmp_path: Pa
             wait_reason=None,
             revision=1,
         )
-        with pytest.raises(IpcRemoteError) as conflict_info:
-            request_task_start(
-                socket_path,
-                [WorkspaceHint(root, "explicit-root")],
-                title="Must not replace working Task",
-            )
-        assert conflict_info.value.code == "task_conflict"
+        second = request_task_start(
+            socket_path,
+            [WorkspaceHint(root, "explicit-root")],
+            title="Independent working Task",
+        )
+        assert second.task_id != started.task_id
+        assert second.state is TaskState.WORKING
+        status = request_workspace_task_status(socket_path, [WorkspaceHint(root, "explicit-root")])
+        assert status.task is None and status.last_checkpoint is None
+        assert status.active_task_count == 2
+        selected = request_workspace_task_status(
+            socket_path, [WorkspaceHint(root, "explicit-root")], task_id=started.task_id
+        )
+        assert selected.task is not None and selected.task.task_id == started.task_id
 
         checkpoint_raw = _raw_request(
             socket_path,
@@ -738,6 +745,8 @@ def test_workspace_task_status_exposes_only_relevant_task_continuity(tmp_path: P
             "pending_operator_feedback",
             "head",
             "branch",
+            "active_tasks",
+            "active_task_count",
         }
         assert raw_result["pending_operator_feedback"] is None
         assert "First checkpoint" not in json.dumps(raw_status, sort_keys=True)

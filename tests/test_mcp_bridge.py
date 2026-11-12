@@ -49,6 +49,85 @@ from harness.visibility import set_project_visibility
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX MCP/IPC slice")
 
 
+@pytest.mark.anyio
+async def test_two_stdio_agents_can_work_on_distinct_tasks_in_one_workspace(tmp_path: Path) -> None:
+    root, database = _repo(tmp_path)
+    runtime = tmp_path / "runtime"
+    stop, executor, future = _start_daemon(database, runtime / "harness" / "harness.sock")
+    env = dict(os.environ)
+    env.update(
+        {
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+            "XDG_RUNTIME_DIR": str(runtime),
+            "HARNESS_HOST_PROFILE": "cursor",
+            "HARNESS_WORKSPACE_ROOT": str(root),
+        }
+    )
+    params = StdioServerParameters(
+        command=sys.executable, args=["-m", "harness.mcp_process"], env=env, cwd=str(tmp_path)
+    )
+    try:
+        async with Client(stdio_client(params)) as first, Client(stdio_client(params)) as second:
+            first_start = await first.call_tool(
+                "task_start", {"title": "First independent outcome"}
+            )
+            second_start = await second.call_tool(
+                "task_start", {"title": "Second independent outcome"}
+            )
+            assert not first_start.is_error and not second_start.is_error
+            assert first_start.structured_content is not None
+            assert second_start.structured_content is not None
+            first_id = first_start.structured_content["task_id"]
+            second_id = second_start.structured_content["task_id"]
+            assert first_id != second_id
+            progress = await first.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": first_id,
+                    "expected_revision": 1,
+                    "state": "working",
+                    "summary": "First-only private progress",
+                    "next_step": "Continue first",
+                },
+            )
+            assert not progress.is_error
+            status = await second.call_tool("project_status")
+            assert status.structured_content is not None
+            payload = status.structured_content
+            assert payload["current_task"] is None
+            assert payload["last_checkpoint"] is None
+            assert payload["active_task_count"] == 2
+            assert not payload["active_tasks_truncated"]
+            assert {item["task_id"] for item in payload["active_tasks"]} == {first_id, second_id}
+            serialized = json.dumps(payload)
+            assert "First-only private progress" not in serialized
+            for field in ("summary", "changed_paths", "baseline_head", "jira_url"):
+                assert field not in serialized
+            chosen = await second.call_tool("project_status", {"task_id": second_id})
+            assert chosen.structured_content is not None
+            assert chosen.structured_content["current_task"]["task_id"] == second_id
+            assert chosen.structured_content["current_task"]["revision"] == 1
+            assert chosen.structured_content["last_checkpoint"] is None
+            own_status = await first.call_tool("project_status", {"task_id": first_id})
+            assert own_status.structured_content is not None
+            assert own_status.structured_content["current_task"]["revision"] == 2
+            assert own_status.structured_content["next_step"] == "Continue first"
+            stale = await first.call_tool(
+                "task_checkpoint",
+                {
+                    "task_id": first_id,
+                    "expected_revision": 1,
+                    "state": "working",
+                    "summary": "Stale progress",
+                },
+            )
+            assert stale.is_error
+    finally:
+        stop.set()
+        future.result(timeout=3)
+        executor.shutdown(wait=True)
+
+
 def test_server_instructions_allow_proportionate_tasks_within_budget() -> None:
     assert len(_SERVER_INSTRUCTIONS.encode("utf-8")) < 1024
     first_512 = _SERVER_INSTRUCTIONS[:512]
@@ -73,8 +152,11 @@ def test_server_instructions_allow_proportionate_tasks_within_budget() -> None:
         "task_id+expected_revision",
         "ready => waiting(operator_review)",
         "Only the operator completes Tasks",
-        "Use native repository tools for code and document discovery",
-        "Optional project_recall finds past Knowledge/Tasks without IDs",
+        "Native code/doc search",
+        "project_recall: past Knowledge/Tasks without IDs",
+        "Research current vulnerabilities online before stack/version choices",
+        "Hidden: no durable SCM mutations",
+        "README/feature docs/agent reports need explicit operator request",
     ):
         assert required in _SERVER_INSTRUCTIONS
     assert "Small work or known paths still need a Task" not in _SERVER_INSTRUCTIONS
@@ -167,7 +249,7 @@ def test_unknown_tool_argument_error_names_allowed_fields_not_unknown_names() ->
         {"unexpected"},
     )
     status_text = status_error.message
-    assert "no arguments" in status_text
+    assert "allowed: task_id" in status_text
     assert "unexpected" not in status_text
     assert status_error.data == {"tool": "project_status", "unknown_field_count": 1}
 
@@ -284,7 +366,7 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
             assert removed_search.is_error is True
             with pytest.raises(MCPError, match="Unknown tool argument fields") as status_error:
                 await client.call_tool("project_status", {"unexpected": True})
-            assert "no arguments" in str(status_error.value)
+            assert "allowed: task_id" in str(status_error.value)
             assert "unexpected" not in str(status_error.value)
             with pytest.raises(MCPError, match="Unknown tool argument fields") as start_error:
                 await client.call_tool(
@@ -307,6 +389,9 @@ async def test_real_stdio_mcp_exposes_stable_five_tool_surface(tmp_path: Path) -
                 "git",
                 "index",
                 "current_task",
+                "active_tasks",
+                "active_task_count",
+                "active_tasks_truncated",
                 "relevant_waiting_task",
                 "last_checkpoint",
                 "next_step",
@@ -682,11 +767,13 @@ def test_raw_modern_wire_catalog_is_bounded_and_stable() -> None:
                 assert "stack_hints" in instructions[:512]
                 assert "optional Task metadata" in instructions[:512]
                 assert "durable SCM mutations" in instructions
-                assert "Paths allow native reads" in instructions
-                assert "project_context expands selected refs" in instructions
+                assert (
+                    "Research current vulnerabilities online before stack/version choices"
+                    in instructions
+                )
                 assert "project_context only for selected semantic refs." not in instructions
                 assert "substantial changes" in instructions
-                assert "retry errors" in instructions
+                assert "Retry errors" in instructions
                 assert "After status, start/resume a Task" in instructions
                 assert (
                     "Same outcome: one Task across diagnosis, implementation, checks and follow-ups"

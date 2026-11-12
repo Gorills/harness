@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from harness.agent_instructions import (
     TASK_CONTINUITY_INSTRUCTIONS,
     TASK_CREATION_INSTRUCTIONS,
+    TASK_PARALLEL_INSTRUCTIONS,
     TASK_REVIEW_INSTRUCTIONS,
 )
 from harness.codex_adapter import (
@@ -66,16 +67,17 @@ _OPERATOR_LANGUAGE = "Russian"
 _SERVER_INSTRUCTIONS = (
     "project_status must be the first repository action. Before any shell "
     "command/read/search/browser/change, find deferred/omitted tools; discovery is the "
-    "only allowed pre-status action. Russian Task title/summary/next_step and Knowledge. "
+    "only allowed pre-status action. Russian title/summary/next_step, Knowledge. "
     "stack_hints: optional Task metadata. "
     + TASK_CREATION_INSTRUCTIONS
     + TASK_CONTINUITY_INSTRUCTIONS
-    + "Resume by ID; retry errors. "
-    "Use native repository tools for code and document discovery. "
-    "Optional project_recall finds past Knowledge/Tasks without IDs. "
-    "Paths allow native reads; project_context expands selected refs. "
+    + TASK_PARALLEL_INSTRUCTIONS
+    + "Retry errors. "
+    "Native code/doc search. "
+    "project_recall: past Knowledge/Tasks without IDs. "
+    "Research current vulnerabilities online before stack/version choices. "
     + TASK_REVIEW_INSTRUCTIONS
-    + "Hidden forbids durable SCM mutations."
+    + "Hidden: no durable SCM mutations; README/feature docs/agent reports need explicit operator request."
 )
 _PROJECT_CONTEXT_DESCRIPTION = (
     "Expand only explicitly selected Project Intelligence refs when they add semantic "
@@ -85,6 +87,8 @@ _PROJECT_CONTEXT_DESCRIPTION = (
 )
 _TASK_START_DESCRIPTION = (
     "Create a new durable Harness task, or explicitly resume an existing task. "
+    "Independent outcomes may have parallel working Tasks in one Workspace. "
+    "Do not resume another outcome merely because it is listed in project_status. "
     + TASK_CREATION_INSTRUCTIONS
     + f"A new title is operator-facing {_OPERATOR_LANGUAGE}. "
     "Create with title and optional stack_hints only; omit task_id; never pass summary or "
@@ -143,7 +147,7 @@ _TOOL_RESPONSE_MAX_BYTES = {
     "task_checkpoint": _TASK_MAX_BYTES,
 }
 _TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
-    "project_status": frozenset(),
+    "project_status": frozenset({"task_id"}),
     "project_context": frozenset({"refs"}),
     "project_recall": frozenset({"query", "kind", "limit"}),
     "task_start": frozenset({"title", "stack_hints", "task_id", "expected_revision"}),
@@ -414,14 +418,19 @@ def build_mcp_server(
     @server.tool(
         description=(
             "Required first repository action. Return compact current Workspace, Git, index, and "
-            "durable Task continuity state."
+            "durable Task continuity state. Lists active Tasks; when working Tasks are ambiguous, "
+            "pass task_id to select the intended Task explicitly. Task presence is not ownership."
         )
     )
-    def project_status(ctx: Context[Any, Any]) -> dict[str, Any]:
+    def project_status(ctx: Context[Any, Any], task_id: str | None = None) -> dict[str, Any]:
         socket_path = _socket_path()
         hints = _workspace_hints(ctx, workspace_transport=workspace_transport)
         status = request_workspace_status(socket_path, hints)
-        task_status = request_workspace_task_status(socket_path, hints)
+        task_status = (
+            request_workspace_task_status(socket_path, hints)
+            if task_id is None
+            else request_workspace_task_status(socket_path, hints, task_id=task_id)
+        )
         if (
             task_status.workspace_id != status.workspace_id
             or task_status.schema_version != status.schema_version
@@ -441,7 +450,7 @@ def build_mcp_server(
             else None
         )
         last_checkpoint = task_status.last_checkpoint
-        return _bounded(
+        return _fit_status_payload(
             {
                 "project_id": status.project_id,
                 "workspace_id": status.workspace_id,
@@ -459,6 +468,10 @@ def build_mcp_server(
                     "last_reconcile_kind": status.last_reconcile_kind,
                 },
                 "current_task": current_task,
+                "active_tasks": [_status_task_payload(item) for item in task_status.active_tasks],
+                "active_task_count": task_status.active_task_count,
+                "active_tasks_truncated": task_status.active_task_count
+                > len(task_status.active_tasks),
                 "relevant_waiting_task": relevant_waiting_task,
                 "last_checkpoint": (
                     None
@@ -482,8 +495,6 @@ def build_mcp_server(
                 "pending_operator_feedback": task_status.pending_operator_feedback,
                 "schema_version": status.schema_version,
             },
-            _STATUS_MAX_BYTES,
-            "project_status response exceeds model exposure budget",
         )
 
     @server.tool(description=_PROJECT_CONTEXT_DESCRIPTION)
@@ -753,6 +764,20 @@ def _bounded(payload: dict[str, Any], limit: int, message: str) -> dict[str, Any
     return payload
 
 
+def _fit_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Shorten discovery metadata before SDK conversion; preserve selected continuity."""
+    active_tasks = payload["active_tasks"]
+    while (
+        len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        > _STATUS_MAX_BYTES
+    ):
+        if not active_tasks:
+            raise ValueError("project_status response exceeds model exposure budget")
+        active_tasks.pop()
+        payload["active_tasks_truncated"] = True
+    return payload
+
+
 def _fit_recall_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Preserve refs and titles first when durable previews approach the MCP byte budget."""
     results = payload["results"]
@@ -779,6 +804,27 @@ def _bounded_call_result(name: str, result: CallToolResult) -> CallToolResult:
     encoded = result.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
     if len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= limit:
         return result
+    if name == "project_status" and result.structured_content is not None and not result.is_error:
+        payload = dict(result.structured_content)
+        active_tasks = list(payload["active_tasks"])
+        payload["active_tasks"] = active_tasks
+        while active_tasks:
+            active_tasks.pop()
+            payload["active_tasks_truncated"] = True
+            candidate = result.model_copy(
+                update={
+                    "structured_content": payload,
+                    "content": [
+                        TextContent(
+                            type="text",
+                            text=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                        )
+                    ],
+                }
+            )
+            encoded = candidate.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
+            if len(encoded) + _MCP_WIRE_OVERHEAD_BYTES <= limit:
+                return candidate
     return CallToolResult(
         content=[TextContent(type="text", text="Tool response exceeds model exposure budget")],
         is_error=True,

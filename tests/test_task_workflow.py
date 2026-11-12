@@ -20,7 +20,6 @@ from harness.task_workflow import (
     task_start,
 )
 from harness.tasks import (
-    TaskConflictError,
     TaskRecord,
     TaskRevisionConflictError,
     TaskState,
@@ -246,7 +245,7 @@ def test_task_resume_rolls_back_state_when_resumed_event_persistence_fails(
         connection.close()
 
 
-def test_task_resume_rejects_terminal_task_and_distinct_working_task(tmp_path: Path) -> None:
+def test_task_resume_allows_parallel_work_but_rejects_terminal_task(tmp_path: Path) -> None:
     _database_path, connection, workspace_id = _database(tmp_path)
     try:
         first = task_start(connection, workspace_id, "First")
@@ -262,14 +261,15 @@ def test_task_resume_rejects_terminal_task_and_distinct_working_task(tmp_path: P
         )
         second = task_start(connection, workspace_id, "Second")
 
-        with pytest.raises(TaskConflictError, match="already has a working task"):
-            task_resume(
-                connection,
-                workspace_id,
-                first.task_id,
-                expected_revision=waiting.task.revision,
-            )
-        assert get_task(connection, first.task_id) == waiting.task
+        resumed = task_resume(
+            connection,
+            workspace_id,
+            first.task_id,
+            expected_revision=waiting.task.revision,
+        )
+        assert resumed.state is TaskState.WORKING
+        assert resumed.revision == waiting.task.revision + 1
+        assert get_task(connection, second.task_id) == second
 
         completed = task_accept(
             connection,

@@ -85,6 +85,13 @@ The audited architecture and accepted ADRs control implementation when the origi
 - Do not mix unrelated refactors, cleanup, dependency changes, or feature work into the same task.
 - Prefer the smallest change that fully satisfies the task and preserves architectural boundaries.
 - Before implementation, verify existing APIs, invariants, tests, and external contracts; do not invent them.
+- Before choosing a stack or selecting, installing, or updating packages, language/toolchain
+  runtimes, frameworks, images, or services on any stack, research current known vulnerabilities
+  online. Verify candidate exact versions and resolved transitive dependencies against primary
+  advisories, affected/fixed ranges, and support status; use the `secure-by-design` component
+  research guidance. Record dated sources and material findings. An incomplete check must be
+  disclosed and blocks the dependent choice/installation unless the operator explicitly accepts
+  the stated uncertainty; a known affected choice likewise requires explicit risk acceptance.
 - After implementation, review the diff as a critic and run checks proportionate to the changed risk.
 - Once focused verification and independent review make a task safe to publish and repository/user authorization permits publication, create a durable task commit/PR before spending the remaining execution window on long repeatable full-suite runs. Do not treat maximal local verification as a prerequisite for first publication; the exact-head CI quality gate remains mandatory before merge.
 - Publication readiness and merge readiness are separate gates. A reviewed candidate with proportionate focused checks and no known blocker may be published durably; merge still requires the exact published head, all required CI, and no known substantial correctness issue.

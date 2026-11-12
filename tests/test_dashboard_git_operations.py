@@ -112,6 +112,7 @@ def test_bulk_git_buttons_use_snapshot_schema_and_preserve_files(tmp_path: Path)
         with connect_database(database) as connection:
             assert read_git_snapshot(connection, workspace).staged_count == 2
         _, _, html = _read(url)
+        assert "Код завершения: 0" in html and "git add --all" in html
         fields.update(action="git_unstage_all", expected_token=_token(html))
         assert _post(url, fields, origin=origin)[0] == 303
         with connect_database(database) as connection:
@@ -160,5 +161,46 @@ def test_git_failure_keeps_message_and_returns_updated_state(tmp_path: Path) -> 
         assert status == 409
         assert "My draft &lt;commit&gt;" in payload.decode()
         assert "Подготовить" in payload.decode()
+    finally:
+        manager.close()
+
+
+def test_visible_git_navigation_publish_push_and_console(tmp_path: Path) -> None:
+    from test_git_transport import _remote
+
+    root, database, workspace, remote = _remote(tmp_path)
+    manager = DashboardServerManager(database)
+    try:
+        base = manager.get_url()
+        url = base + f"workspaces/{workspace}/git/"
+        _, _, home = _read(base)
+        assert 'class="project-git-button"' in home
+        _, _, html = _read(url)
+        assert 'aria-current="page">Git</a>' in html
+        assert "Опубликовать и связать" in html
+        assert 'name="remote"' in html
+        fields: dict[str, str | int] = {
+            "action": "git_publish",
+            "workspace_id": workspace,
+            "expected_token": _token(html),
+            "remote": "origin",
+            "value": "published",
+        }
+        origin = base.rstrip("/")
+        assert (
+            _post(url, fields | {"remote": "https://foreign.invalid/repo"}, origin=origin)[0] == 409
+        )
+        assert _post(url, fields, origin=origin)[0] == 303
+        _, _, html = _read(url)
+        assert "origin/published" in html
+        assert "Получить · Pull" in html and "Отправить · Push" in html
+        assert "--set-upstream" in html and "Код завершения: 0" in html
+        fields = {"action": "git_push", "workspace_id": workspace, "expected_token": _token(html)}
+        assert _post(url, fields, origin=origin)[0] == 303
+        _, _, html = _read(url)
+        assert "up to date" in html
+        assert "Команда выполнена" in html
+        assert (remote / "refs/heads/published").exists()
+        assert (root / "tracked.txt").read_text() == "baseline\n"
     finally:
         manager.close()

@@ -21,7 +21,7 @@ from harness.agent_instructions import (
 )
 from harness.dashboard import load_or_create_dashboard_access_token, read_dashboard_access_token
 from harness.git_workspace import inspect_workspace_layout
-from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY, LEGACY_HIDDEN_INSTRUCTION_BODY
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationCollisionError,
@@ -234,9 +234,14 @@ _OWNED_CODEX_BOOTSTRAP_BASES = (
     _PRE_SEARCH_RETIREMENT_CODEX_BOOTSTRAP_INSTRUCTION_BODY,
     CODEX_BOOTSTRAP_INSTRUCTION_BODY,
 )
+_OWNED_HIDDEN_INSTRUCTION_BODIES = (LEGACY_HIDDEN_INSTRUCTION_BODY, HIDDEN_INSTRUCTION_BODY)
 _OWNED_CODEX_DEVELOPER_INSTRUCTIONS = frozenset(
-    (*_OWNED_CODEX_BOOTSTRAP_BASES, HIDDEN_INSTRUCTION_BODY)
-) | frozenset(f"{base}\n{HIDDEN_INSTRUCTION_BODY}" for base in _OWNED_CODEX_BOOTSTRAP_BASES)
+    (*_OWNED_CODEX_BOOTSTRAP_BASES, *_OWNED_HIDDEN_INSTRUCTION_BODIES)
+) | frozenset(
+    f"{base}\n{policy}"
+    for base in _OWNED_CODEX_BOOTSTRAP_BASES
+    for policy in _OWNED_HIDDEN_INSTRUCTION_BODIES
+)
 
 CODEX_MCP_MISSING_WORKSPACE_ROOT_MESSAGE = (
     "Codex MCP did not receive a Workspace root. Production Harness MCP must be "
@@ -739,7 +744,7 @@ def codex_profile_missing_workspace_root(
 
 
 def codex_owned_hidden_instructions_active(workspace_root: Path) -> bool:
-    """Return whether a marker-owned project config contains the exact Hidden policy."""
+    """Return whether a marker-owned config contains a current or legacy Hidden policy."""
     root = _workspace_root(workspace_root)
     if _read_owner_marker(root) is None:
         return False
@@ -748,9 +753,12 @@ def codex_owned_hidden_instructions_active(workspace_root: Path) -> bool:
     if raw is None:
         return False
     value = _parse_toml(raw, path)
-    return _config_is_owned_shape(value, root) and value.get(
-        "developer_instructions"
-    ) == codex_developer_instructions(hidden=True)
+    instructions = value.get("developer_instructions")
+    return (
+        _config_is_owned_shape(value, root)
+        and isinstance(instructions, str)
+        and any(instructions.endswith(policy) for policy in _OWNED_HIDDEN_INSTRUCTION_BODIES)
+    )
 
 
 def codex_developer_instructions(*, hidden: bool = False) -> str:
@@ -776,7 +784,18 @@ def _manual_agents_override_is_current(raw: bytes, *, hidden: bool) -> bool:
         not raw.startswith(_AGENTS_GENERATED_HEADER.encode())
         and codex_developer_instructions(hidden=hidden).encode() in raw
         and _ROOT_AGENTS_READ_INSTRUCTION.encode() in raw
-        and (hidden or HIDDEN_INSTRUCTION_BODY.encode() not in raw)
+        and (
+            hidden or all(policy.encode() not in raw for policy in _OWNED_HIDDEN_INSTRUCTION_BODIES)
+        )
+    )
+
+
+def _owned_agents_file_versions() -> tuple[bytes, ...]:
+    hidden = _agents_file_bytes(hidden=True)
+    return (
+        _agents_file_bytes(hidden=False),
+        hidden,
+        hidden.replace(HIDDEN_INSTRUCTION_BODY.encode(), LEGACY_HIDDEN_INSTRUCTION_BODY.encode()),
     )
 
 
@@ -1162,10 +1181,7 @@ def _preflight_agents_file(root: Path, *, hidden: bool = False, removing: bool =
             f"tracked Harness Codex AGENTS.override.md requires manual cleanup: {path}"
         )
     raw = _read_optional_regular_file(path, label="Codex AGENTS.override.md")
-    if raw is not None and raw not in (
-        _agents_file_bytes(hidden=False),
-        _agents_file_bytes(hidden=True),
-    ):
+    if raw is not None and raw not in _owned_agents_file_versions():
         raise HostIntegrationError(
             f"Harness-owned Codex AGENTS.override.md contains unknown user content: {path}"
         )
@@ -1231,10 +1247,7 @@ def _remove_agents_file(root: Path) -> bool:
             f"tracked Harness Codex AGENTS.override.md requires manual cleanup: {path}"
         )
     raw = _read_optional_regular_file(path, label="Codex AGENTS.override.md")
-    if raw is not None and raw not in (
-        _agents_file_bytes(hidden=False),
-        _agents_file_bytes(hidden=True),
-    ):
+    if raw is not None and raw not in _owned_agents_file_versions():
         raise HostIntegrationError(
             f"Harness-owned Codex AGENTS.override.md contains unknown user content: {path}"
         )

@@ -123,6 +123,8 @@ Known evidence:
 
 ### One working Task per Workspace — ACCEPT
 
+Amended on 2026-10-04 by [ADR-0079](../decisions/0079-parallel-workspace-tasks.md): independent working Tasks may share a Workspace, with explicit selection and unchanged revision CAS. The original audit finding below records the earlier baseline.
+
 This is a valuable complexity bound. Enforce it transactionally, not only as UI guidance.
 
 ## 4. Host adapters

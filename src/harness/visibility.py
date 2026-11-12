@@ -34,6 +34,10 @@ class VisibilityChangeResult:
     projection: HiddenProjectionResult
 
 
+class HiddenRequiresGitError(HiddenProjectionError):
+    """Raised when a Project has a filesystem Workspace that cannot enter Hidden."""
+
+
 def set_project_visibility(
     connection: sqlite3.Connection,
     *,
@@ -61,7 +65,7 @@ def set_project_visibility(
     if mode is VisibilityMode.HIDDEN and any(
         not workspace_has_git(workspace) for workspace in workspaces
     ):
-        raise HiddenProjectionError(
+        raise HiddenRequiresGitError(
             "Hidden requires a Git Workspace; filesystem Workspaces stay Normal"
         )
     roots = _projection_roots(workspaces, deadline=deadline)

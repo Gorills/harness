@@ -1,0 +1,1 @@
+package com.harness.tunnel; final class Profile {String name(){return "fixture";} String config(boolean b){return "{}";}}

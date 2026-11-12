@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import sys
 from argparse import ArgumentParser
@@ -11,6 +12,7 @@ from types import FrameType
 
 from harness.builtin_skills import BuiltinSkillError, sync_builtin_skills
 from harness.codex_adapter import discover_codex_adapter
+from harness.codex_servers_adapter import GlobalServersSetupError, setup_global_servers
 from harness.cursor_adapter import (
     CursorProjectRuntimeStatus,
     cursor_project_enable_command,
@@ -19,6 +21,7 @@ from harness.cursor_adapter import (
 )
 from harness.daemon import DaemonError, serve_daemon
 from harness.daemon_autostart import ensure_canonical_daemon
+from harness.dashboard import read_dashboard_access_token
 from harness.doctor import DoctorReport, run_doctor_checks, run_system_doctor
 from harness.host_adapters import (
     HostIntegrationError,
@@ -34,6 +37,7 @@ from harness.ipc import (
     WorkspaceScanResult,
     WorkspaceStatusResult,
     request_dashboard_url,
+    request_servers,
     request_set_visibility,
     request_shutdown,
     request_workspace_init,
@@ -47,7 +51,10 @@ from harness.runtime_paths import (
     RuntimePathError,
     default_runtime_paths,
     ensure_private_state_directory,
+    mcp_http_listen_port,
 )
+from harness.server_import import enrich_selected_card, preview_import
+from harness.servers import ServerError
 from harness.skill_runtime import (
     SkillRuntimeError,
     active_skill_profiles_for_runtime,
@@ -1097,7 +1104,169 @@ def harness_main() -> int:
         description="Serve the Harness model-facing MCP surface over stdio using daemon IPC.",
     )
 
+    servers_parser = subparsers.add_parser(
+        "servers", help="global server inventory and projectless Codex delivery"
+    )
+    servers_sub = servers_parser.add_subparsers(dest="servers_command", required=True)
+    servers_sub.add_parser("start", help="start local daemon after machine restart")
+    servers_sub.add_parser("list", help="list shared server identities")
+    servers_clear = servers_sub.add_parser(
+        "clear-history", help="operator-only: permanently clear one server's recorded history"
+    )
+    servers_clear.add_argument("server_id", help="explicit stable server identity")
+    servers_clear.add_argument("--expected-revision", type=int, required=True)
+    servers_clear.add_argument(
+        "--confirm", action="store_true", help="confirm permanent deletion of all selected history"
+    )
+    servers_import = servers_sub.add_parser(
+        "import", help="preview safe index metadata; --apply creates without overwrites"
+    )
+    servers_import.add_argument("root", type=Path)
+    servers_import.add_argument(
+        "--server", help="select exactly one card for safe service/path enrichment"
+    )
+    servers_import.add_argument("--apply", action="store_true")
+    servers_import.add_argument(
+        "--sites-manifest",
+        type=Path,
+        help="Reviewed non-secret site mapping for the one selected source card",
+    )
+    servers_import.add_argument(
+        "--expected-revision",
+        type=int,
+        help="CAS enrichment of one existing --server record; preserve edited fields",
+    )
+    servers_setup = servers_sub.add_parser(
+        "setup", help="explicit user-global Codex MCP and operations skill setup"
+    )
+    servers_setup.add_argument("--host", choices=("codex",), required=True)
+    servers_setup.add_argument("--remove", action="store_true")
+    tunnels_parser = subparsers.add_parser(
+        "tunnels", help="machine tunnel setup and emergency network recovery"
+    )
+    tunnels_sub = tunnels_parser.add_subparsers(dest="tunnels_command", required=True)
+    tunnels_sub.add_parser(
+        "setup", help="prepare audited component and request OS administrator permission"
+    )
+    tunnels_sub.add_parser(
+        "emergency-off", help="stop tunnel and explicitly restore ordinary networking"
+    )
     args = parser.parse_args()
+    if args.command == "tunnels":
+        from harness.tunnel_platform import PlatformError
+
+        try:
+            if os.environ.get("HARNESS_DEV_ROOT"):
+                raise PlatformError(
+                    "Системная установка и аварийное отключение недоступны из изолированного checkout"
+                )
+            if args.tunnels_command == "setup":
+                from harness.tunnel_installer import request_install
+
+                request_install()
+            else:
+                from harness.tunnel_installer import request_emergency_off
+
+                request_emergency_off()
+            return 0
+        except (PlatformError, OSError) as error:
+            return _bounded_failure("Harness Tunnels", str(error))
+    if args.command == "servers":
+        try:
+            if args.servers_command == "clear-history":
+                if not args.confirm:
+                    raise ServerError("Explicit --confirm is required to clear history")
+                result = request_servers(
+                    _canonical_socket(),
+                    "clear_history",
+                    {
+                        "server_id": args.server_id,
+                        "expected_revision": args.expected_revision,
+                        "confirm": args.confirm,
+                    },
+                )
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 0
+            if args.servers_command == "import":
+                entries = preview_import(args.root)
+                if args.sites_manifest and not args.server:
+                    raise ServerError("Sites manifest requires one explicitly selected --server")
+                if args.server:
+                    entries = [
+                        entry for entry in entries if args.server in entry["metadata"]["aliases"]
+                    ]
+                    if len(entries) != 1:
+                        raise ServerError("Selected source server not found")
+                    entries = [
+                        enrich_selected_card(
+                            args.root, entries[0], args.server, sites_manifest=args.sites_manifest
+                        )
+                    ]
+                if not args.apply:
+                    print(
+                        json.dumps(
+                            {"preview": True, "records": entries, "source_untouched": True},
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                    )
+                    return 0
+                if args.expected_revision is not None and not args.server:
+                    raise ServerError("Enrichment revision requires one --server")
+                socket_path = _canonical_socket()
+                if args.expected_revision is not None:
+                    entry = entries[0]
+                    request_servers(
+                        socket_path,
+                        "enrich",
+                        {
+                            "server_id": entry["server_id"],
+                            "expected_revision": args.expected_revision,
+                            "metadata": entry["metadata"],
+                        },
+                    )
+                    print(json.dumps({"enriched": 1, "preserved_operator_fields": True}))
+                    return 0
+                # Each bounded record is admitted by the daemon, never by a CLI SQLite writer.
+                totals = {"created": 0, "preserved": 0}
+                for entry in entries:
+                    result = request_servers(socket_path, "import", {"entries": [entry]})
+                    for key in totals:
+                        totals[key] += result[key]
+                print(json.dumps(totals))
+                return 0
+            if args.servers_command == "setup" and os.environ.get("HARNESS_DEV_ROOT"):
+                raise GlobalServersSetupError(
+                    "Source-checkout global setup is refused; use installed runtime after explicit activation authorization. Synthetic adapter tests remain available."
+                )
+            socket_path = _canonical_socket()
+            if args.servers_command == "list":
+                print(
+                    json.dumps(
+                        request_servers(socket_path, "list", {}), ensure_ascii=False, indent=2
+                    )
+                )
+            elif args.servers_command == "setup":
+                paths = default_runtime_paths()
+                token = read_dashboard_access_token(paths.database)
+                if token is None:
+                    raise GlobalServersSetupError("Daemon capability unavailable")
+                home = Path.home()
+                codex_home = Path(os.environ.get("CODEX_HOME", str(home / ".codex")))
+                url = f"http://127.0.0.1:{mcp_http_listen_port(paths.socket)}/servers/mcp"
+                if not args.remove:
+                    sync_builtin_skills(default_skill_registry())
+                setup_global_servers(codex_home, home, url, token, remove=args.remove)
+                print(
+                    "Harness Servers global delivery updated. Fully restart Codex and open a fresh chat."
+                )
+            else:
+                print(
+                    "Harness Servers daemon ready; global connection remains separate from project MCP."
+                )
+            return 0
+        except (ServerError, GlobalServersSetupError, OSError, IpcError, RuntimePathError) as exc:
+            return _bounded_failure("Harness Servers", str(exc))
     if args.command == "install":
         return _run_install(host=args.host)
     if args.command == "uninstall":

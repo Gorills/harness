@@ -13,7 +13,7 @@ def test_schema_v9_task_stack_hint_constraints_and_cascade(tmp_path: Path) -> No
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
         connection.execute(
             """

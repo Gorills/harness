@@ -16,7 +16,7 @@ Do not combine unrelated cleanup with feature or bug work.
 
 ## Local quality checks
 
-Harness development uses `uv 0.12.5` with Python 3.13 and the committed `uv.lock`:
+Harness development uses `uv 0.13.6` with Python 3.13 and the committed `uv.lock`:
 
 ```text
 scripts/dev sync

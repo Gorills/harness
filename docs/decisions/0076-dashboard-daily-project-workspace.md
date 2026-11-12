@@ -19,9 +19,11 @@ scrollable inbox. Global Tasks and review have their own routes through a valida
 field; the Project and Workspace routes open active Tasks by default.
 
 - Home defaults to `scope=projects`; its bounded inbox selects review Tasks only.
-- Task views accept `active`, `review`, `all`, and `archive`. Active includes only working;
-  review means waiting for operator review; archive means completed or cancelled. Tasks waiting
-  for operator input or an external dependency remain available under all and search.
+- Task views accept `active`, `review`, `waiting`, `all`, and `archive`. Active includes only working;
+  review means waiting for operator review; waiting (the «Ожидание» tab) groups operator input
+  and external dependencies; archive means completed or cancelled. These three non-terminal
+  groups are disjoint, so every unfinished Task has a dedicated view as well as all and search.
+  The waiting tab and its count appear in global, Project and Workspace Task lists.
 - Sidebar primary links and Project search stay fixed; only the quick Project list scrolls,
   without a visible scrollbar. Keyboard focus and wheel scrolling still reach every Project.
 - Membership, selected count, 24-row pagination, and SSE fingerprints use the same scope.
@@ -45,7 +47,9 @@ Task navigation and domain-backed inline decisions remain.
 ## Verification
 
 HTTP/SSE tests cover selected-scope snapshots, strict query validation, multiple review pages,
-active Tasks after a full review page, archive membership, and actionable search with no duplicated
-forms. Existing action, ownership, evidence, same-origin and draft-recovery tests remain in place.
+active Tasks after a full review page, waiting reasons and counts, waiting pagination and state
+transitions across global/Project/Workspace boundaries, archive membership, and actionable search
+with no duplicated forms. Existing action, ownership, evidence, same-origin and draft-recovery
+tests remain in place.
 Browser verification uses a disposable database with multiple Projects; real registered Tasks are
 not accepted or edited for testing. Wide and narrow screenshots accompany the delivery.

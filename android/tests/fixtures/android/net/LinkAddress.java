@@ -1,0 +1,1 @@
+package android.net; public class LinkAddress {public String toString(){return "127.0.0.1/8";}}

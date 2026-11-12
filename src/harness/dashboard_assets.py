@@ -352,6 +352,21 @@ nav.action-row { border-top: 1px solid var(--border); padding: 16px 24px; }
 .project-row-links { font-size: 11px; }
 .mobile-work-tabs { display: none; }
 .git-entry { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; color: var(--accent); font-size: 12px; overflow-wrap: anywhere; }
+.project-row-links .project-git-button { display: inline-flex; align-items: center; justify-content: center; min-width: 48px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: 4px; font-size: 13px; font-weight: 600; color: var(--accent); background: var(--panel); }
+.git-sync, .git-console { padding: 16px 20px; margin-bottom: 20px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--panel); }
+.git-sync h2 { font-size: 15px; margin-bottom: 8px; }
+.git-tracking { font-size: 13px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.git-sync-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0 12px; }
+.git-sync select { width: auto; max-width: 100%; min-height: 34px; }
+.git-publish summary { font-size: 13px; font-weight: 600; color: var(--accent); }
+.git-publish form { display: grid; gap: 10px; padding-top: 12px; }
+.git-publish-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px; }
+.git-publish-fields label { min-width: 0; }
+.git-publish-fields input, .git-publish-fields select { display: block; width: 100%; margin-top: 6px; }
+.git-publish button { justify-self: start; }
+.git-console summary { font-weight: 600; font-size: 13px; }
+.git-console p { margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.git-console pre { max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border-radius: 4px; background: var(--sidebar-bg, #202b33); color: #f4f7f8; font-size: 12px; }
 .project-git-links { display: flex; flex-wrap: wrap; gap: 12px; margin: -8px 0 20px; }
 .task-branch-context { margin: -8px 0 20px; }
 .task-branch-prompt, .git-status-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border: 1px solid var(--border); background: var(--panel); border-radius: var(--radius); margin-bottom: 20px; }
@@ -394,6 +409,7 @@ nav.action-row { border-top: 1px solid var(--border); padding: 16px 24px; }
   .git-workbench.has-changes .git-changes { order: -1; }
 }
 @media (max-width: 600px) {
+  .git-publish-fields { grid-template-columns: minmax(0, 1fr); }
   .git-status-bar, .task-branch-prompt { align-items: flex-start; flex-direction: column; padding: 14px; }
   .git-branch-row { align-items: flex-start; flex-wrap: wrap; }
   .git-branch-actions { width: 100%; justify-content: flex-start; }
@@ -453,8 +469,9 @@ nav.action-row { border-top: 1px solid var(--border); padding: 16px 24px; }
   .mobile-navigation-panel .primary-navigation { grid-template-columns: 1fr 1fr; padding-bottom: 16px; }
   .mobile-navigation-panel .overview-link { min-height: 44px; }
   .mobile-navigation-panel .nav-project-link { min-height: 44px; }
-  .header-live-indicator { font-size: 10px; }
-  .header-live-indicator .update-link { margin-left: 3px; }
+  .header-live-indicator { font-size: 10px; flex-shrink: 1; min-width: 0; }
+  .header-live-indicator .live-copy { min-width: 0; overflow-wrap: anywhere; }
+  .header-live-indicator .update-link { margin-left: 3px; flex-shrink: 0; white-space: nowrap; }
   main { padding: 22px 16px 32px; }
   .mobile-work-tabs { display: flex; gap: 6px; margin: -8px 0 22px; }
   .mobile-work-tabs a { flex: 1; display: grid; place-items: center; min-height: 42px; font-size: 12px; border: 1px solid var(--border); background: #fff; border-radius: 5px; }
@@ -533,12 +550,18 @@ DASHBOARD_JS = r"""
   let inFlight = false;
   let queued = false;
   let queuedForce = false;
+  let queuedExplicitRead = false;
   let queuedMutationRecovery = false;
   let mutationInFlight = false;
   let mutationRefreshQueued = false;
   let mutationEpoch = 0;
   let mutationRecoveryInFlight = false;
   let mutationRecoveryWarning = false;
+  let refreshFailed = false;
+  let backgroundRefreshPending = false;
+  let composing = false;
+  let pointerDown = false;
+  let interactionCheckScheduled = false;
   const filters = new Map();
   let projectFilter = 'all';
 
@@ -596,6 +619,7 @@ DASHBOARD_JS = r"""
       if (!Number.isNaN(date.getTime())) {
         time.textContent = date.toLocaleString('ru', {
           day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
+          year: time.hasAttribute('data-time-year') ? 'numeric' : undefined,
         });
         time.title = date.toLocaleString('ru');
       }
@@ -622,6 +646,33 @@ DASHBOARD_JS = r"""
   const hasUnsavedInput = () => Array.from(
     document.querySelectorAll('textarea, input:not([type="hidden"]), select')
   ).some(fieldHasChanged);
+
+  // Restoring a value or calling focus() cannot restore an open native picker,
+  // composition session, or a selection spanning text nodes. Keep their DOM alive.
+  const hasActiveInteraction = () => {
+    if (composing || pointerDown) return true;
+    const layout = document.querySelector('.app-layout');
+    const active = document.activeElement;
+    if (layout?.contains(active) && active.closest(
+      'input, textarea, select, button, a[href], summary, [contenteditable], [tabindex]'
+    )) return true;
+    const selection = window.getSelection();
+    return selection !== null && !selection.isCollapsed && (
+      layout?.contains(selection.anchorNode) || layout?.contains(selection.focusNode)
+    );
+  };
+
+  const resumeBackgroundRefresh = () => {
+    if (!backgroundRefreshPending || interactionCheckScheduled) return;
+    interactionCheckScheduled = true;
+    // focusout fires before the next control receives focus; check after that transfer.
+    setTimeout(() => {
+      interactionCheckScheduled = false;
+      if (backgroundRefreshPending && !hasUnsavedInput() && !hasActiveInteraction()) {
+        void refreshPage({ force: false });
+      }
+    }, 0);
+  };
 
   const setState = (state, text) => {
     document.querySelectorAll('.live-indicator').forEach((indicator) => {
@@ -660,7 +711,111 @@ DASHBOARD_JS = r"""
     });
   };
 
-  const applyPage = (nextDocument) => {
+  const showServerView = ({ initial = false } = {}) => {
+    const workspace = document.querySelector('[data-server-workspace]');
+    if (!(workspace instanceof HTMLElement)) {
+      return;
+    }
+    let target = null;
+    try {
+      target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+    } catch (_error) {
+      // An invalid fragment does not prevent reading the overview.
+    }
+    const views = Array.from(workspace.querySelectorAll('[data-server-view]'));
+    const selectedView = target?.closest('[data-server-view]');
+    const key = initial && workspace.dataset.serverError === 'true'
+      ? workspace.dataset.serverInitialView
+      : selectedView?.dataset.serverView || workspace.dataset.serverInitialView || 'overview';
+    views.forEach((view) => { view.hidden = view.dataset.serverView !== key; });
+    workspace.querySelectorAll('[data-server-tab]').forEach((link) => {
+      if (link.dataset.serverTab === key) {
+        link.setAttribute('aria-current', 'page');
+      } else {
+        link.removeAttribute('aria-current');
+      }
+    });
+    // Exact app/profile links and add/edit links reveal the requested disclosure.
+    if (target instanceof HTMLDetailsElement) {
+      target.open = true;
+      let parent = target.parentElement?.closest('details');
+      while (parent instanceof HTMLDetailsElement) {
+        parent.open = true;
+        parent = parent.parentElement?.closest('details');
+      }
+    }
+  };
+
+  const bindServerControls = () => {
+    showServerView({ initial: true });
+    document.querySelectorAll('[data-server-navigation]').forEach((link) => {
+      if (link.dataset.serverBound === 'true') return;
+      link.dataset.serverBound = 'true';
+      link.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) return;
+        event.preventDefault();
+        navigateServer(link.href);
+      });
+    });
+    document.querySelectorAll('[data-server-cancel]').forEach((button) => {
+      if (button.dataset.cancelBound === 'true') return;
+      button.dataset.cancelBound = 'true';
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        const form = button.closest('form');
+        if (!form || mutationInFlight || inFlight) return;
+        form.querySelectorAll('textarea, input:not([type="hidden"]), select').forEach((field) => {
+          const value = field.dataset.serverDefault ?? field.defaultValue ?? '';
+          field.value = value;
+          if (field instanceof HTMLSelectElement) {
+            Array.from(field.options).forEach((option) => { option.defaultSelected = option.value === value; });
+          } else {
+            field.defaultValue = value;
+          }
+          delete field.dataset.recoveredDraft;
+        });
+        const revision = document.querySelector('[data-server-workspace]')?.dataset.serverRevision;
+        const field = form.elements.namedItem('expected_revision');
+        if (field && revision) field.value = field.defaultValue = revision;
+        const disclosure = form.closest('details');
+        if (disclosure) {
+          disclosure.open = false;
+          disclosure.querySelector('summary')?.focus();
+        }
+        setState('live', 'Изменения этой формы отменены');
+        if (form.elements.namedItem('object_key')?.value === '@new') {
+          const target = new URL(window.location.href);
+          target.searchParams.delete('object_id');
+          navigateServer(target.href);
+        }
+      });
+    });
+    document.querySelectorAll('[data-server-tab]:not([data-server-navigation]), [data-server-open]').forEach((link) => {
+      if (link.dataset.serverBound === 'true') {
+        return;
+      }
+      link.dataset.serverBound = 'true';
+      link.addEventListener('click', (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+          return;
+        }
+        event.preventDefault();
+        const fragment = link.getAttribute('href');
+        window.history.pushState(null, '', fragment);
+        showServerView();
+        if (link.dataset.serverOpen) {
+          const disclosure = document.getElementById(link.dataset.serverOpen);
+          if (disclosure instanceof HTMLDetailsElement) {
+            disclosure.open = true;
+            disclosure.scrollIntoView({ block: 'start' });
+            disclosure.querySelector('summary')?.focus({ preventScroll: true });
+          }
+        }
+      });
+    });
+  };
+
+  const applyPage = (nextDocument, { preserveDraftRevisions = false, confirmedForm = null, syncUrl = true } = {}) => {
     const currentLayout = document.querySelector('.app-layout');
     const nextLayout = nextDocument.querySelector('.app-layout');
     if (!(currentLayout instanceof HTMLElement) || !(nextLayout instanceof HTMLElement)) {
@@ -671,8 +826,10 @@ DASHBOARD_JS = r"""
     );
     const formIdentity = (form) => form === null ? '' : JSON.stringify([
       form.getAttribute('method'), form.getAttribute('action') || '',
-      ...['action', 'task_id', 'workspace_id', 'project_id', 'facet'].map(
-        (name) => form.elements.namedItem(name)?.value || ''
+      ...['action', 'task_id', 'workspace_id', 'project_id', 'facet', 'server_id', 'site_key', 'profile_key', 'map_kind', 'object_key', 'link_key', 'from_kind', 'from_id'].map(
+        (name) => name === 'server_id' && form.elements.namedItem('action')?.value === 'server_save'
+          && form.elements.namedItem('expected_revision')?.value === '0'
+          ? '@new-server' : form.elements.namedItem(name)?.value || ''
       ),
     ]);
     const fieldIdentity = (field) => JSON.stringify([
@@ -682,6 +839,14 @@ DASHBOARD_JS = r"""
     ]);
     const currentFields = editableFields(currentLayout);
     const nextFields = editableFields(nextLayout);
+    // Server error pages also retain fields for native submissions. With JS, use the
+    // current edit history so an untouched field can adopt a concurrent stored update.
+    nextFields.forEach((target) => {
+      const matches = currentFields.filter((field) => fieldIdentity(field) === fieldIdentity(target));
+      if (matches.length === 1 && !fieldHasChanged(matches[0])) {
+        delete target.dataset.recoveredDraft;
+      }
+    });
     const matchingField = (field) => {
       const matches = nextFields.filter((candidate) => fieldIdentity(candidate) === fieldIdentity(field));
       if (field.dataset.uiFilter) {
@@ -691,6 +856,22 @@ DASHBOARD_JS = r"""
       return matches.length === 1 ? matches[0] : null;
     };
     const drafts = currentFields.filter(fieldHasChanged);
+    // A neighboring POST response is not permission to rebase an unsent draft.
+    // Keep the revision on which each dirty form was edited until an explicit read.
+    if (preserveDraftRevisions) {
+      const dirtyForms = new Set(drafts.map((field) => field.form).filter(
+        (form) => form !== null && form.method.toLowerCase() === 'post' && form !== confirmedForm
+      ));
+      const nextForms = Array.from(nextLayout.querySelectorAll('form'));
+      dirtyForms.forEach((form) => {
+        const matches = nextForms.filter((candidate) => formIdentity(candidate) === formIdentity(form));
+        const revision = form.elements.namedItem('expected_revision');
+        const target = matches.length === 1 ? matches[0].elements.namedItem('expected_revision') : null;
+        if (revision !== null && target !== null) {
+          target.value = target.defaultValue = revision.value;
+        }
+      });
+    }
     // Capture after the fetch: edits made while the response arrived are still operator-owned.
     const replacements = drafts.map((field) => [field, matchingField(field)]);
     if (replacements.some(([field, target]) => target === null || (
@@ -718,9 +899,8 @@ DASHBOARD_JS = r"""
       } else {
         target.value = field.value;
       }
-      if (field.dataset.recoveredDraft === 'true') {
-        target.dataset.recoveredDraft = 'true';
-      }
+      // A validation response can echo this value as its default; it is still an unsaved draft.
+      target.dataset.recoveredDraft = 'true';
     }
     const disclosureIdentity = (disclosure) => disclosure.id || JSON.stringify([
       disclosure.className,
@@ -774,11 +954,21 @@ DASHBOARD_JS = r"""
     if (nextDocument.body && nextDocument.body.dataset.eventsUrl) {
       body.dataset.eventsUrl = nextDocument.body.dataset.eventsUrl;
     }
+    const pageUrl = nextLayout.querySelector('[data-server-page-url]')?.dataset.serverPageUrl;
+    if (pageUrl && syncUrl) {
+      const canonical = new URL(pageUrl, window.location.href);
+      if (canonical.origin === window.location.origin) {
+        window.history.replaceState(window.history.state ?? null, '', `${canonical.pathname}${canonical.search}${window.location.hash || ''}`);
+      }
+    }
     bindRefreshButtons();
     bindMobileNavigation();
     bindWorkControls();
+    bindServerControls();
+    backgroundRefreshPending = false;
     return true;
   };
+  const serverPositions = new Map();
 
   const disconnectEvents = () => {
     if (source === null) {
@@ -801,7 +991,7 @@ DASHBOARD_JS = r"""
     eventsUrl = nextUrl;
     source = new EventSource(nextUrl);
     source.addEventListener('ready', () => {
-      if (!mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning) {
+      if (!inFlight && !mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning && !refreshFailed && !backgroundRefreshPending) {
         setState('live', 'Онлайн');
       }
     });
@@ -816,7 +1006,7 @@ DASHBOARD_JS = r"""
       void refreshPage({ force: false });
     });
     source.onerror = () => {
-      if (!mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning) {
+      if (!inFlight && !mutationInFlight && !mutationRecoveryInFlight && !mutationRecoveryWarning && !refreshFailed && !backgroundRefreshPending) {
         setState('reconnecting', 'Переподключение');
       }
     };
@@ -832,7 +1022,9 @@ DASHBOARD_JS = r"""
     }
     queued = true;
     queuedForce = queuedForce || Boolean(options.force);
-    queuedMutationRecovery = queuedMutationRecovery || Boolean(options.mutationRecovery);
+    queuedExplicitRead = queuedExplicitRead || Boolean(options.force && !options.mutationRecovery);
+    queuedMutationRecovery = queuedMutationRecovery || Boolean(options.mutationRecovery)
+      || Boolean(options.force && mutationRecoveryWarning);
     if (inFlight) {
       return;
     }
@@ -843,13 +1035,21 @@ DASHBOARD_JS = r"""
         queued = false;
         const force = queuedForce;
         queuedForce = false;
+        const explicitRead = queuedExplicitRead;
+        queuedExplicitRead = false;
         mutationRecovery = queuedMutationRecovery;
         queuedMutationRecovery = false;
         mutationRecoveryInFlight = mutationRecovery;
-        if (!force && hasUnsavedInput()) {
-          setState('update', 'Есть обновление');
+        if (!force && (hasUnsavedInput() || hasActiveInteraction())) {
+          backgroundRefreshPending = true;
+          if (refreshFailed) {
+            setState('update', 'Не удалось обновить · черновик сохранён');
+          } else if (!mutationRecoveryWarning) {
+            setState('update', 'Есть обновление');
+          }
           break;
         }
+        backgroundRefreshPending = false;
         setState('update', 'Обновление');
         const expectedMutationEpoch = mutationEpoch;
         const response = await fetch(`${window.location.pathname}${window.location.search}`, {
@@ -864,17 +1064,19 @@ DASHBOARD_JS = r"""
         if (expectedMutationEpoch !== mutationEpoch) {
           break;
         }
-        if (!force && hasUnsavedInput()) {
+        if (!force && (hasUnsavedInput() || hasActiveInteraction())) {
+          backgroundRefreshPending = true;
           setState('update', 'Есть обновление');
           break;
         }
         const nextDocument = new DOMParser().parseFromString(html, 'text/html');
         const scrollX = window.scrollX;
         const scrollY = window.scrollY;
-        if (!applyPage(nextDocument)) {
+        if (!applyPage(nextDocument, { preserveDraftRevisions: mutationRecovery && !explicitRead })) {
           throw new Error('dashboard refresh parse failed');
         }
         window.scrollTo(scrollX, scrollY);
+        refreshFailed = false;
         mutationRecoveryWarning = mutationRecovery;
         connectEvents();
         setState(
@@ -892,7 +1094,9 @@ DASHBOARD_JS = r"""
           mutationRecoveryWarning = true;
           setState('update', 'Не удалось подтвердить сохранение');
         } else {
-          setState('update', 'Есть обновление');
+          refreshFailed = true;
+          setState('update', hasUnsavedInput()
+            ? 'Не удалось обновить · черновик сохранён' : 'Не удалось обновить');
         }
       }
     } finally {
@@ -901,7 +1105,7 @@ DASHBOARD_JS = r"""
       if (queued) {
         void refreshPage({
           force: queuedForce,
-          mutationRecovery: queuedMutationRecovery,
+          mutationRecovery: queuedMutationRecovery && !queuedExplicitRead,
         });
       }
     }
@@ -962,6 +1166,104 @@ DASHBOARD_JS = r"""
     };
   };
 
+  const navigateServer = async (href, { push = true } = {}) => {
+    if (inFlight || mutationInFlight || mutationRecoveryInFlight || queuedMutationRecovery) {
+      setState('update', 'Дождитесь завершения текущего запроса.');
+      return;
+    }
+    const target = new URL(href, window.location.href);
+    if (target.origin !== window.location.origin) return;
+    inFlight = true;
+    const epoch = mutationEpoch;
+    setState('update', 'Загрузка списка…');
+    try {
+      const response = await fetch(`${target.pathname}${target.search}`, {
+        cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'text/html' },
+      });
+      if (!response.ok) throw new Error('server navigation failed');
+      const nextDocument = new DOMParser().parseFromString(await response.text(), 'text/html');
+      if (epoch !== mutationEpoch) throw new Error('server changed');
+      const currentUrl = window.location.href;
+      const currentPosition = [window.scrollX, window.scrollY];
+      if (!applyPage(nextDocument, { preserveDraftRevisions: true, syncUrl: false })) throw new Error('server navigation failed');
+      if (push) serverPositions.set(currentUrl, currentPosition);
+      if (push) window.history.pushState(null, '', `${target.pathname}${target.search}${target.hash}`);
+      showServerView();
+      const activeView = Array.from(document.querySelectorAll('[data-server-view]')).find((view) => !view.hidden);
+      const detail = activeView?.querySelector('.server-map-detail, .server-edit-disclosure[open]');
+      const heading = detail || activeView?.querySelector('h2');
+      if (heading) {
+        heading.setAttribute('tabindex', '-1');
+        heading.focus({ preventScroll: true });
+        const position = serverPositions.get(target.href);
+        if (position) window.scrollTo(...position);
+        else heading.scrollIntoView({ block: 'start' });
+      }
+      refreshFailed = false;
+      setState('live', 'Список загружен полностью');
+    } catch (error) {
+      setState('error', error instanceof Error && error.message === 'dashboard draft target changed'
+        ? 'Сохраните черновик перед переходом: его форма исчезнет из раздела.'
+        : 'Список не обновлён. Повторите переход; показанные сведения сохранены.');
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  const submitServerSearch = async (form) => {
+    const notice = form.querySelector('[data-server-filter-status]');
+    const report = (message) => { if (notice) notice.textContent = message; };
+    if (inFlight || mutationInFlight || mutationRecoveryInFlight || queuedMutationRecovery) {
+      report('Дождитесь завершения текущего запроса.');
+      return;
+    }
+    inFlight = true;
+    form.setAttribute('aria-busy', 'true');
+    const buttons = Array.from(form.querySelectorAll('button'));
+    buttons.forEach((button) => { button.disabled = true; });
+    report('Поиск…');
+    const fields = Array.from(form.querySelectorAll('input, select'));
+    const submitted = fields.map((field) => [field, submittedControlValue(field)]);
+    const target = new URL(form.getAttribute('action') || window.location.pathname, window.location.href);
+    target.search = new URLSearchParams(new FormData(form)).toString();
+    const expectedMutationEpoch = mutationEpoch;
+    let restoreControls = null;
+    try {
+      const response = await fetch(`${target.pathname}${target.search}`, {
+        cache: 'no-store', credentials: 'same-origin', headers: { Accept: 'text/html' },
+      });
+      if (!response.ok) throw new Error('server search failed');
+      const html = await response.text();
+      if (expectedMutationEpoch !== mutationEpoch) {
+        report('Повторите поиск после сохранения.');
+        return;
+      }
+      const nextDocument = new DOMParser().parseFromString(html, 'text/html');
+      restoreControls = markSubmittedControlsClean(submitted);
+      const scrollX = window.scrollX;
+      const scrollY = window.scrollY;
+      if (!applyPage(nextDocument, { preserveDraftRevisions: true })) {
+        throw new Error('server search parse failed');
+      }
+      // The canonical server response may reconcile an empty last page.
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${target.hash || window.location.hash || ''}`);
+      showServerView();
+      window.scrollTo(scrollX, scrollY);
+      refreshFailed = false;
+      setState('live', 'Результаты обновлены');
+    } catch (error) {
+      if (restoreControls) restoreControls();
+      report(error instanceof Error && error.message === 'dashboard draft target changed'
+        ? 'Сохраните черновик перед поиском: его форма исчезнет из результатов.'
+        : 'Не удалось выполнить поиск. Повторите запрос.');
+    } finally {
+      form.removeAttribute('aria-busy');
+      buttons.forEach((button) => { button.disabled = false; });
+      inFlight = false;
+      if (queued) void refreshPage({ force: queuedForce });
+    }
+  };
+
   const submitMutation = async (form) => {
     if (mutationInFlight || mutationRecoveryInFlight || queuedMutationRecovery) {
       return;
@@ -972,9 +1274,10 @@ DASHBOARD_JS = r"""
     mutationEpoch += 1;
     queued = false;
     queuedForce = false;
+    queuedExplicitRead = false;
     queuedMutationRecovery = false;
     form.setAttribute('aria-busy', 'true');
-    setState('saving', 'Сохранение');
+    setState('saving', form.querySelector('[name="action"]')?.value?.startsWith('git_') ? 'Выполняется Git…' : 'Сохранение');
     const fields = Array.from(form.querySelectorAll('textarea, input, select'));
     const submitted = fields.map((field) => [field, submittedControlValue(field)]);
     const target = form.getAttribute('action') || `${window.location.pathname}${window.location.search}`;
@@ -999,15 +1302,32 @@ DASHBOARD_JS = r"""
         throw new Error('dashboard mutation parse failed');
       }
       if (response.ok) {
-        restoreSubmittedControls = markSubmittedControlsClean(submitted);
+        const action = form.elements.namedItem('action')?.value;
+        const keyName = action === 'server_site_delete' ? 'site_key' : action === 'server_profile_delete' ? 'profile_key' : action === 'server_map_delete' ? 'object_key' : action === 'server_map_unlink' ? 'link_key' : null;
+        const deletedKey = keyName === null ? null : form.elements.namedItem(keyName)?.value;
+        const serverId = form.elements.namedItem('server_id')?.value;
+        const removedFields = keyName === null ? [] : Array.from(document.querySelectorAll('form')).filter(
+          (candidate) => candidate.elements.namedItem('server_id')?.value === serverId &&
+            candidate.elements.namedItem(keyName)?.value === deletedKey &&
+            candidate.elements.namedItem('action')?.value === (keyName === 'site_key' ? 'server_site_save' : keyName === 'object_key' ? 'server_map_save' : keyName === 'link_key' ? 'server_map_link' : 'server_profile_save') &&
+            (keyName !== 'object_key' || candidate.elements.namedItem('map_kind')?.value === form.elements.namedItem('map_kind')?.value)
+        ).flatMap((candidate) => Array.from(candidate.querySelectorAll('textarea, input, select')));
+        // A confirmed delete discards only that entity's own editor; failures retain every draft.
+        restoreSubmittedControls = markSubmittedControlsClean([
+          ...submitted, ...removedFields.map((field) => [field, submittedControlValue(field)]),
+        ]);
       }
       const scrollX = window.scrollX;
       const scrollY = window.scrollY;
-      if (!applyPage(nextDocument)) {
+      // Applying the page adopts its layout and removes the marker from nextDocument.
+      const hasCanonicalPageUrl = nextDocument.querySelector('[data-server-page-url]') !== null;
+      if (!applyPage(nextDocument, {
+        preserveDraftRevisions: true, confirmedForm: response.ok ? form : null,
+      })) {
         throw new Error('dashboard mutation parse failed');
       }
       applied = true;
-      if (response.url) {
+      if (response.url && !hasCanonicalPageUrl) {
         const responseUrl = new URL(response.url, window.location.href);
         const nextLocation = `${responseUrl.pathname}${responseUrl.search}`;
         const currentLocation = `${window.location.pathname}${window.location.search}`;
@@ -1016,7 +1336,15 @@ DASHBOARD_JS = r"""
         }
       }
       window.scrollTo(scrollX, scrollY);
+      refreshFailed = false;
       connectEvents();
+      if (!response.ok) {
+        const alert = document.querySelector('[data-server-error-summary]');
+        if (alert) {
+          alert.focus({ preventScroll: true });
+          alert.scrollIntoView({ block: 'center' });
+        }
+      }
       setState(response.ok ? 'live' : 'update', response.ok ? 'Сохранено' : 'Проверьте форму');
       mutationRefreshQueued = false;
     } catch (_error) {
@@ -1042,6 +1370,30 @@ DASHBOARD_JS = r"""
   bindMobileNavigation();
   bindWorkControls();
 
+  bindServerControls();
+  document.addEventListener('focusout', resumeBackgroundRefresh);
+  document.addEventListener('selectionchange', resumeBackgroundRefresh);
+  document.addEventListener('input', resumeBackgroundRefresh);
+  document.addEventListener('change', resumeBackgroundRefresh);
+  document.addEventListener('compositionstart', () => { composing = true; });
+  document.addEventListener('compositionend', () => {
+    composing = false;
+    resumeBackgroundRefresh();
+  });
+  document.addEventListener('pointerdown', () => { pointerDown = true; });
+  const releasePointer = () => {
+    pointerDown = false;
+    resumeBackgroundRefresh();
+  };
+  window.addEventListener('pointerup', releasePointer);
+  window.addEventListener('pointercancel', releasePointer);
+  window.addEventListener('blur', releasePointer);
+  window.addEventListener('hashchange', () => showServerView());
+  window.addEventListener('popstate', () => {
+    if (window.location.pathname.startsWith('/servers/')) navigateServer(window.location.href, { push: false });
+    else showServerView();
+  });
+
   document.addEventListener('keydown', (event) => {
     if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) {
       return;
@@ -1059,9 +1411,15 @@ DASHBOARD_JS = r"""
 
   document.addEventListener('submit', (event) => {
     const form = event.target;
-    if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== 'post') {
+    if (!(form instanceof HTMLFormElement)) {
       return;
     }
+    if (form.method.toLowerCase() === 'get' && form.hasAttribute('data-server-search')) {
+      event.preventDefault();
+      void submitServerSearch(form);
+      return;
+    }
+    if (form.method.toLowerCase() !== 'post') return;
     event.preventDefault();
     void submitMutation(form);
   });
@@ -1079,3 +1437,255 @@ DASHBOARD_JS = r"""
   window.addEventListener('pagehide', () => disconnectEvents(), { once: true });
 })();
 """.strip()
+
+DASHBOARD_CSS += """
+.server-heading { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:24px; }
+.server-heading > div { min-width:0; }
+.server-heading h1 { margin:9px 0 7px; overflow-wrap:anywhere; }
+.server-heading p { color:var(--text-secondary); font-size:13px; }
+.server-heading-meta { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+.server-badge { display:inline-flex; align-items:center; padding:3px 8px; border-radius:4px; background:var(--accent-soft); color:var(--accent-hover); font-size:11px; font-weight:550; overflow-wrap:anywhere; }
+.server-badge.is-muted { color:var(--text-secondary); background:#edf1f3; }
+.server-tabs, .server-list-tabs { display:flex; gap:24px; border-bottom:1px solid var(--border); margin-bottom:22px; overflow-x:auto; }
+.server-tabs a, .server-list-tabs a { display:flex; align-items:center; gap:7px; flex-shrink:0; min-height:44px; border-bottom:2px solid transparent; color:var(--text-secondary); font-size:13px; font-weight:550; }
+.server-tabs a[aria-current], .server-list-tabs a[aria-current] { border-bottom-color:var(--accent); color:var(--accent-hover); }
+.server-tabs a span { font-size:11px; background:#e9eef0; border-radius:4px; padding:0 6px; color:var(--text-secondary); }
+.server-view { margin-bottom:24px; scroll-margin-top:80px; }
+.server-section-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:20px; }
+.server-section-heading h2 { font-size:18px; }
+.server-section-heading p { color:var(--text-secondary); font-size:12px; margin-top:5px; }
+.server-panel { padding:20px; background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); min-width:0; }
+.server-panel-title { margin-bottom:16px; }
+.server-overview-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:18px; align-items:start; }
+.server-facts { margin:0; }
+.server-facts > div { display:grid; grid-template-columns:145px minmax(0,1fr); gap:16px; padding:8px 0; }
+.server-facts dt { color:var(--text-secondary); font-size:12px; font-weight:400; }
+.server-facts dd { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; font-size:13px; }
+.server-facts .server-fact-empty { color:var(--text-muted); }
+.server-rules { padding-left:18px; margin:0; font-size:13px; }
+.server-rules li + li { margin-top:12px; }
+.server-event small { display:block; color:var(--text-muted); font-size:11px; margin-top:5px; }
+.server-passport-brief, .server-map-summary { margin-bottom:24px; }
+.server-map-summary > .server-section-heading { margin-bottom:14px; }
+.server-map-summary-grid { display:grid; grid-template-columns:minmax(0,1.65fr) minmax(300px,1fr); gap:18px; align-items:start; }
+.server-summary-sidebar { display:grid; gap:18px; min-width:0; }
+.server-summary-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+.server-summary-heading h3 { font-size:14px; }
+.server-summary-heading a, .server-summary-list-note a { color:var(--accent-hover); font-size:12px; }
+.server-summary-count { color:var(--text-secondary); background:var(--bg); border-radius:4px; padding:2px 7px; font-size:12px; font-variant-numeric:tabular-nums; }
+.server-summary-attention:has(.server-summary-issues) .server-summary-count { background:var(--warning-soft); color:var(--warning); }
+.server-inventory-counts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 20px; border-bottom:1px solid var(--border); padding-bottom:16px; margin-bottom:18px; }
+.server-inventory-counts a { display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0; padding:9px 0; font-size:12px; color:var(--text-secondary); }
+.server-inventory-counts a:hover { color:var(--accent-hover); }
+.server-inventory-counts strong { font-size:16px; color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+.server-summary-apps, .server-summary-issues, .server-summary-unknowns { padding:0; margin:0; list-style:none; }
+.server-summary-apps li { padding:12px 0; border-top:1px solid var(--border); min-width:0; }
+.server-summary-apps li:first-child { padding-top:0; border-top:0; }
+.server-summary-app-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; min-width:0; }
+.server-summary-app-heading a, .server-summary-issues a { font-size:13px; font-weight:600; color:var(--accent-hover); overflow-wrap:anywhere; }
+.server-summary-usage { flex-shrink:0; color:var(--text-secondary); font-size:11px; }
+.server-summary-apps p { margin-top:4px; font-size:12px; line-height:1.5; color:var(--text-secondary); overflow-wrap:anywhere; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.server-summary-list-note { border-top:1px solid var(--border); padding-top:12px; font-size:12px; color:var(--text-secondary); }
+.server-summary-empty { color:var(--text-secondary); font-size:13px; line-height:1.6; }
+.server-summary-issues { max-height:320px; overflow-y:auto; scrollbar-gutter:stable; }
+.server-summary-issues li { padding:10px 0; border-top:1px solid var(--border); }
+.server-summary-issues li:first-child { padding-top:0; border-top:0; }
+.server-summary-issues p { margin-top:4px; font-size:12px; color:var(--text-secondary); overflow-wrap:anywhere; }
+.server-summary-unknowns li { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:8px 0; border-top:1px solid var(--border); font-size:13px; }
+.server-summary-unknowns li:first-child { border-top:0; padding-top:0; }
+.server-summary-unknowns a { color:var(--accent-hover); overflow-wrap:anywhere; }
+.server-summary-unknowns strong { font-size:12px; font-weight:550; font-variant-numeric:tabular-nums; }
+.server-summary-settings { margin-top:18px; padding-top:6px; padding-bottom:6px; }
+.server-summary-settings > details { padding:12px 0; font-size:12px; }
+.server-summary-settings > details + details { border-top:1px solid var(--border); }
+.server-summary-settings > details > summary { color:var(--text-secondary); min-height:24px; }
+.server-summary-settings > details p { margin:12px 0; font-size:12px; color:var(--text-secondary); }
+.server-summary-settings li { overflow-wrap:anywhere; }
+.server-map-detail h4 { font-size:13px; margin:16px 0 10px; }
+.server-map-detail { margin:18px 0; }
+.server-understanding { min-width:0; overflow-wrap:anywhere; }
+.server-map-detail h3 { margin:18px 0; font-size:18px; }
+.server-map-description { font-size:14px; margin-bottom:18px; }
+.server-map-relation { border-top:1px solid var(--border); padding:14px 0; display:grid; gap:6px; }
+.server-map-relation small { color:var(--text-secondary); }
+.server-map-relation .server-editor { margin-top:8px; }
+.server-map-list .server-table th:last-child { width:30%; padding:10px 20px; }
+.server-map-list .server-table td:last-child { width:auto; }
+.server-map-list .server-table th:first-child { width:30%; }
+.server-map-list .server-table th:nth-child(2) { width:20%; }
+.server-map-list .server-table a { color:var(--accent-hover); font-weight:600; }
+.server-passport { margin-bottom:18px; }
+.server-passport-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:24px; }
+.server-passport-grid > div { min-width:0; }
+.server-passport-grid > div + div { border-left:1px solid var(--border); padding-left:24px; }
+.server-passport-grid h3 { font-size:13px; margin-bottom:10px; }
+.server-passport-grid .server-facts > div { grid-template-columns:minmax(100px,35%) minmax(0,1fr); gap:12px; padding:7px 0; }
+.server-storage { margin-top:20px; padding-top:18px; border-top:1px solid var(--border); }
+.server-storage h3 { font-size:13px; margin-bottom:10px; }
+.server-storage-table { width:100%; border-collapse:collapse; table-layout:fixed; font-size:13px; }
+.server-storage-table th { color:var(--text-secondary); font-size:12px; font-weight:400; text-align:left; }
+.server-storage-table th, .server-storage-table td { padding:10px 12px; border-bottom:1px solid var(--border); vertical-align:top; overflow-wrap:anywhere; }
+.server-storage-table th:first-child { width:25%; }
+.server-storage-table th:nth-child(2) { width:18%; }
+.server-storage-table tbody tr:last-child td { border-bottom:0; }
+.server-storage-capacity { font-variant-numeric:tabular-nums; font-weight:600; }
+.server-passport > summary { display:flex; align-items:center; gap:12px; min-height:28px; list-style:none; }
+.server-passport > summary::-webkit-details-marker { display:none; }
+.server-passport > summary::before { content:'›'; font-size:20px; color:var(--text-muted); }
+.server-passport[open] > summary::before { transform:rotate(90deg); }
+.server-passport > summary strong { font-size:14px; }
+.server-passport > summary span { font-size:12px; color:var(--text-secondary); }
+.server-passport-content { border-top:1px solid var(--border); margin-top:16px; padding-top:20px; }
+.server-passport-footer { display:flex; align-items:baseline; justify-content:space-between; gap:12px 24px; flex-wrap:wrap; padding-top:12px; }
+.server-passport-footer .server-help { margin:0; flex:1 1 380px; }
+.server-passport-footer .text-link { font-size:12px; }
+.server-passport-empty { padding:10px 12px; margin-bottom:18px; background:#f4f6f8; font-size:12px; color:var(--text-secondary); border-radius:var(--radius); }
+.server-evidence-meta { display:flex; gap:18px; flex-wrap:wrap; border-top:1px solid var(--border); padding-top:14px; margin-top:18px; font-size:12px; color:var(--text-secondary); }
+.server-evidence-meta details p, .server-evidence-source p { overflow-wrap:anywhere; white-space:pre-wrap; margin-top:8px; }
+.server-brief-source { min-width:0; overflow-wrap:anywhere; }
+#server-passport-source, #server-passport-edit { scroll-margin-top:80px; }
+.server-observations { margin-top:24px; }
+.server-observation-snapshot + .server-observation-snapshot, .server-unverified { margin-top:14px; }
+.server-observation-snapshot > h3 { font-size:13px; color:var(--text-secondary); border-bottom:1px solid var(--border); padding-bottom:14px; margin-bottom:18px; }
+.server-observation-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 28px; }
+.server-observation-group h4 { font-size:13px; margin-bottom:10px; }
+.server-observation-group ul { padding-left:18px; margin:0; font-size:13px; line-height:1.65; overflow-wrap:anywhere; white-space:pre-wrap; }
+.server-observation-group li + li { margin-top:10px; }
+.server-observation-group:last-child:nth-child(odd) { grid-column:1 / -1; }
+.server-evidence-source { margin-top:18px; font-size:11px; color:var(--text-secondary); }
+.server-unverified { border-style:dashed; }
+.server-unverified > summary { font-size:13px; color:var(--text-secondary); font-weight:550; }
+.server-unverified[open] > summary { margin-bottom:18px; }
+.server-edit-disclosure { margin-top:18px; }
+.server-edit-disclosure > summary, .server-secondary > summary, .server-create > summary { color:var(--accent-hover); font-weight:550; font-size:13px; }
+.server-edit-disclosure[open] > summary, .server-secondary[open] > summary, .server-create[open] > summary { padding-bottom:16px; border-bottom:1px solid var(--border); margin-bottom:16px; }
+.server-secondary { margin-top:14px; }
+.server-secondary > summary { color:var(--text-secondary); }
+.server-editor { display:grid; gap:20px; margin-top:18px; min-width:0; }
+.server-fieldset { border:0; padding:0; margin:0; min-width:0; }
+.server-fieldset legend { font-size:13px; font-weight:650; padding:0 0 12px; }
+.server-fieldset + .server-fieldset { padding-top:18px; border-top:1px solid var(--border); }
+.server-form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px 20px; }
+.server-form-grid label { min-width:0; }
+.server-form-grid small { display:block; margin-top:5px; font-weight:400; font-size:11px; color:var(--text-muted); }
+.server-editor input { min-width:0; }
+.server-editor textarea { min-height:82px; }
+.server-form-footer { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; border-top:1px solid var(--border); padding-top:16px; }
+.server-help { color:var(--text-secondary); font-size:12px; }
+.server-form-footer .server-help { max-width:620px; }
+.server-entry { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:12px; overflow-wrap:anywhere; }
+.server-entry > summary { display:flex; gap:18px; align-items:center; list-style:none; padding:18px 20px; }
+.server-entry > summary::-webkit-details-marker { display:none; }
+.server-entry > summary::before { content:'›'; color:var(--text-muted); font-size:22px; line-height:1; }
+.server-entry[open] > summary::before { transform:rotate(90deg); }
+.server-entry > summary:hover { background:#f9fbfb; }
+.server-entry-copy { display:grid; gap:4px; flex:1; min-width:0; }
+.server-entry-copy strong { font-size:14px; font-weight:600; }
+.server-entry-copy > span { font-size:12px; color:var(--text-secondary); }
+.server-entry-copy small { color:var(--text-muted); font-size:11px; }
+.server-entry-hint { color:var(--text-muted); font-size:11px; }
+.server-entry-body { padding:4px 20px 20px 48px; }
+.server-entry-body .server-facts > div { border-bottom:1px solid #edf0f2; padding:11px 0; }
+.server-add { border-style:dashed; background:transparent; }
+.server-add > summary { color:var(--accent-hover); font-size:13px; font-weight:550; }
+.server-add > summary::before { content:none; }
+.server-add .server-entry-body { padding-left:20px; }
+.server-filters { display:flex; align-items:end; gap:12px; flex-wrap:wrap; }
+.server-filters label { flex:1; min-width:140px; }
+.server-filters .server-search { flex:3; }
+.server-filters .btn { min-height:36px; }
+.server-filter-status { flex-basis:100%; font-size:12px; color:var(--text-secondary); }
+.server-filter-status:empty { display:none; }
+.server-app-search { max-width:650px; margin-bottom:14px; }
+.server-list-note { color:var(--text-muted); font-size:11px; margin-bottom:14px; }
+.server-pagination { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+.server-empty { text-align:center; padding:38px 20px; background:var(--panel); border:1px dashed var(--border-strong); border-radius:var(--radius); margin:16px 0; }
+.server-empty p { color:var(--text-secondary); margin-top:7px; font-size:13px; }
+.server-status, .server-error { padding:12px 16px; margin-bottom:20px; border-radius:var(--radius); font-size:13px; }
+.server-status { color:var(--success); background:var(--accent-soft); }
+.server-error { color:var(--danger); background:var(--danger-soft); }
+.server-create { margin-bottom:22px; }
+.server-directory-panel { border:1px solid var(--border); border-radius:var(--radius); background:var(--panel); overflow:hidden; }
+.server-list-tabs { padding:0 20px; margin:0; }
+.server-directory-panel > .server-filters { padding:18px 20px; background:#fafbfc; border-bottom:1px solid var(--border); }
+.server-directory-caption { font-size:11px; color:var(--text-secondary); padding:11px 20px; border-bottom:1px solid var(--border); }
+.server-table table { width:100%; border-collapse:collapse; table-layout:fixed; }
+.server-table th { text-align:left; color:var(--text-muted); background:#fafbfc; font-size:10px; font-weight:550; padding:10px 20px; }
+.server-table th:first-child { width:34%; }
+.server-table th:nth-child(2) { width:16%; }
+.server-table th:last-child { width:50px; padding:10px; }
+.server-table td { vertical-align:middle; padding:18px 20px; border-top:1px solid var(--border); white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; }
+.server-table tr:hover td { background:#f9fbfb; }
+.server-name { display:inline-block; color:var(--accent-hover); font-weight:600; font-size:14px; }
+.server-name:hover { text-decoration:underline; }
+.server-table small { display:block; color:var(--text-secondary); font-size:12px; margin-top:5px; }
+.server-row-open { display:flex; align-items:center; justify-content:center; width:32px; height:36px; color:var(--accent-hover); font-size:18px; }
+.server-directory-panel > .server-pagination { padding:0 20px 18px; }
+.server-directory-panel > .server-empty { border:0; margin:0; }
+.server-timeline { background:var(--panel); border:1px solid var(--border); border-radius:var(--radius); padding:0 22px; margin-top:18px; }
+.server-event { padding:20px 0 20px 20px; position:relative; border-bottom:1px solid var(--border); }
+.server-event:last-child { border-bottom:0; }
+.server-event::before { content:''; position:absolute; left:0; top:27px; width:6px; height:6px; border-radius:50%; background:var(--accent); }
+.server-event-heading { display:flex; gap:16px; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.server-event-heading strong { font-size:13px; }
+.server-event time { color:var(--text-muted); font-size:11px; }
+.server-event p, .server-event li { font-size:13px; overflow-wrap:anywhere; }
+.server-event ul { padding-left:18px; margin:10px 0; }
+@media (max-width:1100px) {
+  .server-passport-grid { gap:18px; }
+  .server-passport-grid > div + div { padding-left:18px; }
+  .server-passport-grid .server-facts > div { grid-template-columns:1fr; gap:2px; }
+  .server-map-summary-grid { grid-template-columns:minmax(0,1.3fr) minmax(260px,1fr); }
+  .server-facts > div { grid-template-columns:120px minmax(0,1fr); gap:12px; }
+  .server-table td, .server-table th { padding-left:14px; padding-right:14px; }
+}
+@media (max-width:800px) {
+  .server-passport-grid, .server-observation-grid { grid-template-columns:1fr; }
+  .server-passport-grid > div + div { border-left:0; border-top:1px solid var(--border); padding:16px 0 0; }
+  .server-passport-grid .server-facts > div { grid-template-columns:minmax(100px,35%) minmax(0,1fr); gap:12px; }
+  .server-overview-grid, .server-map-summary-grid { grid-template-columns:1fr; gap:14px; }
+  .server-summary-sidebar { grid-row:1; gap:14px; }
+  .server-heading { align-items:start; flex-wrap:wrap; gap:14px; }
+  .server-tabs { gap:20px; }
+  .server-section-heading { align-items:start; flex-wrap:wrap; gap:12px; }
+  .server-table thead { display:none; }
+  .server-table table, .server-table tbody { display:block; }
+  .server-table tr { display:grid; grid-template-columns:minmax(0,1fr) auto; position:relative; padding:16px 20px; border-top:1px solid var(--border); gap:10px 12px; }
+  .server-table td { display:block; border:0; padding:0; }
+  .server-table td:first-child { grid-column:1; grid-row:1; padding-right:8px; }
+  .server-table td:nth-child(2) { grid-column:1; grid-row:2; }
+  .server-table td:nth-child(3), .server-table td:nth-child(4) { grid-column:1/-1; }
+  .server-table td[data-label]::before { content:attr(data-label) ': '; font-family:Inter,system-ui,sans-serif; color:var(--text-muted); font-size:11px; }
+  .server-table td:last-child { grid-column:2; grid-row:1/3; align-self:center; }
+  .server-map-list .server-table td:last-child { grid-column:1/-1; grid-row:auto; }
+}
+@media (max-width:520px) {
+  .server-storage-table, .server-storage-table tbody { display:block; }
+  .server-storage-table thead { display:none; }
+  .server-storage-table tr { display:block; padding:8px 0; border-bottom:1px solid var(--border); }
+  .server-storage-table tr:last-child { border-bottom:0; }
+  .server-storage-table td { display:grid; grid-template-columns:110px minmax(0,1fr); gap:10px; padding:5px 0; border:0; }
+  .server-storage-table td::before { content:attr(data-label); color:var(--text-secondary); font-size:12px; font-weight:400; }
+  .server-storage-table td[colspan] { display:block; }
+  .server-storage-table td[colspan]::before { content:none; }
+  .server-heading h1 { font-size:24px; }
+  .server-panel { padding:16px; }
+  .server-form-grid { grid-template-columns:1fr; gap:14px; }
+  .server-facts > div { grid-template-columns:1fr; gap:3px; padding:8px 0; }
+  .server-passport > summary { flex-wrap:wrap; gap:4px 10px; }
+  .server-passport > summary span { flex-basis:100%; margin-left:18px; }
+  .server-summary-app-heading { align-items:start; flex-direction:column; gap:3px; }
+  .server-inventory-counts { grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; }
+  .server-entry > summary { flex-wrap:wrap; gap:10px; padding:16px; }
+  .server-entry-copy { flex-basis:calc(100% - 32px); }
+  .server-entry > summary > .server-badge { margin-left:22px; }
+  .server-entry-hint { margin-left:auto; }
+  .server-entry-body { padding:0 16px 16px; }
+  .server-event-heading { align-items:start; flex-direction:column; gap:4px; }
+  .server-filters label, .server-filters .server-search { flex-basis:100%; }
+  .server-tabs { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 16px; overflow:visible; border-bottom:0; }
+  .server-tabs a { min-width:0; min-height:46px; font-size:12px; border-bottom-color:var(--border); }
+  .server-section-heading .btn, .server-heading > .btn { min-height:40px; }
+}
+@media (prefers-reduced-motion:reduce) { .server-tabs a, .server-entry summary { transition:none; } }
+"""

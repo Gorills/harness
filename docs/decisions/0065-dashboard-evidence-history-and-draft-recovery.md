@@ -73,6 +73,14 @@ Do not put drafts in query strings or browser persistent storage.
 
 ### Refresh preserves ongoing interaction
 
+Automatic refresh also waits while a control inside the layout has focus, a native picker may
+be open, text is selected, a pointer is held down, or IME composition is active. Recheck these
+conditions after the HTML fetch as well as before it. Keep the current DOM while interaction is
+active: copying field values and restoring focus cannot restore browser-owned picker/composition
+state or a selection spanning text nodes. Coalesce pending freshness hints and resume after
+interaction ends, provided no unsaved draft remains. An explicit refresh still uses the compatible
+draft restoration path below.
+
 Dirty inputs, including checkbox/radio changes and server-restored drafts, prevent automatic SSE
 apply. Explicit refresh may fetch fresh HTML but preserves editable values, selection, focus,
 open disclosures and sidebar scroll for compatible controls. Match forms by action and stable

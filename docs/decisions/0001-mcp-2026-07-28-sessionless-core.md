@@ -4,6 +4,9 @@
 - **Date:** 2026-08-21
 - **Deciders:** Repository architecture baseline
 
+The one-working-Task constraint in this historical decision is superseded by
+[ADR-0079](0079-parallel-workspace-tasks.md); explicit identity, revision CAS and applicability remain.
+
 ## Context
 
 The original specification models an Agent Session as a concrete MCP client session and states that after `task_start` the MCP session is bound to a Task so subsequent calls normally do not repeat `task_id`.
@@ -57,3 +60,19 @@ Core automated tests must demonstrate Task continuity across multiple independen
 - https://modelcontextprotocol.io/specification/2026-07-28/
 - https://blog.modelcontextprotocol.io/posts/2026-07-28/
 - https://github.com/modelcontextprotocol/python-sdk/blob/main/docs/whats-new.md
+
+## 2026-10-30 amendment: patched SDK and installation runtime
+
+The SDK baseline is now `mcp==2.2.0`. The 2.0.0 pin is affected by the upstream HTTP-session
+retention advisory [GHSA-84m7-p3x7-pcfv](https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-84m7-p3x7-pcfv).
+Harness's stateful HTTP transport remains for host compatibility; the patched SDK bounds and
+reclaims sessions. Application Task state still lives in Harness, independently of transport
+session IDs. Capability authentication and explicit request-body limits remain in Harness.
+
+The installation tool is pinned to uv 0.13.6, which removes the compromised emSign root and
+includes Python 3.13.18 distributions. The supported Python baseline is `>=3.13.18,<3.14`, with
+3.13.18 selected explicitly by development/global installation wrappers. See the
+[uv advisory](https://github.com/astral-sh/uv/security/advisories/GHSA-hq85-5cpj-mr62) and
+[Python release](https://www.python.org/downloads/release/python-31318/).
+The uv-build 0.12.5 packaging backend is separate and remains pinned; current OSV research found
+no advisory for it. These dated checks do not replace future live vulnerability research.

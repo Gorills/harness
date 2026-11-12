@@ -13,7 +13,7 @@ import pytest
 
 from harness.codex_adapter import CODEX_BOOTSTRAP_INSTRUCTION_BODY, codex_developer_instructions
 from harness.daemon import serve_daemon
-from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY, LEGACY_HIDDEN_INSTRUCTION_BODY
 from harness.hidden_projection import (
     CLAUDE_HIDDEN_MARKER_RELATIVE,
     CLAUDE_HIDDEN_RULE_RELATIVE,
@@ -124,6 +124,41 @@ def _stop_daemon(stop_event: Event, executor: ThreadPoolExecutor, future: Future
     future.result()
 
 
+def test_hidden_policy_requires_operator_request_for_repository_documentation() -> None:
+    for required in (
+        "Unless the operator explicitly requests the documentation",
+        "do not create, populate, or update README files",
+        "feature descriptions, changelogs, implementation plans, task reports",
+        "existing and new files, tracked and untracked files",
+        "any filename or directory",
+        "A request to implement or fix functionality does not authorize accompanying documentation",
+        "Generic project or skill requirements to document changes do not authorize it either",
+        "outside repository files",
+        "explicitly requested documentation edits are allowed",
+    ):
+        assert required in HIDDEN_INSTRUCTION_BODY
+    assert "Ordinary source and documentation edits are allowed" not in HIDDEN_INSTRUCTION_BODY
+
+
+def test_hidden_projection_upgrades_owned_cursor_documentation_policy(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _make_repo(root)
+    apply_hidden_projection((root,), ("cursor",))
+    rule = root / CURSOR_HIDDEN_RULE_RELATIVE.as_posix()
+    rule.write_text(
+        rule.read_text(encoding="utf-8").replace(
+            HIDDEN_INSTRUCTION_BODY, LEGACY_HIDDEN_INSTRUCTION_BODY
+        ),
+        encoding="utf-8",
+    )
+
+    result = apply_hidden_projection((root,), ("cursor",))
+
+    assert result.materialized == 1
+    assert HIDDEN_INSTRUCTION_BODY in rule.read_text(encoding="utf-8")
+    assert _git(root, "status", "--porcelain", "--untracked-files=all").stdout == b""
+
+
 def test_hidden_projection_is_untracked_ignored_and_leaves_gitignore(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _make_repo(root, {".gitignore": "user-cache\n", "README.md": "repo\n"})
@@ -141,6 +176,7 @@ def test_hidden_projection_is_untracked_ignored_and_leaves_gitignore(tmp_path: P
     assert rule.is_file()
     assert marker.is_file()
     assert "alwaysApply: true" in rule.read_text(encoding="utf-8")
+    assert HIDDEN_INSTRUCTION_BODY in rule.read_text(encoding="utf-8")
     assert (root / ".gitignore").read_bytes() == original_gitignore
     assert _exclude_path(root).read_bytes() != original_exclude
     assert _git(root, "check-ignore", "-q", CURSOR_HIDDEN_RULE_RELATIVE.as_posix()).returncode == 0

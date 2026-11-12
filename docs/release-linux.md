@@ -6,7 +6,7 @@ The primary Linux local close-out is Cursor IDE/CLI in Normal mode (`harness ins
 
 - Linux with a current Git executable.
 - Python 3.13.
-- `uv` 0.12.5 for the repository installation path (`scripts/dev` bootstraps `.harness/tools/uv` in a checkout). System `uv` 0.12.1 cannot `uv tool install` this repository.
+- `uv` 0.13.6 for the repository installation path (`scripts/dev` bootstraps `.harness/tools/uv` in a checkout). System `uv` 0.12.1 cannot `uv tool install` this repository.
 - Codex CLI on `PATH` for Codex install (cleanup does not require it). Cursor local config does not require a Cursor executable for ownership checks.
 - SQLite in the selected Python runtime with FTS5.
 

@@ -7,11 +7,12 @@ name = "harness"
 version = "0.1.0.dev0"
 description = "Local-first control plane for coding agents"
 readme = "README.md"
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.13.18,<3.14"
 dependencies = [
     "ast-grep-py==0.45.1",
-    "mcp==2.0.0",
+    "mcp==2.2.0",
     "pykeepass==4.2.0",
+    "qrcode==8.2",
     "pywin32==312 ; sys_platform == 'win32'",
     "secretstorage==3.4.0 ; sys_platform == 'linux'",
 ]
@@ -19,6 +20,7 @@ dependencies = [
 [project.scripts]
 harness = "harness.entrypoints:harness_main"
 harnessd = "harness.entrypoints:harnessd_main"
+harness-tunnel-askpass = "harness.tunnel_ssh:askpass_main"
 
 [dependency-groups]
 dev = [
@@ -29,7 +31,7 @@ dev = [
 ]
 
 [tool.uv]
-required-version = "==0.12.5"
+required-version = "==0.13.6"
 
 [tool.ruff]
 target-version = "py313"
@@ -53,7 +55,7 @@ warn_unreachable = true
 files = ["src", "tests", "scripts"]
 
 [[tool.mypy.overrides]]
-module = ["ntsecuritycon", "win32api", "win32con", "win32security", "secretstorage"]
+module = ["ntsecuritycon", "win32api", "win32con", "win32security", "secretstorage", "qrcode", "qrcode.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

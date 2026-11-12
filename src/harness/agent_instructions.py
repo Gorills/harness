@@ -5,6 +5,8 @@ TASK_CONTINUITY_INSTRUCTIONS = (
     "New Task only for a distinct outcome. "
 )
 
+TASK_PARALLEL_INSTRUCTIONS = "Parallel Tasks allowed; select your outcome by ID. "
+
 TASK_CREATION_INSTRUCTIONS = (
     "After status, start/resume a Task for substantial changes, multi-step work, needed continuity, "
     "or an explicit request. Quick questions, reads, and small local edits may proceed without a Task. "

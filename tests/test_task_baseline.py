@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -13,11 +15,14 @@ from harness.registry import create_project, register_workspace
 from harness.storage import connect_database, initialize_database
 from harness.task_baseline import (
     TaskBaselineChangedError,
+    TaskBaselineError,
     TaskBaselineFingerprintKind,
+    capture_task_git_state,
     capture_workspace_task_baseline,
     get_task_baseline,
 )
-from harness.tasks import TaskConflictError, create_task_with_baseline, get_working_task
+from harness.task_changes import calculate_task_changed_files
+from harness.tasks import create_task_with_baseline, get_working_task
 
 
 def _git(cwd: Path, *arguments: str) -> None:
@@ -136,6 +141,53 @@ def test_task_baseline_dirty_fingerprint_distinguishes_later_change(tmp_path: Pa
         connection.close()
 
 
+def test_task_start_preserves_preexisting_deleted_directory(tmp_path: Path) -> None:
+    root, connection, workspace_id = _registered(tmp_path)
+    try:
+        directory = root / "admin" / "scripts"
+        directory.mkdir(parents=True)
+        (directory / "build.py").write_text("build = True\n", encoding="utf-8")
+        _git(root, "add", "admin")
+        _commit(root, "add directory")
+        shutil.rmtree(root / "admin")
+
+        created = create_task_with_baseline(connection, workspace_id, "After deletion")
+        persisted = get_task_baseline(connection, created.task.task_id)
+        assert persisted == created.baseline
+        assert len(persisted.snapshot.dirty_paths) == 1
+        dirty = persisted.snapshot.dirty_paths[0]
+        assert dirty.relative_path == "admin/scripts/build.py"
+        assert dirty.status_code == " D"
+        assert dirty.fingerprint_kind is TaskBaselineFingerprintKind.MISSING
+        assert calculate_task_changed_files(connection, created.task.task_id).relative_paths == ()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("target_exists", [False, True])
+def test_deleted_parent_symlink_outside_workspace_is_rejected(
+    tmp_path: Path, target_exists: bool
+) -> None:
+    root, connection, _workspace_id = _registered(tmp_path)
+    try:
+        directory = root / "admin"
+        directory.mkdir()
+        (directory / "file.py").write_text("tracked\n", encoding="utf-8")
+        _git(root, "add", "admin")
+        _commit(root, "add directory")
+        shutil.rmtree(directory)
+        outside = tmp_path / "outside"
+        if target_exists:
+            outside.mkdir()
+            (outside / "file.py").write_text("external content\n", encoding="utf-8")
+        directory.symlink_to(outside, target_is_directory=True)
+
+        with pytest.raises(TaskBaselineError, match="escapes Workspace through symlink"):
+            capture_task_git_state(root, deadline=monotonic() + 30)
+    finally:
+        connection.close()
+
+
 def test_task_baseline_marks_current_index_fresh_without_mutating_it(tmp_path: Path) -> None:
     _root, connection, workspace_id = _registered(tmp_path)
     try:
@@ -235,15 +287,17 @@ def test_baseline_capture_failure_rolls_back_new_task(
         connection.close()
 
 
-def test_second_baseline_task_conflicts_without_extra_baseline(tmp_path: Path) -> None:
+def test_second_task_captures_its_own_baseline(tmp_path: Path) -> None:
     _root, connection, workspace_id = _registered(tmp_path)
     try:
         first = create_task_with_baseline(connection, workspace_id, "First")
-        with pytest.raises(TaskConflictError, match="already has a working task"):
-            create_task_with_baseline(connection, workspace_id, "Second")
+        second = create_task_with_baseline(connection, workspace_id, "Second")
 
-        assert get_working_task(connection, workspace_id) == first.task
-        assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (1,)
+        assert second.task.task_id != first.task.task_id
+        assert second.baseline.task_id == second.task.task_id
+        assert first.baseline.task_id == first.task.task_id
+        assert get_working_task(connection, workspace_id) is None
+        assert connection.execute("SELECT COUNT(*) FROM task_baselines").fetchone() == (2,)
     finally:
         connection.close()
 

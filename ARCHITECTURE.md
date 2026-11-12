@@ -81,6 +81,9 @@ Harness business state and every model surface; see [ADR-0069](docs/decisions/00
 ## 4. Protocol baseline: MCP 2026-07-28
 
 Production targets the official MCP Python SDK v2 and the MCP 2026-07-28 protocol path while retaining compatibility behavior provided by the SDK for older hosts.
+The security baseline pins SDK `2.2.0` and installer `uv 0.13.6`, with Python `>=3.13.18,<3.14`.
+SDK HTTP sessions retain their existing stateful transport for host compatibility and use the
+upstream bounded session lifetime/capacity fixes; Harness keeps its capability and body-size gates.
 
 The modern MCP path is sessionless:
 
@@ -110,7 +113,7 @@ Logical software project. Stable across multiple physical checkouts.
 
 Physical checkout of a Project: a Git worktree when Git is present, otherwise a bound
 filesystem directory. Filesystem state, current branch/HEAD when Git exists, dirty state,
-watcher, and active Task constraint are Workspace-scoped.
+watcher, and Task ownership are Workspace-scoped.
 
 Canonical identity is the normalized directory plus Git common directory when attached.
 A filesystem Workspace stores `git_common_dir == workspace_root` until Git appears, then
@@ -127,7 +130,9 @@ Minimum states remain:
 - `completed`
 - `cancelled`
 
-v1 enforces at most one distinct `working` Task per Workspace transactionally. Parallel tasks use separate Workspaces/worktrees.
+Multiple independent `working` Tasks may share a Workspace (ADR-0079). Task identity and revision
+remain explicit on every existing-Task write. Separate Workspaces/worktrees provide filesystem,
+branch and verification isolation when needed; the Task lifecycle does not enforce file ownership.
 
 Each Task carries a monotonically increasing `revision` used only as an optimistic-concurrency token. Every successful Task mutation increments it. A caller never uses timestamps, bridge identity, or Workspace-current state as a substitute for this revision.
 
@@ -229,11 +234,11 @@ from titles or replace the explicit-ID state machine. Real-model compliance is a
 
 But the implementation is explicitly workspace-domain based and write-safe:
 
-- `task_start` without `task_id` creates a new Task only when the Workspace has no distinct `working` Task. Creation has no prior Task revision; the one-working-Task invariant and creation are enforced in one transaction, and the response returns the new `task_id` plus initial `revision`.
+- `task_start` without `task_id` creates an independent Task even when other Tasks are working. Creation has no prior Task revision; Task, baseline and creation event are persisted in one transaction, and the response returns the new `task_id` plus initial `revision`.
 - `task_start` with `task_id` resumes an existing Task. If that Task is already the Workspace's `working` Task and its recorded origin is unchanged, resume is idempotent/read-like and returns its current revision. An explicit initial branch handoff changes origin with revision CAS and advances the revision (ADR-0067).
 - If resume would mutate an existing Task (for example `waiting → working`), `task_start` MUST also include `expected_revision`; the transition uses the same compare-and-set rule as every other existing-Task mutation and returns the incremented revision.
-- `completed` and `cancelled` Tasks are never reopened by `task_start`. Dashboard `task_reopen` is a separate human-only CAS operation that preserves Task identity, appends a `reopened` event, and still obeys the one-working-Task-per-Workspace invariant.
-- Starting a different Task while the Workspace already has a `working` Task is a conflict; `task_start` must not silently replace it.
+- `completed` and `cancelled` Tasks are never reopened by `task_start`. Dashboard `task_reopen` is a separate human-only CAS operation that preserves Task identity and appends a `reopened` event, independently of other Tasks.
+- Starting, resuming, reopening or giving feedback to one Task never changes another Task's state, revision, baseline or history.
 - Read-only calls may derive relevance/display defaults from Workspace + current Task and expose the current Task revision where a subsequent mutation may depend on it.
 - `task_checkpoint` is a mutating operation and therefore MUST include both the intended Harness `task_id` and `expected_revision`.
 - Agent-reported checkpoint verification is bounded semantic evidence (`name`, `passed|failed|not_run`, `evidence`) persisted atomically with the checkpoint; mechanical Git evidence remains Harness-derived.
@@ -241,7 +246,7 @@ But the implementation is explicitly workspace-domain based and write-safe:
 - Revision mismatch or a required-but-missing `expected_revision` is a bounded conflict/error with no state/event/knowledge mutation. The caller must refresh/reconcile before retrying; Harness must not silently replay stale semantic content against the newer Task state.
 - A stale call for Task A must never be retargeted to whichever Task is current when the request executes, and a stale writer for Task A must never overwrite a newer checkpoint for Task A.
 - Dashboard Task mutations (`Accept`, feedback, comment, Jira/deployment update, state selection, reopen, cancel, delete) use the same revision precondition at the application boundary; interfaces do not get a concurrency bypass.
-- Operators may explicitly choose any lifecycle state with its required wait reason, preserving the one-working-Task invariant. Completion records acceptance; a ready agent report alone does not.
+- Operators may explicitly choose any lifecycle state with its required wait reason. Completion records acceptance; a ready agent report alone does not.
 - Test and production deployment are independent durable booleans. Schema v22 backfills the legacy single marker; old event/checkpoint history remains readable. Both flags may be true.
 - Confirmed operator Task deletion checks identity and revision, then removes source-Task Knowledge and the Task with its dependent history and retrieval projections in one transaction. It never deletes repository files.
 - A bridge activity record may mirror the current Task for history, but losing/restarting the bridge does not lose Task continuity.
@@ -273,6 +278,19 @@ Write targeting rule:
 - `task_checkpoint` requires `task_id` + `expected_revision`; successful existing-Task mutation returns the incremented revision;
 - revision mismatch or missing required revision is non-mutating and requires refresh/reconciliation;
 - model-visible read calls may use the Workspace current Task for relevance, but mutating calls never infer identity or concurrency state from mutable Workspace-current state.
+
+`project_status(task_id=...)` can explicitly select an eligible working/waiting Task owned by the
+active Workspace. Without an ID, only a unique eligible working Task (otherwise a unique waiting
+Task) supplies continuity; ambiguous Tasks produce no selected Task/checkpoint/next step/feedback.
+The status includes at most five eligible `active_tasks` in working-then-waiting recency order,
+`active_task_count` (both states), and `active_tasks_truncated`. Applicability filtering precedes
+limits and counts. The bridge may shorten the list further to fit the complete serialized MCP
+response, preserving selected-Task continuity and the count and marking truncation. This list is discovery context, not agent ownership; explicit ID selection works
+even for a Task outside the list. No MCP session or host activity record owns the selection.
+
+Checkpoint changed paths describe the shared Workspace delta relative to that Task's baseline,
+and can include parallel work. They do not prove Task or agent authorship. Verification evidence
+refers to the sampled code state; Tasks in one Workspace do not provide isolated test inputs.
 
 `project_status` includes the effective `visibility_mode` (`normal` or `hidden`) as a compact domain field so the model can obey the current publication policy. Host capability diagnostics and enforcement internals stay out of the model-visible payload and belong in `doctor`/dashboard surfaces.
 
@@ -442,14 +460,22 @@ not a full evaluator.
 `secure-by-design` applies to detected software projects and progressively routes to web/backend,
 browser, mobile,
 infrastructure/supply-chain, and verification controls; it reduces risk but never claims that a
-system cannot be compromised. `project-architecture` and `complex-change-planning` also apply to
+system cannot be compromised. Before stack/version choices, the shared MCP instructions require
+current online vulnerability research. The skill's description also covers component selection,
+installation and updates on any stack; its component-research reference requires exact-version,
+transitive-dependency, advisory, fixed-range and support checks with dated evidence and explicit
+handling of incomplete or known affected choices (ADR-0029). `project-architecture` and
+`complex-change-planning` also apply to
 detected software projects and route ADR/scalability and specification-audit/independent-review
 playbooks through references. `legacy-preservation` is a dedicated always-on Skill for detected
 software projects; `complex-change-planning` keeps only a one-line pointer to it. `frontend-design` accompanies recognized web and mobile frontend
-surfaces through matching facets. Its compact entrypoint requires a subject-specific
-design contract, progressively routes marketing/editorial versus product/mobile guidance, rejects
-unjustified model-default aesthetics, and requires bounded rendered visual review before a design
-claim is treated as verified.
+surfaces through matching facets. Its stable ID carries the shared implementation baseline:
+layout, controls, state, and bounded rendered/interaction verification. Working applications use
+task-oriented product guidance and context-preserving in-place web actions; marketing/editorial
+composition and subject-inspired visual direction apply only to those surfaces or an explicit
+visual brief. Disposable reproducible development data does not require preservation machinery;
+valuable state and actual product migration/rollout contracts retain their safeguards
+([ADR-0029](docs/decisions/0029-quality-discipline-verification-and-response-economy.md)).
 
 Stack evidence describes the whole Workspace. The resolver does not narrow the pack from the
 current Task `stack_hints`. Built-in descriptions state when the host should load each projected
@@ -603,8 +629,9 @@ Dashboard rules:
   appear in the default inbox or active list ([ADR-0076](docs/decisions/0076-dashboard-daily-project-workspace.md));
 - `/projects/{id}/` is the aggregate Project Task list with bounded search and pagination across
   folders; it replaces the redundant Overview. Project and Workspace routes default to active Tasks.
-  Native `scope` filters select active (working only), review (waiting for operator review), all
-  or archive; active counters exclude waiting Tasks. Sidebar links and search stay fixed above
+  Native `scope` filters select active (working only), review (waiting for operator review),
+  waiting (operator input or an external dependency), all or archive. Active, review and waiting
+  are disjoint non-terminal groups with separate counters. Sidebar links and search stay fixed above
   a scrollable quick Project list with no visible scrollbar. Selected counts, pagination and SSE
   snapshots use the same membership. Within each list, review precedes other active Tasks and archive,
   by recency within each group. Search spans the existing global or Project boundary, includes archive,
@@ -625,11 +652,15 @@ Dashboard rules:
 - dashboard assets stay same-origin so CSP can forbid inline script/style.
 - operator-only Git actions at `/workspaces/{id}/git/` call `git_operations`, with registered
   worktree identity and a stable snapshot token over HEAD/branch, refs, index, status and dirty
-  file metadata. Five recent branches or twelve search matches and twenty-four files per page
+  file metadata and Git configuration. Five recent branches or twelve search matches and twenty-four files per page
   keep rendered inventories bounded. Git remains authoritative; no branch inventory or write
   capability is added to MCP. Task pages offer explicit navigation to their recorded branch;
   neither page reads nor Task lifecycle writes perform an implicit checkout. See
   [ADR-0078](docs/decisions/0078-dashboard-git-workbench.md).
+  Fetch/Pull/Push use explicit configured remotes; Pull fast-forwards only, and branch publication
+  sets tracking after successful push. A process-local common-directory lock serializes dashboard
+  Git commands; network calls release the SQLite write lock. Bounded, escaped command results
+  are kept in daemon memory for up to 128 Workspaces and cleared on restart, outside durable state.
 - operator copy must not explain the product, loopback trust model, or Harness architecture.
 
 Task cards expose the latest checkpoint's reported verification and its revision/time, with
@@ -796,3 +827,99 @@ official contract changes
 → core tests
 → host acceptance if applicable
 ```
+
+## Global Servers domain
+
+Servers are shared non-secret infrastructure metadata owned by `harnessd`, independent of Git,
+Projects and Workspaces. Schema v26 adds stable-ID/revision-CAS inventory, optional many-to-many
+Project links and append-only server events. Project links confer no project/vault/SCM permission.
+The separate bearer-authenticated official-SDK `/servers/mcp` exposes five server tools and works
+without a Workspace header; `/mcp` keeps its five root-required project tools unchanged.
+The `/servers/` dashboard and IPC use the same domain service. Import is allowlisted, provenance
+bearing and non-overwriting; selected-card enrichment needs an explicit source ID and CAS for
+existing records. Canonical global-only `server-operations` uses explicit Codex user delivery,
+with unknown-file preservation and restart/fresh-chat guidance. No remote execution or vault
+contents enter this domain. See [ADR-0080](docs/decisions/0080-global-server-inventory.md) and
+[operator guide](docs/servers.md).
+
+
+Schema v27 adds import-ID ledgers; v28 adds the paged/child-CAS writer compatibility barrier for nested stable-ID sites and
+reusable preparation profiles in server metadata. Site records contain actual domain/runtime/path/DB
+context; profiles contain nonsecret environment/stack preparation policy, and neither authorizes remote
+execution. Stored cards support 512 KiB/256 sites/32 profiles; disclosure stays at48 KiB through bounded
+site/profile pages and exact selection. Base patches and atomic child writes preserve neighboring
+records under server CAS. Public Servers IPC/HTTP stays64 KiB, administrative import/enrich IPC
+allows1 MiB and project IPC stays16 KiB. Selected-card manifests pin source hashes/anchors, including
+regular linked Markdown inside the selected source root, and expose documented omissions;
+CAS enrichment preserves operator changes and deletion of imported IDs. Dashboard drafts identify
+individual site/profile forms. The global server skill retains actual prepared context and disallows
+executor artifacts without hiding the ordinary operational audit trail.
+Server history is infrastructure evidence: actual intervention with what/when/verification, or an
+explicit primary infrastructure audit with no-change status when read-only. Project code/SQL/business
+diagnosis stays in its Task even through SSH/Docker; mixed work separates actions before execution
+and records only infrastructure in server events. Registry metadata CRUD is not remote intervention.
+This routing is model-visible guidance, preserving all existing append-only payloads and five tools.
+An explicit operator `servers clear-history` CLI request is the sole history-deletion exception:
+daemon-owned positive revision CAS and confirmation clear one card's events atomically, bumping
+its revision without a replacement event or any metadata/neighbor changes. It is not exposed in
+the five MCP tools; ordinary history remains append-only. See ADR-0080 for transactional protection.
+
+Schema v29 adds a writer compatibility barrier for optional base `passport` and fact categories,
+without rewriting stored cards/events. Passport separates machine/OS/hardware/hosting inventory
+from dated operational observations; unknown numbers stay null, zero swap means absent. Dashboard
+provides a separate passport editor and groups facts by source/date/topic, collapsing unchecked
+evidence. Legacy prefix grouping is presentation-only and never extracts inventory or writes data.
+Existing server CAS, child preservation and disclosure budgets apply unchanged. See ADR-0080.
+
+Schema v30 implements the linked Servers map in `server_map.py` (ADR0081): normalized stable-ID
+application/domain/route/directory/service/certificate/version/use objects, explicit evidence-bearing
+FK relations, exact legacy snapshots, and staged check portions. Base metadata, passport, profiles,
+project links, import ledgers and infrastructure history keep their existing ownership. Legacy site
+reads are bounded projections; old writers update only old fields and documented references. The
+migration preserves the original JSON bytes and IDs before normalization. The schema-version writer
+barrier rejects incompatible older runtimes.
+
+Map operations share the server revision CAS and SQLite transactions. Every actual write, including
+check staging, changes revision. Publication accepts explicitly partial coverage, preserves missing
+objects and operator intent, and ignores older field evidence. Portions are idempotent by check ID,
+number and digest. Link endpoints cannot dangle; linked objects require explicit unlink before delete.
+No automatic garbage collection, merging by names, inferred usage or remote execution is introduced.
+
+The five Servers MCP tools remain separate from project/vault admission. `server_get(collection="schema")`
+exposes typed fields, operations, evidence rules and quotas; map reads paginate full filtered/sorted
+sets and high-cardinality relations under 48KiB ASCII JSON (52KiB wrapper/64KiB request). Quotas are
+10,000 objects and 20,000 relations per server, 12KiB per typed object and 1,000 checks/400 portions per
+check; limits reject writes without truncation. Legacy application fields retain their smaller budgets.
+`dashboard_server_map.py` renders compact All/25/50/100 lists and one selected typed editor. A single
+SQLite read snapshot supplies a Dashboard response; enhanced navigation retains drafts and prior
+content on errors, while native links/forms support no-JS. Freshness and expiry policy belongs to
+server metadata, with distinct operational/inventory/passport intervals.
+
+## Machine tunnels
+
+The global human `/tunnels/` workspace owns separate schema32 profiles, CAS operations,
+observations and24hour aggregate metrics. It has no Servers FK/history or model execution
+surface. `tunnels.py` owns durable domain state; `tunnel_control.py` serializes dashboard
+operations and reconciles the privileged service. `tunnel_service.py` owns applied private
+state and generated engine configurations behind authenticated typed local IPC. Original
+SSH passwords are transient and remain outside SQLite, browser drafts and the private vault.
+A separate private, owner-bound FakeIP cache retains domain/address mappings across normal
+engine replacements and service restarts. It contains no credentials or profile policy;
+current routing rules are reapplied after reverse lookup. Linux gives the dedicated engine
+write access to its precreated cache file without write access to its root-owned parent
+or traversal of the separate credential tree. Mappings never enter public observations.
+
+An owned nft/WFP guard precedes TUN activation and survives engine/service failure.
+Linux restores it in a synchronous pre-network boot barrier independent of engine admission;
+Windows uses persistent and separate boot filters. The installer uses an immutable owned
+runtime, an exact audited source-build recipe and deterministic artifact hashes. The default
+core uses REALITY/Vision/XUDP and Hysteria2/Salamander with an SSH-pinned peer identity;
+optional browser/Cronet/ACME components remain unapproved. See
+[ADR0082](docs/decisions/0082-adaptive-machine-tunnels.md) and
+[operator instructions](docs/tunnels.md) for scope and native acceptance limits.
+
+Offline phone sharing is an explicit read-only client-credential export, separate
+from network operations and observations. Android owns a per-application VPN and
+Keystore-protected profile; it does not need the desktop daemon online. See
+[ADR0083](docs/decisions/0083-android-tunnel-sharing.md) for the shared-access, JNI,
+QR and native-device verification boundaries.

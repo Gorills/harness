@@ -65,6 +65,7 @@ from harness.ipc import (
     send_project_context_response,
     send_project_recall_response,
     send_runtime_diagnostics_response,
+    send_servers_response,
     send_shutdown_response,
     send_skill_cleanup_response,
     send_status_response,
@@ -100,6 +101,7 @@ from harness.retrieval import (
 )
 from harness.runtime_identity import RuntimeIdentity, RuntimeIdentityError, current_runtime_identity
 from harness.search import SearchError
+from harness.servers import ServerConflictError, ServerError, dispatch_servers, import_servers
 from harness.skill_runtime import (
     SkillRuntimeError,
     cleanup_projected_skills,
@@ -131,6 +133,8 @@ from harness.tasks import (
     TaskValidationError,
     TaskWorkspaceConflictError,
     get_relevant_task,
+    get_task,
+    list_active_tasks,
 )
 from harness.verification import list_checkpoint_verification
 from harness.visibility import set_project_visibility
@@ -308,6 +312,8 @@ def read_workspace_status(
 def read_workspace_task_status(
     connection: sqlite3.Connection,
     hints: Sequence[WorkspaceHint],
+    *,
+    task_id: str | None = None,
 ) -> WorkspaceTaskStatusResult:
     """Read the current working or most relevant waiting Task for one Workspace."""
     registered = list_workspaces(connection)
@@ -325,6 +331,17 @@ def read_workspace_task_status(
         if current_workspace != workspace:
             raise WorkspaceResolutionError("workspace registry identity changed during Task status")
         task = get_relevant_task(connection, workspace.workspace_id, applicability=applicability)
+        active_tasks, active_task_count = list_active_tasks(
+            connection, workspace.workspace_id, applicability=applicability
+        )
+        if task_id is not None:
+            task = get_task(connection, task_id)
+            if (
+                task.workspace_id != workspace.workspace_id
+                or task.state not in {TaskState.WORKING, TaskState.WAITING}
+                or not applicability.task_visible(task_id)
+            ):
+                raise TaskWorkspaceConflictError("Task is unavailable in the active Workspace")
         checkpoint = (
             get_latest_task_checkpoint_status(connection, task.task_id)
             if task is not None
@@ -384,6 +401,13 @@ def read_workspace_task_status(
         pending_operator_feedback=pending_operator_feedback,
         head=applicability.head,
         branch=applicability.branch,
+        active_tasks=tuple(
+            WorkspaceTaskSummary(
+                item.task_id, item.title, item.state, item.wait_reason, item.revision
+            )
+            for item in active_tasks
+        ),
+        active_task_count=active_task_count,
     )
 
 
@@ -931,6 +955,30 @@ def _serve_client(
         _try_send_error(client, code="invalid_request", message="IPC request is invalid")
         return
 
+    if (
+        request.method == "servers"
+        and request.server_operation is not None
+        and request.server_arguments is not None
+    ):
+        try:
+            send_servers_response(
+                client,
+                request.request_id,
+                import_servers(database, request.server_arguments.get("entries"))
+                if request.server_operation == "import"
+                and set(request.server_arguments) == {"entries"}
+                else dispatch_servers(database, request.server_operation, request.server_arguments),
+            )
+        except ServerError as exc:
+            _try_send_error(
+                client,
+                request_id=request.request_id,
+                code="revision_conflict"
+                if isinstance(exc, ServerConflictError)
+                else "invalid_server_request",
+                message=str(exc),
+            )
+        return
     if request.method == "status":
         _serve_global_status(client, database, request.request_id)
         return
@@ -954,7 +1002,13 @@ def _serve_client(
         _serve_workspace_status(client, database, request.request_id, request.workspace_hints)
         return
     if request.method == "workspace_task_status":
-        _serve_workspace_task_status(client, database, request.request_id, request.workspace_hints)
+        _serve_workspace_task_status(
+            client,
+            database,
+            request.request_id,
+            request.workspace_hints,
+            task_id=request.status_task_id,
+        )
         return
     if request.method == "workspace_skills_reconcile" and request.host_profiles is not None:
         _serve_workspace_skills(
@@ -1157,9 +1211,11 @@ def _serve_workspace_task_status(
     database: sqlite3.Connection,
     request_id: str,
     hints: Sequence[WorkspaceHint],
+    *,
+    task_id: str | None = None,
 ) -> None:
     try:
-        status = read_workspace_task_status(database, hints)
+        status = read_workspace_task_status(database, hints, task_id=task_id)
     except WorkspaceResolutionError as exc:
         _try_send_error(
             client,

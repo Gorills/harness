@@ -1,0 +1,1 @@
+package android.content.pm; public class PackageManager { public static class NameNotFoundException extends Exception{} }

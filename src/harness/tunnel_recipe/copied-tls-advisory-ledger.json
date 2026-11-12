@@ -1,0 +1,44 @@
+[
+  {
+    "id": "GO-2025-4008",
+    "decision": "not_in_selected_path",
+    "reason": "Generic server negotiateALPN error logging retains old code. RealityServer custom handshake skips processClientHello, so it does not call negotiateALPN; HY2 uses current stdlib TLS. Arbitrary generic uTLS server configs are outside scope.",
+    "source": "https://vuln.go.dev/ID/GO-2025-4008.json"
+  },
+  {
+    "id": "GO-2026-4337",
+    "decision": "not_in_selected_path",
+    "reason": "REALITY client explicitly sets SessionTicketsDisabled=true; RealityServer custom handshake skips checkForResumption. No session cache reuse in selected transport.",
+    "source": "https://vuln.go.dev/ID/GO-2026-4337.json"
+  },
+  {
+    "id": "GO-2026-4340",
+    "decision": "backported",
+    "reason": "Official GoCL724120 read-key-boundary handshake-buffer guard, including alternate UConn QUIC error propagation.",
+    "source": "https://vuln.go.dev/ID/GO-2026-4340.json"
+  },
+  {
+    "id": "GO-2026-4870",
+    "decision": "backported_coupled_fix",
+    "reason": "Official GoCL763767 locked-alert fix must accompany4340 to avoid re-locking out mutex in KeyUpdate error path.",
+    "source": "https://vuln.go.dev/ID/GO-2026-4870.json"
+  },
+  {
+    "id": "GO-2026-5856",
+    "decision": "not_in_selected_path",
+    "reason": "No real ECH configuration and no PSK resumption in generated REALITY profile. Greased ECH bytes are not a real ECH+PSK session.",
+    "source": "https://vuln.go.dev/ID/GO-2026-5856.json"
+  },
+  {
+    "id": "GO-2026-6090",
+    "decision": "backported",
+    "reason": "Official GoCL804261 post-handshake records do not reset nonadvancing-record budget; covers shared Conn.Read used by UClient.",
+    "source": "https://vuln.go.dev/ID/GO-2026-6090.json"
+  },
+  {
+    "id": "GO-2026-6607",
+    "decision": "not_in_selected_path",
+    "reason": "ECH server decoding requires ECH keys; selected REALITY server has no ECH server-key configuration and HY2 uses current stdlib.",
+    "source": "https://vuln.go.dev/ID/GO-2026-6607.json"
+  }
+]

@@ -1,10 +1,10 @@
-# Shared uv 0.12.5 resolution for checkout wrappers.
+# Shared uv 0.13.6 resolution for checkout wrappers.
 #
 # Callers must set `repo_root` to this repository's root before sourcing.
 # This file does not apply isolated-development XDG overrides.
 
-REQUIRED_UV_VERSION="0.12.5"
-REQUIRED_PYTHON="3.13"
+REQUIRED_UV_VERSION="0.13.6"
+REQUIRED_PYTHON="3.13.18"
 
 uv_version() {
     local executable="$1"
@@ -64,7 +64,7 @@ ensure_uv() {
         printf '%s\n' "$executable"
         return 0
     fi
-    bootstrap_uv
+    bootstrap_uv >&2
     if ! executable="$(resolve_uv)"; then
         echo "uv $REQUIRED_UV_VERSION is required for Harness development." >&2
         return 1

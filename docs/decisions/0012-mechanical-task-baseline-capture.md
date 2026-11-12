@@ -39,6 +39,13 @@ Dirty-path fingerprints are local mechanical evidence, not persisted source:
 - `missing`: hash records status metadata plus a missing-path sentinel;
 - `opaque`: used for entries such as a dirty submodule/directory where Harness does not claim a complete content fingerprint.
 
+Deletion of an entire tracked directory is ordinary `missing` state for each Git-reported
+child, including when parent directories no longer exist. Parent resolution follows existing
+symlinks without requiring missing ancestors to exist and still rejects paths resolving outside
+the Workspace. The final `lstat` distinguishes missing paths from other filesystem errors.
+This applies both to pre-existing deletions at Task start and Task-time deletions at checkpoint;
+unchanged pre-existing deletions are not attributed to the Task.
+
 Future changed-file calculation must treat an `opaque` pre-existing entry conservatively. Equality of an opaque fingerprint is not proof that nested content stayed unchanged. Git status explicitly uses `--ignore-submodules=none` so repository configuration cannot suppress dirty submodule evidence required by this rule.
 
 Baseline capture is bounded by a finite deadline and fails closed if Git metadata, dirty-file state, Workspace registry identity, Git filesystem identity, or the persisted Structural Index changes during capture. Git state is sampled twice around the live index snapshot; dirty regular files are content-fingerprinted on both samples.
@@ -89,6 +96,8 @@ Automated tests must prove:
 - pre-existing modified and untracked regular files receive deterministic content-sensitive fingerprints;
 - changing an already-dirty regular file changes its baseline fingerprint;
 - staged rename origin is preserved;
+- deletion of whole nested directories permits Task start and checkpoints, both staged and unstaged;
+- parent symlinks outside the Workspace fail closed even when their targets are missing;
 - dirty submodule/directory state is explicitly `opaque`;
 - raw dirty source content is absent from persisted baseline rows;
 - invalid freshness/fingerprint-kind rows are rejected by SQLite;

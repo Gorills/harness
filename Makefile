@@ -24,7 +24,7 @@ help:
 	  '  make benchmark-hot-paths                 measure status, watcher, and scan costs' \
 	  '  make doctor-global                        run the user-global harness doctor only' \
 	  '' \
-	  'install-global reinstalls this tree with uv 0.12.5, then runs that' \
+	  'install-global reinstalls this tree with uv 0.13.6, then runs that' \
 	  'tool-installed harness install for cursor and codex by default so a stale' \
 	  'daemon is replaced. It strips HARNESS_DEV_ROOT, restores pre-overlay XDG,' \
 	  'and drops checkout .venv/bin. This checkout still uses isolated MCP;' \

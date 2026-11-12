@@ -44,6 +44,9 @@ not wanted.
    sentinel (`git_common_dir == workspace_root`). Hidden remains Git-only and fails closed
    for filesystem Workspaces. `project_status` Git fields stay the existing nullable
    branch/HEAD shape (same as an unborn repository); Harness does not invent a fake branch.
+   Project settings explain this restriction instead of offering Hidden when any registered
+   folder lacks Git. A stale dashboard form receives the same specific explanation, while the
+   Project stays Normal and no Hidden artifacts are projected.
 4. When Git appears later in the same bound root, Harness attaches the real Git common
    directory in place and keeps `workspace_id` / `project_id`. Losing Git after attachment
    fails closed. Relocating a Workspace may target a Git or filesystem directory.

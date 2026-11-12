@@ -37,6 +37,6 @@ def test_dashboard_refresh_guard_preserves_any_modified_user_input() -> None:
         in DASHBOARD_JS
     )
     assert ".some(fieldHasChanged);" in DASHBOARD_JS
-    assert "if (!force && hasUnsavedInput())" in DASHBOARD_JS
+    assert "if (!force && (hasUnsavedInput() || hasActiveInteraction()))" in DASHBOARD_JS
     assert "window.location.pathname" in DASHBOARD_JS
     assert "cache: 'no-store'" in DASHBOARD_JS

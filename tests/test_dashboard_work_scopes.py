@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlencode, urlsplit
 
 import pytest
-from test_dashboard_history_counts import _database
+from test_dashboard_history_counts import _database, _HistoryLinks
 from test_dashboard_navigation_realtime import _read
 
 from harness.dashboard import (
@@ -19,12 +19,14 @@ from harness.dashboard import (
     read_dashboard_home,
     read_dashboard_project_detail,
     read_dashboard_workspace_detail,
+    render_project_page,
     render_projects_page,
+    render_workspace_page,
 )
 from harness.registry import create_project, register_workspace
 from harness.search import SearchError
 from harness.storage import connect_database
-from harness.task_workflow import task_accept, task_checkpoint, task_start
+from harness.task_workflow import task_accept, task_checkpoint, task_set_state, task_start
 from harness.tasks import TaskState, TaskWaitReason
 
 
@@ -168,17 +170,160 @@ def test_waiting_tasks_are_excluded_from_active_lists_and_counts(
     home = read_dashboard_home(database, scope="active")
     assert home.workspaces[0].active_task_count == 1
     assert home.workspaces[0].review_task_count == (reason is TaskWaitReason.OPERATOR_REVIEW)
+    assert home.workspaces[0].waiting_task_count == (reason is not TaskWaitReason.OPERATOR_REVIEW)
     assert home.workspaces[0].archived_task_count == 0
     assert ">Архив<span>0</span>" in render_projects_page(home)
     review = read_dashboard_home(database, scope="review")
     assert [row.task.task_id for row in review.recent_tasks] == (
         [waiting.task_id] if reason is TaskWaitReason.OPERATOR_REVIEW else []
     )
+    expected_waiting = [] if reason is TaskWaitReason.OPERATOR_REVIEW else [waiting.task_id]
+    waiting_home = read_dashboard_home(database, scope="waiting")
+    waiting_project = read_dashboard_project_detail(database, project_id, scope="waiting")
+    waiting_workspace = read_dashboard_workspace_detail(database, workspace_id, scope="waiting")
+    for detail, html, url in (
+        (waiting_home, render_projects_page(waiting_home), "/"),
+        (
+            waiting_project,
+            render_project_page(waiting_project, base_path="/"),
+            f"/projects/{project_id}/",
+        ),
+        (
+            waiting_workspace,
+            render_workspace_page(waiting_workspace, base_path="/"),
+            f"/workspaces/{workspace_id}/",
+        ),
+    ):
+        assert detail.listed_task_count == len(expected_waiting)
+        assert [row.task.task_id for row in detail.recent_tasks] == expected_waiting
+        assert (
+            f'<a href="{url}?scope=waiting" aria-current="page">'
+            f"Ожидание<span>{len(expected_waiting)}</span></a>"
+        ) in html
+        assert 'name="action" value="accept"' not in html
     all_tasks = read_dashboard_home(database, scope="all")
     assert {row.task.task_id for row in all_tasks.recent_tasks} == {
         waiting.task_id,
         working.task_id,
     }
+
+
+def test_waiting_scope_pagination_boundaries_and_sse_follow_current_state(tmp_path: Path) -> None:
+    database, project_id, workspace_id = _database(tmp_path)
+    connection = connect_database(database)
+    waiting_ids = set()
+    try:
+        for number in range(25):
+            task = task_start(connection, workspace_id, f"Ожидание зависимости {number}")
+            task = task_checkpoint(
+                connection,
+                workspace_id,
+                task.task_id,
+                expected_revision=task.revision,
+                state=TaskState.WAITING,
+                wait_reason=(
+                    TaskWaitReason.EXTERNAL if number % 2 else TaskWaitReason.OPERATOR_INPUT
+                ),
+                summary="Ожидается ответ",
+                next_step="Продолжить после ответа",
+            ).task
+            waiting_ids.add(task.task_id)
+        resumed = task
+        sibling_root = tmp_path / "sibling"
+        sibling_root.mkdir()
+        sibling = register_workspace(connection, project_id=project_id, path=sibling_root)
+        sibling_task = task_start(connection, sibling.workspace_id, "Ожидание в другой папке")
+        task_checkpoint(
+            connection,
+            sibling.workspace_id,
+            sibling_task.task_id,
+            expected_revision=sibling_task.revision,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.EXTERNAL,
+            summary="Ожидается сервис",
+            next_step="Продолжить после ответа сервиса",
+        )
+        foreign = create_project(connection)
+        foreign_root = tmp_path / "foreign"
+        foreign_root.mkdir()
+        foreign_workspace = register_workspace(
+            connection, project_id=foreign.project_id, path=foreign_root
+        )
+        foreign_task = task_start(connection, foreign_workspace.workspace_id, "Чужая зависимость")
+        task_checkpoint(
+            connection,
+            foreign_workspace.workspace_id,
+            foreign_task.task_id,
+            expected_revision=foreign_task.revision,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.EXTERNAL,
+            summary="Ожидается сервис другого проекта",
+            next_step="Продолжить после ответа сервиса",
+        )
+    finally:
+        connection.close()
+    for pages, expected in (
+        (
+            [read_dashboard_home(database, scope="waiting", page=page) for page in (1, 2)],
+            waiting_ids | {sibling_task.task_id, foreign_task.task_id},
+        ),
+        (
+            [
+                read_dashboard_project_detail(database, project_id, scope="waiting", page=page)
+                for page in (1, 2)
+            ],
+            waiting_ids | {sibling_task.task_id},
+        ),
+        (
+            [
+                read_dashboard_workspace_detail(database, workspace_id, scope="waiting", page=page)
+                for page in (1, 2)
+            ],
+            waiting_ids,
+        ),
+    ):
+        assert all(detail.listed_task_count == len(expected) for detail in pages)
+        assert len(pages[0].recent_tasks) == 24
+        assert len(pages[1].recent_tasks) == len(expected) - 24
+        assert {row.task.task_id for detail in pages for row in detail.recent_tasks} == expected
+    before = _view_fingerprint(database, "workspace", workspace_id, None, 2, "waiting")
+    manager = DashboardServerManager(database)
+    try:
+        base = manager.get_url()
+        for route in ("", f"projects/{project_id}/", f"workspaces/{workspace_id}/"):
+            _, _, html = _read(base + route + "?scope=waiting")
+            links = _HistoryLinks(html)
+            assert "scope=waiting" in links.links["next"]
+            _, _, second_html = _read(base + unescape(links.links["next"]).removeprefix("/"))
+            second_links = _HistoryLinks(second_html)
+            assert "scope=waiting" in second_links.links["prev"]
+            query = urlsplit(second_links.events_url).query
+            view, identity, search, snapshot, page = _parse_sse_view(query)
+            scope = _parse_event_scope(query, view)
+            assert scope == "waiting"
+            assert snapshot == _view_fingerprint(database, view, identity, search, page, scope)
+        connection = connect_database(database)
+        try:
+            task_set_state(
+                connection,
+                workspace_id,
+                resumed.task_id,
+                expected_revision=resumed.revision,
+                state=TaskState.WORKING,
+            )
+        finally:
+            connection.close()
+        after = _view_fingerprint(database, "workspace", workspace_id, None, 2, "waiting")
+        assert after != before
+        _, _, html = _read(base + f"workspaces/{workspace_id}/?scope=waiting&page=2")
+        assert 'aria-current="page">Ожидание<span>24</span>' in html
+        waiting = read_dashboard_workspace_detail(database, workspace_id, scope="waiting", page=2)
+        assert resumed.task_id not in {row.task.task_id for row in waiting.recent_tasks}
+        assert waiting.page == 1
+        active = read_dashboard_workspace_detail(database, workspace_id, scope="active")
+        assert [row.task.task_id for row in active.recent_tasks] == [resumed.task_id]
+    finally:
+        manager.close()
 
 
 @pytest.mark.parametrize("scope", ["", "other", "review&scope=active", "projects"])

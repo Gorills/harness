@@ -1,0 +1,316 @@
+{
+  "schema": 1,
+  "status": "scoped_component_audit_complete",
+  "version": "1.14.4-harness.2",
+  "source": {
+    "url": "https://codeload.github.com/SagerNet/sing-box/legacy.tar.gz/c005f35300ce76427dc285481ec5695f5b179cd2",
+    "sha256": "be36f97b19b5817164d6ef95610291689057bff1c35f2e2d5155dbecb202d438",
+    "format": "tar.gz",
+    "member_prefix": "SagerNet-sing-box-c005f35/",
+    "commit": "c005f35300ce76427dc285481ec5695f5b179cd2"
+  },
+  "toolchains": {
+    "linux-amd64": {
+      "url": "https://go.dev/dl/go1.26.10.linux-amd64.tar.gz",
+      "sha256": "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5",
+      "format": "tar.gz",
+      "member_prefix": "go/",
+      "go_binary": "go/bin/go",
+      "version": "go1.26.10"
+    },
+    "win32-amd64": {
+      "url": "https://go.dev/dl/go1.26.10.windows-amd64.zip",
+      "sha256": "7ecd2d7260e82c59bcbd7f1077a07cee2dea607295b858df67195a1e4e09629b",
+      "format": "zip",
+      "member_prefix": "go/",
+      "go_binary": "go/bin/go.exe",
+      "version": "go1.26.10"
+    }
+  },
+  "replacements": [
+    {
+      "file": "patched-go.mod",
+      "target": "go.mod",
+      "sha256": "ec3a3bd4cc0d3863e7002581fd3f5b370af34536381bf8a53e5d8d565601b06b"
+    },
+    {
+      "file": "patched-go.sum",
+      "target": "go.sum",
+      "sha256": "4b3c6eb91b79407b7f8171581670381890b3ab8cc86da84bb6cbe008fed1e66e"
+    },
+    {
+      "file": "engine/adapter_fakeip.go",
+      "target": "adapter/fakeip.go",
+      "sha256": "4ef5080686e08b71679aba39787fa0d3649694cafb79c2efa57b857a37bbb2a2"
+    },
+    {
+      "file": "engine/cachefile_fakeip.go",
+      "target": "experimental/cachefile/fakeip.go",
+      "sha256": "192d12446e8656ab4d28d23460637a6682f4aa8744bdef582fe6adf40bee9d3b"
+    },
+    {
+      "file": "engine/cachefile_fakeip_durability_test.go",
+      "target": "experimental/cachefile/fakeip_durability_test.go",
+      "sha256": "2ed35584d50837b5126e15ff7d51d661bd4e1da8a0be12562cda39e4cbc2585e"
+    },
+    {
+      "file": "engine/fakeip_store.go",
+      "target": "dns/transport/fakeip/store.go",
+      "sha256": "be6df86254b25642caba67f964c84877fa9560ee55bcea2c502b1c5cf4b9ada8"
+    },
+    {
+      "file": "engine/fakeip_memory.go",
+      "target": "dns/transport/fakeip/memory.go",
+      "sha256": "4dbef84d8b13499dcb35010961d0d02cb9d92d21c7e9cf058e6b96fa1adb27c5"
+    },
+    {
+      "file": "engine/fakeip_durability_test.go",
+      "target": "dns/transport/fakeip/durability_test.go",
+      "sha256": "a116f5e1dcb0691146f0c7d727b71c018d47466a968eb3e6aff874cf04a69507"
+    }
+  ],
+  "resolved_modules": {
+    "file": "resolved-module-lock.json",
+    "sha256": "a808d6811a5c5d5798dbe6571120702483dfef22a3cf9334773b414a2b5901e6",
+    "count": 412
+  },
+  "build": {
+    "env": {
+      "GOENV": "off",
+      "GOTOOLCHAIN": "local",
+      "CGO_ENABLED": "0",
+      "GOARCH": "amd64",
+      "GOOS": "${target_os}",
+      "GOPROXY": "https://proxy.golang.org",
+      "GOSUMDB": "sum.golang.org",
+      "GOPATH": "${scratch}/gopath",
+      "GOCACHE": "${scratch}/gocache",
+      "GOMODCACHE": "${scratch}/gomodcache",
+      "GOTMPDIR": "${scratch}/tmp",
+      "GOWORK": "off",
+      "GOFLAGS": "",
+      "GOEXPERIMENT": "",
+      "GOAMD64": "v1",
+      "GO111MODULE": "on",
+      "GONOPROXY": "",
+      "GONOSUMDB": "",
+      "GOPRIVATE": ""
+    },
+    "argv": [
+      "${go_binary}",
+      "build",
+      "-buildvcs=false",
+      "-mod=readonly",
+      "-trimpath",
+      "-tags",
+      "with_gvisor,with_quic,with_utls,with_clash_api",
+      "-ldflags",
+      "-X github.com/sagernet/sing-box/constant.Version=1.14.4-harness.2 -checklinkname=0 -buildid=",
+      "-o",
+      "${output}",
+      "./cmd/sing-box"
+    ]
+  },
+  "artifacts": [
+    {
+      "platform": "linux",
+      "status": 0,
+      "seconds": 30.889778702010517,
+      "command": [
+        "/tmp/harness-tunnels-orchestrator-bbba1be5/component-audit/toolchain/go/bin/go",
+        "build",
+        "-buildvcs=false",
+        "-mod=readonly",
+        "-trimpath",
+        "-tags",
+        "with_gvisor,with_quic,with_utls,with_clash_api",
+        "-ldflags",
+        "-X github.com/sagernet/sing-box/constant.Version=1.14.4-harness.2 -checklinkname=0 -buildid=",
+        "-o",
+        "/tmp/tunnel-repair-20261109/sing-box-linux",
+        "./cmd/sing-box"
+      ],
+      "log": "/tmp/tunnel-repair-20261109/build-linux.log",
+      "sha256": "38409dae02011960174bfb72674a23e123f016fe79685caae2f2066c6596595d",
+      "govulncheck_findings": []
+    },
+    {
+      "platform": "windows",
+      "status": 0,
+      "seconds": 30.668329952997738,
+      "command": [
+        "/tmp/harness-tunnels-orchestrator-bbba1be5/component-audit/toolchain/go/bin/go",
+        "build",
+        "-buildvcs=false",
+        "-mod=readonly",
+        "-trimpath",
+        "-tags",
+        "with_gvisor,with_quic,with_utls,with_clash_api",
+        "-ldflags",
+        "-X github.com/sagernet/sing-box/constant.Version=1.14.4-harness.2 -checklinkname=0 -buildid=",
+        "-o",
+        "/tmp/tunnel-repair-20261109/sing-box-windows.exe",
+        "./cmd/sing-box"
+      ],
+      "log": "/tmp/tunnel-repair-20261109/build-windows.log",
+      "sha256": "88b88aab0cbc5c6ee6a7e2ae3112f64b889e6598bb326a577096794253cf3f89",
+      "govulncheck_findings": []
+    }
+  ],
+  "checks": {
+    "binary_scan": "govulncheck1.3.0 mode=binary scan_level=symbol,0findings perplatform",
+    "resolved_module_scan": "govulncheck1.3.0 scan=module:412resolvedmodules,0findings",
+    "db_last_modified": "2026-11-05T23:49:57Z",
+    "fork_security_regressions": "7 tests passed incl actual UClient Chrome variants; original negativecontrol fails",
+    "fork_existing_suite": "254pass, identical failing baseline/patched test sets; historical wire/golden mismatch, not allgreen",
+    "protocol_smoke": "isolated local namespace REALITY/Vision/XUDP and HY2/Salamander/SPKIpin: each TCP524288+UDP1024 byte-identical",
+    "wintun": "parent proof: all4 embedded DLLs exactly equal official0.14.1 zip; no nativeWindows driver execution proof",
+    "recipe_reproduction": "fresh verifiedsource+utlszip+file_replacements rebuilt bothplatforms byte-identical"
+  },
+  "excluded_tags": [
+    "with_naive_outbound",
+    "with_acme",
+    "with_wireguard",
+    "with_tailscale"
+  ],
+  "production_admission": "parent decision required; approved scope only generated Harness REALITY/Vision+Hysteria2 configurations; standaloneNaive optional and NOT admitted",
+  "module_overrides": [
+    {
+      "module": "github.com/metacubex/utls",
+      "version": "v1.8.7",
+      "source": {
+        "url": "https://proxy.golang.org/github.com/metacubex/utls/@v/v1.8.7.zip",
+        "sha256": "2c29de950b4778b9d47b0a3cb02b8a50766c2cc3de622a5f12fdf9f5a785711e",
+        "h1": "h1:Cp+yWkNTFkSihETgGWq34hlVFds5HpYWVOR1xovUVTs=",
+        "member_prefix": "github.com/metacubex/utls@v1.8.7/"
+      },
+      "destination": "harness-patches/utls",
+      "patch": {
+        "file": "utls-security.patch",
+        "sha256": "b08998ea2c5572f9375ba7979a13ad9a966cbf64ebabc7d36bf25abb1b1293d1",
+        "strip_components": 1
+      },
+      "patched_tree_manifest": {
+        "file": "utls-patched-tree.sha256",
+        "sha256": "3a0e267008f29d120a78a953d822ee403d5cf4fd52272d1cc3f3dd10df9162a1"
+      },
+      "upstream": [
+        {
+          "advisory": "GO-2026-4340",
+          "cl": "724120",
+          "source": "https://go-review.googlesource.com/c/go/+/724120"
+        },
+        {
+          "advisory": "GO-2026-4870",
+          "cl": "763767",
+          "source": "https://go-review.googlesource.com/c/go/+/763767"
+        },
+        {
+          "advisory": "GO-2026-6090",
+          "cl": "804261",
+          "source": "https://go-review.googlesource.com/c/go/+/804261"
+        }
+      ],
+      "bounded_adaptations": [
+        "propagate new quicSetReadSecret error in alternate u_conn.go exactly like shared Conn counterpart",
+        "upstream6090 regression uses existing testConfig fixture instead of Go1.26 testConfigClient/testConfigServer",
+        "ServerHelloTrailingMessage and MultipleKeyUpdate cloned with UClient(HelloChrome_Auto) to exercise REALITY client path"
+      ],
+      "files": [
+        {
+          "file": "conn.go",
+          "sha256": "82b3cc8dc6eae3c2b836901b38a4c9d2772f7adb2af4b600db7fb1359fb2b6ba",
+          "original_sha256": "e8027769d42706f263ef78d76ebd6e8a592299407a1f86b88b9ba5217bfe7dba"
+        },
+        {
+          "file": "handshake_client_tls13.go",
+          "sha256": "5b9f975947fe19c51fd62e7cac4ba19e0916eab5f0d4d281cf4d15cbb8eb7e16",
+          "original_sha256": "1c4585ded101f8492b0a7ec0f17b10398930648ddcae164e8c71843ef96615c2"
+        },
+        {
+          "file": "handshake_server_tls13.go",
+          "sha256": "1a991322d18d0f58bee90b0dc6e09ceb740717a4e7dcf10694964ea9d94eb0d8",
+          "original_sha256": "6281f17d6a3767c2de4a4d5efbf5bd4e0368bc8150071e13183a7c34f9aa8344"
+        },
+        {
+          "file": "harness_security_test.go",
+          "sha256": "f0b3379ba5653ae838e79dd1f89547e701ea6d8aa94bbf3dd703ad822ca06d5a",
+          "original_sha256": null
+        },
+        {
+          "file": "quic.go",
+          "sha256": "664e22e786d040c6856df470c59350e4d5e6b4d5d94c8ba14e04d228426a5be2",
+          "original_sha256": "6c296d74fe43e61e274e49da01f459e07a41a70554eb740c4551e1022a429530"
+        },
+        {
+          "file": "u_conn.go",
+          "sha256": "d19a2b19a20ae5129a71c88de70b4d02b0e124631e28ae8828a0589dd4a6e49e",
+          "original_sha256": "4a34d3717dfc4558980a7f344cb73982656ca3eba2acefb1cb35dd884a073467"
+        }
+      ],
+      "file_replacements": [
+        {
+          "file": "utls/conn.go",
+          "target": "conn.go",
+          "sha256": "82b3cc8dc6eae3c2b836901b38a4c9d2772f7adb2af4b600db7fb1359fb2b6ba",
+          "original_sha256": "e8027769d42706f263ef78d76ebd6e8a592299407a1f86b88b9ba5217bfe7dba"
+        },
+        {
+          "file": "utls/handshake_client_tls13.go",
+          "target": "handshake_client_tls13.go",
+          "sha256": "5b9f975947fe19c51fd62e7cac4ba19e0916eab5f0d4d281cf4d15cbb8eb7e16",
+          "original_sha256": "1c4585ded101f8492b0a7ec0f17b10398930648ddcae164e8c71843ef96615c2"
+        },
+        {
+          "file": "utls/handshake_server_tls13.go",
+          "target": "handshake_server_tls13.go",
+          "sha256": "1a991322d18d0f58bee90b0dc6e09ceb740717a4e7dcf10694964ea9d94eb0d8",
+          "original_sha256": "6281f17d6a3767c2de4a4d5efbf5bd4e0368bc8150071e13183a7c34f9aa8344"
+        },
+        {
+          "file": "utls/harness_security_test.go",
+          "target": "harness_security_test.go",
+          "sha256": "f0b3379ba5653ae838e79dd1f89547e701ea6d8aa94bbf3dd703ad822ca06d5a",
+          "original_sha256": null
+        },
+        {
+          "file": "utls/quic.go",
+          "target": "quic.go",
+          "sha256": "664e22e786d040c6856df470c59350e4d5e6b4d5d94c8ba14e04d228426a5be2",
+          "original_sha256": "6c296d74fe43e61e274e49da01f459e07a41a70554eb740c4551e1022a429530"
+        },
+        {
+          "file": "utls/u_conn.go",
+          "target": "u_conn.go",
+          "sha256": "d19a2b19a20ae5129a71c88de70b4d02b0e124631e28ae8828a0589dd4a6e49e",
+          "original_sha256": "4a34d3717dfc4558980a7f344cb73982656ca3eba2acefb1cb35dd884a073467"
+        }
+      ]
+    }
+  ],
+  "wintun_provenance": {
+    "version": "0.14.1",
+    "source": "https://www.wintun.net/builds/wintun-0.14.1.zip",
+    "archive_sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+    "embedded_amd64_dll_sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+    "evidence": "/tmp/harness-tunnels-orchestrator-bbba1be5/dependency-audit/wintun-provenance.json",
+    "limitation": "digest provenance only; no liveWindows signature or driver load verification"
+  },
+  "omitted_configurations": [
+    "SSHinbound/outbound",
+    "DHCPDNS",
+    "gRPCAPI/transports",
+    "ACME/cloudDNS",
+    "realECH",
+    "TLSsessionresumption"
+  ],
+  "advisory_evidence": {
+    "file": "component-admission.json",
+    "sha256": "4e3f05f6f47818fd87bc9c1f4f49cb358d6a63379d054a5177033e577dbd19e4",
+    "checked_at": "2026-11-08T17:23:37.841737+00:00",
+    "known_unresolved_in_selected_scope": []
+  },
+  "verification": {
+    "fakeip_durability": "atomic mapping+cursor commit; non-destructive metadata read; Go failure-path and race tests passed; actual IPv4/IPv6 SIGKILL and repeated restart regressions passed"
+  }
+}

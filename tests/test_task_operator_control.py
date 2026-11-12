@@ -26,7 +26,6 @@ from harness.task_workflow import (
     task_start,
 )
 from harness.tasks import (
-    TaskConflictError,
     TaskNotFoundError,
     TaskOperatorStatus,
     TaskRevisionConflictError,
@@ -93,7 +92,7 @@ def test_operator_can_choose_every_state_with_cas(
         connection.close()
 
 
-def test_operator_state_retains_one_working_and_rolls_back_event_failure(tmp_path: Path) -> None:
+def test_operator_state_allows_parallel_work_and_rolls_back_event_failure(tmp_path: Path) -> None:
     connection, workspace, _root = _setup(tmp_path)
     try:
         first = task_start(connection, workspace, "Первая")
@@ -101,15 +100,15 @@ def test_operator_state_retains_one_working_and_rolls_back_event_failure(tmp_pat
             connection, workspace, first.task_id, expected_revision=first.revision
         ).task
         second = task_start(connection, workspace, "Вторая")
-        with pytest.raises(TaskConflictError):
-            task_set_state(
-                connection,
-                workspace,
-                first.task_id,
-                expected_revision=done.revision,
-                state=TaskState.WORKING,
-            )
-        assert get_task(connection, first.task_id) == done
+        resumed = task_set_state(
+            connection,
+            workspace,
+            first.task_id,
+            expected_revision=done.revision,
+            state=TaskState.WORKING,
+        )
+        assert resumed.task.state is TaskState.WORKING
+        assert resumed.task.revision == done.revision + 1
         connection.execute(
             "CREATE TRIGGER fail_operator_event BEFORE INSERT ON task_events "
             "BEGIN SELECT RAISE(ABORT, 'event failure'); END"

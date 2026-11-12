@@ -321,9 +321,11 @@ def test_snapshot_rejects_refs_or_index_change_during_read(
     original_run = operations._run
     changed_once = False
 
-    def run(path: Path, arguments: list[str], deadline: float) -> bytes:
+    def run(
+        path: Path, arguments: list[str], deadline: float, *, console: list[str] | None = None
+    ) -> bytes:
         nonlocal changed_once
-        result = original_run(path, arguments, deadline)
+        result = original_run(path, arguments, deadline, console=console)
         if arguments == ["ls-files", "--stage", "-z"] and not changed_once:
             changed_once = True
             if changed == "index":
@@ -403,11 +405,13 @@ def test_merge_uses_source_oid_seen_in_snapshot(
     _git(root, "update-ref", "refs/heads/source", reviewed)
     original_run = operations._run
 
-    def run(path: Path, arguments: list[str], deadline: float) -> bytes:
+    def run(
+        path: Path, arguments: list[str], deadline: float, *, console: list[str] | None = None
+    ) -> bytes:
         if arguments[0] == "merge":
             assert arguments[-1] == reviewed
             _git(root, "update-ref", "refs/heads/source", unseen)
-        return original_run(path, arguments, deadline)
+        return original_run(path, arguments, deadline, console=console)
 
     with connect_database(database) as connection:
         state = read_git_snapshot(connection, workspace)

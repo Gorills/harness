@@ -17,7 +17,7 @@ from harness.codex_adapter import (
     codex_profile_missing_workspace_root,
     discover_codex_adapter,
 )
-from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY
+from harness.hidden_policy import HIDDEN_INSTRUCTION_BODY, LEGACY_HIDDEN_INSTRUCTION_BODY
 from harness.host_adapters import (
     HostIntegrationError,
     HostRegistrationCollisionError,
@@ -260,13 +260,15 @@ def test_codex_preserves_manual_root_override_with_exact_bootstrap(tmp_path: Pat
     assert override.read_text(encoding="utf-8") == body
 
 
+@pytest.mark.parametrize("policy", [LEGACY_HIDDEN_INSTRUCTION_BODY, HIDDEN_INSTRUCTION_BODY])
 def test_codex_refuses_to_leave_manual_hidden_override_active_on_normal_transition(
     tmp_path: Path,
+    policy: str,
 ) -> None:
     root = _repository(tmp_path / "repo")
     adapter = _adapter()
     assert adapter.reconcile_project(root, hidden=True) is IntegrationChange.CHANGED
-    manual = _agents(root).read_bytes()
+    manual = _agents(root).read_bytes().replace(HIDDEN_INSTRUCTION_BODY.encode(), policy.encode())
     _agents_marker(root).unlink()
     _agents(root).write_bytes(
         manual.removeprefix(
@@ -500,6 +502,60 @@ def test_codex_project_reconcile_migrates_legacy_instruction_shape(
     instructions = tomllib.loads(path.read_text(encoding="utf-8"))["developer_instructions"]
     assert instructions.startswith(CODEX_BOOTSTRAP_INSTRUCTION_BODY)
     assert (HIDDEN_INSTRUCTION_BODY in instructions) is hidden
+
+
+def _restore_legacy_hidden_policy(root: Path) -> None:
+    config = _config(root)
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            json.dumps(codex_module.codex_developer_instructions(hidden=True)),
+            json.dumps(f"{CODEX_BOOTSTRAP_INSTRUCTION_BODY}\n{LEGACY_HIDDEN_INSTRUCTION_BODY}"),
+        ),
+        encoding="utf-8",
+    )
+    agents = _agents(root)
+    agents.write_bytes(
+        agents.read_bytes().replace(
+            HIDDEN_INSTRUCTION_BODY.encode(), LEGACY_HIDDEN_INSTRUCTION_BODY.encode()
+        )
+    )
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_codex_project_reconcile_migrates_owned_legacy_hidden_policy(
+    tmp_path: Path, hidden: bool
+) -> None:
+    root = _repository(tmp_path / "repo")
+    user_agents = root / "AGENTS.md"
+    user_agents.write_text("# User instructions\n", encoding="utf-8")
+    adapter = _adapter()
+    adapter.reconcile_project(root, hidden=True)
+    _restore_legacy_hidden_policy(root)
+
+    assert codex_module.codex_owned_hidden_instructions_active(root)
+    diagnostic = adapter.project_registration_diagnostic(root, hidden=hidden)
+    assert diagnostic.state is HostRegistrationState.STALE_OWNED
+    assert diagnostic.preflight_error is None
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.CHANGED
+    assert tomllib.loads(_config(root).read_text(encoding="utf-8"))["developer_instructions"] == (
+        codex_module.codex_developer_instructions(hidden=hidden)
+    )
+    assert (HIDDEN_INSTRUCTION_BODY in _agents(root).read_text(encoding="utf-8")) is hidden
+    assert LEGACY_HIDDEN_INSTRUCTION_BODY not in _agents(root).read_text(encoding="utf-8")
+    assert codex_module.codex_owned_hidden_instructions_active(root) is hidden
+    assert user_agents.read_text(encoding="utf-8") == "# User instructions\n"
+    assert adapter.reconcile_project(root, hidden=hidden) is IntegrationChange.UNCHANGED
+
+
+def test_codex_project_removes_owned_legacy_hidden_policy(tmp_path: Path) -> None:
+    root = _repository(tmp_path / "repo")
+    adapter = _adapter()
+    adapter.reconcile_project(root, hidden=True)
+    _restore_legacy_hidden_policy(root)
+
+    assert adapter.remove_project(root) is IntegrationChange.CHANGED
+    assert not _config(root).exists()
+    assert not _agents(root).exists()
 
 
 def test_codex_project_reconcile_heals_missing_owned_exclude_block(tmp_path: Path) -> None:

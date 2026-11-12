@@ -1,0 +1,162 @@
+[
+  {
+    "ghsa_id": "GHSA-vvgj-x9jq-8cj9",
+    "cve_id": "CVE-2026-40898",
+    "summary": " HTTP/3 QPACK Trailer Expansion Memory Exhaustion ",
+    "published_at": "2026-05-31T08:35:29Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-vvgj-x9jq-8cj9",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "github.com/quic-go/quic-go"
+        },
+        "vulnerable_version_range": "<= v0.59.0",
+        "patched_versions": "v0.59.1",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-g754-hx8w-x2g6",
+    "cve_id": "CVE-2025-64702",
+    "summary": "HTTP/3 QPACK Header Expansion Memory Exhaustion",
+    "published_at": "2025-12-11T09:11:02Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-g754-hx8w-x2g6",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "github.com/quic-go/quic-go/http3"
+        },
+        "vulnerable_version_range": "=< 0.56.0",
+        "patched_versions": "v0.57.0",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-47m2-4cr7-mhcw",
+    "cve_id": "CVE-2025-59530",
+    "summary": "Client Crash Due to Premature HANDSHAKE_DONE Frame",
+    "published_at": "2025-10-10T06:20:16Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-47m2-4cr7-mhcw",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "github.com/quic-go/quic-go"
+        },
+        "vulnerable_version_range": "<= v0.54.0",
+        "patched_versions": "v0.49.1, v0.54.1, v0.55.0",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-j972-j939-p2v3",
+    "cve_id": "CVE-2025-29785",
+    "summary": "Panic in Path Probe Loss Recovery Handling",
+    "published_at": "2025-05-31T03:40:42Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-j972-j939-p2v3",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "github.com/quic-go/quic-go"
+        },
+        "vulnerable_version_range": "= v0.50.0",
+        "patched_versions": "v0.50.1",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-px8v-pp82-rcvr",
+    "cve_id": "CVE-2024-53259",
+    "summary": "ICMP Packet Too Large Injection Attack on Linux",
+    "published_at": "2024-11-30T03:45:12Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-px8v-pp82-rcvr",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "quic-go"
+        },
+        "vulnerable_version_range": "<v0.48.1",
+        "patched_versions": "v0.48.2",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-c33x-xqrf-c478",
+    "cve_id": "CVE-2024-22189",
+    "summary": "Memory Exhaustion Attack against QUIC's Connection ID Mechanism",
+    "published_at": "2024-04-02T05:26:25Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-c33x-xqrf-c478",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "quic-go"
+        },
+        "vulnerable_version_range": "< v0.42.0",
+        "patched_versions": "v0.42.0",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-ppxx-5m9h-6vxf",
+    "cve_id": "CVE-2023-49295",
+    "summary": "Memory Exhaustion Attack against QUIC's Path Validation Mechanism",
+    "published_at": "2024-01-10T10:09:05Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-ppxx-5m9h-6vxf",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "quic-go"
+        },
+        "vulnerable_version_range": "v0.40.0, <= v0.39.3, <= v0.38.1, <= v0.37.6",
+        "patched_versions": "v0.40.1, v0.39.4, v0.38.2, v0.37.7",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  },
+  {
+    "ghsa_id": "GHSA-3q6m-v84f-6p9h",
+    "cve_id": "CVE-2023-46239",
+    "summary": "remote-triggered panic due to unexpected frame serialization order when completing the handshake",
+    "published_at": "2023-10-27T09:46:09Z",
+    "url": "https://github.com/quic-go/quic-go/security/advisories/GHSA-3q6m-v84f-6p9h",
+    "vulnerabilities": [
+      {
+        "package": {
+          "ecosystem": "go",
+          "name": "quic-go"
+        },
+        "vulnerable_version_range": "v0.37.0, v0.37.1, v0.37.2",
+        "patched_versions": "v0.37.3",
+        "vulnerable_functions": []
+      }
+    ],
+    "decision": "upstream_fixed_ancestry_present",
+    "evidence": "pinned80c132... ahead43/behind0 ofupstreamv0.61.0; latest affectedadvisoryfixed0.59.1; direct3fixsourcechecks also performed"
+  }
+]

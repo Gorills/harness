@@ -17,7 +17,7 @@ from harness.ipc import (
     WorkspaceTaskSummary,
     _workspace_task_status_from_response,
 )
-from harness.tasks import TaskState
+from harness.tasks import TaskState, TaskWaitReason
 
 
 @pytest.mark.anyio
@@ -105,6 +105,9 @@ async def test_private_task_status_git_snapshot_is_not_added_to_model_payload(
         "git",
         "index",
         "current_task",
+        "active_tasks",
+        "active_task_count",
+        "active_tasks_truncated",
         "relevant_waiting_task",
         "last_checkpoint",
         "next_step",
@@ -130,8 +133,65 @@ def test_private_task_status_snapshot_decoder_rejects_bad_types(field: str, valu
             "pending_operator_feedback": None,
             "head": None,
             "branch": None,
+            "active_tasks": [],
+            "active_task_count": 0,
         },
     }
     response["result"][field] = value  # type: ignore[index]
     with pytest.raises(IpcProtocolError):
         _workspace_task_status_from_response(response, expected_request_id="status")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("title_character", ["T", "\x01"])
+async def test_parallel_status_preserves_selected_continuity_under_full_wire_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    title_character: str,
+) -> None:
+    from harness.ipc import WorkspaceTaskCheckpointSummary
+    from harness.mcp_bridge import _MCP_WIRE_OVERHEAD_BYTES, _STATUS_MAX_BYTES
+    from harness.task_checkpoints import MAX_CHECKPOINT_NEXT_STEP_BYTES, MAX_OPERATOR_FEEDBACK_BYTES
+
+    status = WorkspaceStatusResult(
+        25, "workspace", "project", "normal", Path("/repo"), None, None, 0, 0, None, None, None
+    )
+    tasks = tuple(
+        WorkspaceTaskSummary(
+            f"task-{i}", ("T" if i == 0 else title_character) * 256, TaskState.WORKING, None, 1
+        )
+        for i in range(5)
+    )
+    next_step = "N" * MAX_CHECKPOINT_NEXT_STEP_BYTES
+    feedback = "F" * MAX_OPERATOR_FEEDBACK_BYTES
+    task_status = WorkspaceTaskStatusResult(
+        25,
+        "workspace",
+        tasks[0],
+        WorkspaceTaskCheckpointSummary(
+            "checkpoint", 1, TaskState.WAITING, TaskWaitReason.OPERATOR_REVIEW, next_step, ()
+        ),
+        feedback,
+        active_tasks=tasks,
+        active_task_count=5,
+    )
+    monkeypatch.setattr(bridge, "_mcp_tool_refusal", lambda: None)
+    monkeypatch.setattr(bridge, "_workspace_hints", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(bridge, "_socket_path", lambda: Path("/unused"))
+    monkeypatch.setattr(bridge, "request_workspace_status", lambda *_args: status)
+    monkeypatch.setattr(bridge, "request_workspace_task_status", lambda *_args: task_status)
+    result = await bridge.build_mcp_server().call_tool("project_status", {})
+    assert isinstance(result, CallToolResult)
+    assert not result.is_error
+    payload = result.structured_content
+    assert payload is not None
+    assert payload["current_task"]["task_id"] == tasks[0].task_id
+    assert payload["next_step"] == next_step
+    assert payload["pending_operator_feedback"] == feedback
+    assert payload["active_task_count"] == 5
+    assert payload["active_tasks_truncated"]
+    assert len(payload["active_tasks"]) < 5
+    assert (
+        len(result.model_dump_json(by_alias=True, exclude_none=True).encode())
+        + _MCP_WIRE_OVERHEAD_BYTES
+        <= _STATUS_MAX_BYTES
+    )

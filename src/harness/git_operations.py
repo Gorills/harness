@@ -2,12 +2,17 @@ from __future__ import annotations
 
 # ruff: noqa: RUF001 -- Russian operator-facing diagnostics.
 import os
+import re
+import shlex
+import signal
 import sqlite3
 import subprocess
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+from threading import Lock
 from time import monotonic
+from weakref import WeakValueDictionary
 
 from harness.git_workspace import (
     GitWorkspaceError,
@@ -32,6 +37,38 @@ _BRANCH_ARGUMENTS = [
 
 class GitOperationError(GitWorkspaceError):
     """An operator-readable failure; a Git failure may leave an operation in progress."""
+
+    result: GitOperationResult | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GitOperationResult:
+    action: str
+    success: bool
+    output: str
+    message: str
+
+
+def _console_text(value: str) -> str:
+    # Git commonly prints credential-bearing URLs on network failures.
+    value = re.sub(r"(https?://)[^/\s@]+@", r"\1[скрыто]@", value, flags=re.IGNORECASE)
+    value = re.sub(r"(https?://[^\s?#]+)[?#][^\s]*", r"\1?[скрыто]", value, flags=re.IGNORECASE)
+    value = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", value)
+    value = value.encode("utf-8", "backslashreplace").decode("utf-8")
+    return value if len(value) <= 8000 else value[:7960] + "\n[Вывод сокращён]"
+
+
+_OPERATION_LOCKS: WeakValueDictionary[Path, Lock] = WeakValueDictionary()
+_LOCKS_GUARD = Lock()
+
+
+def _operation_lock(root: Path) -> Lock:
+    with _LOCKS_GUARD:
+        lock = _OPERATION_LOCKS.get(root)
+        if lock is None:
+            lock = Lock()
+            _OPERATION_LOCKS[root] = lock
+        return lock
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +110,11 @@ class GitSnapshot:
     query: str
     page: int
     selected_oid: str | None = None
+    remotes: tuple[str, ...] = ()
+    upstream_remote: str | None = None
+    upstream_branch: str | None = None
+    ahead: int | None = None
+    behind: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,32 +123,61 @@ class GitOperationRequest:
     workspace_id: str
     expected_token: str
     value: str = ""
+    remote: str = ""
 
 
-def _run(root: Path, arguments: list[str], deadline: float) -> bytes:
+def _run(
+    root: Path, arguments: list[str], deadline: float, *, console: list[str] | None = None
+) -> bytes:
     timeout = deadline - monotonic()
     if timeout <= 0:
         raise GitOperationError(
             "Git не успел завершить операцию. Обновите состояние перед повтором."
         )
     environment = _git_environment()
-    environment.update(GIT_TERMINAL_PROMPT="0", GIT_EDITOR="true", GIT_MERGE_AUTOEDIT="no")
+    environment.update(
+        GIT_TERMINAL_PROMPT="0",
+        GIT_EDITOR="true",
+        GIT_MERGE_AUTOEDIT="no",
+        GIT_ASKPASS="/bin/false",
+        SSH_ASKPASS="/bin/false",
+    )
+    if console is not None:
+        console.append("$ " + _console_text(shlex.join(["git", *arguments])))
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["git", "--no-pager", *arguments],
             cwd=root,
             env=environment,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=min(timeout, 15),
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
+        try:
+            stdout, stderr = process.communicate(
+                timeout=min(timeout, 45 if console is not None else 15)
+            )
+        except subprocess.TimeoutExpired:
+            # Kill the command's group, including SSH/credential helpers and hooks.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(arguments, timeout, stdout, stderr) from None
+        result = subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
+        if console is not None and isinstance(exc, subprocess.TimeoutExpired):
+            console.append(_console_text(os.fsdecode((exc.stdout or b"") + (exc.stderr or b""))))
         raise GitOperationError(
             "Git не завершил операцию. Проверьте состояние перед повтором; запрос не повторяется автоматически."
         ) from exc
+    if console is not None:
+        console.append(_console_text(os.fsdecode(result.stdout + result.stderr)).strip())
+        console.append(f"Код завершения: {result.returncode}")
     if result.returncode:
-        detail = os.fsdecode(result.stderr or result.stdout).strip()[:1800]
+        detail = _console_text(os.fsdecode(result.stderr or result.stdout)).strip()[:1800]
         raise GitOperationError("Git остановил операцию. " + detail)
     if len(result.stdout) > _OUTPUT_LIMIT:
         raise GitOperationError("Состояние репозитория слишком большое для панели Git.")
@@ -193,6 +264,38 @@ def _snapshot(
             )
         )
     head = status.head
+    config = _run(root, ["config", "--null", "--list"], deadline)
+    remotes_raw = _run(root, ["remote"], deadline)
+    remotes = tuple(os.fsdecode(name) for name in remotes_raw.splitlines() if name)
+    tracking_raw = _run(
+        root,
+        [
+            "for-each-ref",
+            "--format=%(refname)%00%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)",
+            "refs/heads/",
+        ],
+        deadline,
+    )
+    tracking = next(
+        (
+            line.split(b"\0")
+            for line in tracking_raw.splitlines()
+            if branch and line.startswith(os.fsencode("refs/heads/" + branch) + b"\0")
+        ),
+        [b"", b"", b"", b""],
+    )
+    upstream_remote = os.fsdecode(tracking[2]) or None
+    upstream_branch = os.fsdecode(tracking[3]).removeprefix("refs/heads/") or None
+    ahead = behind = None
+    upstream_ref = os.fsdecode(tracking[1])
+    standard_ref = f"refs/remotes/{upstream_remote}/{upstream_branch}"
+    if any(item.ref == standard_ref for item in branches):
+        upstream_ref = standard_ref
+    if head and any(item.ref == upstream_ref for item in branches):
+        counts = _run(
+            root, ["rev-list", "--left-right", "--count", f"HEAD...{upstream_ref}"], deadline
+        ).split()
+        ahead, behind = int(counts[0]), int(counts[1])
     operation = next(
         (
             name
@@ -209,7 +312,15 @@ def _snapshot(
         None,
     )
     index = _run(root, ["ls-files", "--stage", "-z"], deadline)
-    fingerprint = sha256(raw + refs + index + repr((identity, branch, head, operation)).encode())
+    fingerprint = sha256(
+        raw
+        + refs
+        + index
+        + config
+        + remotes_raw
+        + tracking_raw
+        + repr((identity, branch, head, operation)).encode()
+    )
     # Detect ordinary worktree edits even when porcelain keeps the same M/M status.
     metadata = _file_metadata(root, files)
     fingerprint.update(metadata)
@@ -226,6 +337,8 @@ def _snapshot(
         or (inspect_git_working_tree_status(root, deadline=deadline) != status)
         or _run(root, ["ls-files", "--stage", "-z"], deadline) != index
         or (_run(root, _BRANCH_ARGUMENTS, deadline) != refs)
+        or _run(root, ["config", "--null", "--list"], deadline) != config
+        or _run(root, ["remote"], deadline) != remotes_raw
         or _file_metadata(root, files) != metadata
     ):
         raise GitOperationError("Git изменился во время чтения. Обновите страницу.")
@@ -245,6 +358,11 @@ def _snapshot(
         query,
         page,
         next((item.oid for item in branches if item.ref == selected_ref), None),
+        remotes,
+        upstream_remote,
+        upstream_branch,
+        ahead,
+        behind,
     )
 
 
@@ -255,15 +373,31 @@ def read_git_snapshot(
     return _snapshot(connection, workspace_id, query, page, monotonic() + 10)
 
 
-def run_git_operation(connection: sqlite3.Connection, request: GitOperationRequest) -> None:
+def run_git_operation(
+    connection: sqlite3.Connection, request: GitOperationRequest
+) -> GitOperationResult:
+    workspace = get_workspace(connection, request.workspace_id)
+    lock = _operation_lock(workspace.git_common_dir)
+    if not lock.acquire(blocking=False):
+        raise GitOperationError("В этом проекте уже выполняется команда Git. Дождитесь результата.")
+    try:
+        return _run_git_operation(connection, request)
+    finally:
+        lock.release()
+
+
+def _run_git_operation(
+    connection: sqlite3.Connection, request: GitOperationRequest
+) -> GitOperationResult:
     """Serialize dashboard writes and registry changes; Git owns its native file/ref locks.
 
     The token rejects changed HEAD, refs, index and ordinary file edits before the command.
     External editors/CLI Git do not participate in this transaction; never force their state.
     """
+    console: list[str] = []
     connection.execute("BEGIN IMMEDIATE")
     try:
-        deadline = monotonic() + 20
+        deadline = monotonic() + 50
         state = _snapshot(
             connection, request.workspace_id, "", 1, deadline, selected_ref=request.value
         )
@@ -272,6 +406,10 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
                 "Состояние Git изменилось. Проверьте обновлённые данные и повторите действие."
             )
         root = state.workspace.workspace_root
+
+        def execute(arguments: list[str]) -> bytes:
+            return _run(root, arguments, deadline, console=console)
+
         if state.operation and request.action not in {
             "git_abort_merge",
             "git_stage",
@@ -286,7 +424,13 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
             raise GitOperationError(
                 "Завершите текущую операцию в терминале, затем обновите панель."
             )
-        if request.action in {"git_switch", "git_merge"}:
+        if request.action in {"git_fetch", "git_pull", "git_push", "git_publish"}:
+            from harness.git_transport import run_transport
+
+            # Network commands must not hold SQLite's global write lock.
+            connection.execute("COMMIT")
+            run_transport(state, request, execute)
+        elif request.action in {"git_switch", "git_merge"}:
             if state.selected_oid is None:
                 raise GitOperationError("Ветка больше не существует. Найдите её снова.")
             if state.file_count or state.operation:
@@ -299,8 +443,7 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
                         "Для слияния сначала переключитесь на ветку с коммитами."
                     )
                 source = request.value.removeprefix("refs/heads/").removeprefix("refs/remotes/")
-                _run(
-                    root,
+                execute(
                     [
                         "merge",
                         "--no-edit",
@@ -310,33 +453,28 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
                         "--",
                         state.selected_oid,
                     ],
-                    deadline,
                 )
             elif request.value.startswith("refs/heads/"):
-                _run(
-                    root,
+                execute(
                     ["switch", "--no-guess", "--no-recurse-submodules", "--", request.value[11:]],
-                    deadline,
                 )
             else:
-                _run(
-                    root, ["switch", "--no-recurse-submodules", "--track", request.value], deadline
-                )
+                execute(["switch", "--no-recurse-submodules", "--track", request.value])
         elif request.action == "git_create":
             name = request.value.strip()
             if name.startswith("-") or not name or "@{" in name:
                 raise GitOperationError("Укажите допустимое название новой ветки.")
-            _run(root, ["check-ref-format", "refs/heads/" + name], deadline)
+            execute(["check-ref-format", "refs/heads/" + name])
             # A new branch starts at current HEAD and keeps the operator's local changes.
-            _run(root, ["switch", "--no-recurse-submodules", "--create", name], deadline)
+            execute(["switch", "--no-recurse-submodules", "--create", name])
         elif request.action == "git_stage_all":
-            _run(root, ["add", "--all", "--", "."], deadline)
+            execute(["add", "--all", "--", "."])
         elif request.action == "git_unstage_all":
             if state.staged_count:
                 if state.head:
-                    _run(root, ["reset", "--", "."], deadline)
+                    execute(["reset", "--", "."])
                 else:
-                    _run(root, ["rm", "--cached", "-r", "-f", "--", "."], deadline)
+                    execute(["rm", "--cached", "-r", "-f", "--", "."])
         elif request.action in {"git_stage", "git_unstage"}:
             files = _files(
                 _run(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"], deadline)
@@ -348,18 +486,16 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
             if request.action == "git_stage":
                 if selected.original_path and selected.worktree_status == "R":
                     paths.append(selected.original_path)
-                _run(root, ["--literal-pathspecs", "add", "--", *paths], deadline)
+                execute(["--literal-pathspecs", "add", "--", *paths])
             else:
                 if selected.original_path and selected.index_status == "R":
                     paths.append(selected.original_path)
                 if state.head:
-                    _run(root, ["--literal-pathspecs", "reset", "--", *paths], deadline)
+                    execute(["--literal-pathspecs", "reset", "--", *paths])
                 else:
                     # --cached only removes index entries, preserving all working files.
-                    _run(
-                        root,
+                    execute(
                         ["--literal-pathspecs", "rm", "--cached", "-f", "--", *paths],
-                        deadline,
                     )
         elif request.action == "git_commit":
             if not request.value.strip() or len(request.value.encode("utf-8")) > 2048:
@@ -374,14 +510,25 @@ def run_git_operation(connection: sqlite3.Connection, request: GitOperationReque
                 raise GitOperationError(
                     "Сначала создайте ветку: сейчас открыт отдельный коммит (detached HEAD)."
                 )
-            _run(root, ["commit", "-m", request.value.strip()], deadline)
+            execute(["commit", "-m", request.value.strip()])
         elif request.action == "git_abort_merge":
             if state.operation != "merge":
                 raise GitOperationError("Нет слияния, которое можно отменить.")
-            _run(root, ["merge", "--abort"], deadline)
+            execute(["merge", "--abort"])
         else:
             raise GitOperationError("Неизвестная операция Git.")
-        connection.execute("COMMIT")
+        if connection.in_transaction:
+            connection.execute("COMMIT")
+        return GitOperationResult(
+            request.action, True, _console_text("\n".join(console)), "Команда выполнена"
+        )
+    except GitOperationError as exc:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        exc.result = GitOperationResult(
+            request.action, False, _console_text("\n".join(console)), str(exc)
+        )
+        raise
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")

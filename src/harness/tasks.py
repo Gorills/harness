@@ -17,6 +17,7 @@ from harness.task_baseline import (
 MAX_TASK_TITLE_BYTES = 256
 MAX_TASK_STACK_HINTS = 16
 MAX_TASK_STACK_HINT_BYTES = 128
+MAX_STATUS_ACTIVE_TASKS = 5
 
 
 class TaskError(RuntimeError):
@@ -205,7 +206,7 @@ def get_working_task(
     connection: sqlite3.Connection,
     workspace_id: str,
 ) -> TaskRecord | None:
-    """Return the one working Task for a Workspace, if present."""
+    """Return a working Task only when the Workspace has exactly one."""
     get_workspace(connection, workspace_id)
     return _working_task(connection, workspace_id)
 
@@ -216,7 +217,11 @@ def get_relevant_task(
     *,
     applicability: WorkspaceApplicability | None = None,
 ) -> TaskRecord | None:
-    """Return the current working Task, or the most recently updated waiting Task."""
+    """Return a unique eligible working Task, otherwise a unique waiting Task.
+
+    Multiple Tasks at the highest available priority require explicit selection.
+    Recency is never sufficient to choose between independent active outcomes.
+    """
     get_workspace(connection, workspace_id)
     rows = connection.execute(
         """
@@ -228,10 +233,42 @@ def get_relevant_task(
         """,
         (workspace_id,),
     )
+    candidate: TaskRecord | None = None
     for row in rows:
-        if applicability is None or applicability.task_visible(row[0]):
-            return _task_from_row(row)
-    return None
+        if applicability is not None and not applicability.task_visible(row[0]):
+            continue
+        task = _task_from_row(row)
+        if candidate is not None:
+            return candidate if candidate.state is not task.state else None
+        candidate = task
+    return candidate
+
+
+def list_active_tasks(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    applicability: WorkspaceApplicability | None = None,
+    limit: int = MAX_STATUS_ACTIVE_TASKS,
+) -> tuple[tuple[TaskRecord, ...], int]:
+    """Return a bounded eligible active list and its total, filtering before limits."""
+    get_workspace(connection, workspace_id)
+    rows = connection.execute(
+        "SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod, "
+        "revision, created_at, updated_at FROM tasks "
+        "WHERE workspace_id = ? AND state IN ('working', 'waiting') "
+        "ORDER BY CASE state WHEN 'working' THEN 0 ELSE 1 END, updated_at DESC, id DESC",
+        (workspace_id,),
+    )
+    tasks: list[TaskRecord] = []
+    count = 0
+    for row in rows:
+        if applicability is not None and not applicability.task_visible(row[0]):
+            continue
+        count += 1
+        if len(tasks) < limit:
+            tasks.append(_task_from_row(row))
+    return tuple(tasks), count
 
 
 def get_latest_task(
@@ -302,20 +339,14 @@ def _create_task_with_baseline_in_transaction(
     normalized_title = _validate_title(title)
     normalized_stack_hints = normalize_task_stack_hints(stack_hints)
     get_workspace(connection, workspace_id)
-    _require_no_working_task(connection, workspace_id)
     snapshot = capture_workspace_task_baseline(connection, workspace_id, now=now)
     task = _new_task_record(
         workspace_id=workspace_id,
         title=normalized_title,
         timestamp=snapshot.captured_at,
     )
-    try:
-        _insert_task(connection, task)
-        _insert_task_stack_hints(connection, task.task_id, normalized_stack_hints)
-    except sqlite3.IntegrityError as exc:
-        if _working_task(connection, workspace_id) is not None:
-            raise TaskConflictError("workspace already has a working task") from exc
-        raise
+    _insert_task(connection, task)
+    _insert_task_stack_hints(connection, task.task_id, normalized_stack_hints)
     baseline = persist_task_baseline(connection, task.task_id, snapshot)
     capture_task_origin(connection, task.task_id)
     return TaskCreationRecord(task=task, baseline=baseline)
@@ -338,30 +369,20 @@ def _transition_task_state_in_transaction(
         )
     _validate_transition(current.state, state)
 
-    if state is TaskState.WORKING:
-        existing = _working_task(connection, current.workspace_id)
-        if existing is not None and existing.task_id != current.task_id:
-            raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
-
-    try:
-        cursor = connection.execute(
-            """
+    cursor = connection.execute(
+        """
             UPDATE tasks
             SET state = ?, wait_reason = ?, revision = revision + 1, updated_at = ?
             WHERE id = ? AND revision = ?
             """,
-            (
-                state.value,
-                wait_reason.value if wait_reason is not None else None,
-                timestamp,
-                task_id,
-                expected_revision,
-            ),
-        )
-    except sqlite3.IntegrityError as exc:
-        if state is TaskState.WORKING:
-            raise TaskConflictError("workspace already has a working task") from exc
-        raise
+        (
+            state.value,
+            wait_reason.value if wait_reason is not None else None,
+            timestamp,
+            task_id,
+            expected_revision,
+        ),
+    )
     if cursor.rowcount != 1:
         raise TaskRevisionConflictError(
             f"task revision changed during mutation: expected {expected_revision}"
@@ -386,22 +407,14 @@ def _reopen_task_in_transaction(
         raise TaskTransitionError(
             f"reopen requires terminal Task; current state is {current.state.value}"
         )
-    existing = _working_task(connection, current.workspace_id)
-    if existing is not None and existing.task_id != current.task_id:
-        raise TaskConflictError(
-            "workspace already has a working task; defer it in the operator task archive first"
-        )
-    try:
-        cursor = connection.execute(
-            """
+    cursor = connection.execute(
+        """
             UPDATE tasks
             SET state = 'working', wait_reason = NULL, revision = revision + 1, updated_at = ?
             WHERE id = ? AND revision = ? AND state IN ('completed', 'cancelled')
             """,
-            (timestamp, task_id, expected_revision),
-        )
-    except sqlite3.IntegrityError as exc:
-        raise TaskConflictError("workspace already has a working task") from exc
+        (timestamp, task_id, expected_revision),
+    )
     if cursor.rowcount != 1:
         raise TaskRevisionConflictError(
             f"task revision changed during reopen: expected {expected_revision}"
@@ -435,12 +448,6 @@ def _advance_task_revision_in_transaction(
             f"task revision changed during operator mutation: expected {expected_revision}"
         )
     return get_task(connection, task_id)
-
-
-def _require_no_working_task(connection: sqlite3.Connection, workspace_id: str) -> None:
-    existing = _working_task(connection, workspace_id)
-    if existing is not None:
-        raise TaskConflictError(f"workspace already has a working task: {existing.task_id}")
 
 
 def _new_task_record(*, workspace_id: str, title: str, timestamp: str) -> TaskRecord:
@@ -494,18 +501,17 @@ def _working_task(
     connection: sqlite3.Connection,
     workspace_id: str,
 ) -> TaskRecord | None:
-    row = connection.execute(
+    rows = connection.execute(
         """
         SELECT id, workspace_id, title, state, wait_reason, jira_url, deploy_test, deploy_prod,
                revision, created_at, updated_at
         FROM tasks
         WHERE workspace_id = ? AND state = 'working'
+        LIMIT 2
         """,
         (workspace_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return _task_from_row(row)
+    ).fetchall()
+    return _task_from_row(rows[0]) if len(rows) == 1 else None
 
 
 def _validate_title(title: str) -> str:

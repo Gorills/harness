@@ -4,6 +4,9 @@
 - **Date:** 2026-08-23
 - **Deciders:** Repository architecture baseline
 
+The one-working-Task constraint in this historical decision is superseded by
+[ADR-0079](0079-parallel-workspace-tasks.md); explicit identity, revision CAS and applicability remain.
+
 ## Context
 
 ADRs 0011–0014 established durable Task revision CAS, mandatory mechanical Task-start baselines, mechanical changed-file calculation, and atomic checkpoint/event persistence. The corrected architecture requires the next layer to expose one transport-independent domain workflow before daemon IPC, CLI, or MCP. Existing-Task mutations must target an explicit Task and revision, while resume of an already-working Task remains idempotent/read-like. ADR-0014 also intentionally deferred Task-created/resumed events until this orchestration gave them precise semantics.

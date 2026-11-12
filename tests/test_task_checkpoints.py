@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -110,6 +111,64 @@ def test_working_checkpoint_persists_mechanical_snapshot_event_and_revision(tmp_
         assert get_task_checkpoint(connection, result.checkpoint.checkpoint_id) == result.checkpoint
         assert list_task_checkpoints(connection, created.task.task_id) == (result.checkpoint,)
         assert list_task_events(connection, created.task.task_id) == (result.event,)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_checkpoint_persists_deleted_directory_and_can_continue(
+    tmp_path: Path, staged: bool
+) -> None:
+    root, _database, connection, workspace_id = _registered(tmp_path)
+    try:
+        directory = root / "admin" / "scripts"
+        directory.mkdir(parents=True)
+        for name in ("build.py", "icons.py"):
+            (directory / name).write_text("tracked\n", encoding="utf-8")
+        _git(root, "add", "admin")
+        _commit(root, "add admin scripts")
+        created = create_task_with_baseline(connection, workspace_id, "Remove directory")
+        shutil.rmtree(root / "admin")
+        if staged:
+            _git(root, "add", "-u")
+
+        first = checkpoint_task(
+            connection,
+            created.task.task_id,
+            expected_revision=1,
+            state=TaskState.WORKING,
+            summary="Deleted directory",
+        )
+        second = checkpoint_task(
+            connection,
+            created.task.task_id,
+            expected_revision=first.task.revision,
+            state=TaskState.WAITING,
+            wait_reason=TaskWaitReason.OPERATOR_REVIEW,
+            summary="Deletion verified",
+            next_step="Review deletion",
+        )
+
+        expected = ("admin/scripts/build.py", "admin/scripts/icons.py")
+        assert first.checkpoint.changed_paths == second.checkpoint.changed_paths == expected
+        assert second.task.revision == 3
+        assert second.task.state is TaskState.WAITING
+        assert second.checkpoint.current_dirty_path_count == 2
+        assert list_task_checkpoints(connection, created.task.task_id) == (
+            first.checkpoint,
+            second.checkpoint,
+        )
+        assert list_task_events(connection, created.task.task_id) == (first.event, second.event)
+        for checkpoint in (first.checkpoint, second.checkpoint):
+            assert connection.execute(
+                "SELECT complete FROM task_git_evidence WHERE checkpoint_id=?",
+                (checkpoint.checkpoint_id,),
+            ).fetchone() == (1,)
+            assert connection.execute(
+                "SELECT relative_path,kind,content_sha256 FROM task_git_evidence_paths "
+                "WHERE checkpoint_id=? ORDER BY relative_path",
+                (checkpoint.checkpoint_id,),
+            ).fetchall() == [(path, "deleted", None) for path in expected]
     finally:
         connection.close()
 

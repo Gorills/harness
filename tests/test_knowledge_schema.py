@@ -14,7 +14,7 @@ def test_schema_v8_knowledge_constraints_and_tables(tmp_path: Path) -> None:
     initialize_database(database)
     connection = connect_database(database)
     try:
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         connection.execute("INSERT INTO projects(id) VALUES ('project')")
 
         with pytest.raises(sqlite3.IntegrityError):

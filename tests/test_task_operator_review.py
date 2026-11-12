@@ -23,7 +23,6 @@ from harness.task_workflow import (
     task_start,
 )
 from harness.tasks import (
-    TaskConflictError,
     TaskRecord,
     TaskRevisionConflictError,
     TaskState,
@@ -203,8 +202,7 @@ def test_feedback_rejects_non_review_wait_and_distinct_working_task_without_muta
         assert get_task(connection, external.task_id) == external
         assert list_task_events(connection, external.task_id) == before
 
-        # Put the first Task into review, then create another working Task. Feedback cannot
-        # violate the one-working-Task invariant while resuming the first Task.
+        # Feedback resumes the explicit first Task independently of another working Task.
         resumed = task_workflow.task_resume(
             connection,
             workspace_id,
@@ -224,17 +222,17 @@ def test_feedback_rejects_non_review_wait_and_distinct_working_task_without_muta
         second = task_start(connection, workspace_id, "Second task")
         review_events = list_task_events(connection, review.task_id)
 
-        with pytest.raises(TaskConflictError, match="already has a working task"):
-            task_feedback(
-                connection,
-                workspace_id,
-                review.task_id,
-                expected_revision=review.revision,
-                feedback="Change first",
-            )
-        assert get_task(connection, review.task_id) == review
+        feedback = task_feedback(
+            connection,
+            workspace_id,
+            review.task_id,
+            expected_revision=review.revision,
+            feedback="Change first",
+        )
+        assert feedback.task.state is TaskState.WORKING
+        assert feedback.task.revision == review.revision + 1
         assert get_task(connection, second.task_id) == second
-        assert list_task_events(connection, review.task_id) == review_events
+        assert list_task_events(connection, review.task_id)[:-1] == review_events
     finally:
         connection.close()
 

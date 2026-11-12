@@ -32,7 +32,7 @@ Usage:
   scripts\dev.cmd quality
   scripts\dev.cmd <command> [args...]
 
-The wrapper uses uv 0.12.5 and Python 3.13 from this checkout. It keeps
+The wrapper uses uv 0.13.6 and Python 3.13 from this checkout. It keeps
 the database, IPC endpoint, skills, and uv cache under .harness-windows-<SID>.
 Each Windows account gets a separate runtime. This wrapper does not
 install or uninstall Harness from the user's global host configuration.
@@ -42,13 +42,13 @@ install or uninstall Harness from the user's global host configuration.
 function Ensure-Uv {
     if (Test-Path -LiteralPath $uv -PathType Leaf) {
         $version = & $uv --version
-        if ($LASTEXITCODE -eq 0 -and $version -match '^uv 0\.12\.5(?:\s|$)') {
+        if ($LASTEXITCODE -eq 0 -and $version -match '^uv 0\.13\.6(?:\s|$)') {
             return
         }
     }
     New-Item -ItemType Directory -Force -Path $toolDirectory | Out-Null
-    $archive = Join-Path $toolDirectory 'uv-0.12.5.zip'
-    $url = 'https://releases.astral.sh/github/uv/releases/download/0.12.5/uv-x86_64-pc-windows-msvc.zip'
+    $archive = Join-Path $toolDirectory 'uv-0.13.6.zip'
+    $url = 'https://releases.astral.sh/github/uv/releases/download/0.13.6/uv-x86_64-pc-windows-msvc.zip'
     Invoke-WebRequest -Uri $url -OutFile $archive
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
@@ -60,13 +60,13 @@ function Ensure-Uv {
         $zip.Dispose()
     }
     $version = & $uv --version
-    if ($LASTEXITCODE -ne 0 -or $version -notmatch '^uv 0\.12\.5(?:\s|$)') {
-        throw 'uv 0.12.5 was not installed successfully'
+    if ($LASTEXITCODE -ne 0 -or $version -notmatch '^uv 0\.13\.6(?:\s|$)') {
+        throw 'uv 0.13.6 was not installed successfully'
     }
 }
 
 function Sync-Project {
-    & $uv python install --no-bin --no-registry 3.13
+    & $uv python install --no-bin --no-registry 3.13.18
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $uv sync --locked --all-groups
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

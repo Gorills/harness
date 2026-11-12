@@ -1,0 +1,387 @@
+{
+  "status": "NOT_ADMITTED",
+  "release": "v154.0.8037.49-5",
+  "binary_downloaded": false,
+  "scope": "bounded review of20network/proxy/SSL Chromium advisories since154base, not fullnativegraph approval",
+  "advisories": [
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "571058818",
+      "severity": "Medium",
+      "cve": "CVE-2026-121105",
+      "description": "Information leak in Network",
+      "decision": "not_selected",
+      "reason": "Blink media UrlIndex/SecurityOrigin; no Blink/media renderer in Naive subset.",
+      "fixes": [
+        {
+          "commit": "7b99dd29ba266531d1413a67fd799aad112690fa",
+          "url": "https://github.com/chromium/chromium/commit/7b99dd29ba266531d1413a67fd799aad112690fa",
+          "message": "Key media UrlIndex by requesting SecurityOrigin"
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "533454968",
+      "severity": "Medium",
+      "cve": "CVE-2026-121039",
+      "description": "Incorrect authorization in Proxy Auth",
+      "decision": "not_selected",
+      "reason": "Chrome enterprise auth policy boundary absent; no AllHttpAuthSchemesAllowedForOrigins policy configured.",
+      "fixes": [
+        {
+          "commit": "d06dbff79ba64825f1917e6de237d6b315cf1aad",
+          "url": "https://github.com/chromium/chromium/commit/d06dbff79ba64825f1917e6de237d6b315cf1aad",
+          "message": "Add TODO to remove proxy auth scheme version check for AllHttpAuthSchemesAllowedForOrigins in M161"
+        },
+        {
+          "commit": "24e244752648fbd225ce0ccf458b3c68daafbc5b",
+          "url": "https://github.com/chromium/chromium/commit/24e244752648fbd225ce0ccf458b3c68daafbc5b",
+          "message": "[net] Add Net.HttpAuth.SchemeAllowedByAllSchemesPolicy histogram"
+        },
+        {
+          "commit": "411664f61d9c5fa46b21919432e9e362deea437a",
+          "url": "https://github.com/chromium/chromium/commit/411664f61d9c5fa46b21919432e9e362deea437a",
+          "message": "[net][policy] Add AllHttpAuthSchemesAllowedForProxies policy"
+        },
+        {
+          "commit": "a72f49dd63114c1b4a89301a5ef370e086ab9326",
+          "url": "https://github.com/chromium/chromium/commit/a72f49dd63114c1b4a89301a5ef370e086ab9326",
+          "message": "[net][policy] Transition proxy support for AllHttpAuthSchemesAllowedForOrigins to M161"
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "504234693",
+      "severity": "Low",
+      "cve": "CVE-2026-121109",
+      "description": "Inadequate encryption strength in SSL",
+      "decision": "unresolved_native_review",
+      "reason": "Builtin CRL/OCSP verification uses relevant native cert paths. Need exact backport/equivalence proof before native admission.",
+      "fixes": [
+        {
+          "commit": "e9a94ebd9a0485d5a3adaa2b3546acd19b2fb67f",
+          "url": "https://github.com/chromium/chromium/commit/e9a94ebd9a0485d5a3adaa2b3546acd19b2fb67f",
+          "message": "Pass delegate to CheckCRL and CheckOCSP"
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "553260839",
+      "severity": "Low",
+      "cve": "CVE-2026-121236",
+      "description": "Improper input validation in Network",
+      "decision": "not_selected",
+      "reason": "NetworkService CORS/Intervention preflight and Blink document.write code; no browser CORS security boundary.",
+      "fixes": [
+        {
+          "commit": "9eddf1b4fb592d1334d4f372e9a422738efca0fb",
+          "url": "https://github.com/chromium/chromium/commit/9eddf1b4fb592d1334d4f372e9a422738efca0fb",
+          "message": "CORS: Disallow 'Intervention' in CORS safelist"
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "565797214",
+      "severity": "Low",
+      "cve": "CVE-2026-121073",
+      "description": "Use after free in Network",
+      "decision": "unresolved_native_source_gap",
+      "reason": "Native proxy ConnectJob/SPDY teardown reentrancy fix b15c96... is later than154 base; exact fix required before admission.",
+      "fixes": [
+        {
+          "commit": "b15c96ac1c766edbd1600caaaf022603b7db7e22",
+          "url": "https://github.com/chromium/chromium/commit/b15c96ac1c766edbd1600caaaf022603b7db7e22",
+          "message": "Handle reentrancy during ConnectJob teardown and SPDY window updates"
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03T12:38:18.791-08:00",
+      "url": "https://chromereleases.googleblog.com/2026/11/stable-channel-update-for-desktop.html",
+      "bug": "567956457",
+      "severity": "Low",
+      "cve": "CVE-2026-121142",
+      "description": "Incorrect authorization in Network",
+      "decision": "not_selected",
+      "reason": "NetworkService Sec-Fetch-Site header for extensions/redirects; no extensions renderer or NetworkService fetch flow.",
+      "fixes": [
+        {
+          "commit": "3bdce55426e6f5e70ddf844670dcb965ac5cc0f5",
+          "url": "https://github.com/chromium/chromium/commit/3bdce55426e6f5e70ddf844670dcb965ac5cc0f5",
+          "message": "Consider whole redirect chain for non-webby Sec-Fetch-Site value"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-29T14:26:20.252-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02107719452.html",
+      "bug": "572055997",
+      "severity": "High",
+      "cve": "CVE-2026-76029",
+      "description": "Improper input validation in Network",
+      "decision": "disabled_by_entrypoint",
+      "reason": "Both Naive URLRequestContext builders explicitly DisableHttpCache(); issue is cached overlong Content-Range response.",
+      "fixes": [
+        {
+          "commit": "baeba815b067b34e56da00977450e5da55a99268",
+          "url": "https://github.com/chromium/chromium/commit/baeba815b067b34e56da00977450e5da55a99268",
+          "message": "HttpCache::Transaction reject overlong range responses"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "557075191",
+      "severity": "High",
+      "cve": "CVE-2026-113119",
+      "description": "Improper certificate validation in Network",
+      "decision": "unresolved_conditional_auth",
+      "reason": "Fix concerns NTLM/Negotiate certificate-bound auth tokens. Harness supplies Basic for one owned proxy, but native auth-scheme restriction not proven; require backport or exact disabling proof.",
+      "fixes": [
+        {
+          "commit": "6bc3005112c94fda252f66b1ebd7b520195b3de3",
+          "url": "https://github.com/chromium/chromium/commit/6bc3005112c94fda252f66b1ebd7b520195b3de3",
+          "message": "[net] Validate server certificate before generating auth token"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "568906040",
+      "severity": "High",
+      "cve": "CVE-2026-113040",
+      "description": "Use after free in Proxy",
+      "decision": "disabled_by_entrypoint",
+      "reason": "PAC script termination reentrancy; Naive uses ConfiguredProxyResolutionService::CreateWithoutProxyResolver with ProxyConfigServiceFixed.",
+      "fixes": [
+        {
+          "commit": "2ed13d0826b0941eb5fdf6b469cb172b9b8dd2af",
+          "url": "https://github.com/chromium/chromium/commit/2ed13d0826b0941eb5fdf6b469cb172b9b8dd2af",
+          "message": "[Net][CPRS] Improve lifetime management in CPRRequest"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "554556700",
+      "severity": "Medium",
+      "cve": "CVE-2026-113228",
+      "description": "Incorrect authorization in Network",
+      "decision": "not_selected",
+      "reason": "Chrome/browser cookie policy, embedded host permission, NetworkService cookie manager; absent subset.",
+      "fixes": [
+        {
+          "commit": "baebffbdff20a0e7f30afd7bb70a2323a625423c",
+          "url": "https://github.com/chromium/chromium/commit/baebffbdff20a0e7f30afd7bb70a2323a625423c",
+          "message": "CookieSettings: specify what embedded hosts to accept in secure_origin_cookies_allowed_origins"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "562024413",
+      "severity": "Medium",
+      "cve": "CVE-2026-113342",
+      "description": "Privilege elevation in Network",
+      "decision": "not_selected",
+      "reason": "Chrome inspect WebUI permissions and favicon handling; absent browser UI.",
+      "fixes": [
+        {
+          "commit": "e34d8eaec5fa6c2d528275d6e225a4a24ab84e88",
+          "url": "https://github.com/chromium/chromium/commit/e34d8eaec5fa6c2d528275d6e225a4a24ab84e88",
+          "message": "Drop network access permission from chrome://inspect"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "513692667",
+      "severity": "Low",
+      "cve": "CVE-2026-113167",
+      "description": "Observable discrepancy in Network",
+      "decision": "not_selected_boundary",
+      "reason": "Cross-origin browser timing via HttpStreamPool saturation; no untrusted browser origin security boundary in static tunnel process. Does not claim timing resistance.",
+      "fixes": [
+        {
+          "commit": "34f6bb989a9cbf8f7aa7aa5e6d5107b95813229b",
+          "url": "https://github.com/chromium/chromium/commit/34f6bb989a9cbf8f7aa7aa5e6d5107b95813229b",
+          "message": "HEv3: Randomize global socket limit in HttpStreamPool"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20T13:09:05.710-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_02018666648.html",
+      "bug": "524695296",
+      "severity": "Low",
+      "cve": "CVE-2026-113306",
+      "description": "Improper input validation in Network",
+      "decision": "not_selected",
+      "reason": "DevTools HAR URL handling/source map UI; no DevTools frontend.",
+      "fixes": [
+        {
+          "commit": "4ee58b9d1bad99f29957363aee530cf66d403e04",
+          "url": "https://github.com/chromium/chromium/commit/4ee58b9d1bad99f29957363aee530cf66d403e04",
+          "message": "Roll DevTools Frontend from 66303aec83e9 to 7b98aa418980 (7 revisions)"
+        },
+        {
+          "commit": "950ac058830a29daa7e0f9cff392c089fb2e15e5",
+          "url": "https://github.com/chromium/chromium/commit/950ac058830a29daa7e0f9cff392c089fb2e15e5",
+          "message": "Roll DevTools Frontend from 016e0cbcf927 to 84696f60dafe (28 revisions)"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-13T13:53:43.905-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_01668083673.html",
+      "bug": "568826881",
+      "severity": "Critical",
+      "cve": "CVE-2026-110161",
+      "description": "Use after free in Network",
+      "decision": "confirmed_native_source_gap",
+      "reason": "Critical proxied StreamSocket deferred destruction fix7dddd41a... absent: pinned transport_client_socket_pool.cc lacks QueueDestroySocket and sockets_queued_for_destruction_; Oct5 Naive crashfix edits another file.",
+      "fixes": [
+        {
+          "commit": "7dddd41a3f94cdd49beb6c8a53977d04c91368d2",
+          "url": "https://github.com/chromium/chromium/commit/7dddd41a3f94cdd49beb6c8a53977d04c91368d2",
+          "message": "net: Defer proxied StreamSocket destruction in TransportClientSocketPool"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "533426590",
+      "severity": "High",
+      "cve": "CVE-2026-106243",
+      "description": "Incomplete cleanup in Proxy Auth",
+      "decision": "disabled_by_profile",
+      "reason": "Proxy fallback credential reuse requires changing proxy within transaction; generated Naive profile has single fixed proxy chain. Multiple proxy fallback configs outside scope.",
+      "fixes": [
+        {
+          "commit": "bf2b378deb9032d52a6be2c17d7e9b2a7fb76458",
+          "url": "https://github.com/chromium/chromium/commit/bf2b378deb9032d52a6be2c17d7e9b2a7fb76458",
+          "message": "net: Rebuild proxy HttpAuthController when the proxy changes"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "533493992",
+      "severity": "High",
+      "cve": "CVE-2026-106214",
+      "description": "Information leak in Proxy",
+      "decision": "disabled_by_entrypoint",
+      "reason": "Windows PAC automatic auth retrieval; same fixed proxy resolver exclusion.",
+      "fixes": [
+        {
+          "commit": "6a2ce41c631e27dc6b9685e0d89dfbba6abbd4f4",
+          "url": "https://github.com/chromium/chromium/commit/6a2ce41c631e27dc6b9685e0d89dfbba6abbd4f4",
+          "message": "[net] Stop PAC script auto-auth fetches in ProxyResolverWinHttp"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "498737756",
+      "severity": "Medium",
+      "cve": "CVE-2026-106267",
+      "description": "Missing authorization in Network",
+      "decision": "not_selected",
+      "reason": "Browser recursive prefetch tokens and renderer partitions; no browser/content loader.",
+      "fixes": [
+        {
+          "commit": "3ea5ba00721b6ba23b76ad63ff679de648284df3",
+          "url": "https://github.com/chromium/chromium/commit/3ea5ba00721b6ba23b76ad63ff679de648284df3",
+          "message": "Prefetch: Tighten recursive prefetch token checks and LRU-bound cache"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "537832408",
+      "severity": "Medium",
+      "cve": "CVE-2026-106307",
+      "description": "Incorrect authorization in Network",
+      "decision": "not_selected",
+      "reason": "Browser NavigationURLLoader early hints for blob URLs; no document navigation.",
+      "fixes": [
+        {
+          "commit": "e6f4a3b4803a7311519f0583cd6dec3cd26b7843",
+          "url": "https://github.com/chromium/chromium/commit/e6f4a3b4803a7311519f0583cd6dec3cd26b7843",
+          "message": "Validate scheme before processing Early Hints in NavigationURLLoader"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "553283471",
+      "severity": "Low",
+      "cve": "CVE-2026-106418",
+      "description": "Missing authorization in Network",
+      "decision": "not_selected",
+      "reason": "Browser client hints storage after TLS interstitial bypass; no browser page storage or interstitial UI.",
+      "fixes": [
+        {
+          "commit": "e415ddae9e64dcd0fec6fb0fa645d5beca0fbded",
+          "url": "https://github.com/chromium/chromium/commit/e415ddae9e64dcd0fec6fb0fa645d5beca0fbded",
+          "message": "[TLS Cert] Allow updates when user bypasses error notice"
+        }
+      ]
+    },
+    {
+      "date": "2026-10-06T10:17:52.425-07:00",
+      "url": "https://chromereleases.googleblog.com/2026/10/stable-channel-update-for-desktop_086471744.html",
+      "bug": "564085088",
+      "severity": "Low",
+      "cve": "CVE-2026-106234",
+      "description": "Use after free in Network",
+      "decision": "not_selected",
+      "reason": "NetworkService CookieSettings lifetime and trust tokens; no cookie manager service.",
+      "fixes": [
+        {
+          "commit": "cb7afd9a9776ac9e363be4f36540895d5e5d7764",
+          "url": "https://github.com/chromium/chromium/commit/cb7afd9a9776ac9e363be4f36540895d5e5d7764",
+          "message": "Make CreateDeleteCookieOnExitPredicate self-contained"
+        }
+      ]
+    }
+  ],
+  "other_components": [
+    {
+      "id": "CVE-2026-111497",
+      "component": "google/brotli",
+      "decision": "fix_proven",
+      "reason": "Pinned cfa184... is ahead5/behind0 of official main fix0ed4268...; exact decoder branches confirmed.",
+      "evidence": "naive-brotli-main-security-compare.json"
+    },
+    {
+      "component": "eMudhraintermediates",
+      "decision": "blocked_in_latest_release",
+      "evidence": "official v154.0.8037.49-5 release Oct22"
+    },
+    {
+      "component": "BoringSSLnativegraph",
+      "decision": "not_admitted",
+      "reason": "Exact revision recorded; a complete native transitive/CVE audit is not established."
+    }
+  ]
+}

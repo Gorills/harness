@@ -203,15 +203,6 @@ def task_set_state(
     try:
         current = _task_in_workspace(connection, workspace_id, task_id)
         _require_expected_revision(current, expected_revision)
-        if state is TaskState.WORKING:
-            existing = connection.execute(
-                "SELECT id FROM tasks WHERE workspace_id = ? AND state = 'working' AND id <> ?",
-                (workspace_id, task_id),
-            ).fetchone()
-            if existing is not None:
-                from harness.tasks import TaskConflictError
-
-                raise TaskConflictError("workspace already has a working task")
         connection.execute(
             "UPDATE tasks SET state = ?, wait_reason = ?, revision = revision + 1, "
             "updated_at = ? WHERE id = ? AND revision = ?",

@@ -31,7 +31,7 @@ def test_schema_v10_operator_event_constraints(tmp_path: Path) -> None:
     connection = sqlite3.connect(database)
     connection.execute("PRAGMA foreign_keys = ON")
     try:
-        assert SCHEMA_VERSION == 24
+        assert SCHEMA_VERSION == 25
         _seed_task(connection)
         connection.execute(
             """

@@ -871,6 +871,30 @@ def test_initialize_database_migrates_existing_version_five_checkpoint_foundatio
         connection.execute("DROP TABLE task_git_origins")
         connection.execute("ALTER TABLE tasks DROP COLUMN deploy_test")
         connection.execute("ALTER TABLE tasks DROP COLUMN deploy_prod")
+        connection.execute("DROP TRIGGER server_events_no_update")
+        connection.execute("DROP TRIGGER server_events_no_delete")
+        connection.execute("DROP TABLE server_events")
+        connection.execute("DROP TABLE server_projects")
+        connection.execute("DROP TABLE server_imported_sites")
+        connection.execute("DROP TABLE server_imported_profiles")
+        for table in (
+            "server_map_batches",
+            "server_map_checks",
+            "server_map_links",
+            "server_map_objects",
+            "server_legacy_snapshots",
+        ):
+            connection.execute("DROP TABLE " + table)
+        connection.execute("DROP TABLE servers")
+        for table in (
+            "tunnel_machine",
+            "tunnel_metrics",
+            "tunnel_events",
+            "tunnel_operations",
+            "tunnel_runtime",
+            "tunnel_profiles",
+        ):
+            connection.execute("DROP TABLE " + table)
         connection.execute("DELETE FROM schema_migrations WHERE version >= 6")
         connection.commit()
     finally:
@@ -982,7 +1006,7 @@ def test_v24_migration_drops_project_search_projections_and_preserves_durable_st
         connection.close()
 
     status = initialize_database(database)
-    assert status.schema_version == 24
+    assert status.schema_version == SCHEMA_VERSION
 
     connection = connect_database(database)
     try:

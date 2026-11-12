@@ -1,0 +1,1 @@
+package com.harness.tunnel; final class ProfileStore {ProfileStore(Object c){} Profile load(){return new Profile();} java.util.Set<String> installedSelection(){return java.util.Collections.singleton("app");}}

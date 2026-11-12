@@ -17,7 +17,7 @@ from mcp.client.stdio import stdio_client
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_VERSION = "0.1.0.dev0"
-DECLARED_RUNTIME_REQUIREMENTS = ("ast-grep-py==0.45.1", "mcp==2.0.0")
+DECLARED_RUNTIME_REQUIREMENTS = ("ast-grep-py==0.45.1", "mcp==2.2.0")
 
 
 def _run(

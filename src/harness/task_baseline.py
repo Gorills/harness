@@ -525,7 +525,10 @@ def _dirty_path_state(
     )
     path = workspace_root / relative_path
     try:
-        parent = path.parent.resolve(strict=True)
+        # Git still reports deleted children after their whole directory is removed.
+        # Resolve existing symlinks without requiring deleted ancestors to exist;
+        # lstat below remains authoritative for absence and other filesystem errors.
+        parent = path.parent.resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise TaskBaselineChangedError(
             f"dirty path parent cannot be resolved safely: {relative_path}"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
@@ -22,7 +23,13 @@ from harness.mcp_http_server import (
     MCP_HTTP_AUTHORIZATION_HEADER,
     MCP_HTTP_WORKSPACE_ROOT_HEADER,
 )
-from harness.runtime_paths import MCP_HTTP_ISOLATED_PORT, RuntimePaths, default_runtime_paths
+from harness.runtime_paths import (
+    RuntimePaths,
+    default_runtime_paths,
+    mcp_http_listen_port,
+)
+from harness.storage import connect_database
+from harness.task_checkpoints import list_task_checkpoints
 from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX daemon HTTP MCP slice")
@@ -51,6 +58,7 @@ def _start_daemon(database: Path, socket_path: Path) -> tuple[ThreadPoolExecutor
 async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_harness_http_ports: None,
 ) -> None:
     state = tmp_path / "state"
     runtime = tmp_path / "runtime"
@@ -64,7 +72,7 @@ async def test_daemon_http_mcp_requires_capability_and_explicit_workspace(
         scan = request_workspace_init(paths.socket, root)
         token = read_dashboard_access_token(paths.database)
         assert token is not None
-        url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
+        url = f"http://127.0.0.1:{mcp_http_listen_port(paths.socket)}/mcp"
 
         async with httpx2.AsyncClient() as raw:
             unauthorized = await raw.post(url, content=b"{}")
@@ -143,9 +151,94 @@ def _isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Runtim
 
 
 @pytest.mark.anyio
+async def test_http_mcp_checkpoint_survives_deleted_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_harness_http_ports: None,
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    paths = default_runtime_paths()
+    root = _repository(tmp_path / "repo")
+    directory = root / "admin" / "scripts"
+    directory.mkdir(parents=True)
+    (directory / "icons.py").write_text("icons = True\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "admin"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Harness Test",
+            "-c",
+            "user.email=h@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-qm",
+            "add admin scripts",
+        ],
+        check=True,
+    )
+    executor, future = _start_daemon(paths.database, paths.socket)
+    try:
+        request_workspace_init(paths.socket, root)
+        token = read_dashboard_access_token(paths.database)
+        assert token is not None
+        headers = {
+            MCP_HTTP_AUTHORIZATION_HEADER: f"Bearer {token}",
+            MCP_HTTP_WORKSPACE_ROOT_HEADER: str(root),
+        }
+        port = os.environ["HARNESS_ACCEPTANCE_MCP_HTTP_PORT"]
+        async with create_mcp_http_client(headers=headers) as http_client:
+            transport = streamable_http_client(
+                f"http://127.0.0.1:{port}/mcp", http_client=http_client
+            )
+            async with Client(transport, mode="legacy") as client:
+                started = await client.call_tool("task_start", {"title": "Delete admin"})
+                assert not started.is_error
+                assert started.structured_content is not None
+                task_id = started.structured_content["task_id"]
+                shutil.rmtree(root / "admin")
+                result = await client.call_tool(
+                    "task_checkpoint",
+                    {
+                        "task_id": task_id,
+                        "expected_revision": started.structured_content["revision"],
+                        "state": "waiting",
+                        "wait_reason": "operator_review",
+                        "summary": "Deleted directory",
+                        "next_step": "Review deletion",
+                    },
+                )
+                assert not result.is_error
+                assert result.structured_content is not None
+                assert result.structured_content["revision"] == 2
+                assert result.structured_content["state"] == "waiting"
+                status = await client.call_tool("project_status", {})
+                assert not status.is_error
+                assert status.structured_content is not None
+                assert status.structured_content["last_checkpoint"]["task_revision"] == 2
+    finally:
+        request_shutdown(paths.socket)
+        await anyio.to_thread.run_sync(future.result, 10)
+        executor.shutdown()
+
+    connection = connect_database(paths.database)
+    try:
+        checkpoints = list_task_checkpoints(connection, task_id)
+        assert len(checkpoints) == 1
+        assert checkpoints[0].changed_paths == ("admin/scripts/icons.py",)
+    finally:
+        connection.close()
+
+
+@pytest.mark.anyio
 async def test_daemon_http_mcp_rejects_invalid_capability_and_unknown_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_harness_http_ports: None,
 ) -> None:
     paths = _isolated_runtime(tmp_path, monkeypatch)
     root = _repository(tmp_path / "repo")
@@ -155,7 +248,7 @@ async def test_daemon_http_mcp_rejects_invalid_capability_and_unknown_workspace(
         request_workspace_init(paths.socket, root)
         token = read_dashboard_access_token(paths.database)
         assert token is not None
-        url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
+        url = f"http://127.0.0.1:{mcp_http_listen_port(paths.socket)}/mcp"
 
         async with httpx2.AsyncClient() as raw:
             wrong = await raw.post(
@@ -184,11 +277,12 @@ async def test_daemon_http_mcp_rejects_invalid_capability_and_unknown_workspace(
 async def test_daemon_http_mcp_is_unreachable_after_shutdown(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_harness_http_ports: None,
 ) -> None:
     paths = _isolated_runtime(tmp_path, monkeypatch)
     root = _repository(tmp_path / "repo")
     executor, future = _start_daemon(paths.database, paths.socket)
-    url = f"http://127.0.0.1:{MCP_HTTP_ISOLATED_PORT}/mcp"
+    url = f"http://127.0.0.1:{mcp_http_listen_port(paths.socket)}/mcp"
     try:
         request_workspace_init(paths.socket, root)
         async with httpx2.AsyncClient() as raw:

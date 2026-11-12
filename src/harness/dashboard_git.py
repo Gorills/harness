@@ -6,7 +6,79 @@ from hashlib import sha256
 from html import escape as _escape
 from urllib.parse import urlencode
 
-from harness.git_operations import FILE_LIMIT, GitSnapshot
+from harness.git_operations import FILE_LIMIT, GitOperationResult, GitSnapshot
+
+
+def render_transport(
+    state: GitSnapshot, post_url: str, draft_value: str = "", draft_remote: str = ""
+) -> str:
+    if not state.remotes:
+        return '<section class="git-sync"><h2>Синхронизация</h2><p>Удалённый репозиторий не настроен. Добавьте remote через Git в терминале, затем обновите страницу.</p></section>'
+    default = (
+        draft_remote
+        if draft_remote in state.remotes
+        else state.upstream_remote
+        if state.upstream_remote in state.remotes
+        else "origin"
+        if "origin" in state.remotes
+        else state.remotes[0]
+    )
+
+    def options() -> str:
+        return "".join(
+            f'<option value="{escape(remote, quote=True)}"{" selected" if remote == default else ""}>{escape(remote)}</option>'
+            for remote in state.remotes
+            if _browser_name(remote)
+        )
+
+    unavailable = state.branch is None or state.head is None or bool(state.operation)
+    tracking = state.upstream_remote in state.remotes and bool(state.upstream_branch)
+    disabled = " disabled" if unavailable else ""
+    linked = (
+        f"{state.upstream_remote}/{state.upstream_branch}"
+        if tracking
+        else "Ветка ещё не связана с удалённой"
+    )
+    counts = (
+        f" · Получить {state.behind} · Отправить {state.ahead}" if state.ahead is not None else ""
+    )
+    forms = (
+        f'<form method="post" action="{escape(post_url, quote=True)}">'
+        + git_fields(state, "git_fetch")
+        + '<label for="git-fetch-remote">Репозиторий</label>'
+        + f'<div class="git-sync-actions"><select id="git-fetch-remote" name="value">{options()}</select><button type="submit"{" disabled" if state.operation else ""}>Обновить ветки · Fetch</button></div></form>'
+    )
+    if tracking:
+        forms += '<div class="git-sync-actions">'
+        for action, label, blocked in (
+            ("git_pull", "Получить · Pull", unavailable or bool(state.file_count)),
+            ("git_push", "Отправить · Push", unavailable),
+        ):
+            forms += (
+                f'<form method="post" action="{escape(post_url, quote=True)}">'
+                + git_fields(state, action)
+                + f'<button type="submit"{" disabled" if blocked else ""}>{label}</button></form>'
+            )
+        forms += '</div><p class="section-note">Pull обновляет текущую ветку. Если ветки разошлись, выполните слияние. Push отправляет только коммиты текущей ветки.</p>'
+        if state.file_count:
+            forms += '<p class="section-note">Чтобы получить изменения (Pull), сначала сделайте коммит.</p>'
+    forms += (
+        f'<details class="git-publish"{" open" if not tracking or draft_value else ""}><summary>{"Изменить связь с удалённой веткой" if tracking else "Опубликовать ветку"}</summary>'
+        + f'<form method="post" action="{escape(post_url, quote=True)}">'
+        + git_fields(state, "git_publish")
+        + '<div class="git-publish-fields"><label>Репозиторий'
+        + f'<select name="remote">{options()}</select></label><label>Ветка на сервере'
+        + f'<input name="value" required maxlength="256" value="{escape(draft_value or state.branch or "", quote=True)}"></label></div>'
+        + f'<p class="git-direction">{escape(state.branch or "Нет ветки")} → выбранный репозиторий и ветка</p>'
+        + '<p class="section-note">Первый Push создаст ветку на сервере и настроит связь для следующих Pull и Push.</p>'
+        + f'<button type="submit"{disabled}>Опубликовать и связать</button></form></details>'
+    )
+    return (
+        '<section class="git-sync"><h2>Синхронизация</h2>'
+        + f'<p class="git-tracking">{escape(linked + counts)}</p>'
+        + forms
+        + "</section>"
+    )
 
 
 def escape(value: str, quote: bool = True) -> str:
@@ -43,6 +115,8 @@ def render_git_panel(
     error: str | None = None,
     draft_action: str = "",
     draft_value: str = "",
+    result: GitOperationResult | None = None,
+    draft_remote: str = "",
 ) -> str:
     branch = state.branch or "Отдельный коммит (detached HEAD)"
     post_url = url + (
@@ -161,6 +235,16 @@ def render_git_panel(
         + '<section class="git-status-bar"><div><span>Текущая ветка</span>'
         + f'<strong class="mono">{escape(branch)}</strong><small>{escape((state.head or "Нет коммитов")[:12])}</small></div>'
         + f"<p>{state.file_count} изменённых файлов · {state.staged_count} подготовлено</p></section>"
+        + render_transport(
+            state, post_url, draft_value if draft_action == "git_publish" else "", draft_remote
+        )
+        + (
+            '<section class="git-console" aria-label="Вывод последней команды Git">'
+            + f"<details{' open' if not result.success or result.action in {'git_fetch', 'git_pull', 'git_push', 'git_publish', 'git_commit'} else ''}><summary>{'✓ Команда выполнена' if result.success else 'Команда остановлена'}</summary>"
+            + f'<p role="status">{escape(result.message)}</p><pre tabindex="0">{escape(result.output or "Команда Git не запускалась.")}</pre></details></section>'
+            if result is not None
+            else ""
+        )
         + (
             '<p class="git-switch-hint">Перед переключением или слиянием сделайте коммит. Новую ветку можно создать вместе с текущими изменениями.</p>'
             if blocked and not state.operation

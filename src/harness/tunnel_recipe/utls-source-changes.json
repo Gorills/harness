@@ -1,0 +1,32 @@
+[
+  {
+    "file": "conn.go",
+    "sha256": "82b3cc8dc6eae3c2b836901b38a4c9d2772f7adb2af4b600db7fb1359fb2b6ba",
+    "original_sha256": "e8027769d42706f263ef78d76ebd6e8a592299407a1f86b88b9ba5217bfe7dba"
+  },
+  {
+    "file": "handshake_client_tls13.go",
+    "sha256": "5b9f975947fe19c51fd62e7cac4ba19e0916eab5f0d4d281cf4d15cbb8eb7e16",
+    "original_sha256": "1c4585ded101f8492b0a7ec0f17b10398930648ddcae164e8c71843ef96615c2"
+  },
+  {
+    "file": "handshake_server_tls13.go",
+    "sha256": "1a991322d18d0f58bee90b0dc6e09ceb740717a4e7dcf10694964ea9d94eb0d8",
+    "original_sha256": "6281f17d6a3767c2de4a4d5efbf5bd4e0368bc8150071e13183a7c34f9aa8344"
+  },
+  {
+    "file": "harness_security_test.go",
+    "sha256": "f0b3379ba5653ae838e79dd1f89547e701ea6d8aa94bbf3dd703ad822ca06d5a",
+    "original_sha256": null
+  },
+  {
+    "file": "quic.go",
+    "sha256": "664e22e786d040c6856df470c59350e4d5e6b4d5d94c8ba14e04d228426a5be2",
+    "original_sha256": "6c296d74fe43e61e274e49da01f459e07a41a70554eb740c4551e1022a429530"
+  },
+  {
+    "file": "u_conn.go",
+    "sha256": "d19a2b19a20ae5129a71c88de70b4d02b0e124631e28ae8828a0589dd4a6e49e",
+    "original_sha256": "4a34d3717dfc4558980a7f344cb73982656ca3eba2acefb1cb35dd884a073467"
+  }
+]

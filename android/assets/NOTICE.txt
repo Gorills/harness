@@ -1,0 +1,17 @@
+Harness Tunnels Android 0.1
+
+This app contains sing-box 1.14.4-harness.2 with Harness's bounded uTLS/FakeIP
+patches, built from source commit c005f35300ce76427dc285481ec5695f5b179cd2.
+Sing-box and the adapted platform stub: GPL-3.0-or-later.
+Corresponding source and patches are in this repository's android/ directory and
+src/harness/tunnel_recipe/; the exact upstream archive, graph, and checksums are
+recorded by engine-source-build-recipe.json and build-provenance.json.
+Upstream: https://github.com/SagerNet/sing-box
+
+ZXing Core 3.5.4, Copyright ZXing authors, Apache License 2.0.
+Source: https://github.com/zxing/zxing/tree/zxing-3.5.4
+Artifact: https://repo.maven.apache.org/maven2/com/google/zxing/core/3.5.4/
+
+Go and transitive modules retain their own licenses. The exact module graph is
+listed in resolved-module-lock.json. This build includes no Cronet, NaiveProxy,
+Tailscale, WireGuard, OpenVPN, Google Play services, tracking, or remote control UI.

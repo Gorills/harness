@@ -3,7 +3,7 @@
 ## Windows native checkout
 
 On Windows, run the PowerShell-backed `scripts\dev.cmd` from Command Prompt or PowerShell.
-It bootstraps pinned uv 0.12.5 and Python 3.13 within this checkout. No Linux subsystem or
+It bootstraps pinned uv 0.13.6 and Python 3.13 within this checkout. No Linux subsystem or
 global Harness installation is needed.
 Each Windows account uses an ignored `.harness-windows-<SID>` directory, including a separate
 virtual environment. Run the wrapper as the same Windows account that will use Codex.
@@ -64,7 +64,7 @@ chmod +x scripts/dev
 scripts/dev sync
 ```
 
-`scripts/dev` requires `uv 0.12.5`. If that version is not on `PATH`, the wrapper bootstraps it into `.harness/tools/` (needs `curl`). Override the executable with `HARNESS_DEV_UV` when you already have 0.12.5 somewhere else.
+`scripts/dev` requires `uv 0.13.6`. If that version is not on `PATH`, the wrapper bootstraps it into `.harness/tools/` (needs `curl`). Override the executable with `HARNESS_DEV_UV` when you already have 0.13.6 somewhere else.
 
 This installs Python 3.13 if needed and runs `uv sync --locked --all-groups`.
 
@@ -136,13 +136,13 @@ scripts/dev stop
 
 ## 4. Quality gate
 
-`scripts/dev quality` puts the resolved `uv 0.12.5` first on `PATH` so the quality gate's `uv lock --check` does not pick up an older system `uv`.
+`scripts/dev quality` puts the resolved `uv 0.13.6` first on `PATH` so the quality gate's `uv lock --check` does not pick up an older system `uv`.
 
 ```bash
 scripts/dev quality
 ```
 
-Equivalent after sourcing the isolation environment, once `uv 0.12.5` and the project
+Equivalent after sourcing the isolation environment, once `uv 0.13.6` and the project
 environment exist:
 
 ```bash
@@ -217,6 +217,11 @@ machine acceptance for the exact installed wheel.
 
 ## 7. Machine acceptance and user-global activation
 
+The current security baseline is uv 0.13.6, MCP SDK 2.2.0 and Python 3.13.18 or later in
+the 3.13 series. The wrappers install Python 3.13.18 explicitly so an existing older managed
+interpreter cannot silently satisfy the global installation. The uv build backend remains
+separately pinned at 0.12.5; it is not the network-enabled uv installer.
+
 Isolated `scripts/dev harness install` is refused on purpose. Synthetic machine acceptance is a
 separate, explicitly authorized lane:
 
@@ -244,7 +249,7 @@ make install-global HOST=cursor,codex
 make doctor-global
 ```
 
-`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, clears Python import overrides, host/workspace hints and acceptance listener overrides, then reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.12.5 (the package version stays `0.1.0.dev0`, so `--reinstall` is required). It then runs that tool-installed `harness install` once for Cursor and once for Codex by default. This differs from bare `harness install`, whose default is Cursor only. `HOST=cursor`, `HOST=codex` and
+`make install-global` is `scripts/install-global`: it unsets `HARNESS_DEV_ROOT`, restores pre-overlay `XDG_STATE_HOME` / `XDG_RUNTIME_DIR` from `HARNESS_DEV_SAVED_XDG_STATE_HOME` and `HARNESS_DEV_SAVED_XDG_RUNTIME_DIR` (saved by `scripts/dev-env.sh` so the user-global daemon stays on `/run/user/<uid>` rather than falling back to `/tmp`), drops checkout `.venv/bin` from `PATH`, clears Python import overrides, host/workspace hints and acceptance listener overrides, then reinstalls with `uv tool install --force --reinstall --python 3.13 .` using uv 0.13.6 (the package version stays `0.1.0.dev0`, so `--reinstall` is required). It then runs that tool-installed `harness install` once for Cursor and once for Codex by default. This differs from bare `harness install`, whose default is Cursor only. `HOST=cursor`, `HOST=codex` and
 `HOST=cursor,codex` select those profiles; `HOST=all` is not accepted by this Make helper. Explicitly authorized agents must always name the
 profile set. Codex reconciliation writes the daemon HTTP URL, private bearer capability, and exact
 Workspace root into the ignored project config. `scripts/install-global --package-only` is reserved for the acceptance target and never runs host lifecycle or doctor. It never uses `scripts/dev` or `.venv/bin/harness`. After MCP changes, restart the affected host.

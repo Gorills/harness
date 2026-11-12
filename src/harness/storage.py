@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from time import sleep
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 32
 _MIGRATIONS_TABLE = "schema_migrations"
 _TASK_SEARCH_V13_TRIGGERS = """
 CREATE TRIGGER task_search_task_insert
@@ -2006,6 +2006,76 @@ def _apply_migration(connection: sqlite3.Connection, target_version: int) -> Non
             DROP TABLE IF EXISTS workspace_search_index_state;
             """,
         )
+        return
+    if target_version == 25:
+        connection.execute("DROP INDEX IF EXISTS tasks_one_working_per_workspace_idx")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS tasks_active_workspace_idx ON tasks(workspace_id, state, updated_at DESC, id DESC) "
+            "WHERE state IN ('working', 'waiting')"
+        )
+        return
+    if target_version == 26:
+        _execute_sql_script_in_transaction(
+            connection,
+            """
+            CREATE TABLE servers (
+                id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)),
+                data TEXT NOT NULL CHECK(json_valid(data)),
+                source_key TEXT UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE server_projects (
+                server_id TEXT NOT NULL REFERENCES servers(id),
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                PRIMARY KEY(server_id, project_id)
+            );
+            CREATE TABLE server_events (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                server_id TEXT NOT NULL REFERENCES servers(id),
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                kind TEXT NOT NULL CHECK(kind IN ('created','updated','archived','restored','audit','operation')),
+                data TEXT NOT NULL CHECK(json_valid(data)),
+                recorded_at TEXT NOT NULL
+            );
+            CREATE INDEX server_events_server_idx ON server_events(server_id, sequence DESC);
+            CREATE TRIGGER server_events_no_update BEFORE UPDATE ON server_events
+            BEGIN SELECT RAISE(ABORT, 'server history is append-only'); END;
+            CREATE TRIGGER server_events_no_delete BEFORE DELETE ON server_events
+            BEGIN SELECT RAISE(ABORT, 'server history is append-only'); END;
+        """,
+        )
+        return
+    if target_version == 27:
+        # A version barrier prevents older full-replacement writers from erasing site context.
+        connection.execute(
+            "CREATE TABLE server_imported_sites (server_id TEXT NOT NULL REFERENCES servers(id), site_id TEXT NOT NULL, PRIMARY KEY(server_id,site_id))"
+        )
+        connection.execute(
+            "CREATE TABLE server_imported_profiles (server_id TEXT NOT NULL REFERENCES servers(id), profile_id TEXT NOT NULL, PRIMARY KEY(server_id,profile_id))"
+        )
+        return
+    if target_version == 28:
+        # Old full-card writers cannot safely edit the paged/child-CAS contract.
+        return
+    if target_version == 29:
+        # Older validators/full-card writers cannot preserve passport or fact categories.
+        # A compatibility barrier only: existing cards and events are not rewritten.
+        return
+    if target_version == 30:
+        from harness.server_map import migrate_map
+
+        migrate_map(connection)
+        return
+    if target_version == 31:
+        # New typed observations must survive older full-object writers. No data rewrite.
+        return
+    if target_version == 32:
+        from harness.tunnels import migrate
+
+        migrate(connection)
         return
     raise InvalidSchemaStateError(f"no migration registered for schema {target_version}")
 

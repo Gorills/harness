@@ -76,7 +76,7 @@ TASK_START_STRUCTURED_KEYS = frozenset(
     {"workspace_id", "task_id", "state", "wait_reason", "revision"}
 )
 EXPECTED_TOOL_INPUT_PROPERTIES = {
-    "project_status": frozenset(),
+    "project_status": frozenset({"task_id"}),
     "project_context": frozenset({"refs"}),
     "project_recall": frozenset({"query", "kind", "limit"}),
     "task_start": frozenset({"title", "stack_hints", "task_id", "expected_revision"}),
@@ -857,6 +857,67 @@ async def _verify_mcp_wire_async(
                 raise CodexAcceptanceError(
                     "installed MCP task_start returned invalid Task identity"
                 )
+            async with Client(
+                streamable_http_client(url, http_client=http_client), mode="legacy"
+            ) as peer:
+                parallel = _structured_result(
+                    "task_start",
+                    await peer.call_tool(
+                        "task_start", {"title": "Независимая параллельная проверка"}
+                    ),
+                )
+                parallel_id = parallel.get("task_id")
+                if (
+                    not isinstance(parallel_id, str)
+                    or parallel_id == task_id
+                    or parallel.get("revision") != 1
+                ):
+                    raise CodexAcceptanceError(
+                        "installed MCP did not create an independent parallel Task"
+                    )
+                shared_status = _structured_result(
+                    "project_status", await peer.call_tool("project_status")
+                )
+                if (
+                    shared_status.get("current_task") is not None
+                    or shared_status.get("last_checkpoint") is not None
+                    or shared_status.get("active_task_count") != 2
+                ):
+                    raise CodexAcceptanceError("installed MCP selected an arbitrary parallel Task")
+                selected = _structured_result(
+                    "project_status",
+                    await peer.call_tool("project_status", {"task_id": parallel_id}),
+                )
+                selected_task = selected.get("current_task")
+                if (
+                    not isinstance(selected_task, dict)
+                    or selected_task.get("task_id") != parallel_id
+                ):
+                    raise CodexAcceptanceError(
+                        "installed MCP could not select the peer Task explicitly"
+                    )
+                _structured_result(
+                    "task_checkpoint",
+                    await peer.call_tool(
+                        "task_checkpoint",
+                        {
+                            "task_id": parallel_id,
+                            "expected_revision": 1,
+                            "state": "waiting",
+                            "wait_reason": "operator_review",
+                            "summary": "Параллельная Task проверена отдельно",
+                            "next_step": "Оператор принимает результаты проверки",
+                        },
+                    ),
+                )
+                own_status = _structured_result(
+                    "project_status", await client.call_tool("project_status", {"task_id": task_id})
+                )
+                own_task = own_status.get("current_task")
+                if not isinstance(own_task, dict) or own_task.get("revision") != revision:
+                    raise CodexAcceptanceError(
+                        "installed peer Task changed the original Task revision"
+                    )
             recalled = _structured_result(
                 "project_recall",
                 await client.call_tool(

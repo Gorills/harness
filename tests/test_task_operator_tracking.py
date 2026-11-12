@@ -28,7 +28,6 @@ from harness.task_workflow import (
     task_start,
 )
 from harness.tasks import (
-    TaskConflictError,
     TaskOperatorStatus,
     TaskRevisionConflictError,
     TaskState,
@@ -224,7 +223,7 @@ def test_operator_tracking_reopen_and_task_search_are_one_cas_history(tmp_path: 
         connection.close()
 
 
-def test_reopen_obeys_one_working_task_and_metadata_validation(tmp_path: Path) -> None:
+def test_reopen_allows_parallel_work_and_preserves_metadata_validation(tmp_path: Path) -> None:
     _database_path, connection, workspace_id = _database(tmp_path)
     try:
         first = task_start(connection, workspace_id, "Первая задача")
@@ -236,14 +235,14 @@ def test_reopen_obeys_one_working_task_and_metadata_validation(tmp_path: Path) -
         ).task
         second = task_start(connection, workspace_id, "Вторая задача")
 
-        with pytest.raises(TaskConflictError):
-            task_reopen(
-                connection,
-                workspace_id,
-                completed.task_id,
-                expected_revision=completed.revision,
-            )
-        assert get_task(connection, completed.task_id) == completed
+        reopened = task_reopen(
+            connection,
+            workspace_id,
+            completed.task_id,
+            expected_revision=completed.revision,
+        )
+        assert reopened.task.state is TaskState.WORKING
+        assert reopened.task.revision == completed.revision + 1
         assert get_task(connection, second.task_id).state is TaskState.WORKING
 
         with pytest.raises(TaskValidationError):

@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "bundles": {
+    "linux-amd64": {
+      "schema": 1,
+      "version": "1.14.4-harness.2",
+      "platform": "linux",
+      "audit": {
+        "status": "approved",
+        "checked_at": "2026-11-09",
+        "evidence": "docs/decisions/0082-adaptive-machine-tunnels.md",
+        "reviewer": "scoped dependency audit and FakeIP durability correctness review"
+      },
+      "components": {
+        "sing-box": {
+          "method": "source-build",
+          "target_os": "linux",
+          "recipe_sha256": "ce39e010371f9cad21e6fc19757fb3f1355316dac2c46aff719877205414983b",
+          "file": "sing-box",
+          "sha256": "38409dae02011960174bfb72674a23e123f016fe79685caae2f2066c6596595d",
+          "version": "1.14.4-harness.2",
+          "source": "https://github.com/SagerNet/sing-box/tree/c005f35300ce76427dc285481ec5695f5b179cd2",
+          "audit_status": "approved"
+        }
+      },
+      "system_packages": {}
+    },
+    "win32-amd64": {
+      "schema": 1,
+      "version": "1.14.4-harness.2",
+      "platform": "win32",
+      "audit": {
+        "status": "approved",
+        "checked_at": "2026-11-09",
+        "evidence": "docs/decisions/0082-adaptive-machine-tunnels.md",
+        "reviewer": "scoped dependency audit and FakeIP durability correctness review"
+      },
+      "components": {
+        "sing-box": {
+          "method": "source-build",
+          "target_os": "windows",
+          "recipe_sha256": "ce39e010371f9cad21e6fc19757fb3f1355316dac2c46aff719877205414983b",
+          "file": "sing-box.exe",
+          "sha256": "88b88aab0cbc5c6ee6a7e2ae3112f64b889e6598bb326a577096794253cf3f89",
+          "version": "1.14.4-harness.2",
+          "source": "https://github.com/SagerNet/sing-box/tree/c005f35300ce76427dc285481ec5695f5b179cd2",
+          "audit_status": "approved"
+        },
+        "server-engine": {
+          "method": "source-build",
+          "target_os": "linux",
+          "recipe_sha256": "ce39e010371f9cad21e6fc19757fb3f1355316dac2c46aff719877205414983b",
+          "file": "server-sing-box",
+          "sha256": "38409dae02011960174bfb72674a23e123f016fe79685caae2f2066c6596595d",
+          "version": "1.14.4-harness.2",
+          "source": "https://github.com/SagerNet/sing-box/tree/c005f35300ce76427dc285481ec5695f5b179cd2",
+          "audit_status": "approved"
+        }
+      },
+      "system_packages": {}
+    }
+  },
+  "excluded": {
+    "naive": "CVE-2026-110161 unresolved in native candidate; separate admission required",
+    "acme": "not included in audited core build"
+  }
+}

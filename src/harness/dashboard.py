@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -13,7 +14,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import SimpleQueue
-from threading import BoundedSemaphore, Event, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from time import monotonic, sleep
 from typing import ClassVar, cast
 from urllib.parse import parse_qs, quote, unquote_to_bytes, urlencode, urlsplit
@@ -72,6 +73,8 @@ from harness.dashboard_i18n import (
     LIVE_MANUAL,
     LIVE_REFRESH,
     METRIC_REVIEW,
+    MULTIPLE_TASKS_HINT,
+    MULTIPLE_TASKS_TITLE,
     NAVIGATION,
     NAVIGATION_UNAVAILABLE,
     NEXT,
@@ -103,10 +106,12 @@ from harness.dashboard_i18n import (
     VISIBILITY,
     VISIBILITY_HINT_HIDDEN,
     VISIBILITY_HINT_NORMAL,
+    VISIBILITY_REQUIRES_GIT,
     VISIBILITY_SET_HIDDEN,
     VISIBILITY_SET_NORMAL,
     WAIT_REASON,
     WORKSPACE,
+    WORKSPACE_DELTA_HINT,
     WORKSPACE_FALLBACK,
     WORKSPACE_RELOCATION_HINT,
     WORKSPACE_RELOCATION_LABEL,
@@ -129,12 +134,19 @@ from harness.dashboard_i18n import (
     wait_reason_label,
     workspace_count_label,
 )
+from harness.dashboard_servers import (
+    mutate_servers_page,
+    parse_server_route,
+    render_servers_content,
+)
 from harness.dashboard_skill_view import render_skill_policy
 from harness.dashboard_skills import DashboardSkillsSnapshot, read_dashboard_skills
+from harness.dashboard_tunnels import TUNNELS_CSS, TUNNELS_HTML, TUNNELS_JS
 from harness.git_applicability import WorkspaceApplicability
 from harness.git_operations import (
     GitOperationError,
     GitOperationRequest,
+    GitOperationResult,
     read_git_snapshot,
     run_git_operation,
 )
@@ -160,11 +172,13 @@ from harness.registry import (
     get_workspace,
     list_workspaces,
     relocate_workspace,
+    workspace_has_git,
     workspace_layout_compatible,
 )
 from harness.retrieval import ProjectSearchHit, search_tasks
 from harness.runtime_paths import DASHBOARD_HOST
 from harness.search import SearchError
+from harness.servers import ServerConflictError, ServerError, safe_text
 from harness.skill_policy import (
     MANAGED_PROJECT_SKILL_FACETS,
     ProjectSkillFacetMode,
@@ -220,10 +234,22 @@ from harness.tasks import (
     get_relevant_task,
     get_task,
     get_task_stack_hints,
+    list_active_tasks,
+)
+from harness.tunnel_control import TunnelController
+from harness.tunnels import (
+    TunnelConflict,
+    TunnelError,
+    delete_profile,
+    identity,
+    save_profile,
+)
+from harness.tunnels import (
+    revision as tunnel_revision,
 )
 from harness.vault_process import VaultProcess
 from harness.verification import VerificationError, VerificationRecord, list_checkpoint_verification
-from harness.visibility import set_project_visibility
+from harness.visibility import HiddenRequiresGitError, set_project_visibility
 
 _DASHBOARD_URL_FILENAME = "dashboard.url"
 _DASHBOARD_TOKEN_FILENAME = "dashboard.token"
@@ -321,6 +347,8 @@ class DashboardWorkspaceRow:
     active_task_count: int = 0
     review_task_count: int = 0
     archived_task_count: int = 0
+    waiting_task_count: int = 0
+    task_selection_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,6 +539,7 @@ def _task_scope_condition(scope: str) -> str:
         "all": "1 = 1",
         "active": "tasks.state = 'working'",
         "review": "tasks.state = 'waiting' AND tasks.wait_reason = 'operator_review'",
+        "waiting": "tasks.state = 'waiting' AND tasks.wait_reason IN ('operator_input', 'external')",
         "archive": "tasks.state IN ('completed', 'cancelled')",
     }
     if scope not in conditions:
@@ -944,7 +973,13 @@ def _read_workspace_row_persisted(
         if tasks_available
         else None
     )
-    if task is None and tasks_available:
+    selection_required = (
+        task is None
+        and tasks_available
+        and list_active_tasks(connection, workspace.workspace_id, applicability=applicability)[1]
+        > 0
+    )
+    if task is None and tasks_available and not selection_required:
         task = get_latest_task(connection, workspace.workspace_id, applicability=applicability)
     checkpoint = (
         get_latest_task_checkpoint_status(connection, task.task_id) if task is not None else None
@@ -959,13 +994,14 @@ def _read_workspace_row_persisted(
         """
         SELECT COALESCE(SUM(state = 'working'), 0),
                COALESCE(SUM(state = 'waiting' AND wait_reason = 'operator_review'), 0),
-               COALESCE(SUM(state IN ('completed', 'cancelled')), 0)
+               COALESCE(SUM(state IN ('completed', 'cancelled')), 0),
+               COALESCE(SUM(state = 'waiting' AND wait_reason IN ('operator_input', 'external')), 0)
         FROM tasks WHERE workspace_id = ?
         """,
         (workspace.workspace_id,),
     ).fetchone()
     if not tasks_available:
-        counts = (0, 0, 0)
+        counts = (0, 0, 0, 0)
     if counts is None or any(
         isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
     ):
@@ -999,8 +1035,10 @@ def _read_workspace_row_persisted(
         indexed_file_count=_indexed_file_count(connection, workspace.workspace_id),
         live_error=None,
         active_task_count=counts[0],
+        task_selection_required=selection_required,
         review_task_count=counts[1],
         archived_task_count=counts[2],
+        waiting_task_count=counts[3],
     )
 
 
@@ -1381,13 +1419,26 @@ def _parse_dashboard_action_form(
             "git_commit",
             "git_merge",
             "git_abort_merge",
+            "git_fetch",
+            "git_pull",
+            "git_push",
+            "git_publish",
         }
         expected = {"action", "workspace_id", "expected_token"}
-        if action not in {"git_abort_merge", "git_stage_all", "git_unstage_all"}:
+        if action not in {
+            "git_abort_merge",
+            "git_stage_all",
+            "git_unstage_all",
+            "git_pull",
+            "git_push",
+        }:
             expected.add("value")
+        if action == "git_publish":
+            expected.add("remote")
         workspace_id = fields.get("workspace_id", "")
         token = fields.get("expected_token", "")
         value = fields.get("value", "")
+        remote = fields.get("remote", "")
         if (
             action not in actions
             or set(fields) != expected
@@ -1398,9 +1449,11 @@ def _parse_dashboard_action_form(
             or any(c not in "0123456789abcdef" for c in token)
             or "\x00" in value
             or len(value.encode("utf-8")) > 4096
+            or "\x00" in remote
+            or len(remote.encode("utf-8")) > 256
         ):
             raise TaskValidationError("dashboard Git form does not match the expected schema")
-        return GitOperationRequest(action, workspace_id, token, value)
+        return GitOperationRequest(action, workspace_id, token, value, remote)
     if action == "delete_project":
         expected = {"action", "project_id", "confirmation"}
         if set(fields) != expected:
@@ -1630,6 +1683,7 @@ def _render_visibility_form(
     visibility_mode: VisibilityMode | str,
     *,
     action: str,
+    hidden_available: bool,
     compact: bool = False,
 ) -> str:
     mode = (
@@ -1648,6 +1702,11 @@ def _render_visibility_form(
     hint_html = ""
     if not compact or mode is VisibilityMode.HIDDEN:
         hint_html = f'<p class="visibility-hint">{escape(hint)}</p>'
+    if target is VisibilityMode.HIDDEN and not hidden_available:
+        return (
+            f'<div class="visibility-box">{hint_html}'
+            f'<p class="visibility-hint">{escape(VISIBILITY_REQUIRES_GIT)}</p></div>'
+        )
     return (
         f'<div class="visibility-box">{hint_html}'
         '<form method="post" action="'
@@ -2099,6 +2158,7 @@ def _render_recovery_controls(
         connection = connect_database(database_path)
         try:
             project = get_project(connection, fields["project_id"])
+            workspaces = list_workspaces(connection, project_id=project.project_id)
             if page.kind == "workspace" and action == "set_visibility":
                 if (
                     page.identity is None
@@ -2115,7 +2175,10 @@ def _render_recovery_controls(
             )
         if action == "set_visibility":
             return _render_visibility_form(
-                project.project_id, project.visibility_mode, action=page.redirect_target
+                project.project_id,
+                project.visibility_mode,
+                action=page.redirect_target,
+                hidden_available=all(map(workspace_has_git, workspaces)),
             )
         project_detail = read_dashboard_project_detail(
             database_path, project.project_id, include_skills=True
@@ -2136,6 +2199,7 @@ def _render_dashboard_form_error(
     *,
     status: int,
     payload: bytes = b"",
+    message: str | None = None,
 ) -> str:
     fields = _recoverable_form_fields(payload) if payload else {}
     controls = ""
@@ -2171,7 +2235,8 @@ def _render_dashboard_form_error(
         )
         if name in fields
     ]
-    message = FORM_ERROR_CONFLICT if status == 409 else FORM_ERROR_INVALID
+    if message is None:
+        message = FORM_ERROR_CONFLICT if status == 409 else FORM_ERROR_INVALID
     content = (
         '<section class="panel form-recovery"><div class="panel-body">'
         f'<div class="form-error" role="alert"><h1>{escape(FORM_ERROR_TITLE)}</h1>'
@@ -2326,6 +2391,8 @@ def _ui_icon(name: str) -> str:
         "projects": '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
         "review": '<path d="M4 4h16v16H4zM4 14h5l2 3h2l2-3h5M9 8l2 2 4-4"/>',
         "tasks": '<path d="m3 6 2 2 3-4m3 2h10M3 13l2 2 3-4m3 2h10M3 20l2 2 3-4m3 2h10"/>',
+        "servers": '<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h1m-1 11h1"/>',
+        "tunnels": '<path d="M4 8h12l-3-3m3 3-3 3M20 16H8l3-3m-3 3 3 3"/>',
         "vault": '<rect x="4" y="9" width="16" height="12" rx="2"/><path d="M8 9V6a4 4 0 0 1 8 0v3m-4 5v3"/>',
     }
     return (
@@ -2349,6 +2416,8 @@ def _render_project_navigation(
         ("projects", "Проекты", base_path, str(len({row.project_id for row in rows or ()}))),
         ("review", METRIC_REVIEW, base_path + "?scope=review", str(review_count)),
         ("tasks", "Задачи", base_path + "?scope=active", ""),
+        ("servers", "Серверы", base_path + "servers/", ""),
+        ("tunnels", "Туннели", base_path + "tunnels/", ""),
         ("vault", "Личное хранилище", base_path + "vault/all/", ""),
     )
     parts = [
@@ -2420,6 +2489,7 @@ def _render_shell(
     current_task_id: str | None = None,
     interactive: bool = True,
     current_section: str = "overview",
+    javascript_url: str | None = None,
 ) -> str:
     breadcrumb_html: list[str] = []
     for label, href in breadcrumbs:
@@ -2448,7 +2518,7 @@ def _render_shell(
             task_id=current_task_id,
         )
     css_url = f"{base_path}assets/dashboard.css"
-    js_url = f"{base_path}assets/dashboard.js"
+    js_url = javascript_url or f"{base_path}assets/dashboard.js"
     live_state = "reconnecting" if events_url else "manual"
     live_copy = LIVE_CONNECTING if events_url else LIVE_MANUAL
     refresh_control = (
@@ -2551,6 +2621,8 @@ def _render_git_page(
     error: str | None = None,
     draft_action: str = "",
     draft_value: str = "",
+    result: GitOperationResult | None = None,
+    draft_remote: str = "",
 ) -> str:
     assert request.identity is not None
     connection = connect_database(database_path)
@@ -2585,13 +2657,19 @@ def _render_git_page(
             + f'<p class="hero-copy workspace-path">{escape(str(row.workspace_root))}</p></div>'
             + f'<a class="text-link" href="{workspace_url}">Задачи проекта →</a></section>'
             + render_git_panel(
-                snapshot, git_url, error=error, draft_action=draft_action, draft_value=draft_value
+                snapshot,
+                git_url,
+                error=error,
+                draft_action=draft_action,
+                draft_value=draft_value,
+                result=result,
+                draft_remote=draft_remote,
             )
         ),
         navigation_rows=navigation,
         current_project_id=row.project_id,
         current_workspace_id=row.workspace_id,
-        current_section="tasks",
+        current_section="git",
     )
 
 
@@ -2608,6 +2686,8 @@ def _render_project_hub_cards(rows: tuple[DashboardWorkspaceRow, ...], base_path
         task = (
             f'<a href="{_url(base_path, "tasks", workspace.task_id)}">{escape(workspace.task_title or NO_TASK)}</a>'
             if workspace.task_id
+            else f'<a href="{project_url}">{escape(MULTIPLE_TASKS_TITLE)}</a>'
+            if workspace.task_selection_required
             else '<span class="muted">Пока нет задач</span>'
         )
         activity = (
@@ -2633,7 +2713,12 @@ def _render_project_hub_cards(rows: tuple[DashboardWorkspaceRow, ...], base_path
             + "</span></div>"
             f'<div class="project-row-state">{state}<span>{activity}</span></div>'
             '<div class="project-row-links">'
-            f'<a href="{_url(base_path, "workspaces", workspace.workspace_id)}">Папка</a>'
+            + (
+                f'<a class="project-git-button" href="{_url(base_path, "workspaces", workspace.workspace_id)}git/">Git</a>'
+                if workspace.git_common_dir != workspace.workspace_root
+                else ""
+            )
+            + f'<a href="{_url(base_path, "workspaces", workspace.workspace_id)}">Папка</a>'
             f'<details class="project-menu"><summary aria-label="Ещё действия: {escape(name, quote=True)}">•••</summary>'
             f'<div><a href="{_url(base_path, "vault", project_id)}">Заметки проекта</a>'
             f'<a href="{project_url}settings/">Настройки</a></div></details></div></article>'
@@ -2681,6 +2766,9 @@ def _render_project_tabs(
     if context:
         vault_url += "?" + urlencode(context)
     links = [("tasks", "Задачи", project_url)] if rows else []
+    selected = next((row for row in rows if row.workspace_id == workspace_id), None)
+    if selected is not None and selected.git_common_dir != selected.workspace_root:
+        links.append(("git", "Git", _url(base_path, "workspaces", selected.workspace_id) + "git/"))
     links.extend(
         (
             ("vault", "Заметки и доступы", vault_url),
@@ -2733,11 +2821,12 @@ def _render_task_search_bar(
 
 
 def _render_task_scopes(
-    url: str, scope: str, *, total: int, active: int, review: int, archive: int
+    url: str, scope: str, *, total: int, active: int, review: int, waiting: int, archive: int
 ) -> str:
     items = (
         ("active", "Активные", active),
         ("review", METRIC_REVIEW, review),
+        ("waiting", "Ожидание", waiting),
         ("all", TASKS_ALL, total),
         ("archive", "Архив", archive),
     )
@@ -2761,6 +2850,7 @@ def _render_work_list(
     *,
     active: int,
     review: int,
+    waiting: int,
     archive: int,
     show_project: bool = False,
     show_workspace: bool = False,
@@ -2793,6 +2883,7 @@ def _render_work_list(
             total=detail.task_count,
             active=active,
             review=review,
+            waiting=waiting,
             archive=archive,
         )
         + _render_recent_tasks(
@@ -2849,7 +2940,11 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             for label, href, selected in (
                 ("Проекты", base_path, home.scope == "projects"),
                 (f"Проверка · {review}", base_path + "?scope=review", home.scope == "review"),
-                ("Задачи", base_path + "?scope=active", home.scope in {"active", "all", "archive"}),
+                (
+                    "Задачи",
+                    base_path + "?scope=active",
+                    home.scope in {"active", "waiting", "all", "archive"},
+                ),
             )
         )
         + "</nav>"
@@ -2888,6 +2983,7 @@ def render_projects_page(home: DashboardHomePage, *, base_path: str = "/") -> st
             rows,
             active=active,
             review=review,
+            waiting=sum(row.waiting_task_count for row in rows),
             archive=sum(row.archived_task_count for row in rows),
             show_project=True,
         )
@@ -2958,6 +3054,7 @@ def render_project_page(
             nav_rows,
             active=active,
             review=review,
+            waiting=sum(row.waiting_task_count for row in rows),
             archive=sum(row.archived_task_count for row in rows),
             show_workspace=len(rows) > 1,
         )
@@ -2977,7 +3074,10 @@ def render_project_page(
             '<section class="panel"><div class="panel-head"><h2>Режим проекта</h2></div>'
             '<div class="panel-body">'
             + _render_visibility_form(
-                project_id, detail.project.visibility_mode, action=visibility_action
+                project_id,
+                detail.project.visibility_mode,
+                action=visibility_action,
+                hidden_available=all(row.git_common_dir != row.workspace_root for row in rows),
             )
             + "</div></section>"
             + _render_skill_policy(
@@ -3153,6 +3253,13 @@ def _render_workspace_current_task(
             + "</div></section>"
         )
     if row.task_id is None:
+        if row.task_selection_required:
+            return (
+                '<section class="panel focus-panel"><div class="panel-body">'
+                f"<h2>{escape(MULTIPLE_TASKS_TITLE)}</h2>"
+                f"<p>{escape(MULTIPLE_TASKS_HINT)}</p>"
+                "</div></section>"
+            )
         return (
             '<section class="panel focus-panel"><div class="panel-head">'
             f'<div><p class="panel-kicker">{escape(CURRENT_TASK)}</p>'
@@ -3233,7 +3340,7 @@ def render_workspace_page(
         + "</div>"
         + (
             _render_workspace_current_task(row, base_path=base_path, actions="")
-            if row.live_error
+            if row.live_error or row.task_selection_required
             else ""
         )
         + _render_task_search_bar(
@@ -3246,6 +3353,7 @@ def render_workspace_page(
             navigation,
             active=row.active_task_count,
             review=row.review_task_count,
+            waiting=row.waiting_task_count,
             archive=row.archived_task_count,
         )
         + '<details class="panel folder-facts"><summary>Состояние папки</summary>'
@@ -3362,6 +3470,7 @@ def _render_timeline(detail: DashboardTaskDetail, *, base_path: str = "/") -> st
                     f"<div><strong>{escape(NEXT)}:</strong> {escape(checkpoint.next_step)}</div>"
                 )
             if checkpoint.changed_paths:
+                content.append(f'<p class="section-note">{escape(WORKSPACE_DELTA_HINT)}</p>')
                 visible_paths = checkpoint.changed_paths[:_DASHBOARD_CHANGED_PATH_LIMIT]
                 chips = "".join(
                     f'<span class="path-chip">{escape(path)}</span>' for path in visible_paths
@@ -3923,6 +4032,20 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
     workspace_invalidations: ClassVar[SimpleQueue[str] | None]
     vault_process: ClassVar[VaultProcess]
     vault_frame_origin = ""
+    git_results: ClassVar[dict[str, GitOperationResult]]
+    git_results_lock: ClassVar[Lock]
+    tunnels: ClassVar[TunnelController]
+
+    def _remember_git_result(self, workspace_id: str, result: GitOperationResult) -> None:
+        with self.git_results_lock:
+            self.git_results.pop(workspace_id, None)
+            self.git_results[workspace_id] = result
+            if len(self.git_results) > 128:
+                self.git_results.pop(next(iter(self.git_results)))
+
+    def _git_result(self, workspace_id: str | None) -> GitOperationResult | None:
+        with self.git_results_lock:
+            return self.git_results.get(workspace_id or "")
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
@@ -3930,11 +4053,22 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_html(404, "")
             return
         path = _normalize_legacy_capability_path(parsed.path, self.access_token)
+        if path.startswith("/tunnels/"):
+            self._serve_tunnels(path, parsed.query)
+            return
+        if path == f"{self.route_path}assets/tunnels.js" and not parsed.query:
+            self._send_bytes(200, "application/javascript; charset=utf-8", TUNNELS_JS.encode())
+            return
+        if path.startswith("/servers/"):
+            self._serve_servers(path, parsed.query)
+            return
         if path.startswith("/vault/"):
             self._serve_vault(path, parsed.query)
             return
         if path == f"{self.route_path}assets/dashboard.css" and not parsed.query:
-            self._send_bytes(200, "text/css; charset=utf-8", DASHBOARD_CSS.encode("utf-8"))
+            self._send_bytes(
+                200, "text/css; charset=utf-8", (DASHBOARD_CSS + TUNNELS_CSS).encode("utf-8")
+            )
             return
         if path == f"{self.route_path}assets/dashboard.js" and not parsed.query:
             self._send_bytes(
@@ -3960,7 +4094,16 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             page = _parse_page_request(self.route_path, path, parsed.query)
-            html = _render_page(self.database_path, self.route_path, page)
+            html = (
+                _render_git_page(
+                    self.database_path,
+                    self.route_path,
+                    page,
+                    result=self._git_result(page.identity),
+                )
+                if page.kind == "git"
+                else _render_page(self.database_path, self.route_path, page)
+            )
         except SearchError:
             self._send_html(
                 400,
@@ -4003,6 +4146,233 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_html(200, html)
+
+    def _tunnel_json(self, status: int, payload: dict[str, object]) -> None:
+        self._send_bytes(status, "application/json; charset=utf-8", json.dumps(payload).encode())
+
+    def _serve_tunnels(self, path: str, query: str) -> None:
+        try:
+            values = parse_qs(query, keep_blank_values=True, strict_parsing=True, max_num_fields=1)
+            if set(values) - {"profile"} or any(len(items) != 1 for items in values.values()):
+                raise TunnelError("Некорректный запрос подключения")
+            profile_id = identity(values["profile"][0]) if "profile" in values else None
+            if path == "/tunnels/":
+                self._send_html(
+                    200,
+                    _render_shell(
+                        base_path=self.route_path,
+                        page_title="Туннели · Harness",
+                        breadcrumbs=(("Туннели", None),),
+                        events_url="",
+                        content=TUNNELS_HTML,
+                        navigation_rows=_read_dashboard_navigation_rows(self.database_path),
+                        current_section="tunnels",
+                        javascript_url="/assets/tunnels.js",
+                    ),
+                )
+            elif path == "/tunnels/data":
+                self._tunnel_json(200, self.tunnels.state(profile_id))
+            elif path == "/tunnels/events":
+                if self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                    self.headers.get("Origin") is not None
+                    and self.headers.get("Origin") != self.expected_origin
+                ):
+                    self._tunnel_json(403, {"error": "Запрос отклонён"})
+                    return
+                if not self.sse_slots.acquire(blocking=False):
+                    self._tunnel_json(503, {"error": "Слишком много подключений мониторинга"})
+                    return
+                try:
+                    self.send_response_only(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Connection", "close")
+                    self._send_security_headers()
+                    self.end_headers()
+                    deadline = monotonic() + 30
+                    while not self.stop_event.is_set() and monotonic() < deadline:
+                        data = json.dumps(self.tunnels.state(profile_id), ensure_ascii=True)
+                        self.wfile.write(f"event: snapshot\ndata: {data}\n\n".encode())
+                        self.wfile.flush()
+                        self.stop_event.wait(1)
+                except (OSError, TunnelError):
+                    pass
+                finally:
+                    self.sse_slots.release()
+            else:
+                self._tunnel_json(404, {"error": "Раздел не найден"})
+        except (TunnelError, ValueError):
+            self._tunnel_json(400, {"error": "Подключение не найдено или запрос некорректен"})
+        except (OSError, sqlite3.DatabaseError, DatabaseError):
+            self._tunnel_json(503, {"error": "Туннели временно недоступны"})
+
+    def _mutate_tunnels(self, path: str, query: str) -> None:
+        if path != "/tunnels/action" or query:
+            self._tunnel_json(404, {"error": "Операция не найдена"})
+            return
+        if not _allows_dashboard_mutation(
+            host=self.headers.get("Host"),
+            origin=self.headers.get("Origin"),
+            sec_fetch_site=self.headers.get("Sec-Fetch-Site"),
+            expected_host=self.expected_host,
+            expected_origin=self.expected_origin,
+        ):
+            self._tunnel_json(403, {"error": "Запрос отклонён"})
+            return
+        length = self.headers.get("Content-Length", "")
+        if (
+            self.headers.get("Transfer-Encoding") is not None
+            or self.headers.get("Content-Type", "").partition(";")[0] != "application/json"
+            or not length.isascii()
+            or not length.isdigit()
+            or not 0 < int(length) <= 65536
+        ):
+            self._tunnel_json(400, {"error": "Некорректный запрос"})
+            return
+        connection = None
+        try:
+            body = self.rfile.read(int(length))
+            if len(body) != int(length):
+                raise TunnelError("Запрос получен не полностью")
+            fields = json.loads(body)
+            if not isinstance(fields, dict) or set(fields) - {
+                "action",
+                "profile_id",
+                "expected_revision",
+                "settings",
+                "credentials",
+            }:
+                raise TunnelError("Некорректный запрос")
+            action = fields.get("action")
+            profile_id = identity(fields.get("profile_id"))
+            expected_revision = tunnel_revision(fields.get("expected_revision"))
+            if action == "phone_export":
+                if set(fields) != {"action", "profile_id", "expected_revision"}:
+                    raise TunnelError("Некорректный запрос")
+                self._tunnel_json(
+                    200,
+                    {"ok": True, "phone": self.tunnels.export_phone(profile_id, expected_revision)},
+                )
+            elif action in {"save", "delete"}:
+                if "credentials" in fields or (action == "delete" and "settings" in fields):
+                    raise TunnelError("Некорректный запрос")
+                connection = connect_database(self.database_path)
+                if action == "save":
+                    save_profile(
+                        connection,
+                        profile_id,
+                        expected_revision,
+                        fields.get("settings"),
+                    )
+                else:
+                    delete_profile(connection, profile_id, expected_revision)
+                self._tunnel_json(200, {"ok": True})
+            elif action in {"prepare", "connect", "disconnect", "check", "remove"}:
+                if "settings" in fields or (
+                    action not in {"prepare", "remove"} and "credentials" in fields
+                ):
+                    raise TunnelError("Некорректный запрос")
+                operation = self.tunnels.submit(
+                    profile_id,
+                    expected_revision,
+                    action,
+                    fields.get("credentials"),
+                )
+                self._tunnel_json(202, {"ok": True, "operation": operation})
+            else:
+                raise TunnelError("Неизвестная операция")
+        except TunnelError as exc:
+            self._tunnel_json(409 if isinstance(exc, TunnelConflict) else 400, {"error": str(exc)})
+        except (ValueError, UnicodeError, TypeError):
+            self._tunnel_json(400, {"error": "Проверьте поля подключения"})
+        except (OSError, sqlite3.DatabaseError, DatabaseError):
+            self._tunnel_json(
+                503, {"error": "Операция недоступна. Проверьте состояние перед повтором."}
+            )
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def _serve_servers(self, path: str, query: str, *, payload: bytes | None = None) -> None:
+        status = 200
+        error = ""
+        fields: dict[str, str] = {}
+        try:
+            identity, filters = parse_server_route(path, query)
+            requested_filters = filters.copy()
+            if payload is not None:
+                try:
+                    encoded = payload.decode("ascii")
+                    parsed_fields = parse_qs(
+                        encoded,
+                        keep_blank_values=True,
+                        strict_parsing=True,
+                        encoding="utf-8",
+                        errors="strict",
+                        max_num_fields=64,
+                    )
+                    if any(len(value) != 1 for value in parsed_fields.values()):
+                        raise ServerError("Server form fields must be singular")
+                    fields = {key: value[0] for key, value in parsed_fields.items()}
+                    mutate_servers_page(self.database_path, identity, fields)
+                    for action, selection, key in (
+                        ("server_site_delete", "site_id", "site_key"),
+                        ("server_profile_delete", "profile_id", "profile_key"),
+                        ("server_map_delete", "object_id", "object_key"),
+                    ):
+                        if fields.get("action") == action and filters.get(selection) == fields.get(
+                            key
+                        ):
+                            filters.pop(selection, None)
+                    if fields.get("action") == "server_site_save":
+                        filters["view"] = "sites"
+                        filters["site_id"] = fields["site_id"]
+                    if fields.get("action") == "server_map_save":
+                        from harness.dashboard_server_map import VIEWS
+
+                        filters["view"] = VIEWS[fields["map_kind"]]
+                        filters["collection"] = fields["map_kind"]
+                        filters["object_id"] = fields["object_id"]
+                    fields = {}
+                except (ServerError, DashboardError, UnicodeError, ValueError) as exc:
+                    status = 409 if isinstance(exc, ServerConflictError) else 400
+                    error = str(exc) if isinstance(exc, ServerError) else "Проверьте поля формы"
+                    for key, value in list(fields.items()):
+                        try:
+                            safe_text(value, 4000)
+                        except ServerError:
+                            fields[key] = ""
+            content = render_servers_content(
+                self.database_path,
+                identity,
+                filters,
+                error=error,
+                draft=fields,
+                saved=payload is not None and not error,
+            )
+            if payload is None and filters != requested_filters:
+                self._send_redirect(path + ("?" + urlencode(filters) if filters else ""))
+                return
+            html = _render_shell(
+                base_path=self.route_path,
+                page_title="Серверы · Harness",
+                breadcrumbs=(("Серверы", None),),
+                events_url="",
+                content=content,
+                navigation_rows=_read_dashboard_navigation_rows(self.database_path),
+                current_section="servers",
+            )
+            self._send_html(status, html)
+        except (ServerError, ValueError):
+            self._send_html(
+                404,
+                _render_navigation_error(
+                    "Сервер недоступен", "Проверьте ссылку или вернитесь к списку серверов."
+                ),
+            )
+        except (OSError, sqlite3.DatabaseError, DatabaseError):
+            self._send_html(
+                503, _render_navigation_error("Серверы недоступны", "Обновите страницу.")
+            )
 
     def _serve_vault(self, path: str, query: str = "") -> None:
         parts = path.split("/")
@@ -4103,6 +4473,36 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlsplit(self.path)
         path = _normalize_legacy_capability_path(parsed.path, self.access_token)
+        if path.startswith("/tunnels/"):
+            self._mutate_tunnels(path, parsed.query)
+            return
+        if path.startswith("/servers/"):
+            if not _allows_dashboard_mutation(
+                host=self.headers.get("Host"),
+                origin=self.headers.get("Origin"),
+                sec_fetch_site=self.headers.get("Sec-Fetch-Site"),
+                expected_host=self.expected_host,
+                expected_origin=self.expected_origin,
+            ):
+                self._send_html(403, _action_rejected_html())
+                return
+            length = self.headers.get("Content-Length", "")
+            if (
+                self.headers.get("Transfer-Encoding") is not None
+                or self.headers.get("Content-Type", "").partition(";")[0]
+                != "application/x-www-form-urlencoded"
+                or not length.isascii()
+                or not length.isdigit()
+                or not 0 < int(length) <= 64 * 1024
+            ):
+                self._send_html(400, _action_rejected_html())
+                return
+            payload = self.rfile.read(int(length))
+            if len(payload) != int(length):
+                self._send_html(400, _action_rejected_html())
+                return
+            self._serve_servers(path, parsed.query, payload=payload)
+            return
         try:
             page = _parse_page_request(self.route_path, path, parsed.query)
         except (DashboardError, SearchError):
@@ -4143,9 +4543,10 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     raise TaskValidationError("Git target does not match its Workspace page")
                 connection = connect_database(self.database_path)
                 try:
-                    run_git_operation(connection, request)
+                    result = run_git_operation(connection, request)
                 finally:
                     connection.close()
+                self._remember_git_result(request.workspace_id, result)
                 if self.workspace_invalidations is not None:
                     self.workspace_invalidations.put(request.workspace_id)
             elif isinstance(request, DashboardVisibilityRequest):
@@ -4198,6 +4599,8 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
             if not isinstance(request, GitOperationRequest):
                 self._send_form_error(409, page, payload)
                 return
+            if exc.result is not None:
+                self._remember_git_result(request.workspace_id, exc.result)
             if self.workspace_invalidations is not None:
                 self.workspace_invalidations.put(request.workspace_id)
             try:
@@ -4208,6 +4611,12 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     error=str(exc),
                     draft_action=request.action,
                     draft_value=request.value,
+                    result=exc.result,
+                    draft_remote=request.remote
+                    if request.action == "git_publish"
+                    else request.value
+                    if request.action == "git_fetch"
+                    else "",
                 )
             except (
                 GitWorkspaceError,
@@ -4220,6 +4629,9 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
                     "Git недоступен", "Обновите страницу и проверьте папку проекта."
                 )
             self._send_html(409, html)
+            return
+        except HiddenRequiresGitError:
+            self._send_form_error(409, page, payload, message=VISIBILITY_REQUIRES_GIT)
             return
         except TaskValidationError:
             self._send_form_error(400, page, payload)
@@ -4247,12 +4659,22 @@ class _DashboardRequestHandler(BaseHTTPRequestHandler):
         self._send_redirect(redirect_target)
 
     def _send_form_error(
-        self, status: int, page: _DashboardPageRequest, payload: bytes = b""
+        self,
+        status: int,
+        page: _DashboardPageRequest,
+        payload: bytes = b"",
+        *,
+        message: str | None = None,
     ) -> None:
         self._send_html(
             status,
             _render_dashboard_form_error(
-                self.database_path, self.route_path, page, status=status, payload=payload
+                self.database_path,
+                self.route_path,
+                page,
+                status=status,
+                payload=payload,
+                message=message,
             ),
         )
 
@@ -4402,6 +4824,8 @@ def _request_handler(
     Handler.stop_event = stop_event
     Handler.sse_slots = BoundedSemaphore(_DASHBOARD_SSE_MAX_CLIENTS)
     Handler.workspace_invalidations = workspace_invalidations
+    Handler.git_results = {}
+    Handler.git_results_lock = Lock()
     return Handler
 
 
@@ -4599,6 +5023,7 @@ class DashboardServerManager:
         self._url: str | None = None
         self._failure: BaseException | None = None
         self._vault_process = VaultProcess(database_path)
+        self._tunnels: TunnelController | None = None
 
     def is_running(self) -> bool:
         """Return whether the daemon-owned dashboard listener is currently healthy and running."""
@@ -4647,6 +5072,9 @@ class DashboardServerManager:
             handler.expected_host = f"{DASHBOARD_HOST}:{port}"
             handler.expected_origin = f"http://{DASHBOARD_HOST}:{port}"
             handler.vault_process = self._vault_process
+            self._tunnels = TunnelController(self._database_path)
+            self._tunnels.start()
+            handler.tunnels = self._tunnels
             thread = Thread(
                 target=self._run_server,
                 args=(server, stop_event, started_event),
@@ -4709,6 +5137,9 @@ class DashboardServerManager:
     def close(self) -> None:
         """Stop only the dashboard server owned by this manager."""
         self._vault_process.close()
+        if self._tunnels is not None:
+            self._tunnels.close()
+            self._tunnels = None
         server = self._server
         thread = self._thread
         stop_event = self._stop_event

@@ -5,6 +5,9 @@
 - **Amended:** 2026-09-18
 - **Deciders:** Operator request; repository architecture review
 
+The one-working-Task constraint in this historical decision is superseded by
+[ADR-0079](0079-parallel-workspace-tasks.md); explicit identity, revision CAS and applicability remain.
+
 ## Context
 
 Project identity alone previously admitted unrelated branch Tasks to status/search/context.

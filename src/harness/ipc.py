@@ -32,6 +32,7 @@ from harness.task_checkpoints import (
     MAX_OPERATOR_FEEDBACK_BYTES,
 )
 from harness.tasks import (
+    MAX_STATUS_ACTIVE_TASKS,
     MAX_TASK_STACK_HINT_BYTES,
     MAX_TASK_STACK_HINTS,
     MAX_TASK_TITLE_BYTES,
@@ -51,6 +52,8 @@ from harness.workspace_resolution import WorkspaceHint, WorkspaceHintMatchMode
 
 PROTOCOL_VERSION = 1
 MAX_MESSAGE_BYTES = 16 * 1024
+MAX_SERVER_MESSAGE_BYTES = 64 * 1024
+MAX_SERVER_IMPORT_BYTES = 1024 * 1024
 _REQUEST_ID_MAX_LENGTH = 64
 _HINT_SOURCE_MAX_LENGTH = 64
 _HINT_PATH_MAX_LENGTH = 4096
@@ -209,6 +212,8 @@ class WorkspaceTaskStatusResult:
     pending_operator_feedback: str | None
     head: str | None = None
     branch: str | None = None
+    active_tasks: tuple[WorkspaceTaskSummary, ...] = ()
+    active_task_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,9 +384,12 @@ class IpcRequest:
     recall_limit: int | None = None
     task_start: TaskStartRequestData | None = None
     task_checkpoint: TaskCheckpointRequestData | None = None
+    status_task_id: str | None = None
     host_profiles: tuple[str, ...] | None = None
     visibility_path: Path | None = None
     visibility_mode: str | None = None
+    server_operation: str | None = None
+    server_arguments: dict[str, Any] | None = None
 
 
 def request_status(
@@ -454,17 +462,22 @@ def request_workspace_task_status(
     socket_path: Path,
     hints: Sequence[WorkspaceHint],
     *,
+    task_id: str | None = None,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
 ) -> WorkspaceTaskStatusResult:
     """Request bounded current/relevant Task status for one resolved Workspace."""
     request_id = uuid4().hex
+    params: dict[str, object] = {"hints": _workspace_hints_to_wire(hints)}
+    if task_id is not None:
+        _validate_task_id(task_id)
+        params["task_id"] = task_id
     response = _request_response(
         socket_path,
         {
             "version": PROTOCOL_VERSION,
             "request_id": request_id,
             "method": "workspace_task_status",
-            "params": {"hints": _workspace_hints_to_wire(hints)},
+            "params": params,
         },
         timeout=timeout,
     )
@@ -764,7 +777,21 @@ def request_task_checkpoint(
 
 def receive_request(peer: IpcPeer) -> IpcRequest:
     """Receive and validate exactly one bounded request frame."""
-    payload = _decode_json(_receive_frame(peer))
+    frame = _receive_frame(peer, maximum=MAX_SERVER_IMPORT_BYTES)
+    try:
+        payload = _decode_json(frame)
+    except IpcProtocolError as exc:
+        if len(frame) > MAX_MESSAGE_BYTES:
+            raise IpcMessageTooLargeError("IPC message exceeds the byte limit") from exc
+        raise
+    if payload.get("method") != "servers" and len(frame) > MAX_MESSAGE_BYTES:
+        raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
+    if (
+        payload.get("method") == "servers"
+        and payload.get("operation") not in {"import", "enrich"}
+        and len(frame) > MAX_SERVER_MESSAGE_BYTES
+    ):
+        raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
     version = payload.get("version")
     request_id = payload.get("request_id")
     method = payload.get("method")
@@ -780,6 +807,20 @@ def receive_request(peer: IpcPeer) -> IpcRequest:
         raise IpcProtocolError("request_id must be a non-empty bounded string")
     if not isinstance(method, str):
         raise IpcProtocolError("request method must be a string")
+
+    if method == "servers":
+        if (
+            set(payload) != {"version", "request_id", "method", "operation", "arguments"}
+            or not isinstance(payload["operation"], str)
+            or not isinstance(payload["arguments"], dict)
+        ):
+            raise IpcProtocolError("invalid server request schema")
+        return IpcRequest(
+            request_id=request_id,
+            method=method,
+            server_operation=payload["operation"],
+            server_arguments=payload["arguments"],
+        )
 
     if method == "status":
         if set(payload) != {"version", "request_id", "method"}:
@@ -815,10 +856,17 @@ def receive_request(peer: IpcPeer) -> IpcRequest:
             raise IpcProtocolError(
                 "workspace task status request fields do not match the IPC schema"
             )
+        params = payload["params"]
+        if not isinstance(params, dict) or set(params) not in ({"hints"}, {"hints", "task_id"}):
+            raise IpcProtocolError("workspace task status params do not match the IPC schema")
+        task_id = params.get("task_id")
+        if task_id is not None:
+            _validate_task_id(task_id)
         return IpcRequest(
             request_id=request_id,
             method=method,
-            workspace_hints=_workspace_hints_from_params(payload["params"]),
+            workspace_hints=_workspace_hints_from_params({"hints": params["hints"]}),
+            status_task_id=task_id,
         )
 
     if method in {"scan_workspace", "init_workspace"}:
@@ -1066,6 +1114,10 @@ def send_workspace_task_status_response(
                         }
                     ),
                     "pending_operator_feedback": status.pending_operator_feedback,
+                    "active_tasks": [
+                        _workspace_task_summary_to_wire(item) for item in status.active_tasks
+                    ],
+                    "active_task_count": status.active_task_count,
                     "head": status.head,
                     "branch": status.branch,
                 },
@@ -1352,30 +1404,33 @@ def _request_response(
     *,
     timeout: float,
 ) -> dict[str, Any]:
+    maximum = MAX_SERVER_MESSAGE_BYTES if request.get("method") == "servers" else MAX_MESSAGE_BYTES
+    if request.get("method") == "servers" and request.get("operation") in {"import", "enrich"}:
+        maximum = MAX_SERVER_IMPORT_BYTES
     if os.name == "nt":
         from multiprocessing.context import AuthenticationError
 
         from harness.windows_fs import WindowsFileSecurityError
         from harness.windows_pipe import connect_pipe
 
-        payload = _encode_json(request)
+        payload = _encode_json(request, maximum=maximum)
         try:
             with connect_pipe(socket_path, timeout=timeout) as client:
                 client.settimeout(timeout)
                 client.sendall(payload)
-                return _decode_json(_receive_frame(client))
+                return _decode_json(_receive_frame(client, maximum=maximum))
         except TimeoutError as exc:
             raise IpcTransportError("local IPC request timed out") from exc
         except (OSError, WindowsFileSecurityError, AuthenticationError) as exc:
             raise IpcTransportError(f"local IPC transport failed: {exc}") from exc
     _require_posix_transport()
-    payload = _encode_json(request)
+    payload = _encode_json(request, maximum=maximum)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout)
             client.connect(str(socket_path))
             client.sendall(payload)
-            return _decode_json(_receive_frame(client))
+            return _decode_json(_receive_frame(client, maximum=maximum))
     except TimeoutError as exc:
         raise IpcTransportError("local IPC request timed out") from exc
     except OSError as exc:
@@ -1941,7 +1996,7 @@ def _validate_hint_fields(
         raise IpcProtocolError("workspace hint uses an unsupported match mode")
 
 
-def _receive_frame(peer: IpcPeer) -> bytes:
+def _receive_frame(peer: IpcPeer, *, maximum: int = MAX_MESSAGE_BYTES) -> bytes:
     data = bytearray()
     original_timeout = peer.gettimeout()
     deadline = (
@@ -1957,19 +2012,19 @@ def _receive_frame(peer: IpcPeer) -> bytes:
                     raise TimeoutError("IPC receive deadline exceeded")
                 peer.settimeout(remaining)
 
-            chunk = peer.recv(min(4096, MAX_MESSAGE_BYTES + 1 - len(data)))
+            chunk = peer.recv(min(4096, maximum + 1 - len(data)))
             if not chunk:
                 raise IpcProtocolError("IPC peer closed before terminating the message")
             newline_index = chunk.find(b"\n")
             if newline_index >= 0:
                 data.extend(chunk[:newline_index])
-                if len(data) > MAX_MESSAGE_BYTES:
+                if len(data) > maximum:
                     raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
                 if chunk[newline_index + 1 :]:
                     raise IpcProtocolError("multiple IPC messages per connection are not supported")
                 return bytes(data)
             data.extend(chunk)
-            if len(data) > MAX_MESSAGE_BYTES:
+            if len(data) > maximum:
                 raise IpcMessageTooLargeError("IPC message exceeds the byte limit")
     finally:
         if deadline is not None:
@@ -1987,11 +2042,11 @@ def _decode_json(payload: bytes) -> dict[str, Any]:
     return cast(dict[str, Any], value)
 
 
-def _encode_json(value: dict[str, Any]) -> bytes:
+def _encode_json(value: dict[str, Any], *, maximum: int = MAX_MESSAGE_BYTES) -> bytes:
     payload = json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
         "utf-8"
     )
-    if len(payload) > MAX_MESSAGE_BYTES:
+    if len(payload) > maximum:
         raise IpcMessageTooLargeError("IPC response exceeds the byte limit")
     return payload + b"\n"
 
@@ -2304,6 +2359,8 @@ def _workspace_task_status_from_response(
         "pending_operator_feedback",
         "head",
         "branch",
+        "active_tasks",
+        "active_task_count",
     }:
         raise IpcProtocolError("daemon workspace task status result does not match the IPC schema")
     schema_version = result["schema_version"]
@@ -2324,32 +2381,24 @@ def _workspace_task_status_from_response(
     if branch is not None:
         branch = _bounded_response_string(branch, "branch", MAX_MESSAGE_BYTES)
 
+    raw_active_tasks = result["active_tasks"]
+    if not isinstance(raw_active_tasks, list) or len(raw_active_tasks) > MAX_STATUS_ACTIVE_TASKS:
+        raise IpcProtocolError("daemon workspace task status active_tasks has invalid shape")
+    active_tasks = tuple(_workspace_task_summary_from_wire(item) for item in raw_active_tasks)
+    active_task_count = _bounded_nonnegative_int(result["active_task_count"], "active_task_count")
+    if len(active_tasks) != min(active_task_count, MAX_STATUS_ACTIVE_TASKS) or len(
+        {item.task_id for item in active_tasks}
+    ) != len(active_tasks):
+        raise IpcProtocolError(
+            "daemon workspace task status active_tasks has invalid count or duplicates"
+        )
+
     raw_task = result["task"]
     task: WorkspaceTaskSummary | None
     if raw_task is None:
         task = None
     else:
-        if not isinstance(raw_task, dict) or set(raw_task) != {
-            "task_id",
-            "title",
-            "state",
-            "wait_reason",
-            "revision",
-        }:
-            raise IpcProtocolError(
-                "daemon workspace task status task does not match the IPC schema"
-            )
-        task_id = _bounded_response_string(raw_task["task_id"], "task_id", _TASK_ID_MAX_LENGTH)
-        title = _bounded_response_string(raw_task["title"], "title", MAX_TASK_TITLE_BYTES)
-        revision = raw_task["revision"]
-        if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
-            raise IpcProtocolError("daemon workspace task status task has invalid revision")
-        state, wait_reason = _task_state_from_response(raw_task["state"], raw_task["wait_reason"])
-        if state not in {TaskState.WORKING, TaskState.WAITING}:
-            raise IpcProtocolError(
-                "daemon workspace task status returned an irrelevant terminal Task"
-            )
-        task = WorkspaceTaskSummary(task_id, title, state, wait_reason, revision)
+        task = _workspace_task_summary_from_wire(raw_task)
 
     raw_checkpoint = result["last_checkpoint"]
     checkpoint: WorkspaceTaskCheckpointSummary | None
@@ -2438,7 +2487,39 @@ def _workspace_task_status_from_response(
         cast(str | None, pending_operator_feedback),
         head,
         branch,
+        active_tasks,
+        active_task_count,
     )
+
+
+def _workspace_task_summary_to_wire(task: WorkspaceTaskSummary) -> dict[str, object]:
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "state": task.state.value,
+        "wait_reason": None if task.wait_reason is None else task.wait_reason.value,
+        "revision": task.revision,
+    }
+
+
+def _workspace_task_summary_from_wire(value: object) -> WorkspaceTaskSummary:
+    if not isinstance(value, dict) or set(value) != {
+        "task_id",
+        "title",
+        "state",
+        "wait_reason",
+        "revision",
+    }:
+        raise IpcProtocolError("daemon workspace task status task does not match the IPC schema")
+    task_id = _bounded_response_string(value["task_id"], "task_id", _TASK_ID_MAX_LENGTH)
+    title = _bounded_response_string(value["title"], "title", MAX_TASK_TITLE_BYTES)
+    revision = value["revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision <= 0:
+        raise IpcProtocolError("daemon workspace task status task has invalid revision")
+    state, wait_reason = _task_state_from_response(value["state"], value["wait_reason"])
+    if state not in {TaskState.WORKING, TaskState.WAITING}:
+        raise IpcProtocolError("daemon workspace task status returned an irrelevant terminal Task")
+    return WorkspaceTaskSummary(task_id, title, state, wait_reason, revision)
 
 
 def _workspace_scan_from_response(
@@ -2893,3 +2974,28 @@ def _require_posix_transport() -> None:
         raise UnsupportedIpcTransportError(
             "the Windows local-user IPC transport is not implemented in this bounded slice"
         )
+
+
+def request_servers(socket_path: Path, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    request_id = uuid4().hex
+    response = _request_response(
+        socket_path,
+        {
+            "version": PROTOCOL_VERSION,
+            "request_id": request_id,
+            "method": "servers",
+            "operation": operation,
+            "arguments": arguments,
+        },
+        timeout=5.0,
+    )
+    return _success_result(response, expected_request_id=request_id)
+
+
+def send_servers_response(peer: IpcPeer, request_id: str, result: dict[str, Any]) -> None:
+    peer.sendall(
+        _encode_json(
+            {"version": PROTOCOL_VERSION, "request_id": request_id, "ok": True, "result": result},
+            maximum=MAX_SERVER_MESSAGE_BYTES,
+        )
+    )
