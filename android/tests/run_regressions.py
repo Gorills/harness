@@ -16,13 +16,9 @@ def main() -> None:
     sources = sorted((root / "fixtures").rglob("*.java"))
     sources.extend(production / name for name in ("TunnelService.java", "BackNavigation.java"))
     with tempfile.TemporaryDirectory(prefix="harness-android-regressions-") as directory:
-        subprocess.run(
-            ["javac", "--release", "8", "-d", directory, *map(str, sources)], check=True
-        )
+        subprocess.run(["javac", "--release", "8", "-d", directory, *map(str, sources)], check=True)
         for fixture in ("ServiceRegressionFixture", "BackNavigationFixture"):
-            subprocess.run(
-                ["java", "-cp", directory, f"com.harness.tunnel.{fixture}"], check=True
-            )
+            subprocess.run(["java", "-cp", directory, f"com.harness.tunnel.{fixture}"], check=True)
 
 
 if __name__ == "__main__":
